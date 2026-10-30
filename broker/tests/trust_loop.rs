@@ -1016,3 +1016,54 @@ fn repair_refuses_a_changed_repo_and_reconciles_an_interruption() {
     let e = b2.repair("casey").unwrap();
     assert_eq!(e.body.kind, "interrupted", "an interruption is repaired by reconciling it");
 }
+
+/// A rebuild that "succeeds" while something else decides what runs (an outside nixos-rebuild
+/// finishing during the repair) must not be recorded as a repair: the running system and the next
+/// boot are checked, and the drift that was found is ledgered, not erased.
+#[test]
+fn repair_does_not_vouch_for_a_system_it_did_not_switch_to() {
+    let (dir, repo) = config_dir();
+    let link = dir.path().join("current-system");
+    let profiles = dir.path().join("profiles");
+    fs::create_dir_all(&profiles).unwrap();
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", &link).unwrap();
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", profiles.join("system")).unwrap();
+    // The rebuild exits 0, but leaves the running system on the outside one.
+    let b = Broker::new(&repo, dir.path().join("state"), "true").with_current_system(&link).with_system_profile(profiles.join("system"));
+    b.init().unwrap();
+    switch_to(&link, "/nix/store/zzz-outside");
+    let err = format!("{:#}", b.repair("casey").unwrap_err());
+    assert!(err.contains("did not take"), "{err}");
+    let e = b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!((e.body.kind.as_str(), &e.body.data["restored"]), ("repaired", &serde_json::json!(false)));
+    assert_eq!(e.body.data["drift"]["running_system"], "/nix/store/zzz-outside", "the drift is ledgered");
+    assert!(!b.status().unwrap().problems().is_empty(), "status must not turn happy");
+}
+
+/// Next-boot drift (nixos-rebuild boot outside the broker) is repaired by a switch.
+#[test]
+fn repair_fixes_next_boot_drift_and_refusals_rebuild_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let calls = tmp.path().join("calls.log");
+    let (dir, repo) = config_dir();
+    let link = dir.path().join("current-system");
+    let profile = dir.path().join("system-profile");
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", &link).unwrap();
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", &profile).unwrap();
+    let rebuild = format!("echo rebuilt >> {}; ln -sfn /nix/store/aaa-system-1 {}", calls.display(), profile.display());
+    let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_current_system(&link).with_system_profile(&profile);
+    b.init().unwrap();
+
+    let err = format!("{:#}", b.repair("casey").unwrap_err());
+    assert!(err.contains("nothing to repair"), "{err}");
+    switch_to(&profile, "/nix/store/bbb-boot-outside");
+    fs::write(b.repo.root().join("stray.nix"), "{ }\n").unwrap();
+    assert!(b.repair("casey").is_err());
+    assert!(!calls.exists(), "refusals rebuild nothing");
+    fs::remove_file(b.repo.root().join("stray.nix")).unwrap();
+
+    let e = b.repair("casey").unwrap();
+    assert_eq!(e.body.data["drift"]["next_boot"], "/nix/store/bbb-boot-outside");
+    assert_eq!(e.body.data["commit"].as_str(), b.repo.head().ok().as_deref(), "the ledgered commit, unchanged");
+    assert!(b.status().unwrap().problems().is_empty(), "{:?}", b.status().unwrap().problems());
+}

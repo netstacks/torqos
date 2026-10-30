@@ -109,7 +109,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   priority, and **never fails**: it can run during a switch, and a failed unit would fail the switch,
   which the broker treats as a failed rebuild and rolls back (ADR-008).
 - **Consequences:** Drift is visible within 15 minutes, at boot and in every new shell, but nothing
-  is changed automatically: the person decides (apply, rollback or reconcile). Garbage collection
+  is changed automatically: the person decides — `kestrel status --repair` (the broker's `repair`:
+  rebuild the last ledgered configuration, refuse if the config repo itself was changed, record what
+  had drifted, and say so if the switch did not take), or apply, rollback, reconcile. Garbage collection
   (`nix.gc`, weekly, generations older than 30 days; `min-free` during builds) is safe for the same
   reason undo works: a broker rollback reverts the commit and *rebuilds*, it never needs an old
   generation on disk.

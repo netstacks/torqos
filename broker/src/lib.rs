@@ -96,8 +96,7 @@ impl Status {
         if let Some(e) = &self.unrestored {
             p.push(format!(
                 "the last rebuild ({e}) failed and could not restore the previous system: the running system \
-                 may not match the config; fix the cause, then apply any change (or undo the last one) so the \
-                 system is rebuilt"
+                 may not match the config; fix the cause, then `kestrel-broker repair --approved-by <name>`"
             ));
         }
         match &self.head {
@@ -319,6 +318,11 @@ impl Broker {
     pub fn status(&self) -> Result<Status> {
         let lock = Lock::try_acquire(&self.state_dir)?; // held until the comparison is done
         let busy = lock.is_none().then(|| Lock::busy(&self.state_dir));
+        self.facts(busy)
+    }
+
+    /// The comparison itself, for a caller that already holds the lock (or knows it is busy).
+    fn facts(&self, busy: Option<String>) -> Result<Status> {
         let ledger = self.ledger.verify().map_err(|e| format!("{e:#}"));
         let entries = self.ledger.read_all().unwrap_or_default();
         let interrupted = match self.read_pending()? {
@@ -357,16 +361,31 @@ impl Broker {
             return Ok(e);
         }
         let head = self.repo.head()?;
-        let ledgered = ledgered_commit(&self.ledger.read_all()?);
-        if ledgered.as_deref() != Some(head.as_str()) || self.repo.ensure_clean().is_err() {
+        let entries = self.ledger.read_all()?;
+        let Some(ledgered) = ledgered_commit(&entries) else {
+            bail!("this machine's ledger has no configuration yet: initialise it first (kestrel-broker init)");
+        };
+        if ledgered != head || self.repo.ensure_clean().is_err() {
             bail!(
-                "the config repo was changed outside the broker (it is at {head}, the ledger says {}); a \
-                 rebuild would build that change, so look at {} first",
-                ledgered.as_deref().unwrap_or("nothing"),
+                "the config repo was changed outside the broker (it is at {head}, the ledger says {ledgered}); \
+                 a rebuild would build that change, so look at {} first",
                 self.repo.root().display()
             );
         }
-        let restored = self.rebuild(&lock).is_ok();
+        let before = self.facts(None)?;
+        if before.problems().is_empty() {
+            bail!("nothing to repair: the machine is as its ledger says");
+        }
+        // A manual nixos-rebuild does not take the broker lock: switching now would race it, and the
+        // result could be its system recorded as ours.
+        if switch_running() {
+            bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then repair");
+        }
+        let rebuilt = self.rebuild(&lock).is_ok();
+        // A switch sets the running system and the next boot alike; if they differ afterwards,
+        // something else changed one of them, and this was not a repair.
+        let (running, next) = (self.running_system(), self.next_boot());
+        let restored = rebuilt && (next.is_none() || next == running);
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(by.into()),
@@ -376,12 +395,22 @@ impl Broker {
             reason: if restored {
                 "Returned the machine to its ledgered configuration".into()
             } else {
-                "Tried to return the machine to its ledgered configuration, but the rebuild failed".into()
+                "Tried to return the machine to its ledgered configuration, but it did not take".into()
             },
-            data: self.with_system(json!({ "commit": head, "restored": restored })),
+            // What was wrong is ledgered too: repairing must not erase the evidence of drift.
+            data: self.with_system(json!({
+                "commit": head,
+                "restored": restored,
+                "drift": {
+                    "running_system": before.running_system,
+                    "next_boot": before.next_boot,
+                    "ledgered_system": before.ledgered_system,
+                    "problems": before.problems(),
+                },
+            })),
         })?;
         if !restored {
-            bail!("the rebuild failed: the machine may still not match its ledger (recorded as #{})", e.body.seq);
+            bail!("the repair did not take: the machine may still not match its ledger (recorded as #{})", e.body.seq);
         }
         Ok(e)
     }
