@@ -167,7 +167,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   - The configuration is a tree whose containers are the config repo's folders and whose leaves are
     small data files; each setting is declared in a schema next to its NixOS module and installed
     with the system (help, completion, syntax); the modules' types, not the schema, are the authority.
-    User tier is an explicit allow-list (`users/<name>/packages.json`, `users/<name>/cli.json`).
+    User tier is an explicit allow-list (`users/<name>/packages.json`; a leaf joins it only with the
+    typed setting that reads it, e.g. `cli.json`), and the broker checks each leaf's JSON shape.
     Environment variables are held for their own design (values are effectively code). The broker
     always builds `nixosConfigurations.torq`, so changing the host name cannot break rebuilds.
   - Edits go into a per-user candidate that remembers its base commit; `commit` applies the change

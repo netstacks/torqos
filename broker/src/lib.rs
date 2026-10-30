@@ -440,9 +440,10 @@ impl Broker {
     }
 
     /// User-tier files are data by construction, whoever proposes them: a regular file (git mode
-    /// 100644 — never a symlink) holding a JSON object or list, at most `USER_DATA_MAX` bytes.
-    /// Deleting one is always fine. The NixOS module reading the file is still the authority on
-    /// what the data means; this makes sure it is data at all.
+    /// 100644 — never a symlink) holding exactly the JSON shape its leaf takes
+    /// (`policy::user_leaf_ok`), at most `USER_DATA_MAX` bytes. Deleting one is always fine. The
+    /// NixOS module reading the file is still the authority on what the data means; this makes sure
+    /// it is the right kind of data, refused now rather than failing the rebuild.
     fn check_user_data(&self, diff_path: &Path, files: &[String]) -> Result<()> {
         let user: Vec<String> = files.iter().filter(|f| policy::is_user_data(f)).cloned().collect();
         if user.is_empty() {
@@ -450,12 +451,17 @@ impl Broker {
         }
         for (path, file) in self.repo.proposed_files(diff_path, &user, USER_DATA_MAX)? {
             let Some(f) = file else { continue };
+            let leaf = path.rsplit('/').next().unwrap_or_default();
             let data = f.mode == "100644"
                 && f.size <= USER_DATA_MAX
-                && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| v.is_object() || v.is_array());
+                && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| policy::user_leaf_ok(leaf, &v));
             if !data {
                 bail!(
-                    "refused: {path} must be a regular file holding JSON data (an object or a list) of at most {} KiB",
+                    "refused: {path} must be a regular file holding {} of at most {} KiB",
+                    match leaf {
+                        "packages.json" => format!("a JSON list of package names (at most {})", policy::MAX_USER_PACKAGES),
+                        _ => "JSON data".to_string(),
+                    },
                     USER_DATA_MAX / 1024
                 );
             }

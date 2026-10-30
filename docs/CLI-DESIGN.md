@@ -230,10 +230,12 @@ The broker stays small; its additions for this model:
 - `status` reports a pending confirmation (its deadline) instead of calling it drift.
 - The broker clears its environment at start and takes its paths and rebuild commands from fixed
   configuration, not from the caller (closes part of KNOWN-GAPS #4); sudo uses a fixed `secure_path`.
-- User-tier files are an explicit allow-list in `policy.rs`, exactly `users/<name>/packages.json`
-  and `users/<name>/cli.json` (a test checks the list against the schema's user-tier leaves): regular
-  files (git mode 100644), JSON object or list, size-capped. Evaluation rejects unknown files under
-  `users/` and names that are not normal users.
+- User-tier files are an explicit allow-list in `policy.rs` (`USER_LEAVES`, kept in step with the
+  module's): `users/<name>/packages.json` today, `users/<name>/cli.json` when the CLI-style setting
+  gives it a type — a leaf joins only with its typed reader. Each must be a regular file (git mode
+  100644) of at most 64 KiB holding exactly its leaf's shape (`packages.json`: a list of at most 256
+  names). Evaluation rejects unknown files and symlinks under `users/` and names that are not normal
+  users.
 - The configuration the broker builds is always `nixosConfigurations.torq`, never derived from the
   host name (a VM test changes the host name, then commits again).
 - The single-change undo is renamed `revert <seq>`, so "rollback" means one thing.

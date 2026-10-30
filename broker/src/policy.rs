@@ -57,8 +57,27 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
 /// a directory: a leaf a later release starts reading (say `ssh-keys.json`) must not become user
 /// tier by accident, and a file planted today must not become active then. Any `.nix` file is a
 /// full NixOS module (sudo rules, services, ...) wherever it lives, so it is system tier. Keep in
-/// step with the user-tier leaves of the configuration tree (docs/CLI-DESIGN.md).
-pub const USER_LEAVES: &[&str] = &["packages.json", "cli.json"];
+/// step with `userLeaves` in modules/packages.nix. A leaf is added only together with the typed
+/// module that reads it (`cli.json` comes with the CLI-style setting), and with its shape in
+/// `user_leaf_ok`.
+pub const USER_LEAVES: &[&str] = &["packages.json"];
+
+/// The most packages one user's list may hold: a lightly-approved change must not be able to start
+/// hours of downloads and builds while holding the broker lock.
+pub const MAX_USER_PACKAGES: usize = 256;
+
+/// Whether `value` has exactly the shape the user leaf `leaf` takes. Checked by the broker before
+/// accepting a proposal, so data the leaf's module would reject is refused up front instead of
+/// failing the rebuild; the module's own types remain the authority on meaning.
+pub fn user_leaf_ok(leaf: &str, value: &serde_json::Value) -> bool {
+    match leaf {
+        // A list of nixpkgs attribute names.
+        "packages.json" => value
+            .as_array()
+            .is_some_and(|names| names.len() <= MAX_USER_PACKAGES && names.iter().all(|n| n.is_string())),
+        _ => false,
+    }
+}
 
 /// User tier: exactly `users/<name>/<leaf>` with an allow-listed leaf. The broker also checks the
 /// content of such a file before accepting it (`Broker::check_user_data`).
@@ -110,7 +129,7 @@ mod tests {
     fn classifies() {
         assert_eq!(tier_for_path("users/casey/packages.json"), Tier::User);
         assert_eq!(tier_for_path("./users/casey/packages.json"), Tier::User);
-        assert_eq!(tier_for_path("users/casey/cli.json"), Tier::User);
+        assert_eq!(tier_for_path("users/casey/cli.json"), Tier::System, "no leaf without a typed reader");
         assert_eq!(tier_for_path("users/casey.nix"), Tier::System, "a NixOS module is never user tier");
         assert_eq!(tier_for_path("desktop.nix"), Tier::System);
         assert_eq!(tier_for_path("policy/tiers.toml"), Tier::Forbidden);
@@ -146,10 +165,26 @@ mod tests {
         ] {
             assert_eq!(tier_for_path(p), Tier::System, "{p}");
         }
-        for p in ["users/casey/packages.json", "users/_svc/cli.json", "users/a-b_9/packages.json"] {
+        for p in ["users/casey/packages.json", "users/_svc/packages.json", "users/a-b_9/packages.json"] {
             assert_eq!(tier_for_path(p), Tier::User, "{p}");
         }
-        assert_eq!(USER_LEAVES, ["packages.json", "cli.json"]);
+        assert_eq!(USER_LEAVES, ["packages.json"]);
+    }
+
+    /// Each user leaf has exactly one shape; anything else is refused at propose rather than failing
+    /// at the rebuild.
+    #[test]
+    fn user_leaf_shapes() {
+        let ok = |leaf: &str, json: &str| user_leaf_ok(leaf, &serde_json::from_str(json).unwrap());
+        assert!(ok("packages.json", r#"["htop", "python3Packages.requests"]"#));
+        assert!(ok("packages.json", "[]"));
+        for bad in ["{}", "[1]", "[{}]", "[null]", "\"htop\"", "42"] {
+            assert!(!ok("packages.json", bad), "{bad}");
+        }
+        let at_most = |n: usize| format!("[{}]", vec!["\"p\""; n].join(","));
+        assert!(ok("packages.json", &at_most(256)));
+        assert!(!ok("packages.json", &at_most(257)));
+        assert!(!ok("unknown.json", "[]"), "a leaf without a shape is never ok");
     }
 
     #[test]

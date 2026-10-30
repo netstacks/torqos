@@ -34,7 +34,7 @@
       };
 
       # Helper used by per-machine config repos (see templates/config).
-      # `configDir = ./.;` lets the machine's package lists (packages.json, users/*.packages.json)
+      # `configDir = ./.;` lets the machine's package lists (system/packages.json, users/<name>/packages.json)
       # be read from the config repo; see modules/packages.nix.
       lib.mkSystem = { system, modules ? [ ], configDir ? null }:
         nixpkgs.lib.nixosSystem {

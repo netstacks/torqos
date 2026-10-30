@@ -47,14 +47,17 @@ let
 
   # Same shape and leaves the broker treats as user tier (broker/src/policy.rs, is_user_data).
   isUserName = s: builtins.match "[a-z_][a-z0-9_-]*" s != null;
-  userLeaves = [ "packages.json" "cli.json" ];
+  # A leaf is added only together with the typed setting that reads it (cli.json comes with the
+  # CLI-style setting), here and in the broker's USER_LEAVES at the same time.
+  userLeaves = [ "packages.json" ];
   usersDir = dir + "/users";
   entries = if dir != null && builtins.pathExists usersDir then builtins.readDir usersDir else { };
 
   # users/<name>/ folders, checked: a valid name, and nothing in them but allow-listed regular files.
-  # Other top-level entries in users/ are left alone (e.g. a <name>.nix module the config's flake
-  # imports, which is system tier), except the old flat `<name>.packages.json`, which would
-  # otherwise be silently ignored.
+  # Other top-level regular files in users/ are left alone (e.g. a <name>.nix module the config's
+  # flake imports, which is system tier), except the old flat `<name>.packages.json`, which would
+  # otherwise be silently ignored. A symlink there is refused rather than ignored: nothing planted
+  # may lie in wait.
   userDirs = lib.mapAttrs (name: _:
     let
       leaves = builtins.readDir (usersDir + "/${name}");
@@ -71,6 +74,7 @@ let
       leaves
   ) (lib.filterAttrs (_: type: type == "directory") entries);
   oldLayout = lib.filterAttrs (n: type: type == "regular" && lib.hasSuffix ".packages.json" n) entries;
+  links = lib.attrNames (lib.filterAttrs (_: type: type == "symlink") entries);
 in
 {
   options.torq.cli.package = lib.mkOption {
@@ -114,7 +118,11 @@ in
       ++ lib.mapAttrsToList (n: _: {
         assertion = false;
         message = "torq: users/${n} is the old layout; move it to users/${lib.removeSuffix ".packages.json" n}/packages.json.";
-      }) oldLayout;
+      }) oldLayout
+      ++ map (n: {
+        assertion = false;
+        message = "torq: users/${n} is a symlink; a user's settings must be a real folder (users/<name>/).";
+      }) links;
 
     environment.systemPackages = [ config.torq.cli.package ] ++ map (resolve "system") cfg.system;
     users.users = lib.mapAttrs (user: names: { packages = map (resolve "user ${user}") names; }) cfg.user;

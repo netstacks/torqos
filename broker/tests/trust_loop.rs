@@ -153,19 +153,26 @@ fn new_user_file(path: &str, body: &str) -> String {
     format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n{}", lines.len(), lines.concat())
 }
 
-/// User-tier files are data, by construction: a regular file holding a JSON object or list, small.
-/// Anything else at a user-tier path is refused, whoever proposes it.
+/// User-tier files are data, by construction: a regular file holding exactly the shape its leaf
+/// takes, small. Anything else at a user-tier path is refused, whoever proposes it.
 #[test]
 fn user_tier_files_must_be_json_data() {
     let (dir, b) = setup("true");
     let refused = |name: &str, diff: String| {
         let d = write_diff(dir.path(), name, &diff);
         let err = format!("{:#}", b.propose(&d, "sneaky", Actor::Agent, false).unwrap_err());
-        assert!(err.contains("must be a regular file holding JSON data"), "{name}: {err}");
+        assert!(err.contains("must be a regular file holding"), "{name}: {err}");
     };
     refused("not-json.diff", new_user_file("users/casey/packages.json", "{ pkgs, ... }: { }"));
     refused("string.diff", new_user_file("users/casey/packages.json", "\"htop\""));
-    refused("number.diff", new_user_file("users/casey/cli.json", "42"));
+    refused("number.diff", new_user_file("users/casey/packages.json", "42"));
+    // packages.json is a list of names: other JSON would only fail later, at the rebuild.
+    refused("object.diff", new_user_file("users/casey/packages.json", "{}"));
+    refused("list-of-numbers.diff", new_user_file("users/casey/packages.json", "[1]"));
+    refused("list-of-objects.diff", new_user_file("users/casey/packages.json", "[{}]"));
+    // At most 256 packages per user: one light change cannot start hours of builds.
+    let many: Vec<String> = (0..257).map(|i| format!("\"p{i}\"")).collect();
+    refused("too-many.diff", new_user_file("users/casey/packages.json", &format!("[{}]", many.join(","))));
     let big = format!("[\n{}\"x\"\n]", "\"padding-padding-padding-padding\",\n".repeat(2200));
     refused("big.diff", new_user_file("users/casey/packages.json", &big));
     // A symlink (mode 120000) pointing at a module, under a user-tier name.
@@ -178,13 +185,16 @@ fn user_tier_files_must_be_json_data() {
     // A symlink whose target text happens to be valid JSON: only the mode check can refuse it.
     refused(
         "symlink-json.diff",
-        "diff --git a/users/casey/cli.json b/users/casey/cli.json\nnew file mode 120000\n\
-         --- /dev/null\n+++ b/users/casey/cli.json\n@@ -0,0 +1 @@\n+[]\n\\ No newline at end of file\n"
+        "diff --git a/users/casey/packages.json b/users/casey/packages.json\nnew file mode 120000\n\
+         --- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[]\n\\ No newline at end of file\n"
             .to_string(),
     );
-    // JSON objects and lists are fine.
-    let ok = write_diff(dir.path(), "ok.diff", &new_user_file("users/casey/cli.json", "{ \"style\": \"cisco\" }"));
-    assert_eq!(b.propose(&ok, "cisco style", Actor::Agent, false).unwrap().body.tier, "user");
+    // A list of names is fine, up to 256 of them.
+    let ok = write_diff(dir.path(), "ok.diff", &new_user_file("users/casey/packages.json", "[\"htop\", \"ripgrep\"]"));
+    assert_eq!(b.propose(&ok, "two packages", Actor::Agent, false).unwrap().body.tier, "user");
+    let most: Vec<String> = (0..256).map(|i| format!("\"p{i}\"")).collect();
+    let d = write_diff(dir.path(), "most.diff", &new_user_file("users/casey/packages.json", &format!("[{}]", most.join(","))));
+    assert_eq!(b.propose(&d, "256 packages", Actor::Agent, false).unwrap().body.tier, "user");
 }
 
 /// Removing a user-tier file is a plain user-tier change: there is no content to check.
