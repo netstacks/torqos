@@ -3,57 +3,39 @@
 #
 #   { "host-name": "torq-utm", "time-zone": "Europe/Berlin" }
 #
-# Both are optional. This module is the authority on what is valid, whoever wrote the file (torqcli,
-# the agent, a raw diff): anything else fails evaluation, so the broker's rebuild fails and the change
-# is undone. Changing the host name never changes which configuration the broker builds
+# Both are optional (leave a key out; null is refused, not read as "unset"). This module is the
+# authority on what is valid, whoever wrote the file (torqcli, the agent, a raw diff): anything else
+# fails evaluation, so the broker's rebuild fails and the change is undone. The rules are in
+# host-rules.nix. Changing the host name never changes which configuration the broker builds
 # (`nixosConfigurations.torq`, torq.broker.configName).
+#
+# A JSON object with a key twice keeps the last value: what a person approving the diff reads first
+# is not necessarily what applies. torqcli never writes such a file.
 { config, lib, pkgs, ... }:
 
 let
   dir = config.torq.packages.configDir;
   file = dir + "/system/host.json";
   where = "torq: system/host.json";
-
-  # RFC 1123: one label, letters, digits and hyphens, not starting or ending with a hyphen, at most
-  # 63 characters. (No dots: a fully qualified name is a domain setting, not a host name.) NixOS's
-  # own type for networking.hostName refuses these too; this check is for the message. The time
-  # zone has no such second check: NixOS takes any string.
-  hostNameOk = s: builtins.match "[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?" s != null;
-
-  # A zone tzdata knows: an Area/Location name of plain segments (never `..` or an absolute path),
-  # naming a file in zoneinfo (many are links: UTC, US/Eastern), not a folder ("America" alone is
-  # not a time zone).
-  zoneinfo = "${pkgs.tzdata}/share/zoneinfo";
-  timeZoneOk = s:
-    let
-      segments = lib.splitString "/" s;
-      parent = lib.concatStringsSep "/" (lib.init segments);
-      entries = builtins.readDir (zoneinfo + lib.optionalString (parent != "") "/${parent}");
-    in
-    builtins.match "[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*" s != null
-      && builtins.all (seg: builtins.match "[.]+" seg == null) segments
-      && builtins.pathExists "${zoneinfo}/${s}"
-      && builtins.elem (entries.${lib.last segments} or null) [ "regular" "symlink" ];
+  rules = import ./host-rules.nix { inherit lib; inherit (pkgs) tzdata; };
 
   known = [ "host-name" "time-zone" ];
 
   settings =
     let
-      v = lib.importJSON file;
+      v = builtins.addErrorContext "while reading ${where}" (lib.importJSON file);
       unknown = lib.subtractLists known (lib.attrNames v);
-      host = v.host-name or null;
-      zone = v.time-zone or null;
     in
     if !(builtins.isAttrs v) then
       throw "${where} must be a JSON object with \"host-name\" and/or \"time-zone\""
     else if unknown != [ ] then
       throw "${where}: \"${lib.head unknown}\" is not a setting (it holds ${lib.concatStringsSep ", " known})"
-    else if host != null && !(builtins.isString host && hostNameOk host) then
-      throw "${where}: host-name ${builtins.toJSON host} must be one label of letters, digits and hyphens, at most 63 characters, not starting or ending with a hyphen"
-    else if zone != null && !(builtins.isString zone && timeZoneOk zone) then
-      throw "${where}: time-zone ${builtins.toJSON zone} is not a time zone (e.g. Europe/Berlin, America/New_York, UTC)"
+    else if v ? host-name && !(rules.hostNameOk v.host-name) then
+      throw "${where}: host-name ${builtins.toJSON v.host-name} must be one label of letters, digits and hyphens, at most 63 characters, not starting or ending with a hyphen"
+    else if v ? time-zone && !(rules.timeZoneOk v.time-zone) then
+      throw "${where}: time-zone ${builtins.toJSON v.time-zone} is not a time zone tzdata lists (e.g. Europe/Berlin, America/New_York, UTC)"
     else
-      { inherit host zone; };
+      { host = v.host-name or null; zone = v.time-zone or null; };
 
   present = dir != null && builtins.pathExists file;
 in
