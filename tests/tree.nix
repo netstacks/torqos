@@ -125,8 +125,14 @@ let
   ++ lib.optional (lib.attrNames nodes.services.values != lib.attrNames schemaConfig.torq.services.catalog)
     "schema: services are the catalog";
 
+  # torqcli's tests parse a copy of this schema (cli/src/schema-fixture.json): it must be the real one.
+  # After a schema change, regenerate it (the command is in cli/src/tree.rs's tests).
+  fixtureMismatch = lib.optional (builtins.fromJSON (builtins.readFile ../cli/src/schema-fixture.json) != schema)
+    "cli/src/schema-fixture.json is not the schema the modules produce: regenerate it";
+
   mismatches =
     ruleMismatches
+    ++ fixtureMismatch
     ++ schemaMismatches
     ++ lib.optional (defaults == null) "host-empty: does not evaluate"
     ++ lib.concatLists (lib.mapAttrsToList (case: want:

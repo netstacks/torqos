@@ -2,6 +2,8 @@
 //! proposed change as a diff and hands it to `torq-broker`, which ledgers, applies and can undo it.
 
 mod history;
+#[allow(dead_code)] // torqcli (next) is its user
+mod tree;
 mod pkg;
 mod run;
 mod status;
