@@ -8,6 +8,7 @@
     ./dev.nix
     ./packages.nix
     ./host.nix
+    ./cli.nix
     ./services.nix
   ];
 }

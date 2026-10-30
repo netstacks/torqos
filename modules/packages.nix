@@ -47,9 +47,9 @@ let
 
   # Same shape and leaves the broker treats as user tier (broker/src/policy.rs, is_user_data).
   isUserName = s: builtins.match "[a-z_][a-z0-9_-]*" s != null;
-  # A leaf is added only together with the typed setting that reads it (cli.json comes with the
-  # CLI-style setting), here and in the broker's USER_LEAVES at the same time.
-  userLeaves = [ "packages.json" ];
+  # A leaf is added only together with the typed setting that reads it, here and in the broker's
+  # USER_LEAVES at the same time: packages.json (this module), cli.json (modules/cli.nix).
+  userLeaves = [ "packages.json" "cli.json" ];
   usersDir = dir + "/users";
   entries = if dir != null && builtins.pathExists usersDir then builtins.readDir usersDir else { };
 

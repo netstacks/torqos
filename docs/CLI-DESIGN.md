@@ -80,7 +80,7 @@ settings (more are added one schema entry at a time):
 |---|---|---|
 | `system packages <name>` | `system/packages.json` | system |
 | `system host-name <name>` · `system time-zone <tz>` | `system/host.json` (done: `modules/host.nix`) | system |
-| `system cli style juniper\|cisco` | `system/cli.json` | system |
+| `system cli style juniper\|cisco` | `system/cli.json` (done: `modules/cli.nix`, installed as `/etc/torq/cli.json`) | system |
 | `services <name>` (catalog: ssh, …) | `services.json` | system |
 | `users <name> packages <pkg>` | `users/<name>/packages.json` | user |
 | `users <name> cli style juniper\|cisco` | `users/<name>/cli.json` | user |
@@ -266,11 +266,11 @@ The broker stays small; its additions for this model:
   of a sudo `secure_path`. The CLI calls sudo and the broker by absolute path. Without root
   (tests), flags apply.
 - User-tier files are an explicit allow-list in `policy.rs` (`USER_LEAVES`, kept in step with the
-  module's): `users/<name>/packages.json` today, `users/<name>/cli.json` when the CLI-style setting
-  gives it a type — a leaf joins only with its typed reader. Each must be a regular file (git mode
-  100644) of at most 64 KiB holding exactly its leaf's shape (`packages.json`: a list of at most 256
-  names). Evaluation rejects unknown files and symlinks under `users/` and names that are not normal
-  users.
+  module's): `users/<name>/packages.json` and `users/<name>/cli.json` (2c) — a leaf joins only with
+  its typed reader. Each must be a regular file (git mode 100644) of at most 64 KiB holding exactly
+  its leaf's shape (`packages.json`: a list of at most 256 names; `cli.json`: exactly
+  `{"style": "juniper"|"cisco"}`). Evaluation rejects unknown files and symlinks under `users/` and
+  names that are not normal users.
 - The configuration the broker builds is always `nixosConfigurations.torq`, never derived from the
   host name (a VM test changes the host name, then commits again).
 - The single-change undo is renamed `revert <seq>`, so "rollback" means one thing.
