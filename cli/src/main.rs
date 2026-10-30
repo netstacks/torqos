@@ -4,6 +4,8 @@
 mod history;
 #[allow(dead_code)] // torqcli (next) is its user
 mod tree;
+#[allow(dead_code)] // torqcli (next) is its user
+mod candidate;
 mod pkg;
 mod run;
 mod status;
