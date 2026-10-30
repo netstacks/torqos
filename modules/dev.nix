@@ -25,5 +25,21 @@ in
 
     nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
     environment.systemPackages = with pkgs; [ claude-code gh ];
+
+    # Claude Code ships a new build most days; nixpkgs lags it by weeks, and the upstream
+    # native installer is useless here (its binary is a plain dynamically-linked ELF — it
+    # needs nixpkgs' autoPatchelfHook to run at all, and the Nix build sets
+    # DISABLE_AUTOUPDATER anyway). So pin the version declaratively by overriding the
+    # release manifest nixpkgs reads. To bump:
+    #   curl -fsSL https://downloads.claude.ai/claude-code-releases/latest
+    #   curl -fsSL https://downloads.claude.ai/claude-code-releases/<ver>/manifest.json \
+    #     -o modules/claude-code-manifest.json
+    nixpkgs.overlays = [
+      (final: prev: {
+        claude-code = prev.claude-code.override {
+          manifest = lib.importJSON ./claude-code-manifest.json;
+        };
+      })
+    ];
   };
 }

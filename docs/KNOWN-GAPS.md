@@ -35,3 +35,11 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 - Firefox's GPU WebRender drops most text on virgl. Workaround: `LIBGL_ALWAYS_SOFTWARE=1 firefox`.
 - On a Mac keyboard, niri's Mod is ⌘: ⌘⇧Q logs out of macOS and ⌘Q quits UTM. Use UTM's
   "Capture input" before using niri shortcuts.
+
+## Dev mode (`kestrel.dev.enable`)
+- **Claude Code's own installer and `claude update` do not work on NixOS.** The native binary is
+  a plain dynamically-linked ELF (dies with the `stub-ld` error) and the installer edits
+  `~/.bashrc` to put it first on `PATH`, which breaks `claude` in every new terminal. Instead,
+  `modules/dev.nix` pins the version by overriding nixpkgs' release manifest with
+  `modules/claude-code-manifest.json`. To update, fetch a newer manifest (the commands are in
+  `dev.nix`) and ship it through the broker. Running sessions keep their old code until relaunched.
