@@ -158,6 +158,22 @@ fn reason_of(entries: &[Entry], seq: Option<u64>) -> Option<&str> {
     entries.iter().find(|e| e.seq == seq).map(|e| e.reason.as_str())
 }
 
+/// Later changes, still in effect, that touched a file the given applied change touched: why it
+/// cannot be undone on its own.
+pub fn later_conflicts(entries: &[Entry], applied: u64) -> Vec<u64> {
+    let files = |e: &Entry| -> Vec<String> {
+        e.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(String::from).collect()
+    };
+    let Some(target) = entries.iter().find(|e| e.seq == applied) else { return vec![] };
+    let mine = files(target);
+    entries
+        .iter()
+        .filter(|e| e.kind == "applied" && e.seq > applied && undone_by(entries, e.seq).is_none())
+        .filter(|e| files(e).iter().any(|f| mine.contains(f)))
+        .map(|e| e.seq)
+        .collect()
+}
+
 /// The latest change that took effect (applied, undone, repaired), in the log's words.
 pub fn last_change(entries: &[Entry]) -> Option<String> {
     let e = entries.iter().rev().find(|e| matches!(e.kind.as_str(), "applied" | "rolled_back" | "repaired"))?;
@@ -374,6 +390,20 @@ mod tests {
         assert_eq!(out.trim_end(), expected, "\n{out}");
         assert!(out.lines().all(|l| crate::ui::width(l) <= crate::ui::WIDTH), "80 columns");
         assert_eq!(render(&ledger(), 2, &Ui::plain(), &clock()).lines().filter(|l| l.starts_with("    ")).count(), 2);
+    }
+
+    #[test]
+    fn what_stands_in_the_way_of_an_undo() {
+        let lines = [
+            r#"{"seq":1,"ts":"2026-10-30T12:00:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install a","data":{"files":["users/v.packages.json"]}}"#,
+            r#"{"seq":2,"ts":"2026-10-30T12:01:00Z","kind":"applied","actor":"user","tier":"system","reason":"Enable ssh","data":{"files":["services.json"]}}"#,
+            r#"{"seq":3,"ts":"2026-10-30T12:02:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install b","data":{"files":["users/v.packages.json"]}}"#,
+            r#"{"seq":4,"ts":"2026-10-30T12:03:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install c","data":{"files":["users/v.packages.json"]}}"#,
+            r#"{"seq":5,"ts":"2026-10-30T12:04:00Z","kind":"rolled_back","actor":"user","tier":"user","reason":"Undo: Install c","data":{"applied":4}}"#,
+        ];
+        let l = parse(&lines.join("\n")).unwrap();
+        assert_eq!(later_conflicts(&l, 1), vec![3], "same file, still in effect; not ssh, not the undone one");
+        assert!(later_conflicts(&l, 3).is_empty());
     }
 
     #[test]

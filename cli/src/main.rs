@@ -326,7 +326,7 @@ fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result
             }
             seq
         }
-        other => return fail(cli, &ui, &s.what, other, &log, None),
+        other => return fail(cli, &ui, &s.what, other, &log, Attempt::Nothing),
     };
     let applied = {
         // A spinner redraws its line every 100 ms and would wipe out a sudo password prompt: only
@@ -339,7 +339,7 @@ fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result
             println!("{}", ui.ok(&s.done, &ui::change_ref(v["seq"].as_u64().unwrap_or(seq))));
             Ok(())
         }
-        other => fail(cli, &ui, &s.what, other, &log, Some(seq)),
+        other => fail(cli, &ui, &s.what, other, &log, Attempt::Proposal(seq)),
     }
 }
 
@@ -362,24 +362,40 @@ fn asks_for_password(cli: &Cli) -> bool {
     }
 }
 
+/// What a failed command had got as far as, so `fail` knows which ledger entry would show that it
+/// happened anyway.
+#[derive(Clone, Copy)]
+enum Attempt {
+    /// Nothing recorded yet (refused at propose).
+    Nothing,
+    /// This proposal was made; an `applied` entry for it means it happened.
+    Proposal(u64),
+    /// Undoing this applied change; a `rolled_back` entry for it means it happened.
+    Undo(u64),
+}
+
 /// A change that did not go through: what went wrong, and — from the ledger, not assumed — what
-/// actually happened: applied after all, or nothing changed and the machine is as it was, or not
-/// sure. `proposal`: the proposal made for it, if it got that far. Exits 1.
-fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path, proposal: Option<u64>) -> Result<()> {
+/// actually happened: done after all, or nothing changed and the machine is as it was, or not
+/// sure. Exits 1.
+fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path, attempt: Attempt) -> Result<()> {
     let log_line = || println!("    {}", ui.dim(&format!("log: {}", log.display())));
-    if let run::Outcome::Busy = outcome {
-        if proposal.is_none() {
-            println!("{}", ui.fail("Another change is being applied right now. Try again when it is done."));
-            println!("    Nothing changed.");
-            std::process::exit(1);
-        }
+    if let (run::Outcome::Busy, Attempt::Nothing | Attempt::Undo(_)) = (&outcome, attempt) {
+        // Refused before taking the lock: nothing happened.
+        println!("{}", ui.fail("Another change is being applied right now. Try again when it is done."));
+        println!("    Nothing changed.");
+        std::process::exit(1);
     }
-    // The broker may have applied it before failing (killed after ledgering, a late error): the
+    // The broker may have done it before failing (killed after ledgering, a late error): the
     // ledger says, so look before saying anything — and if it cannot be read, claim nothing.
-    if let Some(p) = proposal {
+    let landed = |l: &[history::Entry]| match attempt {
+        Attempt::Nothing => None,
+        Attempt::Proposal(p) => l.iter().find(|e| e.kind == "applied" && e.data["proposal"].as_u64() == Some(p)).map(|e| e.seq),
+        Attempt::Undo(a) => l.iter().find(|e| e.kind == "rolled_back" && e.data["applied"].as_u64() == Some(a)).map(|e| e.seq),
+    };
+    if !matches!(attempt, Attempt::Nothing) {
         match read_ledger(cli) {
             Ok(l) => {
-                if let Some(a) = l.iter().find(|e| e.kind == "applied" && e.data["proposal"].as_u64() == Some(p)).map(|e| e.seq) {
+                if let Some(a) = landed(&l) {
                     println!("{}", ui.warn(&format!("Done, but something went wrong afterwards ({what}: change {a}).")));
                     println!("    Check with: kestrel status");
                     log_line();
@@ -407,10 +423,10 @@ fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path, p
     } else {
         println!("    Your machine may not be as it was: see kestrel status");
     }
-    if let Some(p) = proposal {
+    if let Attempt::Proposal(p) = attempt {
         println!("    {}", ui.dim(&format!("(Your request is recorded as proposal {p}, not applied.)")));
     }
-    println!("    {}", ui.dim(&format!("log: {}", log.display())));
+    log_line();
     std::process::exit(1);
 }
 
@@ -786,19 +802,28 @@ fn read_ledger(cli: &Cli) -> Result<Vec<history::Entry>> {
 
 /// `kestrel undo [n]`: roll back an applied change through the broker, after saying what it was.
 fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
+    let ui = ui::Ui::detect();
     let entries = read_ledger(cli)?;
     let target = history::undo_target(&entries, seq)?;
     let files: Vec<&str> = target.data["files"].as_array().map(|f| f.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
-    let reason = history::one_line(&target.reason, 80);
+    let reason = history::one_line(&target.reason, 60);
+    let system = target.tier != "user";
     // Say what it is before anything else, refusals included.
-    println!(
-        "#{}  {reason}  ({} tier, by {}{}{})",
-        target.seq,
-        history::clean(&target.tier),
-        history::clean(&target.actor),
-        if target.tainted { ", tainted ⚠" } else { "" },
-        if files.is_empty() { String::new() } else { format!("; {}", history::clean(&files.join(", "))) }
-    );
+    println!("\n{}", ui.heading(&format!("Undo \"{reason}\""), system));
+    let clock = history::Clock::system();
+    let when = history::parse_ts(&target.ts)
+        .map(|t| t + clock.offset)
+        .map(|t| format!("{} {:02}:{:02}", pkg::ymd(t as u64), t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60))
+        .unwrap_or_default();
+    let mut by = history::one_line(&target.actor, 20);
+    if target.tainted {
+        by.push_str(" ⚠ (from a session that read untrusted content)");
+    }
+    println!("    · change {}, {when}, by {by}", target.seq);
+    if !files.is_empty() {
+        println!("    · {}", ui.dim(&history::one_line(&files.join(", "), 70)));
+    }
+    println!();
     // --yes only for a change to exactly your own package list — not someone else's, not the system.
     let me = me()?;
     let mine = files == [format!("users/{me}.packages.json").as_str()];
@@ -807,17 +832,40 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
     }
     approval(false, yes)?; // there must be someone to ask
     // The answer defaults to Yes by the same rule: only for a change to your own packages.
-    if !yes && !confirm(&ui::Ui::detect(), &format!("Undo \"{reason}\"?"), mine)? {
-        println!("not undone");
+    if !yes && !confirm(&ui, "Undo?", mine)? {
+        println!("  Nothing changed.");
         return Ok(());
     }
-    let st = broker(cli, &["rollback", &target.seq.to_string(), "--approved-by", &me])
-        .status()
-        .context("running the broker")?;
-    if !st.success() {
-        bail!("undo of #{} failed (see above)", target.seq);
+    let log = run::start_log()?;
+    let done = {
+        let _p = if asks_for_password(cli) { None } else { Some(run::Progress::start("Undoing")) };
+        run::broker_json(broker(cli, &["rollback", &target.seq.to_string(), "--approved-by", &me]), &log)?
+    };
+    let what = format!("undo change {}", target.seq);
+    match done {
+        run::Outcome::Done(e) => {
+            println!("{}", ui.ok("Undone", &format!("change {}", e["seq"].as_u64().unwrap_or(0))));
+            Ok(())
+        }
+        run::Outcome::Refused(m) if m.contains("later changes conflict") => {
+            // Name what stands in the way, from the ledger, rather than repeating git's view of it.
+            let later = history::later_conflicts(&entries, target.seq);
+            let list = later.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ");
+            println!(
+                "{}",
+                ui.fail(&format!(
+                    "Can't undo change {} on its own: {} also changed {}.",
+                    target.seq,
+                    if later.is_empty() { "later changes".to_string() } else { format!("later changes ({list})") },
+                    history::one_line(&files.join(", "), 40)
+                ))
+            );
+            println!("    Undo those first (newest first), or make the opposite change yourself.");
+            println!("    Nothing changed.");
+            std::process::exit(1);
+        }
+        other => fail(cli, &ui, &what, other, &log, Attempt::Undo(target.seq)),
     }
-    Ok(())
 }
 
 /// `kestrel update`: move this machine to the newest Kestrel (and so nixpkgs, which follows it), as
