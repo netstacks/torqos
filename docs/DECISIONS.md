@@ -109,7 +109,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   priority, and **never fails**: it can run during a switch, and a failed unit would fail the switch,
   which the broker treats as a failed rebuild and rolls back (ADR-008).
 - **Consequences:** Drift is visible within 15 minutes, at boot and in every new shell, but nothing
-  is changed automatically: the person decides — `torq status --repair` (the broker's `repair`:
+  is changed automatically (the one exception: an unconfirmed `commit confirmed`, which the person
+  consented to in advance, ADR-016): the person decides — `torq status --repair` (the broker's `repair`:
   rebuild the last ledgered configuration, refuse if the config repo itself was changed, record what
   had drifted, and say so if the switch did not take), or apply, rollback, reconcile. Garbage collection
   (`nix.gc`, weekly, generations older than 30 days; `min-free` during builds) is safe for the same
@@ -153,20 +154,33 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   `/var/lib/torq`; its old history is not migrated. Anything still saying Kestrel is either history
   (old ledger, git log) or a miss.
 
-## ADR-016 — The CLI follows the Junos configuration model
-- **Context:** Commands applied each change immediately (`pkg add` = propose + apply), and undo
-  reverted one old change, which conflicts when later changes touched the same file. The owner is a
-  network engineer; the Junos model (candidate config, `show | compare`, `commit check`,
-  `commit confirmed`, `rollback <n>`) is the best-tested answer to "change a live system safely".
-- **Decision:** Edits (`set`/`delete`, `request system update`) go into a per-user candidate
-  configuration and change nothing until `commit`, which applies them as one ledgered change.
-  Commit numbers count backwards (0 = active); `rollback <n>` loads a whole earlier configuration
-  into the candidate. `commit confirmed <minutes>` rolls back automatically unless confirmed — done
-  by the broker from a system timer, so it works when the session is gone and across reboots.
-  Junos forms only: the earlier `pkg`, `service`, `update`, `log`, `undo` and `status` commands are
-  removed (`torq configure`, an interactive mode, comes later).
-- **Consequences:** The candidate, `show`, `commit check` and `rollback <n>` are unprivileged CLI
-  work; the broker gains only `apply --confirm-within`, `confirm` and `expire-confirm`, and a ledger
-  kind `confirmed`. Rollback is always a new change forward, so it cannot conflict. `commit` asks no
-  question — it is the approval — and whoever can run it approves until the broker identifies its
-  caller (M3).
+## ADR-016 — TorqOS is driven like a network device: `torqcli`, a candidate, commit confirmed
+- **Context:** Commands applied each change immediately, and undo reverted one old change, which
+  conflicts when later changes touched the same file. The owner is a network engineer; the network
+  device model (a shell with operational and configuration modes, a candidate configuration,
+  `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`) is the best-tested answer to
+  "change a live system safely".
+- **Decision:**
+  - `torqcli` is the shell (interactive, or one command per invocation for scripts). Two syntaxes
+    over one model — Juniper-style and Cisco-style — switched with `switch cli` (as in Cisco NSO);
+    the default is a setting. The earlier `torq pkg/service/update/log/undo/status` are removed.
+  - The configuration is a tree whose containers are the config repo's folders and whose leaves are
+    small data files; each setting is declared in a schema next to its NixOS module and installed
+    with the system (help, completion, syntax). Tiers follow the paths: `users/<name>/` is user tier.
+  - Edits go into a per-user candidate that remembers its base commit; `commit` applies the change
+    from base to candidate as one ledgered change, and the broker refuses it if the base is stale.
+    A system-tier commit prints exactly what it commits and needs a terminal.
+  - Commit numbers count backwards (0 = active). `rollback <n>` restores commit <n>'s
+    configuration but never `flake.lock`; going back in software is the separate
+    `request system software rollback <n>`.
+  - `commit confirmed <minutes>` activates without changing the boot default; `commit` confirms
+    (makes it the boot default, no rebuild); otherwise the broker restores the previous system
+    directly from its store path, from a transient timer running the previous (known-good) broker;
+    a reboot before confirming is itself the rollback. While one is pending, no other change can be
+    made.
+- **Consequences:** Most of this is unprivileged CLI work. The broker gains `propose --base`,
+  `apply --confirm`, `confirm`, `expire-confirm`, the pending-confirm interlock and boot check, the
+  ledger kind `confirmed`, JSON-only user-tier files at `users/<name>/<leaf>.json`, and renames
+  single-change undo to `revert`. Rollback is always a new change forward, so it cannot conflict.
+  An automatic rollback of an unconfirmed commit is consented to in advance by `commit confirmed`
+  and ledgered; it is not the silent drift correction ADR-012 rules out.

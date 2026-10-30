@@ -18,17 +18,22 @@ In an ARM NixOS VM (UTM on the M4 Mac):
 ### M1.5 — CLI polish: the everyday commands feel finished  ← current
 Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 
-**Junos configuration model (ADR-016)** — replaces `pkg`, `service`, `update`, `log`, `undo`, `status`:
-- [ ] Candidate configuration per user; `set` / `delete` (`packages`, `system packages`,
-      `services`), `request system update [all]`, `rollback 0`.
-- [ ] `show configuration`, `show compare`, `show system commit`, `show system rollback <n>
+**`torqcli`: the network-device model (ADR-016)** — replaces `torq pkg/service/update/log/undo/status`:
+- [ ] Broker: `propose --base`, `apply --confirm` (test activation, anchor), `confirm`, `expire-confirm`
+      (transient timer, direct restore, boot check), pending-confirm interlock, `revert`, JSON-only
+      user-tier files at `users/<name>/<leaf>.json`; VM tests.
+- [ ] Schema-driven tree: `system packages/environment/host-name/time-zone/cli`, `services`,
+      `users <name> packages/environment/cli`; `share/torq/schema.json` in the system.
+- [ ] `torqcli` shell: operational + configuration modes, Juniper style, pipes, `?`, Tab, history.
+- [ ] Cisco style and `switch cli`.
+- [ ] Candidate per user with its base commit; `set` / `delete` on the tree; `rollback 0`.
+- [ ] `show configuration`, `show | compare`, `show system commit`, `show system rollback <n>
       [compare <m>]`, `show packages available`, `show services`, `show system alarms`.
-- [ ] `commit check` (evaluate + build, no switch); `commit [comment]` (one ledgered change).
-- [ ] `commit confirmed [<minutes>]`: broker `apply --confirm-within`, `confirm`, `expire-confirm`;
-      a system timer rolls back as root, also after a reboot; VM test.
-- [ ] `rollback <n>` loads a whole earlier configuration into the candidate.
-- [ ] `request system repair` (was `status --repair`).
-- [ ] Later: `torq configure` (interactive `[edit]` mode), `commit at <time>`, `load override`.
+- [ ] `commit check` (evaluate + build, no switch); `commit [comment]`; `commit confirmed
+      [<minutes>]`; system-tier commits print the change and need a terminal.
+- [ ] `rollback <n>` (configuration, never `flake.lock`); `request system software rollback <n>`;
+      `request system update [all]`; `request system repair`.
+- [ ] Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 
 **First round** (done with the earlier command names; carried over):
 - [x] Broker `--json` for every command (shapes and exit codes in `CLI-DESIGN.md`).
