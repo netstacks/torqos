@@ -81,6 +81,13 @@ in
       {
         torq.services.enabled = lib.mkIf (dir != null && builtins.pathExists file) fromFile;
 
+        torq.schema.services = {
+          kind = "leaf-list";
+          help = "Services from the TorqOS catalog, each with TorqOS's defaults";
+          file = "services.json";
+          values = cfg.catalog;
+        };
+
         assertions =
           [
             {

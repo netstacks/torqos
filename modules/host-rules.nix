@@ -23,4 +23,7 @@ in
   hostNameOk = s: builtins.isString s && builtins.match "[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?" s != null;
 
   timeZoneOk = s: builtins.isString s && zones ? ${s};
+
+  # For completion (the schema).
+  timeZones = lib.attrNames zones;
 }

@@ -96,6 +96,12 @@ in
       default = [ ];
       description = "nixpkgs attribute paths installed system-wide.";
     };
+    userLeaves = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      readOnly = true;
+      default = userLeaves;
+      description = "The files a users/<name>/ folder may hold (the broker's USER_LEAVES; read-only).";
+    };
     user = lib.mkOption {
       type = lib.types.attrsOf (lib.types.listOf lib.types.str);
       default = { };
@@ -123,6 +129,22 @@ in
         assertion = false;
         message = "torq: users/${n} is a symlink; a user's settings must be a real folder (users/<name>/).";
       }) links;
+
+    torq.schema = {
+      "system packages" = {
+        kind = "leaf-list";
+        help = "Software installed for everyone (nixpkgs names)";
+        file = "system/packages.json";
+        type = "package";
+      };
+      "users <name> packages" = {
+        kind = "leaf-list";
+        help = "Software installed for this person only";
+        file = "users/<name>/packages.json";
+        tier = "user";
+        type = "package";
+      };
+    };
 
     environment.systemPackages = [ config.torq.cli.package ] ++ map (resolve "system") cfg.system;
     users.users = lib.mapAttrs (user: names: { packages = map (resolve "user ${user}") names; }) cfg.user;

@@ -53,5 +53,23 @@ in
     torq.cli.style = lib.mkIf (dir != null && builtins.pathExists systemFile) (readStyle "system/cli.json" systemFile);
     torq.cli.userStyles = lib.mapAttrs (name: _: readStyle "users/${name}/cli.json" (usersDir + "/${name}/cli.json")) userFiles;
     environment.etc."torq/cli.json".text = builtins.toJSON { inherit (cfg) style; users = cfg.userStyles; };
+
+    torq.schema =
+      let
+        values = { juniper = "Junos syntax: set/delete, show | compare, commit"; cisco = "IOS-style syntax: no …, show running-config"; };
+      in
+      {
+        "system cli" = { kind = "container"; help = "The torqcli shell"; };
+        "system cli style" = { kind = "leaf"; help = "Syntax torqcli speaks on this machine"; file = "system/cli.json"; key = "style"; inherit values; };
+        "users <name> cli" = { kind = "container"; help = "The torqcli shell, for this person"; tier = "user"; };
+        "users <name> cli style" = {
+          kind = "leaf";
+          help = "Syntax torqcli speaks for this person (overrides system cli style)";
+          file = "users/<name>/cli.json";
+          key = "style";
+          tier = "user";
+          inherit values;
+        };
+      };
   };
 }

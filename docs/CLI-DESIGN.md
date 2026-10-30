@@ -192,9 +192,14 @@ Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 
 - **`torqcli` is unprivileged** (ADR-014): the shell, the candidate, `show`, `commit check` and
   `rollback <n>` live in it. A commit is one `propose --base` + `apply` through `sudo torq-broker`.
-- **The schema** is defined next to each setting's NixOS module (`torq.schema`) and installed as
-  `share/torq/schema.json` in the system, so the shell reads it instantly for parsing, `?` and Tab.
-  Syntax is checked as you type; meaning (does the package exist, is it free) at `commit check`.
+- **The schema** is defined next to each setting's NixOS module (`torq.schema."<path>"`; the node
+  format is documented in `modules/schema.nix`) and installed as `/etc/torq/schema.json`, so the
+  shell reads it instantly for parsing, `?` and Tab. Closed sets carry their values (time zones from
+  tzdata's index, catalog services, styles, the machine's users); open ones a type (`package`,
+  `host-name`). `tests/tree.nix` keeps it consistent: parents exist, files and keys fit the kind,
+  `users <name> …` is user tier and nothing else is, and its user-tier files are exactly the
+  allowed user leaves. Syntax is checked as you type; meaning (does the package exist, is it free)
+  at `commit check`.
 - **The schema is not the authority.** The NixOS modules' strict types are: every leaf file has a
   consumer that rejects bad data at evaluation, whoever wrote it (the shell, the agent, a raw diff).
   The installed schema belongs to the *running* system, so `commit check` evaluates the candidate

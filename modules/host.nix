@@ -40,10 +40,30 @@ let
   present = dir != null && builtins.pathExists file;
 in
 {
-  config = lib.mkIf present {
-    # Normal priority: setting the host name in Nix as well is a conflict, reported, not silently
-    # overridden one way or the other.
-    networking.hostName = lib.mkIf (settings.host != null) settings.host;
-    time.timeZone = lib.mkIf (settings.zone != null) settings.zone;
-  };
+  config = lib.mkMerge [
+    (lib.mkIf present {
+      # Normal priority: setting the host name in Nix as well is a conflict, reported, not silently
+      # overridden one way or the other.
+      networking.hostName = lib.mkIf (settings.host != null) settings.host;
+      time.timeZone = lib.mkIf (settings.zone != null) settings.zone;
+    })
+    {
+      torq.schema = {
+        "system host-name" = {
+          kind = "leaf";
+          help = "This machine's name on the network (one label: letters, digits, hyphens)";
+          file = "system/host.json";
+          key = "host-name";
+          type = "host-name";
+        };
+        "system time-zone" = {
+          kind = "leaf";
+          help = "Local time zone, e.g. Europe/Berlin (the ledger is always UTC)";
+          file = "system/host.json";
+          key = "time-zone";
+          values = lib.genAttrs rules.timeZones (_: "");
+        };
+      };
+    }
+  ];
 }

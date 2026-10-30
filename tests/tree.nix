@@ -70,8 +70,39 @@ let
     lib.optional (rules.${f} arg != want) "${f} ${builtins.toJSON arg}: want ${builtins.toJSON want}"
   ) ruleCases;
 
+  # The schema (modules/schema.nix) is consistent: every node's parent exists, files and keys are
+  # where the kind says, `users <name> …` is user tier and nothing else is, and the user-tier leaves
+  # it describes are exactly the leaves a users/<name>/ folder may hold — no setting without a node,
+  # no node without a reader.
+  schemaConfig = configOf "cli-good";
+  schema = builtins.fromJSON schemaConfig.environment.etc."torq/schema.json".text;
+  nodes = schema.nodes;
+  parentOf = path: lib.concatStringsSep " " (lib.init (lib.splitString " " path));
+  underUser = path: lib.hasPrefix "users <name>" path;
+  schemaMismatches = lib.concatLists (lib.mapAttrsToList (path: n:
+    let has = k: n ? ${k}; in
+    lib.optional (lib.length (lib.splitString " " path) > 1 && !(nodes ? ${parentOf path})) "schema ${path}: no parent node"
+    ++ lib.optional (n.kind == "leaf" && !(has "file" && has "key")) "schema ${path}: a leaf needs file and key"
+    ++ lib.optional (n.kind == "leaf-list" && !(has "file") || n.kind == "leaf-list" && has "key") "schema ${path}: a leaf-list is a whole file"
+    ++ lib.optional (builtins.elem n.kind [ "container" "list" ] && (has "file" || has "key")) "schema ${path}: a ${n.kind} has no file"
+    ++ lib.optional ((n.tier == "user") != underUser path) "schema ${path}: tier ${n.tier}"
+    ++ lib.optional (has "file" && underUser path && !(lib.hasPrefix "users/<name>/" n.file)) "schema ${path}: file outside users/<name>/"
+  ) nodes)
+  ++ (let
+    described = lib.unique (map (n: lib.removePrefix "users/<name>/" n.file)
+      (lib.filter (n: n ? file && n.tier == "user") (lib.attrValues nodes)));
+    allowed = schemaConfig.torq.packages.userLeaves;
+  in lib.optional (lib.sort lib.lessThan described != lib.sort lib.lessThan allowed)
+    "schema: user-tier files ${builtins.toJSON described} != allowed user leaves ${builtins.toJSON allowed}")
+  ++ lib.optional (!(nodes.users.values ? dev)) "schema: users lists the machine's normal users (dev)"
+  ++ lib.optional (!(nodes."system time-zone".values ? "Europe/Berlin") || nodes."system time-zone".values ? Factory)
+    "schema: time zones are tzdata's list"
+  ++ lib.optional (lib.attrNames nodes.services.values != lib.attrNames schemaConfig.torq.services.catalog)
+    "schema: services are the catalog";
+
   mismatches =
     ruleMismatches
+    ++ schemaMismatches
     ++ lib.optional (defaults == null) "host-empty: does not evaluate"
     ++ lib.concatLists (lib.mapAttrsToList (case: want:
       let got = host case; in lib.optional (got != want) "${case}: got ${builtins.toJSON got}, want ${builtins.toJSON want}"
@@ -87,6 +118,7 @@ if mismatches != [ ] then
 else
   pkgs.runCommand "torq-tree-test" { } ''
     echo "rules: ${toString (builtins.length ruleCases)} cases" > $out
+    echo "schema: ${toString (builtins.length (lib.attrNames nodes))} nodes consistent" >> $out
     echo "host: ${toString (builtins.length invalid)} invalid cases refused, ${toString (builtins.length (lib.attrNames expect) + 1)} valid ones read" >> $out
     echo "cli: ${toString (builtins.length cliInvalid)} invalid cases refused, ${toString (builtins.length (lib.attrNames cliExpect))} valid ones read" >> $out
   ''

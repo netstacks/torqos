@@ -9,6 +9,7 @@
     ./packages.nix
     ./host.nix
     ./cli.nix
+    ./schema.nix
     ./services.nix
   ];
 }

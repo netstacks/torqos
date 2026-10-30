@@ -24,11 +24,11 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       user-tier files at `users/<name>/<leaf>.json`; VM tests. Done so far: `--base` (1c), `revert`
       (1d), user-tier JSON files, fixed settings + cleared environment for a root broker (1e),
       `apply --confirm` / `confirm` / `expire-confirm` with the timer, boot check and freeze (1f).
-- [ ] Schema-driven tree: `system packages/host-name/time-zone/cli`, `services`,
-      `users <name> packages/cli`; `share/torq/schema.json` in the system; fixed output
-      `nixosConfigurations.torq`. Done: `system/host.json` (host-name, time-zone; 2b),
-      `system/cli.json` + `users/<name>/cli.json` (CLI style, user tier; 2c), with an evaluation
-      test (`tests/tree.nix`). Next: the schema.
+- [x] Schema-driven tree: `system packages/host-name/time-zone/cli`, `services`,
+      `users <name> packages/cli`; `/etc/torq/schema.json` in the system; fixed output
+      `nixosConfigurations.torq`. `system/host.json` (host-name, time-zone; 2b),
+      `system/cli.json` + `users/<name>/cli.json` (CLI style, user tier; 2c), the schema (2d), with
+      an evaluation test (`tests/tree.nix`).
 - [ ] Environment variables: their own design first (allow-list, per-user delivery, escaping,
       never reaching root or the broker, secrets check) — review N2/N3.
 - [ ] `torqcli` shell: operational + configuration modes, Juniper style, pipes, `?`, Tab, history.
