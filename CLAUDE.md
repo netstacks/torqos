@@ -1,0 +1,116 @@
+# CLAUDE.md — Kestrel
+
+> "Kestrel" is a placeholder codename. Rename freely (search the repo for `kestrel`).
+
+## What this project is
+
+Kestrel is a **laptop operating system** built on **NixOS** with three non-negotiable goals:
+
+1. **Ground-up security owned by the user.** Each installed laptop is its own root of trust:
+   owner-generated Secure Boot keys (Microsoft keys removed by default), measured boot,
+   TPM2 + PIN disk unlock. No shim, no vendor keys, no one else's signatures.
+2. **Deep AI integration that is auditable and reversible.** An AI agent can diagnose and
+   change almost anything on the system — drivers, firmware, config, performance — but it can
+   only *propose config changes*. A small privileged **broker** applies them as signed git
+   commits that become bootable NixOS generations. Every action is in a tamper-evident ledger
+   and every change has one-click undo.
+3. **Omarchy-level taste, refinement and speed.** Opinionated, beautiful, ready out of the box,
+   designed for touchpad/touch first (keyboard shortcuts optional), with measured smoothness
+   targets.
+
+Read `docs/VISION.md` first, then `docs/ARCHITECTURE.md`.
+
+## The one rule that shapes everything
+
+**The AI never changes the running system directly.** It edits the system *configuration*
+(the local git repo at `/var/lib/kestrel/config`), and the broker builds the system from it.
+That is what makes auditing and reversal automatic. Do not add code paths that bypass this.
+
+## Repository layout
+
+```
+flake.nix              entry point: VMs, ISO, checks, packages
+modules/               the distribution, as NixOS modules (kestrel.* options)
+  base.nix             nix settings, users, locale, core packages
+  security.nix         boot chain, lanzaboote, TPM/LUKS, hardening
+  desktop.nix          compositor (niri), greetd, pipewire, portals
+  broker.nix           the privileged change broker service + config repo
+  ai.nix               local model runtime + agent service (stubbed)
+hosts/
+  dev-vm/              throwaway VM (`.#nixosConfigurations.dev-vm-{aarch64,x86_64}`)
+templates/config/      the per-machine config repo the broker manages
+                       (`nix flake new -t .#config /var/lib/kestrel/config`)
+broker/                Rust crate: kestrel-broker (ledger, policy, git, rebuild, rollback)
+tests/                 NixOS VM tests
+docs/                  design docs and decision log
+```
+
+Two repos, on purpose:
+- **This repo** = the distribution (modules, broker source, docs). Developed normally, on GitHub.
+- **`/var/lib/kestrel/config`** on each machine = that machine's config, a small flake that imports
+  this repo via `kestrel.lib.mkSystem`. Local only. Written only by the broker.
+
+## Commands
+
+```bash
+# Rust broker
+cd broker && cargo test          # unit tests, incl. ledger tamper detection
+cd broker && cargo run -- --help
+
+# Nix (run on Linux or inside the NixOS VM; on macOS needs a linux-builder)
+nix flake check                                   # eval + VM tests
+nix build .#nixosConfigurations.dev-vm-aarch64.config.system.build.vm
+./result/bin/run-kestrel-dev-vm                   # boot the throwaway VM (dev / kestrel)
+nix build .#checks.aarch64-linux.trust-loop       # run the trust-loop VM test
+
+# Inside the UTM VM, against the machine's config repo
+sudo nixos-rebuild switch --flake /var/lib/kestrel/config#kestrel-utm   # first time only
+sudo kestrel-broker propose --diff change.diff --reason "..." --actor user
+sudo kestrel-broker apply <seq> --approved-by casey
+sudo kestrel-broker rollback <applied-seq> --approved-by casey
+sudo kestrel-broker log && sudo kestrel-broker verify
+```
+
+## Current milestone (M1) — "the trust loop"
+
+In an ARM NixOS VM on the M4 Mac: a change is proposed → shown as a diff → approved →
+the broker commits it (signed, with ledger entry) → rebuilds → the change appears in the
+ledger → one command rolls it back. See `docs/ROADMAP.md` for acceptance criteria.
+
+## Engineering principles
+
+- **Privileged code is Rust**, small, and boring. The broker must stay auditable line by line.
+- **Unprivileged UI is QML (Quickshell).** The agent runs unprivileged and sandboxed.
+- **Everything declarative.** If it isn't in the config repo, it doesn't exist after a rebuild.
+- **Test the trust properties, not just features.** Every security or reversibility claim
+  should have a NixOS VM test (`tests/`) that would fail if the claim broke.
+- **One reference laptop first.** Polish on one machine beats broad mediocre support.
+- **Prefer existing, maintained components** (Lanzaboote, sbctl, systemd-cryptenroll, fwupd,
+  niri/Hyprland, Quickshell, llama.cpp, MCP). Original work goes into the broker, ledger,
+  agent tools, Activity UI, installer and the "Secure this laptop" flow.
+
+## Guardrails for Claude Code working in this repo
+
+- Never weaken a security default to make something work. Add an explicit, documented option
+  instead, defaulting to the secure value.
+- Never give the agent a code path to: modify its own permissions, disable/edit the ledger,
+  touch Secure Boot keys, or run arbitrary root commands. Those are user-only, via direct UI.
+- Record significant design choices in `docs/DECISIONS.md` (short ADR entries).
+- Keep `docs/` in sync when behaviour changes.
+- Things in this scaffold marked `TODO(M1)` / `TODO(M2)` are the intended next steps.
+
+## Status of this scaffold (read this first)
+
+- **Nix:** every configuration (both dev VMs, the VM image, the trust-loop test, and the config
+  template) was evaluated against nixos-26.05 with **zero warnings**. Nothing has been *built* or
+  *booted* yet.
+- **Rust broker:** written and hand-reviewed but **never compiled** — the environment that
+  generated it had no crates.io access. There is **no `broker/Cargo.lock` yet**, so the flake
+  will not evaluate until one exists.
+
+### First tasks for Claude Code
+1. `cd broker && cargo generate-lockfile && cargo test` — fix any compile errors, make all tests
+   pass, commit `Cargo.lock`.
+2. `nix flake check` (on Linux / inside the VM) — the trust-loop VM test must pass.
+3. Follow `docs/DEV-SETUP.md` to bring up the UTM VM and complete the M1 checklist in
+   `docs/ROADMAP.md`.
