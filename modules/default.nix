@@ -5,5 +5,6 @@
     ./desktop.nix
     ./broker.nix
     ./ai.nix
+    ./dev.nix
   ];
 }

@@ -99,18 +99,27 @@ ledger → one command rolls it back. See `docs/ROADMAP.md` for acceptance crite
 - Keep `docs/` in sync when behaviour changes.
 - Things in this scaffold marked `TODO(M1)` / `TODO(M2)` are the intended next steps.
 
-## Status of this scaffold (read this first)
+## Current status (read this first) — 2026-10-30
 
-- **Nix:** every configuration (both dev VMs, the VM image, the trust-loop test, and the config
-  template) was evaluated against nixos-26.05 with **zero warnings**. Nothing has been *built* or
-  *booted* yet.
-- **Rust broker:** written and hand-reviewed but **never compiled** — the environment that
-  generated it had no crates.io access. There is **no `broker/Cargo.lock` yet**, so the flake
-  will not evaluate until one exists.
+- **M1 trust loop works in the UTM VM** with a real `nixos-rebuild`: propose → apply → rebuild →
+  ledger → one-command rollback; broken changes are reset *and rebuilt* (ADR-008); agent refused
+  on forbidden paths; ledger tampering detected. Broker: 19 tests green (`cargo test`).
+- **Still open in M1:** `tests/trust-loop.nix` has never *run* — it needs KVM, and the UTM VM has
+  no `/dev/kvm`. Run on Linux/x86 or a linux-builder.
+- Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
-### First tasks for Claude Code
-1. `cd broker && cargo generate-lockfile && cargo test` — fix any compile errors, make all tests
-   pass, commit `Cargo.lock`.
-2. `nix flake check` (on Linux / inside the VM) — the trust-loop VM test must pass.
-3. Follow `docs/DEV-SETUP.md` to bring up the UTM VM and complete the M1 checklist in
-   `docs/ROADMAP.md`.
+### You are probably running inside the dev VM
+- Host `kestrel-utm`, user **`viper`** (not casey — the VM's config repo was adapted; the template
+  still says casey). `kestrel.dev.enable = true` there: passwordless sudo, you have root (ADR-009).
+- `~/kestrel` = this repo (working copy; push to `github.com/netstacks/kestrel`, branch `main`).
+- `/var/lib/kestrel/config` = the machine's config repo; its `kestrel` input is
+  `path:/home/viper/kestrel`.
+- **Ship a distribution change to the running VM through the broker**, so it is ledgered:
+  ```bash
+  rm -rf /tmp/cfg && cp -r /var/lib/kestrel/config /tmp/cfg && cd /tmp/cfg
+  nix flake update kestrel && git diff > /tmp/bump.diff     # + edit other files if needed
+  sudo kestrel-broker propose --diff /tmp/bump.diff --reason "..." --actor user
+  sudo kestrel-broker apply <seq> --approved-by viper
+  ```
+- Dev mode is a temporary exception for *building* Kestrel. Do not design the Kestrel agent around
+  having root; the agent itself stays unprivileged and broker-only.

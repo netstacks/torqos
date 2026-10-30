@@ -44,3 +44,16 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   `kestrel-broker-init` runs only once (`ConditionPathExists=!…/.git`), never during a switch.
 - **Consequences:** A failed change costs a second (usually cached) switch. If the restore also
   fails, the ledger says so explicitly rather than claiming the system is unchanged.
+
+## ADR-009 — Development mode: Claude Code with full access, behind one switch
+- **Context:** While Kestrel is being built, the fastest loop is Claude Code running *inside*
+  the dev VM with root — editing `~/kestrel`, building with Nix, applying via the broker.
+  Security during development is explicitly not a goal; being able to shut it off later is.
+- **Decision:** `kestrel.dev.enable` (default **false**, `modules/dev.nix`): passwordless sudo
+  for wheel, `claude-code` + `gh`, owner as trusted Nix user. Enabled only in the dev VM's
+  config repo. This is a cloud agent with root, so it is a deliberate, temporary exception to
+  ADR-003 (agent only proposes) and ADR-005 (local models by default) — for *building* Kestrel,
+  not for the Kestrel agent itself.
+- **Consequences:** Every rebuild prints a warning while it is on. Shutting AI access off is
+  a single broker commit (`kestrel.dev.enable = false`), itself ledgered and undoable. The
+  shipped product and all tests run with it off.
