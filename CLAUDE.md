@@ -109,6 +109,9 @@ proposes nothing. See `docs/ROADMAP.md`.
 - **Package system works** (ADR-011): `kestrel pkg add|remove|list|search` writes
   `users/<name>.packages.json` (user tier) or `packages.json` (`--system`, system tier) and goes
   through the broker. Verified live (`ripgrep` for viper, ledger #23).
+- **Services, updates, history work** (ADR-012, ADR-013): `kestrel service`, `kestrel update`,
+  `kestrel log`, `kestrel undo`, `kestrel status`; drift checked at boot and every 15 min. Verified
+  live: Podman enabled, a rootless container run, then undone (ledger #33–#35).
 - **A stray `nixos-rebuild` cannot switch the machine away** from its ledgered config:
   `/etc/nixos` holds stubs that refuse (`kestrel.broker.guardEtcNixos`). This happened once from
   another tool on this VM; never build `/etc/nixos` or any config other than the broker's.
