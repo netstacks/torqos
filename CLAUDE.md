@@ -101,12 +101,20 @@ proposes nothing. See `docs/ROADMAP.md`.
 
 ## Current status (read this first) — 2026-10-30
 
-- **M1 trust loop works in the UTM VM** with a real `nixos-rebuild`: propose → apply → rebuild →
-  ledger → one-command rollback; broken changes are reset *and rebuilt* (ADR-008); agent refused
-  on forbidden paths; ledger tampering detected. Broker: 19 tests green (`cargo test`).
-- **M1 is complete.** `tests/trust-loop.nix` passes inside the UTM VM: there is no `/dev/kvm`, but
-  QEMU falls back to TCG and the test still finishes in about 75 s. Next: M2 (`docs/ROADMAP.md`).
-- Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
+- **M1 is complete** and running on the UTM VM: propose → apply → rebuild → ledger → one-command
+  rollback; broken changes reset *and rebuilt* (ADR-008); a broker killed mid-change is reconciled
+  on the next operation (ADR-010); `kestrel-broker status` reports any drift from the ledger.
+  `tests/trust-loop.nix` passes inside the UTM VM (no `/dev/kvm`: QEMU falls back to TCG, ~2.5 min).
+  Broker: 40 tests green (`cargo test`, also run in the Nix build sandbox).
+- **Package system works** (ADR-011): `kestrel pkg add|remove|list|search` writes
+  `users/<name>.packages.json` (user tier) or `packages.json` (`--system`, system tier) and goes
+  through the broker. Verified live (`ripgrep` for viper, ledger #23).
+- **A stray `nixos-rebuild` cannot switch the machine away** from its ledgered config:
+  `/etc/nixos` holds stubs that refuse (`kestrel.broker.guardEtcNixos`). This happened once from
+  another tool on this VM; never build `/etc/nixos` or any config other than the broker's.
+- **Way of working:** small steps; an independent reviewer agent behind every meaningful change;
+  mutation-check new guards (break them, see a test fail); verify in the Nix sandbox and VM test.
+- Next: M2 (`docs/ROADMAP.md`). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
 ### You are probably running inside the dev VM
 - Host `kestrel-utm`, user **`viper`** (the template no longer names a user; `kestrel.user` in
