@@ -28,13 +28,15 @@ with the taint source displayed.
 
 ## Ledger format (v0)
 
-Append-only JSON Lines at `/var/lib/kestrel/ledger.jsonl`, owned by the broker.
+Append-only JSON Lines at `/var/lib/kestrel/state/ledger.jsonl`, owned by the broker.
+Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `rolled_back`, `rollback_failed`
+(failures carry `restored: true|false` — see ADR-008).
 
 ```json
 {"seq":1042,"ts":"2026-10-30T15:20:11Z","actor":"agent","approved_by":"casey",
- "kind":"commit","tier":"user","tainted":false,
+ "kind":"applied","tier":"user","tainted":false,
  "reason":"User asked for night light at sunset",
- "data":{"commit":"8f3a2c1…","files":["desktop.nix"]},
+ "data":{"proposal":1041,"commit":"8f3a2c1…","files":["desktop.nix"]},
  "prev_hash":"…","hash":"…"}
 ```
 
@@ -42,13 +44,16 @@ Append-only JSON Lines at `/var/lib/kestrel/ledger.jsonl`, owned by the broker.
 - Genesis entry has `prev_hash` = 64 zeros.
 - `kestrel-broker verify` recomputes the chain and reports the first broken link.
 - Git commits carry a `Ledger-Entry: <seq>` trailer; the ledger stores the commit id → each
-  checks the other.
+  checks the other. TODO(M3): `verify` does not cross-check trailers yet, and cannot detect
+  truncation of the newest entries until the head hash is anchored.
 - Later (M3+): anchor the latest hash periodically (e.g. TPM NV index or an external witness).
 
 ## Change lifecycle
 
 1. `propose` — agent or user submits a unified diff against the config repo + a reason.
 2. Broker validates: diff applies cleanly, touches only allowed paths for its tier, tier ≤ allowed.
+   Paths are what the diff actually changes (applied to a scratch index): both sides of a
+   rename, raw names — so renames, deletions and quoted names cannot dodge the forbidden tier.
 3. Preview shown; approval collected (UI → broker over a local socket; M1: CLI flag).
 4. `apply` — commit (signed with the broker's key), `nixos-rebuild switch`, ledger append.
 5. `rollback <seq|commit>` — `git revert`, rebuild, ledger append.

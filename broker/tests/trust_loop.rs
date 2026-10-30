@@ -9,8 +9,10 @@ fn setup(rebuild: &str) -> (tempfile::TempDir, Broker) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("config");
     fs::create_dir_all(repo.join("users")).unwrap();
+    fs::create_dir_all(repo.join("policy")).unwrap();
     fs::write(repo.join("desktop.nix"), "{ nightLight = false; }\n").unwrap();
     fs::write(repo.join("users/casey.nix"), "{ theme = \"dark\"; }\n").unwrap();
+    fs::write(repo.join("policy/tiers.toml"), "agent_can_do_anything = false\n").unwrap();
     let b = Broker::new(&repo, dir.path().join("state"), rebuild);
     b.init().unwrap();
     (dir, b)
@@ -55,7 +57,7 @@ fn agent_cannot_touch_policy() {
     let d = write_diff(
         dir.path(),
         "p.diff",
-        "--- /dev/null\n+++ b/policy/tiers.toml\n@@ -0,0 +1 @@\n+agent_can_do_anything = true\n",
+        "--- /dev/null\n+++ b/policy/override.toml\n@@ -0,0 +1 @@\n+agent_can_do_anything = true\n",
     );
     let err = b.propose(&d, "loosen my own permissions", Actor::Agent, false).unwrap_err();
     assert!(err.to_string().contains("forbidden"), "{err}");
@@ -98,9 +100,9 @@ fn failed_rebuild_restores_previous_system() {
     let (dir2, b) = setup(&rebuild);
     let d = write_diff(dir2.path(), "nl.diff", NIGHT_LIGHT);
     let p = b.propose(&d, "activates but fails", Actor::User, false).unwrap();
-    assert!(b.apply(p.body.seq, "casey", false).is_err());
+    let err = b.apply(p.body.seq, "casey", false).unwrap_err();
 
-    let log = fs::read_to_string(&calls).unwrap();
+    let log = fs::read_to_string(&calls).unwrap_or_else(|e| panic!("{e}; apply error: {err:#}"));
     assert_eq!(log, "{ nightLight = true; }\n{ nightLight = false; }\n", "must rebuild the reset config");
     let last = b.ledger.read_all().unwrap().pop().unwrap();
     assert_eq!(last.body.kind, "apply_failed");
@@ -137,4 +139,91 @@ fn user_tier_detected() {
     );
     let p = b.propose(&d, "light theme", Actor::Agent, false).unwrap();
     assert_eq!(p.body.tier, "user");
+}
+
+fn assert_agent_refused(b: &Broker, diff: &Path) {
+    let err = b.propose(diff, "sneaky", Actor::Agent, false).unwrap_err();
+    assert!(err.to_string().contains("forbidden"), "{err:#}");
+}
+
+#[test]
+fn agent_cannot_move_forbidden_file_away() {
+    // numstat reports only the *new* name of a rename; the old (forbidden) path must count too.
+    let (dir, b) = setup("true");
+    let d = write_diff(
+        dir.path(),
+        "mv.diff",
+        "diff --git a/policy/tiers.toml b/users/junk.nix\nsimilarity index 100%\nrename from policy/tiers.toml\nrename to users/junk.nix\n",
+    );
+    assert_agent_refused(&b, &d);
+}
+
+#[test]
+fn agent_cannot_delete_forbidden_file() {
+    let (dir, b) = setup("true");
+    let d = write_diff(
+        dir.path(),
+        "rm.diff",
+        "diff --git a/policy/tiers.toml b/policy/tiers.toml\ndeleted file mode 100644\n--- a/policy/tiers.toml\n+++ /dev/null\n@@ -1 +0,0 @@\n-agent_can_do_anything = false\n",
+    );
+    assert_agent_refused(&b, &d);
+}
+
+#[test]
+fn agent_cannot_hide_forbidden_path_behind_quoting() {
+    // git C-quotes unusual names ("policy/a\tb"), which defeats a plain prefix match.
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "q.diff", "--- /dev/null\n+++ \"b/policy/a\\tb\"\n@@ -0,0 +1 @@\n+evil\n");
+    assert_agent_refused(&b, &d);
+}
+
+#[test]
+fn relative_diff_path_is_resolved_against_cwd() {
+    let (_dir, b) = setup("true");
+    let here = tempfile::tempdir_in(".").unwrap();
+    write_diff(here.path(), "nl.diff", NIGHT_LIGHT);
+    let d = Path::new(here.path().file_name().unwrap()).join("nl.diff"); // relative to the cwd
+    b.propose(&d, "relative path", Actor::User, false).unwrap();
+}
+
+#[test]
+fn conflicting_rollback_leaves_repo_usable() {
+    let (dir, b) = setup("true");
+    let d1 = write_diff(dir.path(), "a.diff", NIGHT_LIGHT);
+    let p1 = b.propose(&d1, "night light", Actor::User, false).unwrap();
+    let a1 = b.apply(p1.body.seq, "casey", false).unwrap();
+    let d2 = write_diff(
+        dir.path(),
+        "b.diff",
+        "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{ nightLight = true; }\n+{ nightLight = \"sunset\"; }\n",
+    );
+    let p2 = b.propose(&d2, "night light at sunset", Actor::User, false).unwrap();
+    b.apply(p2.body.seq, "casey", false).unwrap();
+
+    // Reverting the first change conflicts with the second.
+    assert!(b.rollback(a1.body.seq, "casey").is_err());
+    b.repo.ensure_clean().expect("a failed revert must not leave the repo dirty");
+    assert!(!b.repo.root().join(".git/REVERT_HEAD").exists());
+    // ...and the broker keeps working.
+    let d3 = write_diff(dir.path(), "c.diff", "--- a/users/casey.nix\n+++ b/users/casey.nix\n@@ -1 +1 @@\n-{ theme = \"dark\"; }\n+{ theme = \"light\"; }\n");
+    b.propose(&d3, "light theme", Actor::User, false).unwrap();
+}
+
+#[test]
+fn stale_lock_file_does_not_block() {
+    // A broker killed mid-rebuild (Ctrl-C, power loss) must not wedge every later operation.
+    let (dir, b) = setup("true");
+    fs::write(dir.path().join("state/broker.lock"), "").unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    b.propose(&d, "after a crash", Actor::User, false).unwrap();
+}
+
+#[test]
+fn concurrent_operation_is_refused() {
+    let (dir, b) = setup("true");
+    let held = fs::OpenOptions::new().write(true).open(dir.path().join("state/broker.lock")).unwrap();
+    held.lock().unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let err = b.propose(&d, "racing", Actor::User, false).unwrap_err();
+    assert!(err.to_string().contains("another broker operation"), "{err:#}");
 }

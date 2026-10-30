@@ -2,6 +2,7 @@
 name = "kestrel-broker"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89" # std::fs::File::try_lock
 description = "Kestrel privileged change broker: tiers, signed commits, rebuild, rollback, hash-chained ledger"
 license = "MIT OR Apache-2.0"
 

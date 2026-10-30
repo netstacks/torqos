@@ -1,7 +1,8 @@
 //! Git operations on the local config repo. Shells out to `git`; the broker identity is fixed.
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{self, Path, PathBuf};
 use std::process::Command;
 
 pub struct Repo {
@@ -21,9 +22,14 @@ impl Repo {
     }
 
     fn git(&self, args: &[&str]) -> Result<String> {
+        self.git_env(&[], args)
+    }
+
+    fn git_env(&self, env: &[(&str, &OsStr)], args: &[&str]) -> Result<String> {
         let user_name = format!("user.name={NAME}");
         let user_email = format!("user.email={EMAIL}");
         let out = Command::new("git")
+            .envs(env.iter().copied())
             .arg("-C")
             .arg(&self.root)
             .arg("-c")
@@ -75,21 +81,29 @@ impl Repo {
         Ok(())
     }
 
-    /// Files a unified diff would touch, without applying it.
+    /// Every path a unified diff would add, modify or delete, without applying it.
+    ///
+    /// The diff is applied to a scratch index built from HEAD and compared with HEAD, so this is
+    /// what the diff *does*, not what its headers say: a rename reports both the old and the new
+    /// path (numstat reports only the new one), and names are raw (`-z`), not C-quoted.
     pub fn diff_files(&self, diff_path: &Path) -> Result<Vec<String>> {
-        let p = diff_path.to_string_lossy().into_owned();
-        self.git(&["apply", "--check", p.as_str()])
-            .context("diff does not apply cleanly to the current config")?;
-        let numstat = self.git(&["apply", "--numstat", p.as_str()])?;
-        Ok(numstat
-            .lines()
-            .filter_map(|l| l.split('\t').nth(2).map(String::from))
-            .collect())
+        let p = path::absolute(diff_path)?.to_string_lossy().into_owned();
+        let index = path::absolute(self.root.join(".git/kestrel-proposal.index"))?;
+        let env = [("GIT_INDEX_FILE", index.as_os_str())];
+        let files = (|| {
+            self.git_env(&env, &["read-tree", "HEAD"])?;
+            self.git_env(&env, &["apply", "--cached", p.as_str()])
+                .context("diff does not apply cleanly to the current config")?;
+            let out = self.git_env(&env, &["diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD"])?;
+            Ok(out.split('\0').filter(|s| !s.is_empty()).map(String::from).collect())
+        })();
+        let _ = std::fs::remove_file(&index);
+        files
     }
 
     pub fn apply_and_commit(&self, diff_path: &Path, message: &str) -> Result<String> {
         self.ensure_clean()?;
-        let p = diff_path.to_string_lossy().into_owned();
+        let p = path::absolute(diff_path)?.to_string_lossy().into_owned();
         self.git(&["apply", "--index", p.as_str()])?;
         self.git(&["commit", "-q", "-m", message])?;
         self.head()
@@ -97,7 +111,13 @@ impl Repo {
 
     pub fn revert_and_commit(&self, commit: &str, message: &str) -> Result<String> {
         self.ensure_clean()?;
-        self.git(&["revert", "--no-commit", commit])?;
+        if let Err(e) = self.git(&["revert", "--no-commit", commit]) {
+            // A conflicting revert leaves REVERT_HEAD and conflict markers behind, which would
+            // block every later broker operation. Put the repo back exactly as it was.
+            let _ = self.git(&["revert", "--abort"]);
+            self.git(&["reset", "-q", "--hard", "HEAD"])?;
+            return Err(e.context(format!("cannot undo {commit} cleanly: later changes conflict with it")));
+        }
         self.git(&["commit", "-q", "-m", message])?;
         self.head()
     }

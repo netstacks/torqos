@@ -27,23 +27,17 @@ pub struct Broker {
     rebuild_cmd: String,
 }
 
-/// Exclusive lock so only one broker operation runs at a time.
-struct Lock(PathBuf);
+/// Exclusive lock so only one broker operation runs at a time. An OS file lock (flock), so the
+/// kernel releases it when the process dies: a broker killed mid-rebuild cannot wedge later ones.
+struct Lock(#[allow(dead_code)] fs::File);
 impl Lock {
     fn acquire(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir)?;
         let p = dir.join("broker.lock");
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&p)
+        let f = OpenOptions::new().write(true).create(true).truncate(false).open(&p)?;
+        f.try_lock()
             .with_context(|| format!("another broker operation is running ({})", p.display()))?;
-        Ok(Lock(p))
-    }
-}
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        Ok(Lock(f))
     }
 }
 
