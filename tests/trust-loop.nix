@@ -9,6 +9,7 @@ pkgs.testers.runNixOSTest {
     imports = [ self.nixosModules.default ];
     kestrel.user = "dev";
     kestrel.desktop.enable = false;
+    specialisation.noguard.configuration.kestrel.broker.guardEtcNixos = false;
 
     environment.etc."kestrel-test/desktop.nix".text = ''
       { nightLight = false; }
@@ -67,28 +68,36 @@ pkgs.testers.runNixOSTest {
         machine.fail(env + "kestrel-broker verify")
 
     with subtest("a stray nixos-rebuild cannot switch away from the ledgered config"):
-        # Someone's own files survive activation, moved aside: a file, and a symlink (kept as a link).
+        # The owner's files are moved aside, never overwritten or opened: a config that merely
+        # mentions the option, and a symlink to a FIFO (reading it would hang activation at boot).
         machine.succeed("rm -f /etc/nixos/configuration.nix /etc/nixos/flake.nix /etc/nixos/*.pre-kestrel*")
-        machine.succeed("echo '{ mine = true; }' > /etc/nixos/configuration.nix")
-        machine.succeed("ln -s /etc/hostname /etc/nixos/flake.nix")
-        machine.succeed("/run/current-system/activate")
-        machine.succeed("grep -qx '{ mine = true; }' /etc/nixos/configuration.nix.pre-kestrel")
-        machine.succeed("test \"$(readlink /etc/nixos/flake.nix.pre-kestrel)\" = /etc/hostname")
-        # The stubs are real files, and re-activating keeps them without making more copies.
-        machine.succeed("/run/current-system/activate")
-        machine.succeed("test ! -L /etc/nixos/flake.nix && grep -q guardEtcNixos /etc/nixos/flake.nix")
-        machine.succeed("test ! -L /etc/nixos/configuration.nix && grep -q guardEtcNixos /etc/nixos/configuration.nix")
+        machine.succeed("echo '{ kestrel.broker.guardEtcNixos = false; }' > /etc/nixos/configuration.nix")
+        machine.succeed("mkfifo /tmp/fifo && ln -s /tmp/fifo /etc/nixos/flake.nix")
+        machine.succeed("timeout 120 /run/current-system/activate")
+        machine.succeed("grep -qx '{ kestrel.broker.guardEtcNixos = false; }' /etc/nixos/configuration.nix.pre-kestrel")
+        machine.succeed("test \"$(readlink /etc/nixos/flake.nix.pre-kestrel)\" = /tmp/fifo")
+        # The stubs are real files; re-activating keeps them and makes no more copies.
+        machine.succeed("timeout 120 /run/current-system/activate")
+        machine.succeed("test -f /etc/nixos/flake.nix -a ! -L /etc/nixos/flake.nix")
+        machine.succeed("test -f /etc/nixos/configuration.nix -a ! -L /etc/nixos/configuration.nix")
         machine.fail("ls /etc/nixos/*.pre-kestrel.*")
         # Building /etc/nixos refuses, every common way, with the message pointing at the broker.
+        # (With flake.nix present nixos-rebuild uses it even when given -I, so --no-flake is what
+        # reaches the configuration.nix stub.)
         for cmd in [
             "nixos-rebuild dry-build -I nixos-config=/etc/nixos/configuration.nix",  # what went wrong
+            # The VM has no channels; the machine this happened on did, so supply nixpkgs.
+            "nixos-rebuild dry-build --no-flake -I nixpkgs=${pkgs.path} -I nixos-config=/etc/nixos/configuration.nix",
             "nixos-rebuild dry-build",
-            "nix-instantiate --eval /etc/nixos/configuration.nix",
             "nix --extra-experimental-features 'nix-command flakes' eval "
             "path:/etc/nixos#nixosConfigurations.machine.config.system.build.toplevel",
         ]:
             out = machine.fail(cmd + " 2>&1")
             assert "managed by Kestrel" in out, f"{cmd}: {out}"
+        # Turning the guard off removes the stubs; the owner's files stay where they were put.
+        machine.succeed("/run/current-system/specialisation/noguard/bin/switch-to-configuration test")
+        machine.succeed("test ! -e /etc/nixos/flake.nix -a ! -e /etc/nixos/configuration.nix")
+        machine.succeed("test -e /etc/nixos/configuration.nix.pre-kestrel -a -L /etc/nixos/flake.nix.pre-kestrel")
 
   '';
 }

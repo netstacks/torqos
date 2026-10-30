@@ -30,7 +30,9 @@ in
         build. A plain `nixos-rebuild switch` would otherwise build them and replace the whole
         system with a stock NixOS one, outside the broker and the ledger. Files already there
         (or symlinks) are moved aside to `<name>.pre-kestrel` first, never overwritten. Turning
-        this off, or rolling back past it, removes the stubs but does not move those files back.
+        this off, or rolling back past it, deletes whatever is at those two paths (NixOS cleans up
+        the files it installed) and does not move the old files back: while the guard is on, keep
+        nothing of your own there.
       '';
     };
   };
@@ -82,16 +84,22 @@ in
         '';
       }
     );
-    # /etc activation replaces existing files silently: move the owner's files (or symlinks — the
-    # link itself, so its target is kept) aside first. Our own stub is recognised by its marker.
+    # /etc activation replaces existing files silently: move the owner's files aside first.
+    # A symlink is moved as a link, never opened (it could point at a FIFO or a hung mount, and this
+    # runs at boot). A regular file is left in place only if it is byte-identical to our stub in the
+    # running or the new generation; anything else — even a stub someone edited — is moved aside.
     system.activationScripts.kestrel-guard-etc-nixos = lib.mkIf cfg.guardEtcNixos ''
       for f in configuration.nix flake.nix; do
         p=/etc/nixos/$f
-        if { [ -e "$p" ] || [ -L "$p" ]; } && ! grep -qs 'kestrel.broker.guardEtcNixos' "$p"; then
-          keep=$p.pre-kestrel
-          { [ -e "$keep" ] || [ -L "$keep" ]; } && keep="$keep.$(date +%Y%m%d-%H%M%S)"
-          mv "$p" "$keep"
+        [ -e "$p" ] || [ -L "$p" ] || continue
+        if [ -f "$p" ] && [ ! -L "$p" ]; then
+          for stub in "/etc/static/nixos/$f" "$systemConfig/etc/nixos/$f"; do
+            [ -f "$stub" ] && ${pkgs.diffutils}/bin/cmp -s "$p" "$stub" && continue 2
+          done
         fi
+        keep=$p.pre-kestrel
+        { [ -e "$keep" ] || [ -L "$keep" ]; } && keep="$keep.$(date +%Y%m%d-%H%M%S)"
+        mv "$p" "$keep"
       done
     '';
     system.activationScripts.etc.deps = lib.mkIf cfg.guardEtcNixos [ "kestrel-guard-etc-nixos" ];
