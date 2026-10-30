@@ -33,8 +33,12 @@ enum Cmd {
     /// Installed software.
     #[command(subcommand)]
     Pkg(PkgCmd),
-    /// Move this machine to the newest Kestrel and nixpkgs (a system change: always asks).
-    Update,
+    /// Move this machine to the newest Kestrel, and so its nixpkgs (a system change: always asks).
+    Update {
+        /// Update every input of the machine's config flake, not just Kestrel.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -77,7 +81,7 @@ fn main() {
         Cmd::Pkg(PkgCmd::Search { terms }) => search(&cli.repo, terms),
         Cmd::Pkg(PkgCmd::Add { names, system, yes }) => change(&cli, names, *system, *yes, Edit::Add),
         Cmd::Pkg(PkgCmd::Remove { names, system, yes }) => change(&cli, names, *system, *yes, Edit::Remove),
-        Cmd::Update => update(&cli),
+        Cmd::Update { all } => update(&cli, *all),
     };
     if let Err(e) = r {
         eprintln!("kestrel: {e:#}");
@@ -280,9 +284,9 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
     submit(cli, scratch, &host, change, yes)
 }
 
-/// `kestrel update`: move this machine to the newest Kestrel (and so nixpkgs), as one ledgered,
-/// undoable change to flake.lock (ADR-004).
-fn update(cli: &Cli) -> Result<()> {
+/// `kestrel update`: move this machine to the newest Kestrel (and so nixpkgs, which follows it), as
+/// one ledgered, undoable change to flake.lock (ADR-004). `all`: every input of the config flake.
+fn update(cli: &Cli, all: bool) -> Result<()> {
     check_repo(cli)?;
     approval(true, false)?;
     let scratch = scratch_dir()?;
@@ -292,11 +296,12 @@ fn update(cli: &Cli) -> Result<()> {
     copy_tree(&cli.repo, &copy)?;
     let old = fs::read_to_string(copy.join("flake.lock")).context("reading flake.lock")?;
     eprintln!("fetching the newest inputs...");
-    let out = Command::new("nix")
-        .args(["flake", "update", "--flake"])
-        .arg(flake_ref(&copy))
-        .output()
-        .context("running nix flake update")?;
+    let mut cmd = Command::new("nix");
+    cmd.args(["flake", "update", "--flake"]).arg(flake_ref(&copy));
+    if !all {
+        cmd.arg("kestrel");
+    }
+    let out = cmd.output().context("running nix flake update")?;
     if !out.status.success() {
         bail!("nix flake update failed: {}", last_error(&out.stderr));
     }
@@ -305,11 +310,7 @@ fn update(cli: &Cli) -> Result<()> {
         println!("already up to date");
         return Ok(());
     }
-    // nix reports each moved input as "• Updated input 'x': <old> → <new>" (plus a detail line).
-    let moved: Vec<String> = String::from_utf8_lossy(&out.stderr)
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("• Updated input '").and_then(|r| r.split('\'').next()).map(String::from))
-        .collect();
+    let moved = pkg::moved_inputs(&String::from_utf8_lossy(&out.stderr));
     eprint!("{}", String::from_utf8_lossy(&out.stderr));
     let change = Change {
         copy: &copy,
@@ -330,10 +331,12 @@ fn broker(cli: &Cli, args: &[&str]) -> Command {
     c
 }
 
-/// A repo override only makes sense with a broker override (tests): with the real broker, a stray
-/// KESTREL_CONFIG_REPO would mean evaluating one repo while root changes another.
+/// A repo override only makes sense with a test broker: with the real one (anything run through
+/// sudo, however it is spelled), a stray KESTREL_CONFIG_REPO would mean evaluating one repo while
+/// root changes another.
 fn check_repo(cli: &Cli) -> Result<()> {
-    if cli.broker == BROKER && cli.repo != Path::new(REPO) {
+    let real_broker = cli.broker == BROKER || cli.broker.split_whitespace().any(|w| w == "sudo" || w.ends_with("/sudo"));
+    if real_broker && cli.repo != Path::new(REPO) {
         bail!(
             "the config repo is set to {} (KESTREL_CONFIG_REPO?), but the broker only manages {REPO}; \
              unset it",

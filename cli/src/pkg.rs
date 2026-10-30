@@ -93,6 +93,24 @@ pub fn proposal_seq(broker_output: &str) -> Option<u64> {
     rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
 }
 
+/// The inputs `nix flake update` reports ("• Updated|Added|Removed input 'x': ..." plus detail
+/// lines), for the change's reason. Only a summary: the diff the person approves is what matters.
+pub fn moved_inputs(nix_stderr: &str) -> Vec<String> {
+    nix_stderr
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim().strip_prefix("• ")?;
+            let (verb, rest) = l.split_once(" input '")?;
+            let name = rest.split('\'').next()?;
+            match verb {
+                "Updated" => Some(name.to_string()),
+                "Added" | "Removed" => Some(format!("{name} ({})", verb.to_lowercase())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +168,17 @@ mod tests {
         assert_eq!((l, c), (v(&["ripgrep"]), v(&["htop"])));
         let (_, c) = edit(&v(&["htop"]), &v(&["htop"]), Edit::Add);
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn summarises_moved_inputs() {
+        let out = "fetching...\n\
+                   • Updated input 'kestrel':\n    'path:/a?narHash=x' (2026-10-30)\n  → 'path:/a?narHash=y'\n\
+                   • Added input 'kestrel/hw':\n    'github:x/y'\n\
+                   • Removed input 'old'\n\
+                   warning: something\n";
+        assert_eq!(moved_inputs(out), v(&["kestrel", "kestrel/hw (added)", "old (removed)"]));
+        assert!(moved_inputs("nothing to see").is_empty());
     }
 
     #[test]
