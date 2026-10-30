@@ -147,6 +147,35 @@ impl Repo {
         Ok(())
     }
 
+    /// Keep a commit reachable after a reset: the reflog alone expires, and `git gc` would drop it.
+    pub fn keep(&self, commit: &str) -> Result<()> {
+        self.git(&["update-ref", &format!("refs/kestrel/discarded/{commit}"), commit])?;
+        self.sync()
+    }
+
+    pub fn is_ancestor(&self, ancestor: &str, of: &str) -> Result<bool> {
+        let st = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["merge-base", "--is-ancestor", ancestor, of])
+            .status()
+            .context("running git")?;
+        match st.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!("git merge-base --is-ancestor {ancestor} {of} failed ({st})"),
+        }
+    }
+
+    /// Remove an `index.lock` left by a git process that died with the broker. Only call this while
+    /// holding the broker lock: then no git process of the broker's can still be running.
+    pub fn remove_stale_index_lock(&self) -> Result<()> {
+        match std::fs::remove_file(self.root.join(".git/index.lock")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
+
     pub fn show(&self, commit: &str) -> Result<String> {
         self.git(&["show", "--stat", "--patch", commit])
     }

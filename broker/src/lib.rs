@@ -13,9 +13,11 @@ use anyhow::{bail, Context, Result};
 use ledger::{Entry, Ledger, NewEntry};
 use policy::{Actor, Tier};
 use repo::Repo;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -76,6 +78,55 @@ fn holders(lock: &Path) -> String {
     if found.is_empty() { "unknown".into() } else { found.join(", ") }
 }
 
+/// An apply or rollback in flight, written to `state/pending.json` before its commit and removed
+/// once its outcome is in the ledger. The commit happens before the (minutes-long) rebuild and the
+/// ledger entry after it, so a broker that dies in between leaves a commit nobody ledgered; the
+/// next operation finds this record and reconciles (see `Broker::reconcile_locked`).
+#[derive(Debug, Serialize, Deserialize)]
+struct Pending {
+    /// "apply" or "rollback".
+    op: String,
+    /// The proposal (apply) or applied entry (rollback) being acted on.
+    target: u64,
+    /// HEAD before the operation: the last ledgered config.
+    before: String,
+    /// Ledger length before the operation; an outcome entry would come after it.
+    ledger_len: usize,
+    /// The operation's commit, recorded as soon as it exists so it is never lost from the audit.
+    commit: Option<String>,
+    approved_by: String,
+    tier: String,
+    tainted: bool,
+}
+
+impl Pending {
+    /// The ledger entry kinds that settle this operation, and the data key naming its target.
+    fn outcome(&self) -> Result<(&'static [&'static str], &'static str)> {
+        match self.op.as_str() {
+            "apply" => Ok((&["applied", "apply_failed"], "proposal")),
+            "rollback" => Ok((&["rolled_back", "rollback_failed"], "applied")),
+            other => bail!("pending.json names an unknown operation '{other}'"),
+        }
+    }
+}
+
+/// fsync a directory, making a create, rename or unlink in it durable.
+fn sync_dir(dir: &Path) -> Result<()> {
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+/// nixos-rebuild runs the switch in this transient unit (`systemd-run --pipe`). A broker rebuild's
+/// switch inherits the lock through stdin, but a manual `nixos-rebuild` outside the broker does not.
+const SWITCH_UNIT: &str = "nixos-rebuild-switch-to-configuration.service";
+
+fn switch_running() -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", SWITCH_UNIT])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 impl Broker {
     pub fn new(repo: impl Into<PathBuf>, state_dir: impl Into<PathBuf>, rebuild_cmd: impl Into<String>) -> Self {
         let state_dir = state_dir.into();
@@ -89,6 +140,7 @@ impl Broker {
 
     pub fn init(&self) -> Result<()> {
         let _l = Lock::acquire(&self.state_dir)?;
+        self.refuse_if_interrupted()?;
         self.repo.init()?;
         if self.ledger.read_all()?.is_empty() {
             self.ledger.append(NewEntry {
@@ -106,6 +158,7 @@ impl Broker {
 
     pub fn propose(&self, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         let _l = Lock::acquire(&self.state_dir)?;
+        self.refuse_if_interrupted()?;
         let diff = fs::read_to_string(diff_path)
             .with_context(|| format!("reading diff {}", diff_path.display()))?;
         let files = self.repo.diff_files(diff_path)?;
@@ -135,6 +188,138 @@ impl Broker {
             .read_all()?
             .into_iter()
             .find(|e| e.body.kind == kind && e.body.data.get(key).and_then(|v| v.as_u64()) == Some(seq)))
+    }
+
+    fn pending_path(&self) -> PathBuf {
+        self.state_dir.join("pending.json")
+    }
+
+    fn read_pending(&self) -> Result<Option<Pending>> {
+        match fs::read(self.pending_path()) {
+            Ok(b) => Ok(Some(serde_json::from_slice(&b).context("reading pending.json")?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Atomically replace pending.json: write, fsync, rename, fsync the directory.
+    fn write_pending(&self, p: &Pending) -> Result<()> {
+        let tmp = self.state_dir.join("pending.json.tmp");
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(&serde_json::to_vec_pretty(p)?)?;
+        f.sync_all()?;
+        fs::rename(&tmp, self.pending_path())?;
+        sync_dir(&self.state_dir)
+    }
+
+    fn clear_pending(&self) -> Result<()> {
+        fs::remove_file(self.pending_path())?;
+        sync_dir(&self.state_dir)
+    }
+
+    /// Whether the ledger already holds this operation's outcome (the broker died after
+    /// ledgering it but before removing pending.json).
+    fn outcome_recorded(&self, p: &Pending) -> Result<bool> {
+        let (kinds, key) = p.outcome()?;
+        Ok(self.ledger.read_all()?.iter().skip(p.ledger_len).any(|e| {
+            kinds.contains(&e.body.kind.as_str()) && e.body.data.get(key).and_then(|v| v.as_u64()) == Some(p.target)
+        }))
+    }
+
+    /// For operations that must not rebuild (init, propose — the agent's entry point): settle a
+    /// record whose outcome was ledgered, and refuse while one still needs reconciling.
+    fn refuse_if_interrupted(&self) -> Result<()> {
+        if let Some(p) = self.read_pending()? {
+            if !self.outcome_recorded(&p)? {
+                bail!(
+                    "the {} of #{} was interrupted and must be reconciled first: run `kestrel-broker \
+                     reconcile` (it resets the config to the last ledgered commit and rebuilds)",
+                    p.op, p.target
+                );
+            }
+            self.clear_pending()?;
+        }
+        Ok(())
+    }
+
+    /// Finish an apply or rollback whose broker died: discard its unledgered commit (kept under
+    /// `refs/kestrel/discarded/`), reset to the last ledgered commit, rebuild, and ledger it.
+    pub fn reconcile(&self) -> Result<Option<Entry>> {
+        let lock = Lock::acquire(&self.state_dir)?;
+        self.reconcile_locked(&lock)
+    }
+
+    fn reconcile_locked(&self, lock: &Lock) -> Result<Option<Entry>> {
+        let Some(mut p) = self.read_pending()? else { return Ok(None) };
+        if self.outcome_recorded(&p)? {
+            self.clear_pending()?;
+            return Ok(None);
+        }
+        if switch_running() {
+            bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then retry");
+        }
+        self.repo.remove_stale_index_lock()?;
+        let head = self.repo.head()?;
+        // Record the commit before resetting, so a crash in here cannot lose it from the audit.
+        if p.commit.is_none() && head != p.before {
+            p.commit = Some(head.clone());
+            self.write_pending(&p)?;
+        }
+        if let Some(c) = &p.commit {
+            self.repo.keep(c)?;
+        }
+        if !self.repo.is_ancestor(&p.before, &head)? {
+            bail!(
+                "config HEAD {head} does not descend from {}, the commit before the interrupted {}; \
+                 refusing to reset",
+                p.before, p.op
+            );
+        }
+        // Always rebuild, even when nothing was committed: the broker may have died inside a
+        // restore, after a failed rebuild had already activated the new system.
+        let restored = self.restore(&p.before, lock)?;
+        let e = self.ledger.append(NewEntry {
+            actor: "broker".into(),
+            approved_by: Some(p.approved_by.clone()),
+            kind: "interrupted".into(),
+            tier: p.tier.clone(),
+            tainted: p.tainted,
+            reason: if restored {
+                format!("Interrupted {} of #{}: config reset to {} and rebuilt", p.op, p.target, p.before)
+            } else {
+                format!(
+                    "Interrupted {} of #{}: config reset to {} but the restore rebuild ALSO failed — \
+                     running system may not match the config",
+                    p.op, p.target, p.before
+                )
+            },
+            data: json!({
+                "op": p.op,
+                "target": p.target,
+                "discarded_commit": p.commit,
+                "commit": p.before,
+                "restored": restored,
+            }),
+        })?;
+        self.clear_pending()?;
+        if !restored {
+            bail!(
+                "reconciled the interrupted {} of #{}, but the restore rebuild failed; the running \
+                 system may not match the config",
+                p.op, p.target
+            );
+        }
+        Ok(Some(e))
+    }
+
+    /// The commit step failed. Nothing was rebuilt or ledgered, but `git apply --index` may have
+    /// left the tree dirty (or the commit landed and only its sync failed): put the repo back and
+    /// drop the record. If even that fails, the record stays and the next operation reconciles.
+    fn undo_failed_commit(&self, p: &Pending, r: Result<String>) -> Result<String> {
+        r.or_else(|e| match self.repo.hard_reset(&p.before).and_then(|()| self.clear_pending()) {
+            Ok(()) => Err(e),
+            Err(u) => Err(e.context(format!("undoing it also failed ({u:#}); the next operation will reconcile"))),
+        })
     }
 
     fn rebuild(&self, lock: &Lock) -> Result<()> {
@@ -170,6 +355,7 @@ impl Broker {
 
     pub fn apply(&self, proposal_seq: u64, approved_by: &str, confirm_tainted: bool) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
+        self.reconcile_locked(&lock)?;
         let p = self.ledger.get(proposal_seq)?;
         if p.body.kind != "proposal" {
             bail!("entry {proposal_seq} is a '{}', not a proposal", p.body.kind);
@@ -199,8 +385,22 @@ impl Broker {
             p.body.reason, p.body.actor
         );
         let before = self.repo.head()?;
-        let commit = self.repo.apply_and_commit(&tmp, &msg)?;
+        self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
+        let mut pending = Pending {
+            op: "apply".into(),
+            target: proposal_seq,
+            before: before.clone(),
+            ledger_len: (next_seq - 1) as usize,
+            commit: None,
+            approved_by: approved_by.into(),
+            tier: tier.to_string(),
+            tainted: p.body.tainted,
+        };
+        self.write_pending(&pending)?;
+        let commit = self.undo_failed_commit(&pending, self.repo.apply_and_commit(&tmp, &msg))?;
         let _ = fs::remove_file(&tmp);
+        pending.commit = Some(commit.clone());
+        self.write_pending(&pending)?;
 
         if let Err(e) = self.rebuild(&lock) {
             let restored = self.restore(&before, &lock)?;
@@ -213,10 +413,11 @@ impl Broker {
                 reason: Self::failure_reason("Rebuild", &before, restored),
                 data: json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored }),
             })?;
+            self.clear_pending()?;
             return Err(e.context("apply rolled back because the rebuild failed"));
         }
 
-        self.ledger.append(NewEntry {
+        let e = self.ledger.append(NewEntry {
             actor: p.body.actor.clone(),
             approved_by: Some(approved_by.into()),
             kind: "applied".into(),
@@ -224,11 +425,14 @@ impl Broker {
             tainted: p.body.tainted,
             reason: p.body.reason.clone(),
             data: json!({ "proposal": proposal_seq, "commit": commit, "files": files }),
-        })
+        })?;
+        self.clear_pending()?;
+        Ok(e)
     }
 
     pub fn rollback(&self, applied_seq: u64, approved_by: &str) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
+        self.reconcile_locked(&lock)?;
         let a = self.ledger.get(applied_seq)?;
         if a.body.kind != "applied" {
             bail!("entry {applied_seq} is a '{}', not an applied change", a.body.kind);
@@ -243,7 +447,21 @@ impl Broker {
             a.body.reason
         );
         let before = self.repo.head()?;
-        let new_commit = self.repo.revert_and_commit(&commit, &msg)?;
+        self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
+        let mut pending = Pending {
+            op: "rollback".into(),
+            target: applied_seq,
+            before: before.clone(),
+            ledger_len: (next_seq - 1) as usize,
+            commit: None,
+            approved_by: approved_by.into(),
+            tier: a.body.tier.clone(),
+            tainted: false,
+        };
+        self.write_pending(&pending)?;
+        let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg))?;
+        pending.commit = Some(new_commit.clone());
+        self.write_pending(&pending)?;
         if let Err(e) = self.rebuild(&lock) {
             let restored = self.restore(&before, &lock)?;
             self.ledger.append(NewEntry {
@@ -255,9 +473,10 @@ impl Broker {
                 reason: Self::failure_reason("Rollback rebuild", &before, restored),
                 data: json!({ "applied": applied_seq, "error": e.to_string(), "restored": restored }),
             })?;
+            self.clear_pending()?;
             return Err(e.context("rollback aborted because the rebuild failed"));
         }
-        self.ledger.append(NewEntry {
+        let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(approved_by.into()),
             kind: "rolled_back".into(),
@@ -265,6 +484,8 @@ impl Broker {
             tainted: false,
             reason: format!("Undo: {}", a.body.reason),
             data: json!({ "applied": applied_seq, "reverted_commit": commit, "commit": new_commit }),
-        })
+        })?;
+        self.clear_pending()?;
+        Ok(e)
     }
 }

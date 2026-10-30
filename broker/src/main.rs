@@ -52,6 +52,9 @@ enum Cmd {
         #[arg(long)]
         approved_by: String,
     },
+    /// Finish an apply or rollback whose broker died: discard its unledgered commit, reset to the
+    /// last ledgered config, rebuild, and ledger it. apply and rollback do this first on their own.
+    Reconcile,
     /// Print the ledger.
     Log {
         #[arg(long)]
@@ -93,6 +96,10 @@ fn main() -> Result<()> {
             let e = b.rollback(seq, &approved_by)?;
             println!("rolled back #{} as commit {} (ledger #{})", seq, e.body.data["commit"], e.body.seq);
         }
+        Cmd::Reconcile => match b.reconcile()? {
+            Some(e) => println!("{} (ledger #{})", e.body.reason, e.body.seq),
+            None => println!("nothing to reconcile"),
+        },
         Cmd::Log { json } => {
             for e in b.ledger.read_all()? {
                 if json {

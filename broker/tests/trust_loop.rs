@@ -257,7 +257,6 @@ fn trailers(b: &Broker) -> Vec<String> {
 /// A broker killed mid-rebuild leaves a commit that was never ledgered. The next operation must
 /// discard it (it never completed), rebuild the last ledgered config, and ledger what happened.
 #[test]
-#[ignore = "needs reconcile (next commit)"]
 fn crash_mid_apply_is_reconciled_by_next_operation() {
     let tmp = tempfile::tempdir().unwrap();
     let calls = tmp.path().join("calls.log");
@@ -278,8 +277,10 @@ fn crash_mid_apply_is_reconciled_by_next_operation() {
     let i = &entries[2];
     assert_eq!(i.body.data["discarded_commit"], orphan.as_str());
     assert_eq!(i.body.data["restored"], true);
-    // The orphan's trailer named the entry that now explains it.
+    // The orphan's trailer named the entry that now explains it, and it is kept, not lost to gc.
     assert_eq!(i.body.seq, 3);
+    assert!(git(&b, &["log", "-1", "--format=%B", &orphan]).contains("Ledger-Entry: 3"));
+    assert_eq!(git(&b, &["rev-parse", &format!("refs/kestrel/discarded/{orphan}")]).trim(), orphan);
     assert_eq!(
         fs::read_to_string(&calls).unwrap(),
         "{ nightLight = false; }\n{ nightLight = true; }\n",
@@ -291,21 +292,32 @@ fn crash_mid_apply_is_reconciled_by_next_operation() {
 }
 
 #[test]
-#[ignore = "needs reconcile (next commit)"]
 fn crash_mid_rollback_is_reconciled_by_next_operation() {
-    let (dir, b) = setup("true");
+    let tmp = tempfile::tempdir().unwrap();
+    let calls = tmp.path().join("calls.log");
+    let (dir, b) = setup(&format!("cat {{repo}}/desktop.nix >> {}", calls.display()));
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
     let a = b.apply(p.body.seq, "casey", false).unwrap();
     let applied_head = b.repo.head().unwrap();
 
     assert_killed(&run_cli(dir.path(), CRASH, &["rollback", &a.body.seq.to_string(), "--approved-by", "casey"]));
-    assert_ne!(b.repo.head().unwrap(), applied_head);
+    let orphan = b.repo.head().unwrap();
+    assert_ne!(orphan, applied_head);
 
     // Reconcile puts the applied change back; the user can then undo it for real.
     b.rollback(a.body.seq, "casey").unwrap();
     let kinds: Vec<_> = b.ledger.read_all().unwrap().into_iter().map(|e| e.body.kind).collect();
     assert_eq!(kinds, ["init", "proposal", "applied", "interrupted", "rolled_back"]);
+    let i = &b.ledger.read_all().unwrap()[3];
+    assert_eq!(i.body.data["discarded_commit"], orphan.as_str());
+    assert_eq!(i.body.data["commit"], applied_head.as_str());
+    assert_eq!(i.body.data["restored"], true);
+    assert_eq!(
+        fs::read_to_string(&calls).unwrap(),
+        "{ nightLight = true; }\n{ nightLight = true; }\n{ nightLight = false; }\n",
+        "apply, then reconcile rebuilds the applied state, then the real rollback"
+    );
     assert!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap().contains("false"));
     b.ledger.verify().unwrap();
 }
@@ -354,4 +366,136 @@ fn rebuild_outliving_a_killed_broker_keeps_the_lock() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     assert!(done.exists(), "the lock must be held until the rebuild has finished");
+}
+
+fn git(b: &Broker, args: &[&str]) -> String {
+    let out = Command::new("git").arg("-C").arg(b.repo.root()).args(args).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn kinds(b: &Broker) -> Vec<String> {
+    b.ledger.read_all().unwrap().into_iter().map(|e| e.body.kind).collect()
+}
+
+const THEME: &str = "--- a/users/casey.nix\n+++ b/users/casey.nix\n@@ -1 +1 @@\n-{ theme = \"dark\"; }\n+{ theme = \"light\"; }\n";
+
+/// propose is the agent's entry point and must not start a rebuild nobody approved: it refuses
+/// until the interruption is reconciled, which the `reconcile` subcommand does.
+#[test]
+fn propose_refuses_until_reconcile_runs() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    assert_killed(&run_cli(dir.path(), CRASH, &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]));
+
+    let t = write_diff(dir.path(), "theme.diff", THEME);
+    let err = format!("{:#}", b.propose(&t, "Light theme", Actor::Agent, false).unwrap_err());
+    assert!(err.contains("kestrel-broker reconcile"), "{err}");
+
+    let out = run_cli(dir.path(), "true", &["reconcile"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Interrupted apply of #2"), "{out:?}");
+    let out = run_cli(dir.path(), "true", &["reconcile"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to reconcile"), "{out:?}");
+
+    b.propose(&t, "Light theme", Actor::Agent, false).unwrap();
+    assert_eq!(kinds(&b), ["init", "proposal", "interrupted", "proposal"]);
+    b.ledger.verify().unwrap();
+}
+
+/// If reconcile's own rebuild fails, that is ledgered and reported — and not retried forever.
+#[test]
+fn failed_reconcile_rebuild_is_ledgered_and_reported() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    assert_killed(&run_cli(dir.path(), CRASH, &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]));
+
+    let failing = Broker::new(dir.path().join("config"), dir.path().join("state"), "false");
+    let err = format!("{:#}", failing.reconcile().unwrap_err());
+    assert!(err.contains("restore rebuild failed"), "{err}");
+    let i = b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!(i.body.kind, "interrupted");
+    assert_eq!(i.body.data["restored"], false);
+    assert!(b.reconcile().unwrap().is_none(), "already reconciled");
+    assert!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap().contains("false"));
+}
+
+fn write_pending(dir: &Path, pending: serde_json::Value) {
+    fs::write(dir.join("state/pending.json"), pending.to_string()).unwrap();
+}
+
+/// The broker died after ledgering the outcome but before removing pending.json: the change was
+/// applied for real and must not be undone.
+#[test]
+fn ledgered_outcome_is_not_undone() {
+    let (dir, b) = setup("true");
+    let before = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    let head = b.repo.head().unwrap();
+    let stale = serde_json::json!({
+        "op": "apply", "target": p.body.seq, "before": before, "ledger_len": 2, "commit": head,
+        "approved_by": "casey", "tier": "system", "tainted": false,
+    });
+
+    // Both paths that settle a record: reconcile (apply, rollback, the CLI) and propose/init.
+    write_pending(dir.path(), stale.clone());
+    assert!(b.reconcile().unwrap().is_none());
+    assert_eq!(b.repo.head().unwrap(), head);
+    assert!(!dir.path().join("state/pending.json").exists());
+
+    write_pending(dir.path(), stale);
+    let t = write_diff(dir.path(), "theme.diff", THEME);
+    b.propose(&t, "Light theme", Actor::User, false).unwrap();
+    assert_eq!(b.repo.head().unwrap(), head);
+    assert_eq!(kinds(&b), ["init", "proposal", "applied", "proposal"]);
+    assert!(!dir.path().join("state/pending.json").exists());
+}
+
+/// Died after recording the operation but before committing: nothing to discard, but it still
+/// rebuilds (it cannot tell this apart from dying inside a restore).
+#[test]
+fn crash_before_commit_still_rebuilds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let calls = tmp.path().join("calls.log");
+    let (dir, b) = setup(&format!("cat {{repo}}/desktop.nix >> {}", calls.display()));
+    let before = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    write_pending(dir.path(), serde_json::json!({
+        "op": "apply", "target": p.body.seq, "before": before, "ledger_len": 2, "commit": null,
+        "approved_by": "casey", "tier": "system", "tainted": false,
+    }));
+
+    let i = b.reconcile().unwrap().expect("reconciled");
+    assert_eq!(i.body.data["discarded_commit"], serde_json::Value::Null);
+    assert_eq!(i.body.data["restored"], true);
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "{ nightLight = false; }\n");
+    assert_eq!(b.repo.head().unwrap(), before);
+}
+
+/// `git apply --index` succeeds but `git commit` fails: the repo must be put back, not left dirty
+/// (which would fail every later operation's clean check).
+#[test]
+fn failed_commit_leaves_repo_clean() {
+    let (dir, b) = setup("true");
+    let before = b.repo.head().unwrap();
+    let hook = b.repo.root().join(".git/hooks/pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    assert!(b.apply(p.body.seq, "casey", false).is_err());
+    assert_eq!(b.repo.head().unwrap(), before);
+    b.repo.ensure_clean().unwrap();
+    assert!(!dir.path().join("state/pending.json").exists());
+
+    fs::remove_file(&hook).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    assert_eq!(kinds(&b), ["init", "proposal", "applied"]);
 }
