@@ -464,8 +464,23 @@ impl Broker {
     }
 
     pub fn propose(&self, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
+        self.propose_on(None, diff_path, reason, actor, tainted)
+    }
+
+    /// Propose a change prepared against the configuration at commit `base`. It is refused now if
+    /// the configuration has moved on since, and again at `apply` if it moves before then: applied
+    /// on top of a newer configuration, a change prepared against an older one can silently undo or
+    /// mix with the commit in between. Without a base, the diff is applied wherever it applies.
+    pub fn propose_on(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         let _l = Lock::acquire(&self.state_dir)?;
         self.refuse_if_interrupted()?;
+        if let Some(base) = base {
+            // A full commit id, never a ref (`HEAD`, a branch) that would always "match".
+            if base.len() != 40 || !base.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+                bail!("--base must be a full commit id (40 lowercase hex digits), not {base:?}");
+            }
+            self.refuse_stale_base(base)?;
+        }
         let diff = fs::read_to_string(diff_path)
             .with_context(|| format!("reading diff {}", diff_path.display()))?;
         // Classify exactly the bytes that go into the ledger: the caller's file is read once and
@@ -494,8 +509,20 @@ impl Broker {
                 "files": files,
                 "diff_sha256": hex::encode(Sha256::digest(diff.as_bytes())),
                 "diff": diff,
+                "base": base,
             }),
         })
+    }
+
+    fn refuse_stale_base(&self, base: &str) -> Result<()> {
+        let head = self.repo.head()?;
+        if head != base {
+            bail!(
+                "refused: the configuration has changed since this change was prepared (prepared on \
+                 {base}, now at {head}); prepare it again from the current configuration"
+            );
+        }
+        Ok(())
     }
 
     fn find_child(&self, kind: &str, key: &str, seq: u64) -> Result<Option<Entry>> {
@@ -712,6 +739,9 @@ impl Broker {
             );
         }
         let diff = p.body.data["diff"].as_str().context("proposal has no diff")?;
+        if let Some(base) = p.body.data["base"].as_str() {
+            self.refuse_stale_base(base)?;
+        }
 
         // Re-validate against the current repo state (it may have changed since proposing).
         let tmp = self.state_dir.join(format!("proposal-{proposal_seq}.diff"));

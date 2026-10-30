@@ -46,6 +46,9 @@ enum Cmd {
         /// The proposing session ingested untrusted content (web, email, downloads).
         #[arg(long)]
         tainted: bool,
+        /// The commit this change was prepared against: refused if the configuration has moved on.
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Show a proposal or applied change.
     Show { seq: u64 },
@@ -123,8 +126,8 @@ fn run(cli: Cli) -> Result<()> {
                 println!("initialised {} (ledger: {})", cli.repo.display(), b.ledger.path().display());
             }
         }
-        Cmd::Propose { diff, reason, actor, tainted } => {
-            let e = b.propose(&diff, &reason, actor, tainted)?;
+        Cmd::Propose { diff, reason, actor, tainted, base } => {
+            let e = b.propose_on(base.as_deref(), &diff, &reason, actor, tainted)?;
             if json {
                 return print_entry(&e);
             }

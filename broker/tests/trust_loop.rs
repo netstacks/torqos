@@ -1140,3 +1140,58 @@ fn repair_does_not_vouch_when_the_boot_profile_vanishes() {
     let e = b.ledger.read_all().unwrap().pop().unwrap();
     assert_eq!(e.body.data["restored"], serde_json::json!(false));
 }
+
+/// A change prepared against one configuration must not be applied on top of another: the commit
+/// in between would be silently undone or mixed (review H4). With a base, the broker refuses.
+#[test]
+fn proposal_based_on_current_config_applies() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose_on(Some(&head), &d, "Night light", Actor::User, false).unwrap();
+    assert_eq!(p.body.data["base"], head.as_str());
+    b.apply(p.body.seq, "casey", false).unwrap();
+}
+
+#[test]
+fn proposal_based_on_a_stale_config_is_refused_at_propose() {
+    let (dir, b) = setup("true");
+    let stale = b.repo.head().unwrap();
+    let t = write_diff(dir.path(), "theme.diff", THEME);
+    let other = b.propose(&t, "someone else's change", Actor::User, false).unwrap();
+    b.apply(other.body.seq, "alice", false).unwrap();
+
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let err = format!("{:#}", b.propose_on(Some(&stale), &d, "Night light", Actor::User, false).unwrap_err());
+    assert!(err.contains("changed since"), "{err}");
+}
+
+#[test]
+fn proposal_whose_base_moved_before_apply_is_refused() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let mine = b.propose_on(Some(&head), &d, "Night light", Actor::User, false).unwrap();
+    // Another change lands between my propose and my apply; it touches a different file, so the
+    // diff would still apply — and that is exactly what must not happen silently.
+    let t = write_diff(dir.path(), "theme.diff", THEME);
+    let other = b.propose(&t, "someone else's change", Actor::User, false).unwrap();
+    b.apply(other.body.seq, "alice", false).unwrap();
+
+    let err = format!("{:#}", b.apply(mine.body.seq, "casey", false).unwrap_err());
+    assert!(err.contains("changed since"), "{err}");
+    assert!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap().contains("false"), "nothing applied");
+}
+
+#[test]
+fn base_must_look_like_a_commit() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    // A ref would never equal HEAD's id, so it would be refused as stale anyway; the point of the
+    // format check is to say what is actually wrong. Uppercase hex of the real HEAD is refused too.
+    let upper = b.repo.head().unwrap().to_uppercase();
+    for bad in ["HEAD", "main", "abc", "--help", "", upper.as_str()] {
+        let err = format!("{:#}", b.propose_on(Some(bad), &d, "x", Actor::User, false).unwrap_err());
+        assert!(err.contains("full commit id"), "{bad}: {err}");
+    }
+}
