@@ -118,6 +118,8 @@ pub fn broker_json(mut broker: Command, log: &std::path::Path) -> Result<Outcome
         (Some(0), Some(v)) => Outcome::Done(v.clone()),
         (Some(75), _) => Outcome::Busy,
         (Some(1), Some(_)) => Outcome::Refused(error()),
+        // 2: it did not understand the request — an installed broker older than this command.
+        (Some(2), _) => Outcome::Broken("the installed broker is older than this kestrel command (update the machine first)".into()),
         (Some(code), _) => Outcome::Broken(format!("the broker stopped unexpectedly (exit code {code})")),
         (None, _) => Outcome::Broken("the broker was stopped before it finished".into()),
     };
