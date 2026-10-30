@@ -211,24 +211,31 @@ Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 
 The broker stays small; its additions for this model:
 - `propose --base <commit>`: `apply` refuses if the config repo's HEAD is not that commit.
-- `apply --confirm <minutes>`: records the anchor (previous commit and running system) in the
-  `applied` entry, activates with a fixed `test` command (not the caller's), keeps the anchor system
-  alive (GC root), and schedules the expiry as a transient systemd timer (`AccuracySec=1s`) that
-  runs *this* — the old, known-good — broker by its store path. If the `test` activation itself
-  fails, the restore also goes straight to the anchor system, not a rebuild.
-- `confirm`: sets the system profile to the running system and runs `switch-to-configuration
-  boot` on it (no rebuild); ledger `confirmed`. Accepted until an expiry has started (under the
-  lock). It is run by the *new* broker and reads what the old one wrote from the ledger — tested
-  across the two.
-- `expire-confirm`: resets the repo to the anchor commit, activates the anchor system directly;
-  ledger `rolled_back` with `unconfirmed: true`, recording any drift it found and keeping anything it
-  would discard; bounded retries, then an alarm. It is its own pending operation (crash-safe,
-  ADR-010). A boot-time check records "rolled back by reboot".
-- While a confirmed commit is pending: every other change-making command is refused, except
-  reconciling that same commit.
+- `apply --confirm <minutes>` (1–1440; done, 1f): records the anchor (previous commit and running
+  system) and the kernel boot ID in the `applied` entry, activates with the fixed `test` command
+  (not the caller's), and schedules the expiry as a transient systemd timer (`AccuracySec=1s`,
+  retried while the broker is busy) that runs *this* — the old, known-good — broker by its store
+  path. Instead of a separate GC root, it requires the running system to be the boot default: the
+  anchor is then the profile's current generation (rooted, and what a reboot starts). If the `test`
+  activation or the scheduling fails, the restore goes straight to the anchor system, not a rebuild.
+- `confirm`: requires the running system to be the one the commit activated, sets the system
+  profile to it and runs `switch-to-configuration boot` (no rebuild); ledger `confirmed`. Accepted
+  until an expiry has started (under the lock), not by the clock. It reads what the applying broker
+  wrote from the ledger only.
+- `expire-confirm [<seq>] [--reboot]`: resets the repo to the anchor commit (keeping the discarded
+  commit and any uncommitted change under `refs/torq/discarded/`), activates the anchor system
+  directly unless it is already running, puts the boot default back if something moved it; ledger
+  `rolled_back` with `unconfirmed: true`, `by_reboot`, `restored` and what it found. Nothing waiting
+  is not an error (a confirmed commit's timer still fires). It is its own pending operation (`op:
+  expire`): an interrupted one is finished by the next operation, not undone. The boot-time unit
+  `torq-confirm-boot` runs `expire-confirm --reboot`, which acts only if the boot ID differs from
+  the recorded one (a switch that first adds the unit starts it too).
+- While a confirmed commit is pending, `apply`, `revert` and `repair` are refused (reconciling is
+  not).
 - The pending confirmation is derived from the ledger, never from a separate state file;
-  `pending.json` gains a version field so an older broker refuses a newer record clearly.
-- `status` reports a pending confirmation (its deadline) instead of calling it drift.
+  `pending.json` has a version field so an older broker refuses a newer record clearly.
+- `status` reports a pending confirmation (its deadline) instead of calling the boot default drift,
+  and reports it as a problem once it is more than two minutes overdue.
 - The broker clears its environment at start and takes its paths and rebuild commands from fixed
   configuration, not from the caller (closes part of KNOWN-GAPS #4). Done (1e): as root it reads
   only `/etc/torq/broker.json` (written by the module from `torq.broker.*`, including

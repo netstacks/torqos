@@ -43,6 +43,33 @@ in
         command from its caller. Tests set it to `true`.
       '';
     };
+    # `commit confirmed` (ADR-016). Fixed settings too; overridden only by tests. See
+    # broker/src/config.rs for what each does and its placeholders.
+    testCommand = lib.mkOption {
+      type = lib.types.str;
+      default = "nixos-rebuild test --flake {repo}#${cfg.configName}";
+      defaultText = lib.literalExpression ''"nixos-rebuild test --flake {repo}#''${config.torq.broker.configName}"'';
+      description = "Build and activate a commit confirmed without making it the boot default.";
+    };
+    activateCommand = lib.mkOption {
+      type = lib.types.str;
+      default = "{system}/bin/switch-to-configuration test";
+      description = "Activate an existing system: the rollback of an unconfirmed commit.";
+    };
+    bootCommand = lib.mkOption {
+      type = lib.types.str;
+      default = "nix-env -p {profile} --set {system} && {system}/bin/switch-to-configuration boot";
+      description = "Make a system the boot default: `confirm`.";
+    };
+    scheduleCommand = lib.mkOption {
+      type = lib.types.str;
+      default = lib.concatStringsSep " " [
+        "systemd-run --quiet --collect --unit=torq-confirm-{seq} --on-active={seconds}"
+        "--timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=5"
+        "{broker} expire-confirm {seq}"
+      ];
+      description = "Schedule the rollback of an unconfirmed commit (a transient timer).";
+    };
     guardEtcNixos = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -123,6 +150,10 @@ in
         repo = cfg.configRepo;
         stateDir = cfg.stateDir;
         rebuild = cfg.rebuildCommand;
+        test = cfg.testCommand;
+        activate = cfg.activateCommand;
+        boot = cfg.bootCommand;
+        schedule = cfg.scheduleCommand;
         currentSystem = "/run/current-system";
         systemProfile = "/nix/var/nix/profiles/system";
         # The tools undo depends on, by store path first: a reviewed but mistaken change that drops
@@ -221,6 +252,28 @@ in
         ProtectHome = true;
         PrivateTmp = true;
         NoNewPrivileges = true;
+      };
+    };
+
+    # A commit confirmed still waiting at boot was not confirmed before the machine restarted: its
+    # timer was transient and is gone, and the boot default was never changed, so this boot already
+    # runs the system before it. Put the config back to match and ledger the rollback. Nothing
+    # waiting: nothing to do. A switch that first adds this unit starts it too; the broker only rolls
+    # back if the boot ID differs from the one recorded with the change, i.e. after a real restart.
+    systemd.services.torq-confirm-boot = {
+      description = "Roll back a TorqOS commit confirmed that was not confirmed before a restart";
+      after = [ "torq-broker-init.service" ];
+      before = [ "torq-status.service" ];
+      wantedBy = [ "multi-user.target" ];
+      restartIfChanged = false;
+      startLimitIntervalSec = 600;
+      startLimitBurst = 30; # then failed, and `torq-broker status` reports it overdue
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${lib.getExe cfg.package} expire-confirm --reboot";
+        Restart = "on-failure"; # busy: try again
+        RestartSec = 5;
       };
     };
   };

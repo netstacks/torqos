@@ -36,6 +36,65 @@ pub struct Broker {
     current_system: PathBuf,
     /// The system profile (`/nix/var/nix/profiles/system`): what the next boot starts.
     system_profile: PathBuf,
+    /// The `commit confirmed` commands (see config.rs for each).
+    test_cmd: String,
+    activate_cmd: String,
+    boot_cmd: String,
+    schedule_cmd: String,
+    /// This broker's own executable, which the scheduled rollback runs: the store path of the
+    /// broker that made the change, not whatever `torq-broker` the new system has.
+    exe: PathBuf,
+    /// The kernel's boot ID (`/proc/sys/kernel/random/boot_id`), new on every boot.
+    boot_id_file: PathBuf,
+}
+
+/// A `commit confirmed` waiting for `confirm`: an `applied` entry with a `confirm` record and no
+/// `confirmed` or `rolled_back` for it. Derived from the ledger alone, never from a separate file.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingConfirm {
+    pub applied: u64,
+    pub deadline: String,
+    /// The config and the system before the commit: what an unconfirmed commit goes back to.
+    pub anchor_commit: String,
+    pub anchor_system: String,
+    /// The system the commit activated.
+    pub system: Option<String>,
+    /// The kernel's boot ID when it was applied: a rollback "by reboot" needs a different one.
+    pub boot_id: Option<String>,
+    #[serde(skip)]
+    tier: String,
+    #[serde(skip)]
+    reason: String,
+}
+
+fn pending_confirm(entries: &[Entry]) -> Option<PendingConfirm> {
+    let a = entries.iter().rev().find(|e| e.body.kind == "applied" && e.body.data.get("confirm").is_some())?;
+    let seq = a.body.seq;
+    let settled = entries
+        .iter()
+        .any(|e| matches!(e.body.kind.as_str(), "confirmed" | "rolled_back") && e.body.data["applied"] == json!(seq));
+    if settled {
+        return None;
+    }
+    let c = &a.body.data["confirm"];
+    Some(PendingConfirm {
+        applied: seq,
+        deadline: c["deadline"].as_str()?.into(),
+        anchor_commit: c["anchor_commit"].as_str()?.into(),
+        anchor_system: c["anchor_system"].as_str()?.into(),
+        system: a.body.data["system"].as_str().map(String::from),
+        boot_id: c["boot_id"].as_str().map(String::from),
+        tier: a.body.tier.clone(),
+        reason: a.body.reason.clone(),
+    })
+}
+
+/// The longest `commit confirmed` wait, in minutes (a day).
+pub const MAX_CONFIRM_MINUTES: u32 = 24 * 60;
+
+/// One shell word, for a placeholder's value.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Another broker operation holds the lock: try again later. Its own type, so the CLI can say
@@ -81,6 +140,10 @@ pub struct Status {
     /// A broker operation is running (who holds the lock): mid-switch, the running system has
     /// changed before the ledger records it, so nothing is compared.
     pub busy: Option<String>,
+    /// A commit confirmed waiting for `confirm`. Its boot default is, rightly, still the old system.
+    pub pending_confirm: Option<PendingConfirm>,
+    /// Its deadline passed more than two minutes ago and it has not been rolled back.
+    pub overdue: bool,
 }
 
 impl Status {
@@ -116,6 +179,13 @@ impl Status {
         if self.dirty {
             p.push("config repo has uncommitted changes, made outside the broker".to_string());
         }
+        if let Some(pc) = self.pending_confirm.as_ref().filter(|_| self.overdue) {
+            p.push(format!(
+                "change #{} (commit confirmed) was not confirmed by {} and has not been rolled back: \
+                 `torq-broker expire-confirm` rolls it back",
+                pc.applied, pc.deadline
+            ));
+        }
         if let Some(want) = &self.ledgered_system {
             if self.running_system.as_ref() != Some(want) {
                 p.push(format!(
@@ -124,7 +194,8 @@ impl Status {
                     self.running_system.as_deref().unwrap_or("(unknown)")
                 ));
             }
-            if let Some(next) = self.next_boot.as_ref().filter(|n| *n != want) {
+            let waiting_anchor = self.pending_confirm.as_ref().map(|pc| &pc.anchor_system);
+            if let Some(next) = self.next_boot.as_ref().filter(|n| *n != want && Some(*n) != waiting_anchor) {
                 p.push(format!(
                     "the next boot would start {next}, not the last ledgered build {want}: the boot default \
                      was changed outside the broker"
@@ -216,9 +287,13 @@ fn holders(path: &Path) -> Vec<String> {
 /// next operation finds this record and reconciles (see `Broker::reconcile_locked`).
 #[derive(Debug, Serialize, Deserialize)]
 struct Pending {
-    /// "apply" or "revert".
+    /// The record's format (`PENDING_VERSION`); absent in records written before it existed (0).
+    /// A broker refuses a record newer than it understands rather than misreading it.
+    #[serde(default)]
+    version: u32,
+    /// "apply", "revert", or "expire" (the rollback of an unconfirmed commit).
     op: String,
-    /// The proposal (apply) or applied entry (revert) being acted on.
+    /// The proposal (apply) or applied entry (revert, expire) being acted on.
     target: u64,
     /// HEAD before the operation: the last ledgered config.
     before: String,
@@ -237,10 +312,13 @@ impl Pending {
         match self.op.as_str() {
             "apply" => Ok((&["applied", "apply_failed"], "proposal")),
             "revert" => Ok((&["reverted", "revert_failed"], "applied")),
+            "expire" => Ok((&["rolled_back"], "applied")),
             other => bail!("pending.json names an unknown operation '{other}'"),
         }
     }
 }
+
+const PENDING_VERSION: u32 = 1;
 
 /// fsync a directory, making a create, rename or unlink in it durable.
 fn sync_dir(dir: &Path) -> Result<()> {
@@ -254,7 +332,7 @@ fn ledgered_commit(entries: &[Entry]) -> Option<String> {
     entries
         .iter()
         .rev()
-        .filter(|e| matches!(e.body.kind.as_str(), "init" | "applied" | "reverted" | "interrupted" | "repaired"))
+        .filter(|e| matches!(e.body.kind.as_str(), "init" | "applied" | "reverted" | "interrupted" | "repaired" | "rolled_back"))
         .find_map(|e| e.body.data.get("commit").and_then(|v| v.as_str()).map(String::from))
 }
 
@@ -279,7 +357,36 @@ impl Broker {
             rebuild_cmd: rebuild_cmd.into(),
             current_system: PathBuf::from("/run/current-system"),
             system_profile: PathBuf::from("/nix/var/nix/profiles/system"),
+            test_cmd: config::TEST.into(),
+            activate_cmd: config::ACTIVATE.into(),
+            boot_cmd: config::BOOT.into(),
+            schedule_cmd: config::SCHEDULE.into(),
+            exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("torq-broker")),
+            boot_id_file: PathBuf::from("/proc/sys/kernel/random/boot_id"),
         }
+    }
+
+    /// Where to read the boot ID (tests: a file they change to simulate a restart).
+    pub fn with_boot_id_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.boot_id_file = path.into();
+        self
+    }
+
+    fn boot_id(&self) -> Option<String> {
+        fs::read_to_string(&self.boot_id_file).ok().map(|s| s.trim().to_string())
+    }
+
+    /// The `commit confirmed` commands: test activation, direct activation, boot default, schedule.
+    pub fn with_confirm_commands(mut self, test: &str, activate: &str, boot: &str, schedule: &str) -> Self {
+        (self.test_cmd, self.activate_cmd, self.boot_cmd) = (test.into(), activate.into(), boot.into());
+        self.schedule_cmd = schedule.into();
+        self
+    }
+
+    /// The broker the scheduled rollback runs (tests: the binary under test).
+    pub fn with_exe(mut self, exe: impl Into<PathBuf>) -> Self {
+        self.exe = exe.into();
+        self
     }
 
     pub fn with_current_system(mut self, link: impl Into<PathBuf>) -> Self {
@@ -339,7 +446,14 @@ impl Broker {
         let unrestored = last_record
             .filter(|e| e.body.data.get("restored") == Some(&json!(false)))
             .map(|e| format!("#{} {}", e.body.seq, e.body.kind));
+        let pending_confirm = pending_confirm(&entries);
+        let overdue = pending_confirm.as_ref().is_some_and(|pc| {
+            chrono::DateTime::parse_from_rfc3339(&pc.deadline)
+                .is_ok_and(|d| chrono::Utc::now() > d + chrono::Duration::minutes(2))
+        });
         Ok(Status {
+            pending_confirm,
+            overdue,
             ledger,
             head: self.repo.head().ok(),
             dirty: self.repo.ensure_clean().is_err() && self.repo.head().is_ok(),
@@ -364,6 +478,8 @@ impl Broker {
         if let Some(e) = self.reconcile_locked(&lock, by)? {
             return Ok(e);
         }
+        // A waiting commit confirmed is not drift; its own rollback is what undoes it.
+        self.refuse_if_confirm_pending()?;
         let head = self.repo.head()?;
         let entries = self.ledger.read_all()?;
         let Some(ledgered) = ledgered_commit(&entries) else {
@@ -546,7 +662,17 @@ impl Broker {
 
     fn read_pending(&self) -> Result<Option<Pending>> {
         match fs::read(self.pending_path()) {
-            Ok(b) => Ok(Some(serde_json::from_slice(&b).context("reading pending.json")?)),
+            Ok(b) => {
+                let p: Pending = serde_json::from_slice(&b).context("reading pending.json")?;
+                if p.version > PENDING_VERSION {
+                    bail!(
+                        "pending.json was written by a newer broker (format {}, this one reads up to {PENDING_VERSION}); \
+                         finish it with that broker",
+                        p.version
+                    );
+                }
+                Ok(Some(p))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -624,6 +750,11 @@ impl Broker {
             }
             self.repo.remove_stale_index_lock()?;
         }
+        // An interrupted rollback of an unconfirmed commit is finished, not undone: it goes to the
+        // anchor recorded in the ledger, which a generic reset-and-rebuild would not ledger as such.
+        if p.op == "expire" {
+            return self.expire_locked(lock, Some(p.target), false, Some(p));
+        }
         let head = self.repo.head()?;
         // Record the commit before resetting, so a crash in here cannot lose it from the audit.
         if p.commit.is_none() && head != p.before {
@@ -696,7 +827,19 @@ impl Broker {
     }
 
     fn rebuild(&self, lock: &Lock) -> Result<()> {
-        let cmd = self.rebuild_cmd.replace("{repo}", &self.repo.root().to_string_lossy());
+        self.run_shell(lock, "rebuild", &self.rebuild_cmd.replace("{repo}", &self.repo.root().to_string_lossy()))
+    }
+
+    /// Run one of the configured commands with its placeholders replaced by shell-quoted values.
+    fn run_command(&self, lock: &Lock, what: &str, template: &str, vars: &[(&str, &str)]) -> Result<()> {
+        let mut cmd = template.to_string();
+        for (k, v) in vars {
+            cmd = cmd.replace(&format!("{{{k}}}"), &shell_quote(v));
+        }
+        self.run_shell(lock, what, &cmd)
+    }
+
+    fn run_shell(&self, lock: &Lock, what: &str, cmd: &str) -> Result<()> {
         let status = Command::new("sh")
             .arg("-c")
             .arg(&cmd)
@@ -705,9 +848,9 @@ impl Broker {
             // (activation scripts print to stdout via systemd-run --pipe) goes to stderr.
             .stdout(Stdio::from(std::io::stderr().as_fd().try_clone_to_owned()?))
             .status()
-            .context("running rebuild")?;
+            .with_context(|| format!("running {what}"))?;
         if !status.success() {
-            bail!("rebuild command failed ({status}): {cmd}");
+            bail!("{what} command failed ({status}): {cmd}");
         }
         Ok(())
     }
@@ -730,8 +873,52 @@ impl Broker {
     }
 
     pub fn apply(&self, proposal_seq: u64, approved_by: &str, confirm_tainted: bool) -> Result<Entry> {
+        self.apply_inner(proposal_seq, approved_by, confirm_tainted, None)
+    }
+
+    /// `commit confirmed`: apply, but activate the new system without making it the boot default,
+    /// and roll it back unless `confirm` runs within `minutes`. The rollback is a transient timer
+    /// running this broker's `expire-confirm`; a reboot rolls back by itself (the boot default is
+    /// still the old system) and the boot-time check ledgers it.
+    pub fn apply_confirmed(&self, proposal_seq: u64, approved_by: &str, confirm_tainted: bool, minutes: u32) -> Result<Entry> {
+        if !(1..=MAX_CONFIRM_MINUTES).contains(&minutes) {
+            bail!("commit confirmed takes 1 to {MAX_CONFIRM_MINUTES} minutes, not {minutes}");
+        }
+        self.apply_inner(proposal_seq, approved_by, confirm_tainted, Some(minutes))
+    }
+
+    /// While a `commit confirmed` waits, nothing else may change the machine: the rollback goes
+    /// back to the configuration before it, and would silently take later changes with it.
+    fn refuse_if_confirm_pending(&self) -> Result<()> {
+        if let Some(pc) = pending_confirm(&self.ledger.read_all()?) {
+            bail!(
+                "refused: change #{} (commit confirmed) is waiting for confirmation until {}: \
+                 `torq-broker confirm` keeps it, `torq-broker expire-confirm` rolls it back now",
+                pc.applied, pc.deadline
+            );
+        }
+        Ok(())
+    }
+
+    fn apply_inner(&self, proposal_seq: u64, approved_by: &str, confirm_tainted: bool, confirm: Option<u32>) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
         self.reconcile_locked(&lock, approved_by)?;
+        self.refuse_if_confirm_pending()?;
+        // The rollback of an unconfirmed commit — and a reboot — go back to the running system, which
+        // must therefore be the boot default too (that also keeps it from garbage collection).
+        let anchor_system = match confirm {
+            None => None,
+            Some(_) => {
+                let running = self.running_system().context("commit confirmed: cannot tell which system is running")?;
+                if let Some(next) = self.next_boot().filter(|n| *n != running) {
+                    bail!(
+                        "commit confirmed: the next boot would start {next}, not the running system {running}, \
+                         so a reboot would not roll back to it; `torq-broker repair` first"
+                    );
+                }
+                Some(running)
+            }
+        };
         let p = self.ledger.get(proposal_seq)?;
         if p.body.kind != "proposal" {
             bail!("entry {proposal_seq} is a '{}', not a proposal", p.body.kind);
@@ -767,6 +954,7 @@ impl Broker {
         let before = self.repo.head()?;
         self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
         let mut pending = Pending {
+            version: PENDING_VERSION,
             op: "apply".into(),
             target: proposal_seq,
             before: before.clone(),
@@ -782,21 +970,47 @@ impl Broker {
         pending.commit = Some(commit.clone());
         self.write_pending(&pending)?;
 
-        if let Err(e) = self.rebuild(&lock) {
-            let restored = self.restore(&before, &lock)?;
-            self.ledger.append(NewEntry {
-                actor: "broker".into(),
-                approved_by: Some(approved_by.into()),
-                kind: "apply_failed".into(),
-                tier: tier.to_string(),
-                tainted: p.body.tainted,
-                reason: Self::failure_reason("Rebuild", &before, restored),
-                data: self.with_system(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored })),
-            })?;
-            self.clear_pending()?;
-            return Err(e.context("apply undone because the rebuild failed"));
-        }
+        // Plain: rebuild and switch. Confirmed: build and activate (`test`), then schedule the
+        // rollback; a failure in either goes straight back to the anchor system, not a rebuild.
+        let activated = match (confirm, &anchor_system) {
+            (Some(minutes), Some(anchor)) => self
+                .run_command(&lock, "test activation", &self.test_cmd, &[("repo", &self.repo.root().to_string_lossy())])
+                .and_then(|()| self.schedule_rollback(&lock, next_seq, minutes))
+                .map(|deadline| Some(json!({
+                    "minutes": minutes,
+                    "deadline": deadline,
+                    "anchor_commit": before,
+                    "anchor_system": anchor,
+                    "boot_id": self.boot_id(),
+                })))
+                .map_err(|e| (e, Some(anchor))),
+            _ => self.rebuild(&lock).map(|()| None).map_err(|e| (e, None)),
+        };
+        let confirm_record = match activated {
+            Ok(c) => c,
+            Err((e, anchor)) => {
+                let restored = match anchor {
+                    Some(system) => self.restore_anchor(&lock, &before, system)?,
+                    None => self.restore(&before, &lock)?,
+                };
+                self.ledger.append(NewEntry {
+                    actor: "broker".into(),
+                    approved_by: Some(approved_by.into()),
+                    kind: "apply_failed".into(),
+                    tier: tier.to_string(),
+                    tainted: p.body.tainted,
+                    reason: Self::failure_reason(if anchor.is_some() { "Test activation" } else { "Rebuild" }, &before, restored),
+                    data: self.with_system(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored })),
+                })?;
+                self.clear_pending()?;
+                return Err(e.context("apply undone because the rebuild failed"));
+            }
+        };
 
+        let mut data = json!({ "proposal": proposal_seq, "commit": commit, "files": files });
+        if let Some(c) = confirm_record {
+            data["confirm"] = c;
+        }
         let e = self.ledger.append(NewEntry {
             actor: p.body.actor.clone(),
             approved_by: Some(approved_by.into()),
@@ -804,10 +1018,163 @@ impl Broker {
             tier: tier.to_string(),
             tainted: p.body.tainted,
             reason: p.body.reason.clone(),
-            data: self.with_system(json!({ "proposal": proposal_seq, "commit": commit, "files": files })),
+            data: self.with_system(data),
         })?;
         self.clear_pending()?;
         Ok(e)
+    }
+
+    /// Start the timer that rolls back applied entry `seq` after `minutes`; returns the deadline.
+    /// It runs this broker by its own path (`exe`), so the rollback does not depend on the system
+    /// being rolled back. If this broker dies before `seq` is ledgered, the timer finds nothing
+    /// waiting and does nothing.
+    fn schedule_rollback(&self, lock: &Lock, seq: u64, minutes: u32) -> Result<String> {
+        let deadline = chrono::Utc::now() + chrono::Duration::minutes(minutes.into());
+        self.run_command(
+            lock,
+            "rollback timer",
+            &self.schedule_cmd,
+            &[("seq", &seq.to_string()), ("seconds", &(u64::from(minutes) * 60).to_string()), ("broker", &self.exe.to_string_lossy())],
+        )?;
+        Ok(deadline.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    }
+
+    /// Go back to `commit` and the already-built `system` without rebuilding: reset the config,
+    /// activate the system unless it is already running, and make it the boot default if something
+    /// moved that. Returns whether the machine ended up running `system` with it as boot default.
+    fn restore_anchor(&self, lock: &Lock, commit: &str, system: &str) -> Result<bool> {
+        self.repo.hard_reset(commit)?;
+        let activated = self.running_system().as_deref() == Some(system)
+            || self.run_command(lock, "activation", &self.activate_cmd, &[("system", system)]).is_ok();
+        let boot_ok = match self.next_boot() {
+            Some(next) if next != system => self
+                .run_command(lock, "boot default", &self.boot_cmd, &[("system", system), ("profile", &self.system_profile.to_string_lossy())])
+                .is_ok(),
+            _ => true,
+        };
+        Ok(activated && boot_ok && self.running_system().as_deref() == Some(system))
+    }
+
+    /// Keep the commit confirmed that is waiting: make the system it activated the boot default and
+    /// ledger `confirmed`. Accepted until its rollback has started (the rollback takes the lock),
+    /// not by the clock. It must be the running system: after a reboot or a switch elsewhere there
+    /// is nothing to keep.
+    pub fn confirm(&self, by: &str) -> Result<Entry> {
+        let lock = Lock::acquire(&self.state_dir)?;
+        self.reconcile_locked(&lock, by)?;
+        let Some(pc) = pending_confirm(&self.ledger.read_all()?) else {
+            bail!("nothing is waiting for confirmation");
+        };
+        let running = self.running_system();
+        let Some(system) = pc.system.clone().filter(|s| running.as_ref() == Some(s)) else {
+            bail!(
+                "change #{} cannot be confirmed: the running system is {}, not the one it activated ({}); \
+                 it will be rolled back",
+                pc.applied,
+                running.as_deref().unwrap_or("(unknown)"),
+                pc.system.as_deref().unwrap_or("(unknown)")
+            );
+        };
+        self.run_command(&lock, "boot default", &self.boot_cmd, &[("system", &system), ("profile", &self.system_profile.to_string_lossy())])
+            .with_context(|| format!("change #{} is still unconfirmed and will be rolled back at {}", pc.applied, pc.deadline))?;
+        self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(by.into()),
+            kind: "confirmed".into(),
+            tier: pc.tier.clone(),
+            tainted: false,
+            reason: format!("Confirmed: {}", pc.reason),
+            data: self.with_system(json!({ "applied": pc.applied })),
+        })
+    }
+
+    /// Roll back the commit confirmed that is waiting (`seq`, if given, must be it): what its timer
+    /// runs at the deadline, the boot-time check after a reboot (`by_reboot`), or a person who
+    /// wants it gone now. Nothing waiting is not an error: a confirmed commit's timer still fires.
+    pub fn expire_confirm(&self, seq: Option<u64>, by_reboot: bool) -> Result<Option<Entry>> {
+        let lock = Lock::acquire(&self.state_dir)?;
+        if let Some(e) = self.reconcile_locked(&lock, "broker")? {
+            if e.body.kind == "rolled_back" {
+                return Ok(Some(e)); // it was this, interrupted: now finished
+            }
+        }
+        self.expire_locked(&lock, seq, by_reboot, None)
+    }
+
+    /// Idempotent, so an interrupted rollback is finished by running it again (`resumed`).
+    fn expire_locked(&self, lock: &Lock, seq: Option<u64>, by_reboot: bool, resumed: Option<Pending>) -> Result<Option<Entry>> {
+        let entries = self.ledger.read_all()?;
+        let pc = pending_confirm(&entries).filter(|pc| seq.is_none_or(|s| s == pc.applied));
+        // "By reboot" only after one: the boot-time unit also starts on the switch that first adds it.
+        let pc = pc.filter(|pc| !by_reboot || pc.boot_id.is_none() || pc.boot_id != self.boot_id());
+        let Some(pc) = pc else {
+            if resumed.is_some() {
+                self.clear_pending()?;
+            }
+            return Ok(None);
+        };
+        self.ledger.verify().context("cannot roll back on a broken ledger")?;
+        // A manual nixos-rebuild does not take the broker lock. Failing makes the timer retry.
+        if switch_running() {
+            bail!("a system switch ({SWITCH_UNIT}) is still running; the rollback waits for it");
+        }
+        let head = self.repo.head()?;
+        let (running_before, next_before) = (self.running_system(), self.next_boot());
+        let mut p = match resumed {
+            Some(p) => p,
+            None => Pending {
+                version: PENDING_VERSION,
+                op: "expire".into(),
+                target: pc.applied,
+                before: head.clone(),
+                ledger_len: entries.len(),
+                commit: None,
+                approved_by: "broker".into(),
+                tier: pc.tier.clone(),
+                tainted: false,
+            },
+        };
+        // What the reset discards is kept (refs/torq/discarded/): the unconfirmed commit, and anything
+        // changed behind the broker's back since.
+        if head != pc.anchor_commit {
+            p.commit = Some(head.clone());
+            self.repo.keep(&head)?;
+        }
+        self.write_pending(&p)?;
+        let uncommitted = self.repo.snapshot_dirty()?;
+        if let Some(s) = &uncommitted {
+            self.repo.keep(s)?;
+        }
+        let restored = self.restore_anchor(lock, &pc.anchor_commit, &pc.anchor_system)?;
+        let why = if by_reboot { "the machine restarted before it was confirmed" } else { "it was not confirmed in time" };
+        let e = self.ledger.append(NewEntry {
+            actor: "broker".into(),
+            approved_by: None,
+            kind: "rolled_back".into(),
+            tier: pc.tier.clone(),
+            tainted: false,
+            reason: if restored {
+                format!("Change #{} rolled back: {why}", pc.applied)
+            } else {
+                format!(
+                    "Change #{} rolled back ({why}), but the restore did not fully take — running system may not \
+                     match the config",
+                    pc.applied
+                )
+            },
+            data: self.with_system(json!({
+                "applied": pc.applied,
+                "unconfirmed": true,
+                "by_reboot": by_reboot,
+                "commit": pc.anchor_commit,
+                "discarded_commit": p.commit,
+                "discarded_uncommitted": uncommitted,
+                "restored": restored,
+                "found": { "running_system": running_before, "next_boot": next_before },
+            })),
+        })?;
+        self.clear_pending()?;
+        Ok(Some(e))
     }
 
     /// Undo one applied change by a new commit that reverts it. (Not `rollback`: that word is kept
@@ -815,6 +1182,7 @@ impl Broker {
     pub fn revert(&self, applied_seq: u64, approved_by: &str) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
         self.reconcile_locked(&lock, approved_by)?;
+        self.refuse_if_confirm_pending()?;
         let a = self.ledger.get(applied_seq)?;
         if a.body.kind != "applied" {
             bail!("entry {applied_seq} is a '{}', not an applied change", a.body.kind);
@@ -831,6 +1199,7 @@ impl Broker {
         let before = self.repo.head()?;
         self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
         let mut pending = Pending {
+            version: PENDING_VERSION,
             op: "revert".into(),
             target: applied_seq,
             before: before.clone(),

@@ -70,6 +70,13 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    the broker should require a base for `--actor agent` (and for anything approved from a shown
    diff). The base must be a 40-hex SHA-1 id: a config repo created with git's SHA-256 object
    format could not use it.
+6h. **`commit confirmed` rollback uses the new system's broker settings.** The old broker runs (by
+   store path), but it reads `/etc/torq/broker.json`, which the `test` activation has replaced. A
+   change that breaks the broker's own settings (`torq.broker.*`) can break its timed rollback; a
+   reboot still rolls it back (the boot default is never changed before `confirm`). Fix: the
+   expiry reads the anchor system's `etc/torq/broker.json`, chosen by the ledger, not the caller.
+   Also: `--confirm` with `torq.broker.testCommand` builds the config a second time if `commit
+   check` built it first (no build sharing yet).
 6c. **`torq update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
    that store path without re-fetching. The ledgered rev may then not identify what was built.

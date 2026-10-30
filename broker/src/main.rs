@@ -23,6 +23,19 @@ struct Cli {
     /// [default: nixos-rebuild switch --flake {repo}].
     #[arg(long, env = "TORQ_REBUILD_CMD")]
     rebuild_cmd: Option<String>,
+    /// `apply --confirm`: build and activate without changing the boot default; `{repo}`
+    /// [default: nixos-rebuild test --flake {repo}].
+    #[arg(long, env = "TORQ_TEST_CMD")]
+    test_cmd: Option<String>,
+    /// Activate an existing system (rollback of an unconfirmed commit); `{system}`.
+    #[arg(long, env = "TORQ_ACTIVATE_CMD")]
+    activate_cmd: Option<String>,
+    /// Make a system the boot default (`confirm`); `{system}`, `{profile}`.
+    #[arg(long, env = "TORQ_BOOT_CMD")]
+    boot_cmd: Option<String>,
+    /// Schedule `{broker} expire-confirm {seq}` after `{seconds}` [default: a transient systemd timer].
+    #[arg(long, env = "TORQ_SCHEDULE_CMD")]
+    schedule_cmd: Option<String>,
     /// Link to the running system, recorded after every rebuild and compared by `status`
     /// [default: /run/current-system].
     #[arg(long, env = "TORQ_CURRENT_SYSTEM")]
@@ -67,6 +80,23 @@ enum Cmd {
         approved_by: String,
         #[arg(long)]
         confirm_tainted: bool,
+        /// Commit confirmed: activate without making it the boot default, and roll it back unless
+        /// `confirm` runs within this many minutes (a reboot rolls it back too).
+        #[arg(long, value_name = "MINUTES")]
+        confirm: Option<u32>,
+    },
+    /// Keep the commit confirmed that is waiting: make it the boot default.
+    Confirm {
+        #[arg(long)]
+        approved_by: String,
+    },
+    /// Roll back the commit confirmed that is waiting (its timer runs this at the deadline).
+    ExpireConfirm {
+        /// Only if this applied change is the one waiting.
+        seq: Option<u64>,
+        /// Run at boot: the machine restarted before the change was confirmed.
+        #[arg(long)]
+        reboot: bool,
     },
     /// Undo one applied change: a new commit that reverts it, rebuild, ledger.
     Revert {
@@ -143,6 +173,10 @@ fn settings(cli: &mut Cli) -> Result<Settings> {
         repo: cli.repo.clone(),
         state_dir: cli.state_dir.clone(),
         rebuild: cli.rebuild_cmd.clone(),
+        test: cli.test_cmd.clone(),
+        activate: cli.activate_cmd.clone(),
+        boot: cli.boot_cmd.clone(),
+        schedule: cli.schedule_cmd.clone(),
         current_system: cli.current_system.clone(),
         system_profile: cli.system_profile.clone(),
     };
@@ -160,7 +194,8 @@ fn run(mut cli: Cli) -> Result<()> {
     let s = settings(&mut cli)?;
     let b = Broker::new(&s.repo, &s.state_dir, &s.rebuild)
         .with_current_system(&s.current_system)
-        .with_system_profile(&s.system_profile);
+        .with_system_profile(&s.system_profile)
+        .with_confirm_commands(&s.test, &s.activate, &s.boot, &s.schedule);
     match cli.cmd {
         Cmd::Init => {
             b.init()?;
@@ -191,14 +226,33 @@ fn run(mut cli: Cli) -> Result<()> {
                 println!("\n{}", printable_text(&b.repo.show(c)?));
             }
         }
-        Cmd::Apply { seq, approved_by, confirm_tainted } => {
-            let e = b.apply(seq, &approved_by, confirm_tainted)?;
+        Cmd::Apply { seq, approved_by, confirm_tainted, confirm } => {
+            let e = match confirm {
+                Some(minutes) => b.apply_confirmed(seq, &approved_by, confirm_tainted, minutes)?,
+                None => b.apply(seq, &approved_by, confirm_tainted)?,
+            };
             if json {
                 return print_entry(&e);
             }
             println!("applied #{} as commit {} (ledger #{})", seq, e.body.data["commit"], e.body.seq);
-            println!("undo with: torq-broker revert {} --approved-by <name>", e.body.seq);
+            if let Some(deadline) = e.body.data["confirm"]["deadline"].as_str() {
+                println!("rolls back at {deadline} unless confirmed: torq-broker confirm --approved-by <name>");
+            } else {
+                println!("undo with: torq-broker revert {} --approved-by <name>", e.body.seq);
+            }
         }
+        Cmd::Confirm { approved_by } => {
+            let e = b.confirm(&approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("confirmed #{} (ledger #{}): it is now the boot default", e.body.data["applied"], e.body.seq);
+        }
+        Cmd::ExpireConfirm { seq, reboot } => match (b.expire_confirm(seq, reboot)?, json) {
+            (e, true) => println!("{}", json!({ "rolled_back": e })),
+            (Some(e), false) => println!("{} (ledger #{})", e.body.reason, e.body.seq),
+            (None, false) => println!("nothing is waiting for confirmation"),
+        },
         Cmd::Revert { seq, approved_by } => {
             let e = b.revert(seq, &approved_by)?;
             if json {
@@ -272,6 +326,7 @@ fn run(mut cli: Cli) -> Result<()> {
                         "dirty": s.dirty,
                         "interrupted": s.interrupted,
                         "unrestored": s.unrestored,
+                        "pending_confirm": s.pending_confirm,
                     })
                 );
                 std::process::exit(if s.busy.is_some() { 75 } else if problems.is_empty() { 0 } else { 1 });
@@ -288,6 +343,13 @@ fn run(mut cli: Cli) -> Result<()> {
                 or(&s.running_system, "?"),
                 or(&s.ledgered_system, "not recorded yet: from the next change on")
             );
+            if let Some(pc) = &s.pending_confirm {
+                println!(
+                    "waiting         change #{} (commit confirmed) rolls back at {} unless confirmed; \
+                     the next boot starts the system before it",
+                    pc.applied, pc.deadline
+                );
+            }
             if problems.is_empty() && s.ledgered_system.is_none() {
                 println!("OK as far as recorded: the running system cannot be checked until a change records it");
             } else if problems.is_empty() {
