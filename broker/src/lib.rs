@@ -1,7 +1,7 @@
 //! torq-broker: the only writer of the TorqOS config repo.
 //!
 //! Lifecycle: propose (validated + ledgered, diff stored in the ledger) → apply (approved,
-//! committed, rebuilt, ledgered) → rollback (reverted, rebuilt, ledgered).
+//! committed, rebuilt, ledgered) → revert (one change undone by a new commit, rebuilt, ledgered).
 //! If a rebuild fails, the repo is reset to the previous commit, that commit is rebuilt (the
 //! failed rebuild may already have activated), and the failure is ledgered.
 
@@ -50,7 +50,7 @@ impl std::fmt::Display for Busy {
 
 impl std::error::Error for Busy {}
 
-/// An apply or rollback that was interrupted and not yet reconciled.
+/// An apply or revert that was interrupted and not yet reconciled.
 #[derive(Debug, Clone, Serialize)]
 pub struct Interrupted {
     pub op: String,
@@ -75,7 +75,7 @@ pub struct Status {
     pub ledgered_system: Option<String>,
     /// The last rebuild failed and could not restore the previous system (its ledger entry).
     pub unrestored: Option<String>,
-    /// An apply or rollback that was interrupted and not yet reconciled.
+    /// An apply or revert that was interrupted and not yet reconciled.
     pub interrupted: Option<Interrupted>,
     /// A broker operation is running (who holds the lock): mid-switch, the running system has
     /// changed before the ledger records it, so nothing is compared.
@@ -209,15 +209,15 @@ fn holders(path: &Path) -> Vec<String> {
     found
 }
 
-/// An apply or rollback in flight, written to `state/pending.json` before its commit and removed
+/// An apply or revert in flight, written to `state/pending.json` before its commit and removed
 /// once its outcome is in the ledger. The commit happens before the (minutes-long) rebuild and the
 /// ledger entry after it, so a broker that dies in between leaves a commit nobody ledgered; the
 /// next operation finds this record and reconciles (see `Broker::reconcile_locked`).
 #[derive(Debug, Serialize, Deserialize)]
 struct Pending {
-    /// "apply" or "rollback".
+    /// "apply" or "revert".
     op: String,
-    /// The proposal (apply) or applied entry (rollback) being acted on.
+    /// The proposal (apply) or applied entry (revert) being acted on.
     target: u64,
     /// HEAD before the operation: the last ledgered config.
     before: String,
@@ -235,7 +235,7 @@ impl Pending {
     fn outcome(&self) -> Result<(&'static [&'static str], &'static str)> {
         match self.op.as_str() {
             "apply" => Ok((&["applied", "apply_failed"], "proposal")),
-            "rollback" => Ok((&["rolled_back", "rollback_failed"], "applied")),
+            "revert" => Ok((&["reverted", "revert_failed"], "applied")),
             other => bail!("pending.json names an unknown operation '{other}'"),
         }
     }
@@ -248,12 +248,12 @@ fn sync_dir(dir: &Path) -> Result<()> {
 }
 
 /// The commit the ledger says the config repo is at: that of the last entry that moved it.
-/// (apply_failed / rollback_failed carry none: the config is back at the previous commit.)
+/// (apply_failed / revert_failed carry none: the config is back at the previous commit.)
 fn ledgered_commit(entries: &[Entry]) -> Option<String> {
     entries
         .iter()
         .rev()
-        .filter(|e| matches!(e.body.kind.as_str(), "init" | "applied" | "rolled_back" | "interrupted" | "repaired"))
+        .filter(|e| matches!(e.body.kind.as_str(), "init" | "applied" | "reverted" | "interrupted" | "repaired"))
         .find_map(|e| e.body.data.get("commit").and_then(|v| v.as_str()).map(String::from))
 }
 
@@ -594,7 +594,7 @@ impl Broker {
         Ok(())
     }
 
-    /// Finish an apply or rollback whose broker died: discard its unledgered commit (kept under
+    /// Finish an apply or revert whose broker died: discard its unledgered commit (kept under
     /// `refs/torq/discarded/`), reset to the last ledgered commit, rebuild, and ledger it.
     /// `by` is who ran it (the approver of the operation that triggered it, or of `reconcile`).
     pub fn reconcile(&self, by: &str) -> Result<Option<Entry>> {
@@ -793,7 +793,7 @@ impl Broker {
                 data: self.with_system(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored })),
             })?;
             self.clear_pending()?;
-            return Err(e.context("apply rolled back because the rebuild failed"));
+            return Err(e.context("apply undone because the rebuild failed"));
         }
 
         let e = self.ledger.append(NewEntry {
@@ -809,15 +809,17 @@ impl Broker {
         Ok(e)
     }
 
-    pub fn rollback(&self, applied_seq: u64, approved_by: &str) -> Result<Entry> {
+    /// Undo one applied change by a new commit that reverts it. (Not `rollback`: that word is kept
+    /// for loading a whole earlier configuration, and for an unconfirmed `commit confirmed`.)
+    pub fn revert(&self, applied_seq: u64, approved_by: &str) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
         self.reconcile_locked(&lock, approved_by)?;
         let a = self.ledger.get(applied_seq)?;
         if a.body.kind != "applied" {
             bail!("entry {applied_seq} is a '{}', not an applied change", a.body.kind);
         }
-        if self.find_child("rolled_back", "applied", applied_seq)?.is_some() {
-            bail!("change {applied_seq} was already rolled back");
+        if self.find_child("reverted", "applied", applied_seq)?.is_some() {
+            bail!("change {applied_seq} was already reverted");
         }
         let commit = a.body.data["commit"].as_str().context("applied entry has no commit")?.to_string();
         let next_seq = self.ledger.read_all()?.len() as u64 + 1;
@@ -828,7 +830,7 @@ impl Broker {
         let before = self.repo.head()?;
         self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
         let mut pending = Pending {
-            op: "rollback".into(),
+            op: "revert".into(),
             target: applied_seq,
             before: before.clone(),
             ledger_len: (next_seq - 1) as usize,
@@ -846,19 +848,19 @@ impl Broker {
             self.ledger.append(NewEntry {
                 actor: "broker".into(),
                 approved_by: Some(approved_by.into()),
-                kind: "rollback_failed".into(),
+                kind: "revert_failed".into(),
                 tier: a.body.tier.clone(),
                 tainted: false,
-                reason: Self::failure_reason("Rollback rebuild", &before, restored),
+                reason: Self::failure_reason("Revert rebuild", &before, restored),
                 data: self.with_system(json!({ "applied": applied_seq, "error": e.to_string(), "restored": restored })),
             })?;
             self.clear_pending()?;
-            return Err(e.context("rollback aborted because the rebuild failed"));
+            return Err(e.context("revert aborted because the rebuild failed"));
         }
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(approved_by.into()),
-            kind: "rolled_back".into(),
+            kind: "reverted".into(),
             tier: a.body.tier.clone(),
             tainted: false,
             reason: format!("Undo: {}", a.body.reason),

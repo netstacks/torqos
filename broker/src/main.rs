@@ -60,14 +60,14 @@ enum Cmd {
         #[arg(long)]
         confirm_tainted: bool,
     },
-    /// Undo an applied change: revert commit, rebuild, ledger.
-    Rollback {
+    /// Undo one applied change: a new commit that reverts it, rebuild, ledger.
+    Revert {
         seq: u64,
         #[arg(long)]
         approved_by: String,
     },
-    /// Finish an apply or rollback whose broker died: discard its unledgered commit, reset to the
-    /// last ledgered config, rebuild, and ledger it. apply and rollback do this first on their own.
+    /// Finish an apply or revert whose broker died: discard its unledgered commit, reset to the
+    /// last ledgered config, rebuild, and ledger it. apply and revert do this first on their own.
     Reconcile {
         #[arg(long)]
         approved_by: String,
@@ -153,14 +153,14 @@ fn run(cli: Cli) -> Result<()> {
                 return print_entry(&e);
             }
             println!("applied #{} as commit {} (ledger #{})", seq, e.body.data["commit"], e.body.seq);
-            println!("undo with: torq-broker rollback {} --approved-by <name>", e.body.seq);
+            println!("undo with: torq-broker revert {} --approved-by <name>", e.body.seq);
         }
-        Cmd::Rollback { seq, approved_by } => {
-            let e = b.rollback(seq, &approved_by)?;
+        Cmd::Revert { seq, approved_by } => {
+            let e = b.revert(seq, &approved_by)?;
             if json {
                 return print_entry(&e);
             }
-            println!("rolled back #{} as commit {} (ledger #{})", seq, e.body.data["commit"], e.body.seq);
+            println!("reverted #{} as commit {} (ledger #{})", seq, e.body.data["commit"], e.body.seq);
         }
         Cmd::Reconcile { approved_by } => match (b.reconcile(&approved_by)?, json) {
             (e, true) => println!("{}", json!({ "reconciled": e })),

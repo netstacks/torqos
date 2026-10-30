@@ -40,7 +40,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   (switch-to-configuration exits 4 when a unit fails). Found in the UTM VM: the broker reset the
   repo but the running system kept the change, so system and config diverged.
 - **Decision:** On a failed apply or rollback, the broker resets the repo to the previous commit
-  *and rebuilds it*, then ledgers `apply_failed` / `rollback_failed` with `restored: true|false`.
+  *and rebuilds it*, then ledgers `apply_failed` / `rollback_failed` (since ADR-016:
+  `revert_failed`) with `restored: true|false`.
   `torq-broker-init` runs only once (`ConditionPathExists=!…/.git`), never during a switch.
 - **Consequences:** A failed change costs a second (usually cached) switch. If the restore also
   fails, the ledger says so explicitly rather than claiming the system is unchanged.
@@ -114,7 +115,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   rebuild the last ledgered configuration, refuse if the config repo itself was changed, record what
   had drifted, and say so if the switch did not take), or apply, rollback, reconcile. Garbage collection
   (`nix.gc`, weekly, generations older than 30 days; `min-free` during builds) is safe for the same
-  reason undo works: a broker rollback reverts the commit and *rebuilds*, it never needs an old
+  reason undo works: a broker revert undoes the commit and *rebuilds*, it never needs an old
   generation on disk.
 
 ## ADR-013 — Services are a curated catalog, enabled as data

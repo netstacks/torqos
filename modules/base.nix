@@ -34,7 +34,7 @@ in
     };
 
     # The store must not fill the disk. Collecting old generations does not weaken undo: a broker
-    # rollback reverts the commit and rebuilds it (from the binary cache), it never needs an old
+    # revert undoes the commit and rebuilds it (from the binary cache), it never needs an old
     # generation on disk (ADR-012). The running system is never collected.
     nix.gc = {
       automatic = lib.mkDefault true;

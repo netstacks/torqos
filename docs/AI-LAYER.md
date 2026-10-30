@@ -29,7 +29,7 @@ with the taint source displayed.
 ## Ledger format (v0)
 
 Append-only JSON Lines at `/var/lib/torq/state/ledger.jsonl`, owned by the broker.
-Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `rolled_back`, `rollback_failed`
+Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `reverted`, `revert_failed`
 (failures carry `restored: true|false` — see ADR-008).
 
 ```json

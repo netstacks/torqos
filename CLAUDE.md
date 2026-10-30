@@ -68,7 +68,7 @@ nix build .#checks.aarch64-linux.trust-loop       # run the trust-loop VM test
 sudo nixos-rebuild switch --flake /var/lib/torq/config#torq   # first time only
 sudo torq-broker propose --diff change.diff --reason "..." --actor user
 sudo torq-broker apply <seq> --approved-by $USER
-sudo torq-broker rollback <applied-seq> --approved-by $USER
+sudo torq-broker revert <applied-seq> --approved-by $USER
 sudo torq-broker log && sudo torq-broker verify
 ```
 

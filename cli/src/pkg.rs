@@ -373,7 +373,7 @@ mod tests {
             .starts_with("vscode can't be installed here"));
         assert!(explain_check_error("something else").starts_with("This change wouldn't work"));
         assert_eq!(
-            explain_apply_error("install htop", "apply rolled back because the rebuild failed: rebuild command failed"),
+            explain_apply_error("install htop", "apply undone because the rebuild failed: rebuild command failed"),
             "Couldn't install htop: building the new system failed."
         );
         assert!(explain_apply_error("x", "diff does not apply cleanly to the current config").contains("Try again"));

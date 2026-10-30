@@ -383,7 +383,7 @@ enum Attempt {
     Nothing,
     /// This proposal was made; an `applied` entry for it means it happened.
     Proposal(u64),
-    /// Undoing this applied change; a `rolled_back` entry for it means it happened.
+    /// Undoing this applied change; a `reverted` entry for it means it happened.
     Undo(u64),
 }
 
@@ -403,7 +403,7 @@ fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path, a
     let landed = |l: &[history::Entry]| match attempt {
         Attempt::Nothing => None,
         Attempt::Proposal(p) => l.iter().find(|e| e.kind == "applied" && e.data["proposal"].as_u64() == Some(p)).map(|e| e.seq),
-        Attempt::Undo(a) => l.iter().find(|e| e.kind == "rolled_back" && e.data["applied"].as_u64() == Some(a)).map(|e| e.seq),
+        Attempt::Undo(a) => l.iter().find(|e| e.kind == "reverted" && e.data["applied"].as_u64() == Some(a)).map(|e| e.seq),
     };
     if !matches!(attempt, Attempt::Nothing) {
         match read_ledger(cli) {
@@ -881,7 +881,7 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
     let log = run::start_log()?;
     let done = {
         let _p = if asks_for_password(cli) { None } else { Some(run::Progress::start("Undoing")) };
-        run::broker_json(broker(cli, &["rollback", &target.seq.to_string(), "--approved-by", &me]), &log)?
+        run::broker_json(broker(cli, &["revert", &target.seq.to_string(), "--approved-by", &me]), &log)?
     };
     let what = format!("undo change {}", target.seq);
     match done {
@@ -903,7 +903,7 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
                 ))
             );
             // An undo cannot be undone, so then only the opposite change helps.
-            if later.iter().any(|s| entries.iter().any(|e| e.seq == *s && e.kind == "rolled_back")) {
+            if later.iter().any(|s| entries.iter().any(|e| e.seq == *s && e.kind == "reverted")) {
                 println!("    Make the opposite change yourself (for packages: torq pkg add / remove).");
             } else {
                 println!("    Undo those first (newest first), or make the opposite change yourself.");

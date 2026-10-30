@@ -127,7 +127,8 @@ users {
   Afterwards the candidate is gone.
 - **`commit check`** evaluates and builds the candidate without switching.
 - **Commit numbers count backwards:** 0 is the active configuration. They are the ledger entries
-  that produced a new configuration (`init`, `applied`, `rolled_back`), newest first. Numbers shift
+  that produced a new configuration (`init`, `applied`, `reverted`, `rolled_back`), newest first.
+  Numbers shift
   with every commit, so `rollback <n>` says which commit it loaded (date, who, comment).
   `show system commit` reads the ledger, so it uses `sudo` like a commit does.
 - **`rollback <n>`** loads commit <n>'s *configuration* into the candidate — every file except
@@ -259,8 +260,9 @@ These shapes are an interface: change them deliberately, with tests on both side
 | any failure | `{"error": "...", "busy": bool}` |
 
 A ledger entry is flat: `seq, ts, actor, approved_by, kind, tier, tainted, reason, data,
-prev_hash, hash`. `kind` is one of `init, proposal, applied, apply_failed, rolled_back,
-rollback_failed, interrupted, repaired, confirmed`.
+prev_hash, hash`. `kind` is one of `init, proposal, applied, apply_failed, reverted,
+revert_failed, interrupted, repaired, confirmed, rolled_back`. `reverted` is one change undone by
+`revert`; `rolled_back` is only an unconfirmed `commit confirmed` being undone.
 
 Exit codes: **0** success; **1** refused or failed; **75** another operation is running; **2** bad
 arguments. **JSON-escaped is not terminal-safe**: the CLI neutralises every string before printing.

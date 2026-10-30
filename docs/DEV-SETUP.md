@@ -48,7 +48,7 @@ sed -i 's/torq.desktop.enable = true;/torq.desktop.enable = true;\n  services.pr
 sudo torq-broker propose --diff /tmp/printing.diff --reason "Enable printing" --actor user
 sudo torq-broker apply <seq> --approved-by $USER      # commits + nixos-rebuild switch
 sudo torq-broker log
-sudo torq-broker rollback <applied-seq> --approved-by $USER
+sudo torq-broker revert <applied-seq> --approved-by $USER
 sudo torq-broker verify
 ```
 (Producing diffs by hand is temporary — the agent and the Activity UI will do this in M2/M3.)
@@ -82,7 +82,7 @@ To move the machine to the newest TorqOS (and so nixpkgs) — one ledgered, undo
 change: `torq update`. `sudo torq-broker status` says whether the machine is as its ledger
 says; it is also checked at boot and every 15 minutes, and a new shell warns if not.
 It checks the change against the whole system first, then proposes and applies it through the
-broker, so it is ledgered and `torq-broker rollback` undoes it.
+broker, so it is ledgered and `torq-broker revert` undoes it.
 
 Do not run `nixos-rebuild` against `/etc/nixos`: on TorqOS those files are stubs that refuse to
 build (`torq.broker.guardEtcNixos`), because building them replaces the whole system outside

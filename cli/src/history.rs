@@ -72,7 +72,7 @@ pub fn parse(json_lines: &str) -> Result<Vec<Entry>> {
 fn undone_by(entries: &[Entry], applied: u64) -> Option<u64> {
     entries
         .iter()
-        .find(|e| e.kind == "rolled_back" && e.data["applied"].as_u64() == Some(applied))
+        .find(|e| e.kind == "reverted" && e.data["applied"].as_u64() == Some(applied))
         .map(|e| e.seq)
 }
 
@@ -178,7 +178,7 @@ pub fn later_conflicts(entries: &[Entry], applied: u64) -> Vec<u64> {
             "applied" => undone_by(entries, e.seq).is_none() && touches(e),
             // A later undo of an earlier change edited the same files too (and cannot itself be
             // undone). The undo of a later change cancels that change, so it is no obstacle.
-            "rolled_back" => e.data["applied"].as_u64().filter(|&a| a < applied).and_then(|a| entries.iter().find(|x| x.seq == a)).is_some_and(touches),
+            "reverted" => e.data["applied"].as_u64().filter(|&a| a < applied).and_then(|a| entries.iter().find(|x| x.seq == a)).is_some_and(touches),
             _ => false,
         })
         .map(|e| e.seq)
@@ -187,7 +187,7 @@ pub fn later_conflicts(entries: &[Entry], applied: u64) -> Vec<u64> {
 
 /// The latest change that took effect (applied, undone, repaired), in the log's words.
 pub fn last_change(entries: &[Entry]) -> Option<String> {
-    let e = entries.iter().rev().find(|e| matches!(e.kind.as_str(), "applied" | "rolled_back" | "repaired"))?;
+    let e = entries.iter().rev().find(|e| matches!(e.kind.as_str(), "applied" | "reverted" | "repaired"))?;
     Some(describe(entries, e).1)
 }
 
@@ -195,13 +195,13 @@ pub fn last_change(entries: &[Entry]) -> Option<String> {
 fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
     match e.kind.as_str() {
         "applied" => ("✓", e.reason.clone()),
-        "rolled_back" => ("↶", format!("Undid \"{}\"", e.reason.strip_prefix("Undo: ").unwrap_or(&e.reason))),
+        "reverted" => ("↶", format!("Undid \"{}\"", e.reason.strip_prefix("Undo: ").unwrap_or(&e.reason))),
         "apply_failed" => {
             let what = reason_of(entries, e.data["proposal"].as_u64()).unwrap_or("a change");
             let after = if e.data["restored"] == false { "machine may not be as it was" } else { "nothing changed" };
             ("✗", format!("Failed: {what} ({after})"))
         }
-        "rollback_failed" => {
+        "revert_failed" => {
             let what = reason_of(entries, e.data["applied"].as_u64()).unwrap_or("a change");
             ("✗", format!("Undo failed: {what}"))
         }
@@ -220,7 +220,7 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
 pub fn asked_by<'a>(entries: &'a [Entry], e: &'a Entry) -> &'a str {
     let pointed = match e.kind.as_str() {
         "apply_failed" => e.data["proposal"].as_u64(),
-        "rollback_failed" => e.data["applied"].as_u64(),
+        "revert_failed" => e.data["applied"].as_u64(),
         "interrupted" => e.data["target"].as_u64(),
         _ => None,
     };
@@ -320,7 +320,7 @@ mod tests {
             r#"{"seq":3,"ts":"2026-10-30T12:01:05Z","kind":"applied","actor":"user","tier":"user","reason":"Install htop for viper","data":{"proposal":2}}"#,
             r#"{"seq":4,"ts":"2026-10-30T12:02:00Z","kind":"proposal","actor":"user","tier":"system","reason":"Install jq system-wide","data":{}}"#,
             r#"{"seq":5,"ts":"2026-10-30T12:02:05Z","kind":"applied","actor":"user","tier":"system","reason":"Install jq system-wide","data":{"proposal":4}}"#,
-            r#"{"seq":6,"ts":"2026-10-30T12:03:00Z","kind":"rolled_back","actor":"user","tier":"system","reason":"Undo: Install jq system-wide","data":{"applied":5}}"#,
+            r#"{"seq":6,"ts":"2026-10-30T12:03:00Z","kind":"reverted","actor":"user","tier":"system","reason":"Undo: Install jq system-wide","data":{"applied":5}}"#,
             r#"{"seq":7,"ts":"2026-10-30T12:04:00Z","kind":"proposal","actor":"user","tier":"user","reason":"Install vim for viper","data":{}}"#,
         ];
         parse(&lines.join("\n")).unwrap()
@@ -423,13 +423,13 @@ mod tests {
             r#"{"seq":2,"ts":"2026-10-30T12:01:00Z","kind":"applied","actor":"user","tier":"system","reason":"Enable ssh","data":{"files":["services.json"]}}"#,
             r#"{"seq":3,"ts":"2026-10-30T12:02:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install b","data":{"files":["users/v/packages.json"]}}"#,
             r#"{"seq":4,"ts":"2026-10-30T12:03:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install c","data":{"files":["users/v/packages.json"]}}"#,
-            r#"{"seq":5,"ts":"2026-10-30T12:04:00Z","kind":"rolled_back","actor":"user","tier":"user","reason":"Undo: Install c","data":{"applied":4}}"#,
+            r#"{"seq":5,"ts":"2026-10-30T12:04:00Z","kind":"reverted","actor":"user","tier":"user","reason":"Undo: Install c","data":{"applied":4}}"#,
         ];
         let l = parse(&lines.join("\n")).unwrap();
         assert_eq!(later_conflicts(&l, 1), vec![3], "same file, in effect; not ssh, not 4 (applied and undone)");
         assert!(later_conflicts(&l, 3).is_empty());
         let mut more = lines.to_vec();
-        more.push(r#"{"seq":6,"ts":"2026-10-30T12:05:00Z","kind":"rolled_back","actor":"user","tier":"user","reason":"Undo: Install a","data":{"applied":1}}"#);
+        more.push(r#"{"seq":6,"ts":"2026-10-30T12:05:00Z","kind":"reverted","actor":"user","tier":"user","reason":"Undo: Install a","data":{"applied":1}}"#);
         let l = parse(&more.join("\n")).unwrap();
         assert_eq!(later_conflicts(&l, 3), vec![6], "a later undo of an earlier change is in the way");
     }

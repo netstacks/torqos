@@ -1,4 +1,4 @@
-//! End-to-end: propose → apply → rollback against a real git repo, with rebuild stubbed.
+//! End-to-end: propose → apply → revert against a real git repo, with rebuild stubbed.
 
 use torq_broker::{policy::Actor, Broker};
 use std::fs;
@@ -33,7 +33,7 @@ fn write_diff(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
 const NIGHT_LIGHT: &str = "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{ nightLight = false; }\n+{ nightLight = true; }\n";
 
 #[test]
-fn propose_apply_rollback() {
+fn propose_apply_revert() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     let p = b.propose(&d, "Night light at sunset", Actor::Agent, false).unwrap();
@@ -50,11 +50,11 @@ fn propose_apply_rollback() {
 
     assert!(b.apply(p.body.seq, "casey", false).is_err(), "double apply must fail");
 
-    b.rollback(a.body.seq, "casey").unwrap();
+    b.revert(a.body.seq, "casey").unwrap();
     assert!(fs::read_to_string(&cfg).unwrap().contains("false"));
-    assert!(b.rollback(a.body.seq, "casey").is_err(), "double rollback must fail");
+    assert!(b.revert(a.body.seq, "casey").is_err(), "double revert must fail");
 
-    assert_eq!(b.ledger.verify().unwrap(), 4); // init, proposal, applied, rolled_back
+    assert_eq!(b.ledger.verify().unwrap(), 4); // init, proposal, applied, reverted
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn failed_rebuild_restores_previous_system() {
 }
 
 #[test]
-fn failed_rollback_is_ledgered_and_restored() {
+fn failed_revert_is_ledgered_and_restored() {
     let dir = tempfile::tempdir().unwrap();
     let flag = dir.path().join("fail");
     let rebuild = format!("! test -e {}", flag.display());
@@ -127,10 +127,10 @@ fn failed_rollback_is_ledgered_and_restored() {
     let head = b.repo.head().unwrap();
 
     fs::write(&flag, "").unwrap();
-    assert!(b.rollback(a.body.seq, "casey").is_err());
+    assert!(b.revert(a.body.seq, "casey").is_err());
     assert_eq!(b.repo.head().unwrap(), head, "config must be reset to the applied state");
     let last = b.ledger.read_all().unwrap().pop().unwrap();
-    assert_eq!(last.body.kind, "rollback_failed");
+    assert_eq!(last.body.kind, "revert_failed");
     assert_eq!(last.body.data["restored"], false, "restore rebuild also failed, and must say so");
     b.ledger.verify().unwrap();
 }
@@ -268,7 +268,7 @@ fn relative_diff_path_is_resolved_against_cwd() {
 }
 
 #[test]
-fn conflicting_rollback_leaves_repo_usable() {
+fn conflicting_revert_leaves_repo_usable() {
     let (dir, b) = setup("true");
     let d1 = write_diff(dir.path(), "a.diff", NIGHT_LIGHT);
     let p1 = b.propose(&d1, "night light", Actor::User, false).unwrap();
@@ -282,7 +282,7 @@ fn conflicting_rollback_leaves_repo_usable() {
     b.apply(p2.body.seq, "casey", false).unwrap();
 
     // Reverting the first change conflicts with the second.
-    assert!(b.rollback(a1.body.seq, "casey").is_err());
+    assert!(b.revert(a1.body.seq, "casey").is_err());
     b.repo.ensure_clean().expect("a failed revert must not leave the repo dirty");
     assert!(!b.repo.root().join(".git/REVERT_HEAD").exists());
     // ...and the broker keeps working.
@@ -373,7 +373,7 @@ fn crash_mid_apply_is_reconciled_by_next_operation() {
 }
 
 #[test]
-fn crash_mid_rollback_is_reconciled_by_next_operation() {
+fn crash_mid_revert_is_reconciled_by_next_operation() {
     let tmp = tempfile::tempdir().unwrap();
     let calls = tmp.path().join("calls.log");
     let (dir, b) = setup(&format!("cat {{repo}}/desktop.nix >> {}", calls.display()));
@@ -382,14 +382,14 @@ fn crash_mid_rollback_is_reconciled_by_next_operation() {
     let a = b.apply(p.body.seq, "casey", false).unwrap();
     let applied_head = b.repo.head().unwrap();
 
-    assert_killed(&run_cli(dir.path(), CRASH, &["rollback", &a.body.seq.to_string(), "--approved-by", "casey"]));
+    assert_killed(&run_cli(dir.path(), CRASH, &["revert", &a.body.seq.to_string(), "--approved-by", "casey"]));
     let orphan = b.repo.head().unwrap();
     assert_ne!(orphan, applied_head);
 
     // Reconcile puts the applied change back; the user can then undo it for real.
-    b.rollback(a.body.seq, "casey").unwrap();
+    b.revert(a.body.seq, "casey").unwrap();
     let kinds: Vec<_> = b.ledger.read_all().unwrap().into_iter().map(|e| e.body.kind).collect();
-    assert_eq!(kinds, ["init", "proposal", "applied", "interrupted", "rolled_back"]);
+    assert_eq!(kinds, ["init", "proposal", "applied", "interrupted", "reverted"]);
     let i = &b.ledger.read_all().unwrap()[3];
     assert_eq!(i.body.data["discarded_commit"], orphan.as_str());
     assert_eq!(i.body.data["commit"], applied_head.as_str());
@@ -398,7 +398,7 @@ fn crash_mid_rollback_is_reconciled_by_next_operation() {
     assert_eq!(
         fs::read_to_string(&calls).unwrap(),
         "{ nightLight = true; }\n{ nightLight = true; }\n{ nightLight = false; }\n",
-        "apply, then reconcile rebuilds the applied state, then the real rollback"
+        "apply, then reconcile rebuilds the applied state, then the real revert"
     );
     assert!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap().contains("false"));
     b.ledger.verify().unwrap();
@@ -523,7 +523,7 @@ fn ledgered_outcome_is_not_undone() {
         "approved_by": "casey", "tier": "system", "tainted": false,
     });
 
-    // Both paths that settle a record: reconcile (apply, rollback, the CLI) and propose/init.
+    // Both paths that settle a record: reconcile (apply, revert, the CLI) and propose/init.
     write_pending(dir.path(), stale.clone());
     assert!(b.reconcile("casey").unwrap().is_none());
     assert_eq!(b.repo.head().unwrap(), head);
@@ -640,7 +640,7 @@ fn init_refuses_until_reconciled() {
 }
 
 #[test]
-fn failed_rollback_commit_leaves_repo_clean() {
+fn failed_revert_commit_leaves_repo_clean() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
@@ -651,7 +651,7 @@ fn failed_rollback_commit_leaves_repo_clean() {
     fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
     fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 
-    assert!(b.rollback(a.body.seq, "casey").is_err());
+    assert!(b.revert(a.body.seq, "casey").is_err());
     assert_eq!(b.repo.head().unwrap(), applied);
     b.repo.ensure_clean().unwrap();
     assert!(!dir.path().join("state/pending.json").exists());
@@ -744,7 +744,7 @@ fn changes_record_the_running_system() {
     let a = b.apply(p.body.seq, "casey", false).unwrap();
     assert_eq!(a.body.data["system"], "/nix/store/aaa-system-1");
     switch_to(&link, "/nix/store/bbb-system-2");
-    let r = b.rollback(a.body.seq, "casey").unwrap();
+    let r = b.revert(a.body.seq, "casey").unwrap();
     assert_eq!(r.body.data["system"], "/nix/store/bbb-system-2");
 }
 
@@ -953,13 +953,13 @@ fn json_output_for_every_command_the_cli_uses() {
     assert_eq!(s["problems"], serde_json::json!([]));
     assert_eq!(s["ledger_entries"].as_u64(), Some(3));
 
-    let (_, r) = json(&["rollback", "3", "--approved-by", "casey"]);
-    assert_eq!((r["kind"].as_str(), r["data"]["applied"].as_u64()), (Some("rolled_back"), Some(3)));
+    let (_, r) = json(&["revert", "3", "--approved-by", "casey"]);
+    assert_eq!((r["kind"].as_str(), r["data"]["applied"].as_u64()), (Some("reverted"), Some(3)));
 
     // Refusals are data too, with a non-zero exit.
-    let (code, e) = json(&["rollback", "3", "--approved-by", "casey"]);
+    let (code, e) = json(&["revert", "3", "--approved-by", "casey"]);
     assert_eq!(code, Some(1));
-    assert!(e["error"].as_str().unwrap().contains("already rolled back"), "{e}");
+    assert!(e["error"].as_str().unwrap().contains("already reverted"), "{e}");
 }
 
 /// stdout carries the result and nothing else: the rebuild's own output (activation scripts print

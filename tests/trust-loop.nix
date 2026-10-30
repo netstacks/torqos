@@ -66,7 +66,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"git -C {repo} log -1 --format=%B | grep -q 'Ledger-Entry: 3'")
 
     with subtest("one-command undo"):
-        machine.succeed(env + "torq-broker rollback 3 --approved-by tester")
+        machine.succeed(env + "torq-broker revert 3 --approved-by tester")
         machine.succeed(f"grep -q 'nightLight = false' {repo}/desktop.nix")
 
     with subtest("agent cannot touch policy"):
