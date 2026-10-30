@@ -118,13 +118,20 @@ impl Schema {
     /// Resolve the words of `set …` / `delete …` / `show configuration …` to a node. Stops at a leaf
     /// or leaf-list (the rest are its values) or when the words run out (a container or list).
     pub fn resolve(&self, words: &[String]) -> Result<Target> {
+        self.resolve_in(words, None)
+    }
+
+    /// The same, also accepting list entries that have settings in `cfg` though they are not (or no
+    /// longer) among the list's values — a removed user's folder can still be shown and deleted.
+    pub fn resolve_in(&self, words: &[String], cfg: Option<&Config>) -> Result<Target> {
         let (mut key, mut path, mut name) = (String::new(), Vec::new(), None);
         let mut i = 0;
         while i < words.len() {
             let w = &words[i];
             if !key.is_empty() && self.node(&key).kind == Kind::List {
                 let list = self.node(&key);
-                check_name(&key, list, w)?;
+                let existing = cfg.is_some_and(|c| self.entry_names(&key, c).contains(w));
+                check_name(&key, list, w, existing)?;
                 key = format!("{key} <name>");
                 name = Some(w.clone());
             } else {
@@ -171,7 +178,8 @@ impl Schema {
             Some("package") => package_name_ok(value),
             Some("host-name") => host_name_ok(value),
             Some("user-name") => user_name_ok(value),
-            _ => !value.is_empty(),
+            // A value with no closed set and no type: still one plain word.
+            _ => !value.is_empty() && !value.chars().any(|c| c.is_whitespace() || c.is_control()),
         };
         if !ok {
             bail!("'{value}' is not a valid {what}");
@@ -179,9 +187,19 @@ impl Schema {
         Ok(())
     }
 
+    /// `set` / `delete` need a path: the whole configuration is not one setting.
+    fn not_the_top(&self, cmd: &str, t: &Target) -> Result<()> {
+        if t.node.is_empty() {
+            let options: Vec<String> = self.children("").into_iter().map(|(w, _)| w).collect();
+            bail!("{cmd}: incomplete; one of: {}", options.join(", "));
+        }
+        Ok(())
+    }
+
     /// `set <words>`: give a leaf a value, or add elements to a leaf-list.
     pub fn set(&self, cfg: &mut Config, words: &[String]) -> Result<()> {
         let t = self.resolve(words)?;
+        self.not_the_top("set", &t)?;
         let n = self.node(&t.node);
         let file = self.file_of(&t.node, t.name.as_deref());
         match (n.kind, file) {
@@ -226,7 +244,8 @@ impl Schema {
     /// `delete <words>`: remove a leaf, elements of a leaf-list (all of them without values), or
     /// everything below a container or list entry.
     pub fn delete(&self, cfg: &mut Config, words: &[String]) -> Result<()> {
-        let t = self.resolve(words)?;
+        let t = self.resolve_in(words, Some(cfg))?;
+        self.not_the_top("delete", &t)?;
         let n = self.node(&t.node);
         let gone = |what: &str| anyhow::anyhow!("delete {}: {what} is not set", t.words.join(" "));
         match n.kind {
@@ -244,15 +263,19 @@ impl Schema {
             }
             Kind::LeafList => {
                 let file = self.file_of(&t.node, t.name.as_deref()).context("schema: a leaf-list without a file")?;
-                let values = list_values(&t.values)?;
+                let values: BTreeSet<String> = list_values(&t.values)?.into_iter().collect();
+                if values.is_empty() && !t.values.is_empty() {
+                    bail!("delete {}: needs a value inside [ ]", t.words.join(" "));
+                }
                 let Some(Data::List(l)) = cfg.files.get_mut(&file) else { return Err(gone("it")) };
                 if values.is_empty() {
                     cfg.files.remove(&file);
                 } else {
-                    for v in &values {
-                        let at = l.iter().position(|x| x == v).ok_or_else(|| gone(v))?;
-                        l.remove(at);
+                    // All or nothing: a failed delete changes nothing.
+                    if let Some(missing) = values.iter().find(|v| !l.contains(v)) {
+                        return Err(gone(missing));
                     }
+                    l.retain(|x| !values.contains(x));
                     if l.is_empty() {
                         cfg.files.remove(&file);
                     }
@@ -288,6 +311,47 @@ impl Schema {
             }
         }
         Ok(())
+    }
+
+    /// Read the tree's files (path, content) into a `Config`. Files the tree does not describe are
+    /// left out (they are Nix, or the modules' business). A tree file must be exactly what its nodes
+    /// make: a JSON object of the nodes' keys with string values, or a JSON list of strings. Anything
+    /// else is refused, naming the file — the shell must not hide, or rewrite, what it cannot show.
+    pub fn load<'a>(&self, files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<Config> {
+        let mut cfg = Config::default();
+        for (path, bytes) in files {
+            let nodes: Vec<&Node> = self.nodes.values().filter(|n| n.file.as_deref().is_some_and(|p| matches_file(p, path).is_some())).collect();
+            let Some(first) = nodes.first() else { continue };
+            let bad = |why: String| anyhow::anyhow!("{path}: {why}; torqcli cannot show it — fix the file (as raw JSON) first");
+            let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| bad(format!("not JSON ({e})")))?;
+            let data = if first.kind == Kind::LeafList {
+                let list = v.as_array().ok_or_else(|| bad("must be a JSON list".into()))?;
+                Data::List(list.iter().map(|x| x.as_str().map(String::from).ok_or_else(|| bad(format!("{x} is not a string")))).collect::<Result<_>>()?)
+            } else {
+                let obj = v.as_object().ok_or_else(|| bad("must be a JSON object".into()))?;
+                let keys: BTreeSet<&str> = nodes.iter().filter_map(|n| n.key.as_deref()).collect();
+                let mut o = BTreeMap::new();
+                for (k, x) in obj {
+                    if !keys.contains(k.as_str()) {
+                        bail!(bad(format!("\"{k}\" is not a setting")));
+                    }
+                    o.insert(k.clone(), x.as_str().map(String::from).ok_or_else(|| bad(format!("\"{k}\" is not a string")))?);
+                }
+                Data::Object(o)
+            };
+            cfg.files.insert(path.to_string(), data);
+        }
+        Ok(cfg)
+    }
+
+    /// The entry names of list `list_key` that have settings in `cfg`.
+    fn entry_names(&self, list_key: &str, cfg: &Config) -> BTreeSet<String> {
+        let prefix = format!("{list_key} <name>");
+        self.instances(cfg)
+            .into_iter()
+            .filter(|(key, _, _)| key == &prefix || key.starts_with(&format!("{prefix} ")))
+            .filter_map(|(_, name, _)| name)
+            .collect()
     }
 
     /// Every set leaf and leaf-list in `cfg`: (node key, list entry name, value).
@@ -335,16 +399,30 @@ impl Schema {
 
     /// `show configuration [<words>]`, Junos style: containers in braces, `leaf value;`,
     /// `leaf-list [ a b ];`.
-    pub fn show(&self, cfg: &Config, prefix: &[String]) -> String {
+    /// The path is resolved first: an unknown setting or name is an error, not empty output; a path
+    /// to a leaf or leaf-list shows that one statement.
+    pub fn show(&self, cfg: &Config, prefix: &[String]) -> Result<String> {
+        let t = self.resolve_in(prefix, Some(cfg))?;
+        if !t.values.is_empty() {
+            bail!("show configuration {}: unexpected '{}'", t.words.join(" "), t.values[0]);
+        }
+        let prefix = &t.words;
+        let mut out = String::new();
+        // (The top, "", is no node: it is the whole tree.)
+        if !t.node.is_empty() && matches!(self.node(&t.node).kind, Kind::Leaf | Kind::LeafList) {
+            if let Some((_, v)) = self.entries(cfg).into_iter().find(|(w, _)| w == prefix) {
+                out.push_str(&format!("{};\n", statement(prefix.last().unwrap(), &v)));
+            }
+            return Ok(out);
+        }
         let entries: Vec<(Vec<String>, Val)> = self
             .entries(cfg)
             .into_iter()
             .filter(|(w, _)| w.starts_with(prefix))
             .map(|(w, v)| (w[prefix.len()..].to_vec(), v))
             .collect();
-        let mut out = String::new();
         render(&entries, 0, &mut out);
-        out
+        Ok(out)
     }
 
     /// `show configuration | display set`: one `set` command per value.
@@ -393,14 +471,23 @@ impl Schema {
     }
 }
 
-/// `name` names a list entry of `list` (at `key`): its type, and one of its values if it has them.
-fn check_name(key: &str, list: &Node, name: &str) -> Result<()> {
+/// `name` names a list entry of `list` (at `key`): its type, and one of its values if it has them
+/// (unless the entry `existing`ly has settings).
+fn check_name(key: &str, list: &Node, name: &str, existing: bool) -> Result<()> {
     let shaped = match list.ty.as_deref() {
         Some("user-name") => user_name_ok(name),
-        _ => !name.is_empty() && !name.contains(['/', ' ']) && name != "." && name != "..",
+        // Any other list: a plain word, never a path or an option.
+        _ => {
+            let mut c = name.chars();
+            c.next().is_some_and(|f| f.is_ascii_alphanumeric() || f == '_')
+                && c.all(|x| x.is_ascii_alphanumeric() || "_.-".contains(x))
+        }
     };
     if !shaped {
         bail!("'{name}' is not a valid name in {key}");
+    }
+    if existing {
+        return Ok(());
     }
     if let Some(values) = &list.values {
         if !values.contains_key(name) {
@@ -470,7 +557,7 @@ fn render(entries: &[(Vec<String>, Val)], depth: usize, out: &mut String) {
 
 /// A word as Junos shows it: quoted if it has spaces or characters the syntax uses.
 fn quote(w: &str) -> String {
-    if w.is_empty() || w.contains([' ', ';', '{', '}', '[', ']', '"', '#']) {
+    if w.is_empty() || w.chars().any(|c| c.is_whitespace() || c.is_control() || ";{}[]\"#'\\".contains(c)) {
         format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         w.to_string()
@@ -621,13 +708,97 @@ mod tests {
     fn show_configuration_is_junos_style() {
         let (s, c) = (schema(), configured());
         assert_eq!(
-            s.show(&c, &[]),
+            s.show(&c, &[]).unwrap(),
             "services [ ssh ];\n\
              system {\n    host-name torq;\n    packages [ htop ripgrep ];\n    time-zone Europe/Berlin;\n}\n\
              users {\n    dev {\n        cli {\n            style cisco;\n        }\n        packages [ jq ];\n    }\n}\n"
         );
-        assert_eq!(s.show(&c, &w("users dev")), "cli {\n    style cisco;\n}\npackages [ jq ];\n");
-        assert_eq!(s.show(&Config::default(), &[]), "");
+        assert_eq!(s.show(&c, &w("users dev")).unwrap(), "cli {\n    style cisco;\n}\npackages [ jq ];\n");
+        assert_eq!(s.show(&Config::default(), &[]).unwrap(), "");
+        // A path to a leaf or leaf-list shows that statement (review: this used to panic).
+        assert_eq!(s.show(&c, &w("system host-name")).unwrap(), "host-name torq;\n");
+        assert_eq!(s.show(&c, &w("system packages")).unwrap(), "packages [ htop ripgrep ];\n");
+        assert_eq!(s.show(&c, &w("users dev cli style")).unwrap(), "style cisco;\n");
+        assert_eq!(s.show(&Config::default(), &w("system host-name")).unwrap(), "");
+        // An unknown setting or name is an error, not empty output.
+        assert!(format!("{:#}", s.show(&c, &w("users nobody")).unwrap_err()).contains("not one of the users"));
+        assert!(format!("{:#}", s.show(&c, &w("system hostname")).unwrap_err()).contains("not a setting"));
+    }
+
+    #[test]
+    fn an_empty_set_or_delete_is_incomplete() {
+        let (s, mut c) = (schema(), configured());
+        for r in [s.set(&mut c, &[]), s.delete(&mut c, &[])] {
+            assert!(err(r).contains("incomplete; one of: services, system, users"));
+        }
+    }
+
+    /// A failed delete changes nothing; duplicates and `[ ]` do not slip through (review of 3a).
+    #[test]
+    fn delete_is_all_or_nothing() {
+        let s = schema();
+        let mut c = configured();
+        let before = c.clone();
+        assert!(err(s.delete(&mut c, &w("system packages htop vim"))).contains("vim is not set"));
+        assert_eq!(c, before, "htop is still there");
+        s.delete(&mut c, &w("system packages htop ripgrep htop")).unwrap();
+        assert!(!c.files.contains_key("system/packages.json"), "an emptied list is no file, duplicates or not");
+        let mut c = before.clone();
+        assert!(err(s.delete(&mut c, &w("system packages [ ]"))).contains("needs a value inside [ ]"));
+        assert_eq!(c, before);
+        // A list loaded with a duplicate loses every copy.
+        let mut c = s.load([("system/packages.json", br#"["htop","htop","vim"]"#.as_slice())]).unwrap();
+        s.delete(&mut c, &w("system packages htop")).unwrap();
+        assert_eq!(c.files["system/packages.json"], Data::List(w("vim")));
+    }
+
+    /// Settings left by a user who is no longer on the machine can be shown and deleted, not set.
+    #[test]
+    fn a_removed_users_settings_can_be_cleaned_up() {
+        let s = schema();
+        let mut c = s.load([("users/old/packages.json", br#"["vim"]"#.as_slice())]).unwrap();
+        assert_eq!(s.show(&c, &w("users old")).unwrap(), "packages [ vim ];\n");
+        assert!(err(s.set(&mut c, &w("users old packages htop"))).contains("not one of the users"));
+        s.delete(&mut c, &w("users old")).unwrap();
+        assert!(c.files.is_empty());
+        // Still only well-formed names.
+        let c = s.load([("users/Old/packages.json", br#"["vim"]"#.as_slice())]).unwrap();
+        assert!(format!("{:#}", s.show(&c, &w("users Old")).unwrap_err()).contains("not a valid name"));
+    }
+
+    /// Loading refuses what the tree cannot show, naming the file; it skips files outside the tree.
+    #[test]
+    fn load_takes_exactly_the_tree_files() {
+        let s = schema();
+        let c = s
+            .load([
+                ("system/host.json", br#"{"host-name":"a","time-zone":"UTC"}"#.as_slice()),
+                ("services.json", br#"["ssh"]"#.as_slice()),
+                ("users/dev/cli.json", br#"{"style":"cisco"}"#.as_slice()),
+                ("flake.nix", b"{ outputs = _: { }; }".as_slice()),
+                ("users/dev.nix", b"{ }".as_slice()),
+            ])
+            .unwrap();
+        assert_eq!(c.files.keys().collect::<Vec<_>>(), ["services.json", "system/host.json", "users/dev/cli.json"]);
+        for (path, body, why) in [
+            ("services.json", r#"{"ssh":true}"#, "must be a JSON list"),
+            ("services.json", r#"["ssh", 1]"#, "is not a string"),
+            ("system/host.json", r#"["torq"]"#, "must be a JSON object"),
+            ("system/host.json", r#"{"host-name":"a","domain":"x"}"#, "\"domain\" is not a setting"),
+            ("system/host.json", r#"{"host-name":5}"#, "\"host-name\" is not a string"),
+            ("users/dev/cli.json", "{", "not JSON"),
+        ] {
+            let e = format!("{:#}", s.load([(path, body.as_bytes())]).unwrap_err());
+            assert!(e.contains(path) && e.contains(why), "{path} {body}: {e}");
+        }
+    }
+
+    #[test]
+    fn quote_marks_what_the_syntax_would_misread() {
+        assert_eq!(quote("Europe/Berlin"), "Europe/Berlin");
+        for (w, q) in [("xorg'", "\"xorg'\""), ("a b", "\"a b\""), ("a\\b", "\"a\\\\b\""), ("", "\"\""), ("a;b", "\"a;b\"")] {
+            assert_eq!(quote(w), q, "{w}");
+        }
     }
 
     #[test]

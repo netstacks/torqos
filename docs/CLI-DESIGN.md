@@ -118,6 +118,11 @@ users {
 }
 ```
 
+As built (cli/src/tree.rs): statements are sorted by name at each level (so `services` comes
+before `system`), and `| compare` shows changes under the innermost `[edit …]` section that holds
+them, a whole leaf-list as one `-`/`+` pair, a new container as its leaves (`[edit users dev cli]
++ style cisco;`, where Junos would show `+ cli { … }` under `[edit users dev]`).
+
 ## The commit model
 
 - **Active configuration:** the config repo at its last commit. **Candidate:** your private copy
