@@ -113,3 +113,16 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   (`nix.gc`, weekly, generations older than 30 days; `min-free` during builds) is safe for the same
   reason undo works: a broker rollback reverts the commit and *rebuilds*, it never needs an old
   generation on disk.
+
+## ADR-013 — Services are a curated catalog, enabled as data
+- **Context:** After software, the most common change is turning a service on or off (SSH,
+  containers, VPN). Doing that meant hand-writing a NixOS diff, and the stock NixOS defaults are
+  not always Kestrel's (SSH allows passwords and root by default).
+- **Decision:** `services.json` in the config repo (system tier) lists names from a catalog in
+  `modules/services.nix`; each entry is a service *with Kestrel's defaults* (SSH: keys only, no root
+  login; Podman: rootless, with a `docker` command). `kestrel service list|enable|disable` changes
+  it through the broker like packages (ADR-011). Unknown names are a type error listing the
+  catalog. Enabling SSH refuses when the user has no `authorized_keys` (it would lock them out).
+- **Consequences:** Common services are one confirmed, ledgered, undoable command. Anything outside
+  the catalog is still a system-tier `.nix` change. The catalog grows deliberately, one reviewed
+  entry at a time.

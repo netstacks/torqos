@@ -10,8 +10,22 @@ pub struct Entry {
     pub ts: String,
     pub kind: String,
     pub tier: String,
+    pub actor: String,
+    pub tainted: bool,
     pub reason: String,
     pub data: Value,
+}
+
+/// Ledger text is written by whoever proposed (the agent included) and printed to a terminal:
+/// control characters (escape sequences, carriage returns, newlines) and bidi overrides could make
+/// one entry look like another, or hide it. Show them as visible escapes instead.
+pub fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            let bidi = matches!(c, '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+            if c.is_control() || bidi { c.escape_unicode().to_string() } else { c.to_string() }
+        })
+        .collect()
 }
 
 /// One JSON object per line, as `kestrel-broker log --json` prints them.
@@ -27,6 +41,8 @@ pub fn parse(json_lines: &str) -> Result<Vec<Entry>> {
                 ts: s("ts"),
                 kind: s("kind"),
                 tier: s("tier"),
+                actor: s("actor"),
+                tainted: v["tainted"].as_bool().unwrap_or(false),
                 reason: s("reason"),
                 data: v["data"].clone(),
             })
@@ -93,7 +109,15 @@ pub fn render(entries: &[Entry], limit: usize) -> String {
             },
             _ => String::new(),
         };
-        out.push_str(&format!("#{:<4} {when}  {:<11} {:<6} {}{note}\n", e.seq, label(&e.kind), e.tier, e.reason));
+        let by = if e.tainted { format!("{} ⚠", e.actor) } else { e.actor.clone() };
+        out.push_str(&format!(
+            "#{:<4} {when}  {:<11} {:<6} {:<8} {}{note}\n",
+            e.seq,
+            label(&e.kind),
+            clean(&e.tier),
+            clean(&by),
+            clean(&e.reason)
+        ));
     }
     out
 }
@@ -104,13 +128,13 @@ mod tests {
 
     fn ledger() -> Vec<Entry> {
         let lines = [
-            r#"{"seq":1,"ts":"2026-10-30T12:00:00Z","kind":"init","tier":"system","reason":"Config repository initialised","data":{}}"#,
-            r#"{"seq":2,"ts":"2026-10-30T12:01:00Z","kind":"proposal","tier":"user","reason":"Install htop for viper","data":{}}"#,
-            r#"{"seq":3,"ts":"2026-10-30T12:01:05Z","kind":"applied","tier":"user","reason":"Install htop for viper","data":{"proposal":2}}"#,
-            r#"{"seq":4,"ts":"2026-10-30T12:02:00Z","kind":"proposal","tier":"system","reason":"Install jq system-wide","data":{}}"#,
-            r#"{"seq":5,"ts":"2026-10-30T12:02:05Z","kind":"applied","tier":"system","reason":"Install jq system-wide","data":{"proposal":4}}"#,
-            r#"{"seq":6,"ts":"2026-10-30T12:03:00Z","kind":"rolled_back","tier":"system","reason":"Undo: Install jq system-wide","data":{"applied":5}}"#,
-            r#"{"seq":7,"ts":"2026-10-30T12:04:00Z","kind":"proposal","tier":"user","reason":"Install vim for viper","data":{}}"#,
+            r#"{"seq":1,"ts":"2026-10-30T12:00:00Z","kind":"init","actor":"user","tier":"system","reason":"Config repository initialised","data":{}}"#,
+            r#"{"seq":2,"ts":"2026-10-30T12:01:00Z","kind":"proposal","actor":"user","tier":"user","reason":"Install htop for viper","data":{}}"#,
+            r#"{"seq":3,"ts":"2026-10-30T12:01:05Z","kind":"applied","actor":"user","tier":"user","reason":"Install htop for viper","data":{"proposal":2}}"#,
+            r#"{"seq":4,"ts":"2026-10-30T12:02:00Z","kind":"proposal","actor":"user","tier":"system","reason":"Install jq system-wide","data":{}}"#,
+            r#"{"seq":5,"ts":"2026-10-30T12:02:05Z","kind":"applied","actor":"user","tier":"system","reason":"Install jq system-wide","data":{"proposal":4}}"#,
+            r#"{"seq":6,"ts":"2026-10-30T12:03:00Z","kind":"rolled_back","actor":"user","tier":"system","reason":"Undo: Install jq system-wide","data":{"applied":5}}"#,
+            r#"{"seq":7,"ts":"2026-10-30T12:04:00Z","kind":"proposal","actor":"user","tier":"user","reason":"Install vim for viper","data":{}}"#,
         ];
         parse(&lines.join("\n")).unwrap()
     }
@@ -141,10 +165,23 @@ mod tests {
         assert!(format!("{:#}", undo_target(only_init, None).unwrap_err()).contains("nothing to undo"));
     }
 
+    /// The reviewer's attack: a reason that wipes its line and draws a fake entry in its place.
+    #[test]
+    fn ledger_text_cannot_forge_the_log() {
+        let forged = r#"{"seq":48,"ts":"2026-10-30T12:00:00Z","kind":"proposal","actor":"agent","tainted":true,"tier":"user","reason":"x\r\u001b[2K#99 applied user Install htop\n#100 fake","data":{}}"#;
+        let out = render(&parse(forged).unwrap(), 10);
+        assert_eq!(out.lines().count(), 1, "{out}");
+        assert!(!out.chars().any(|c| c == '\r' || c == '\u{1b}'), "{out:?}");
+        assert!(out.contains(r"\u{1b}") && out.contains(r"\u{d}") && out.contains(r"\u{a}"), "{out}");
+        assert!(out.contains("agent ⚠"), "who proposed it, and that it was tainted: {out}");
+        assert_eq!(clean("a\u{202e}b"), r"a\u{202e}b"); // bidi override
+        assert_eq!(clean("plain — text"), "plain — text");
+    }
+
     #[test]
     fn log_lines() {
         let out = render(&ledger(), 100);
-        assert!(out.contains("#3    2026-10-30 12:01  applied     user   Install htop for viper  · kestrel undo 3"), "{out}");
+        assert!(out.contains("#3    2026-10-30 12:01  applied     user   user     Install htop for viper  · kestrel undo 3"), "{out}");
         assert!(out.contains("Install jq system-wide  (undone by #6)"), "{out}");
         assert!(out.contains("#6    2026-10-30 12:03  undone"), "{out}");
         assert_eq!(render(&ledger(), 2).lines().count(), 2);

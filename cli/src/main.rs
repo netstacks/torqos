@@ -34,6 +34,9 @@ enum Cmd {
     /// Installed software.
     #[command(subcommand)]
     Pkg(PkgCmd),
+    /// Services (SSH, containers, VPN, ...) from Kestrel's catalog; always system changes.
+    #[command(subcommand)]
+    Service(ServiceCmd),
     /// Move this machine to the newest Kestrel, and so its nixpkgs (a system change: always asks).
     Update {
         /// Update every input of the machine's config flake, not just Kestrel.
@@ -46,15 +49,32 @@ enum Cmd {
         #[arg(long, short, default_value_t = 20)]
         n: usize,
     },
-    /// Undo a change (the number `kestrel log` shows); without one, the latest change.
+    /// Undo a change (the number `kestrel log` shows); without one, the latest change not yet
+    /// undone. Undo is not redo: undoing again goes further back; to redo, make the change again.
     Undo {
         seq: Option<u64>,
-        /// Undo your own (user-tier) change without asking; system changes always ask.
+        /// Undo a change to your own packages without asking; anything else always asks.
         #[arg(long, short)]
         yes: bool,
     },
     /// Is this machine as its ledger says? (exits non-zero if not)
     Status,
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// The catalog, and what is on.
+    List,
+    /// Turn services on.
+    Enable {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+    /// Turn services off.
+    Disable {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -97,13 +117,18 @@ fn main() {
         Cmd::Pkg(PkgCmd::Search { terms }) => search(&cli.repo, terms),
         Cmd::Pkg(PkgCmd::Add { names, system, yes }) => change(&cli, names, *system, *yes, Edit::Add),
         Cmd::Pkg(PkgCmd::Remove { names, system, yes }) => change(&cli, names, *system, *yes, Edit::Remove),
+        Cmd::Service(ServiceCmd::List) => service_list(&cli),
+        Cmd::Service(ServiceCmd::Enable { names }) => service_change(&cli, names, Edit::Add),
+        Cmd::Service(ServiceCmd::Disable { names }) => service_change(&cli, names, Edit::Remove),
         Cmd::Update { all } => update(&cli, *all),
         Cmd::Log { n } => read_ledger(&cli).map(|l| print!("{}", history::render(&l, *n))),
         Cmd::Undo { seq, yes } => undo(&cli, *seq, *yes),
         Cmd::Status => {
             // The broker's own report and exit code (75: busy, not checked).
-            let st = broker(&cli, &["status"]).status();
-            std::process::exit(st.ok().and_then(|s| s.code()).unwrap_or(1));
+            match broker(&cli, &["status"]).status() {
+                Ok(st) => std::process::exit(st.code().unwrap_or(1)),
+                Err(e) => Err(e).context("could not run the broker"),
+            }
         }
     };
     if let Err(e) = r {
@@ -128,8 +153,8 @@ struct ListFile {
     names: Vec<String>,
 }
 
-fn read_list(repo: &Path, target: &Target) -> Result<Option<ListFile>> {
-    let p = repo.join(target.path());
+fn read_list(repo: &Path, path: &str) -> Result<Option<ListFile>> {
+    let p = repo.join(path);
     match fs::read_to_string(&p) {
         Ok(text) => {
             let names = pkg::parse_list(&text).with_context(|| p.display().to_string())?;
@@ -145,7 +170,7 @@ fn list(repo: &Path) -> Result<()> {
     let mut failed = false;
     for target in [Target::System, Target::User(user)] {
         println!("{} ({}):", target.describe(), target.path());
-        match read_list(repo, &target) {
+        match read_list(repo, &target.path()) {
             Ok(f) => {
                 let names = f.map(|f| f.names).unwrap_or_default();
                 if names.is_empty() {
@@ -273,7 +298,7 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
             bail!("'{n}' is not a package name (a nixpkgs attribute, e.g. htop or python3Packages.requests)");
         }
     }
-    let old = read_list(&cli.repo, &target)?;
+    let old = read_list(&cli.repo, &target.path())?;
     let (new, changed) = pkg::edit(old.as_ref().map(|f| f.names.as_slice()).unwrap_or_default(), names, how);
     let verb = if how == Edit::Add { "Install" } else { "Remove" };
     if changed.is_empty() {
@@ -307,9 +332,89 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
     submit(cli, scratch, &host, change, yes)
 }
 
+const SERVICES: &str = "services.json";
+
+/// The service catalog (name → what it is) and what is enabled, from the machine's config.
+fn services(repo: &Path, host: &str) -> Result<(Vec<(String, String)>, Vec<String>)> {
+    let out = Command::new("nix")
+        .args(["eval", "--json"])
+        .arg(format!("{}#nixosConfigurations.{host}.config.kestrel.services", flake_ref(repo)))
+        .args(["--apply", "s: { inherit (s) catalog enabled; }"])
+        .output()
+        .context("running nix eval")?;
+    if !out.status.success() {
+        bail!("cannot read this machine's services: {}", last_error(&out.stderr));
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let catalog = v["catalog"]
+        .as_object()
+        .map(|o| o.iter().map(|(k, d)| (k.clone(), d.as_str().unwrap_or_default().to_string())).collect())
+        .unwrap_or_default();
+    let enabled = serde_json::from_value(v["enabled"].clone())?;
+    Ok((catalog, enabled))
+}
+
+fn service_list(cli: &Cli) -> Result<()> {
+    let (catalog, enabled) = services(&cli.repo, &config_name(&cli.repo)?)?;
+    for (name, what) in catalog {
+        let on = if enabled.contains(&name) { "on " } else { "   " };
+        println!("[{on}] {name:<10} {what}");
+    }
+    Ok(())
+}
+
+/// `kestrel service enable|disable`: a system change to services.json, always asked.
+fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
+    check_repo(cli)?;
+    approval(true, false)?;
+    let host = config_name(&cli.repo)?;
+    let (catalog, _) = services(&cli.repo, &host)?;
+    for n in names {
+        if !catalog.iter().any(|(c, _)| c == n) {
+            let all: Vec<_> = catalog.iter().map(|(c, _)| c.as_str()).collect();
+            bail!("'{n}' is not in the service catalog ({})", all.join(", "));
+        }
+    }
+    // SSH from the catalog is keys-only: turning it on without a key would lock you out.
+    if how == Edit::Add && names.iter().any(|n| n == "ssh") {
+        let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?;
+        let keys = fs::read_to_string(home.join(".ssh/authorized_keys")).unwrap_or_default();
+        if !keys.lines().any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')) {
+            bail!("ssh here allows keys only, and ~/.ssh/authorized_keys has none: you would be locked out");
+        }
+    }
+    let old = read_list(&cli.repo, SERVICES)?;
+    let (new, changed) = pkg::edit(old.as_ref().map(|f| f.names.as_slice()).unwrap_or_default(), names, how);
+    if changed.is_empty() {
+        println!("nothing to do: {}", if how == Edit::Add { "already on" } else { "already off" });
+        return Ok(());
+    }
+    let scratch = scratch_dir()?;
+    let scratch = scratch.path();
+    let copy = scratch.join("config");
+    copy_tree(&cli.repo, &copy)?;
+    if !reads_package_lists(&copy, &host)? {
+        bail!(
+            "this machine's config does not read services.json yet: its flake.nix must call \
+             kestrel.lib.mkSystem with `configDir = ./.;` (a system change)"
+        );
+    }
+    let new_text = pkg::render(&new);
+    fs::write(copy.join(SERVICES), &new_text)?;
+    let verb = if how == Edit::Add { "Enable" } else { "Disable" };
+    let change = Change {
+        copy: &copy,
+        path: SERVICES,
+        old: old.as_ref().map(|f| f.text.as_str()),
+        new: &new_text,
+        reason: format!("{verb} {}", changed.join(", ")),
+    };
+    submit(cli, scratch, &host, change, false)
+}
+
 /// The ledger, read through the broker (it is root-only).
 fn read_ledger(cli: &Cli) -> Result<Vec<history::Entry>> {
-    let out = broker(cli, &["log", "--json"])
+    let out = broker(cli, &["log", "--json", "--brief"])
         .stderr(Stdio::inherit())
         .output()
         .context("running the broker")?;
@@ -323,23 +428,28 @@ fn read_ledger(cli: &Cli) -> Result<Vec<history::Entry>> {
 fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
     let entries = read_ledger(cli)?;
     let target = history::undo_target(&entries, seq)?;
-    let files = target.data["files"].as_array().map(|f| {
-        f.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
-    });
+    let files: Vec<&str> = target.data["files"].as_array().map(|f| f.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+    let reason = history::clean(&target.reason);
     // Say what it is before anything else, refusals included.
     println!(
-        "#{}  {}  ({} tier{})",
+        "#{}  {reason}  ({} tier, by {}{}{})",
         target.seq,
-        target.reason,
-        target.tier,
-        files.map(|f| format!("; {f}")).unwrap_or_default()
+        history::clean(&target.tier),
+        history::clean(&target.actor),
+        if target.tainted { ", tainted ⚠" } else { "" },
+        if files.is_empty() { String::new() } else { format!("; {}", history::clean(&files.join(", "))) }
     );
-    approval(target.tier != "user", yes)?;
-    if !yes && !confirm(&format!("Undo \"{}\"?", target.reason))? {
+    // --yes only for a change to exactly your own package list — not someone else's, not the system.
+    let me = me()?;
+    if yes && files != [format!("users/{me}.packages.json").as_str()] {
+        bail!("--yes only undoes changes to your own packages; this one changes something else: run again without --yes");
+    }
+    approval(false, yes)?; // there must be someone to ask
+    if !yes && !confirm(&format!("Undo \"{reason}\"?"))? {
         println!("not undone");
         return Ok(());
     }
-    let st = broker(cli, &["rollback", &target.seq.to_string(), "--approved-by", &me()?])
+    let st = broker(cli, &["rollback", &target.seq.to_string(), "--approved-by", &me])
         .status()
         .context("running the broker")?;
     if !st.success() {

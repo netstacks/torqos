@@ -824,3 +824,20 @@ fn status_cli_exits_75_while_busy() {
     let out = run_cli(dir.path(), "true", &["status"]);
     assert_eq!(out.status.code(), Some(75), "{out:?}");
 }
+
+/// The broker's own `log` must not let a proposal's reason drive the terminal; `--brief` drops
+/// the diffs.
+#[test]
+fn log_neutralises_control_characters_and_brief_drops_diffs() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    b.propose(&d, "x\r\u{1b}[2K#99 applied fake\nsecond line", Actor::Agent, false).unwrap();
+    let out = run_cli(dir.path(), "true", &["log"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains('\r') && !text.contains('\u{1b}'), "{text:?}");
+    assert_eq!(text.lines().count(), 2, "one line per entry: {text}");
+    let brief = String::from_utf8(run_cli(dir.path(), "true", &["log", "--json", "--brief"]).stdout).unwrap();
+    assert!(!brief.contains("\"diff\":"), "{brief}");
+    let full = String::from_utf8(run_cli(dir.path(), "true", &["log", "--json"]).stdout).unwrap();
+    assert!(full.contains("\"diff\":"));
+}

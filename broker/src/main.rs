@@ -68,6 +68,9 @@ enum Cmd {
     Log {
         #[arg(long)]
         json: bool,
+        /// Leave out proposals' full diffs (for listing: the diffs make the ledger large).
+        #[arg(long)]
+        brief: bool,
     },
     /// Verify the ledger hash chain.
     Verify,
@@ -113,15 +116,21 @@ fn main() -> Result<()> {
             Some(e) => println!("{} (ledger #{})", e.body.reason, e.body.seq),
             None => println!("nothing to reconcile"),
         },
-        Cmd::Log { json } => {
-            for e in b.ledger.read_all()? {
+        Cmd::Log { json, brief } => {
+            for mut e in b.ledger.read_all()? {
+                if brief {
+                    if let Some(d) = e.body.data.as_object_mut() {
+                        d.remove("diff");
+                    }
+                }
                 if json {
                     println!("{}", serde_json::to_string(&e)?);
                 } else {
+                    // Ledger text comes from whoever proposed: never let it drive the terminal.
                     println!(
                         "#{:<4} {} {:<12} {:<9} {:<6}{} {}",
-                        e.body.seq, e.body.ts, e.body.kind, e.body.tier, e.body.actor,
-                        if e.body.tainted { " ⚠" } else { "" }, e.body.reason
+                        e.body.seq, e.body.ts, e.body.kind, e.body.tier, printable(&e.body.actor),
+                        if e.body.tainted { " ⚠" } else { "" }, printable(&e.body.reason)
                     );
                 }
             }
@@ -158,4 +167,16 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Control characters (escape sequences, carriage returns, newlines) and bidi overrides as visible
+/// escapes: ledger text is written by whoever proposed, the agent included, and must not be able to
+/// make one entry look like another on a terminal.
+fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            let bidi = matches!(c, '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+            if c.is_control() || bidi { c.escape_unicode().to_string() } else { c.to_string() }
+        })
+        .collect()
 }
