@@ -32,9 +32,14 @@
       };
 
       # Helper used by per-machine config repos (see templates/config).
-      lib.mkSystem = { system, modules ? [ ] }:
+      # `configDir = ./.;` lets the machine's package lists (packages.json, users/*.packages.json)
+      # be read from the config repo; see modules/packages.nix.
+      lib.mkSystem = { system, modules ? [ ], configDir ? null }:
         nixpkgs.lib.nixosSystem {
-          modules = [ self.nixosModules.default { nixpkgs.hostPlatform = system; } ] ++ modules;
+          modules = [
+            self.nixosModules.default
+            { nixpkgs.hostPlatform = system; kestrel.packages.configDir = configDir; }
+          ] ++ modules;
         };
 
       # ── Throwaway dev VMs: nix build .#nixosConfigurations.dev-vm-<arch>.config.system.build.vm

@@ -28,6 +28,11 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    (`git+file://…?rev=<commit>`) would make "running system = ledgered commit" hold by
    construction instead of by fsync discipline.
 
+6a. **User tier is not bound to a user:** `users/alice.packages.json` is user tier whoever proposes
+   it, so an agent session acting for viper could change alice's apps. Needs the caller identity
+   from #4 (M3 socket). A user's packages also act in that user's *session*: autostart entries,
+   D-Bus session services and systemd user units from their profile (never system-wide).
+
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing

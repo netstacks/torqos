@@ -6,5 +6,6 @@
     ./broker.nix
     ./ai.nix
     ./dev.nix
+    ./packages.nix
   ];
 }

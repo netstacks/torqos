@@ -80,3 +80,18 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   `KNOWN-GAPS.md`): a broken ledger, a HEAD that does not descend from the recorded commit, or
   leftover git lock files other than `index.lock`. Until the boot-time hook lands, a machine that
   lost power mid-switch runs whatever generation it booted until the next broker command.
+
+## ADR-011 — Installed software is data in the config repo, not Nix code
+- **Context:** Installing software is the most common change anyone makes, and the agent will make
+  it too. Having tools edit Nix lists inside `.nix` files is fragile, and `users/<name>.nix` was
+  user tier even though it is a full NixOS module (sudo rules, services: an escalation path).
+- **Decision:** `packages.json` (system tier) and `users/<name>.packages.json` (user tier) are JSON
+  lists of nixpkgs attribute paths, read by `modules/packages.nix` when the config flake passes
+  `kestrel.lib.mkSystem { configDir = ./.; }`. User tier is that exact data-file shape and
+  nothing else: any `.nix` file is system tier wherever it lives (`broker/src/policy.rs`). Names
+  are a top-level attribute or one level under a known package set; unfree/broken/unsupported
+  packages are refused at evaluation with a clear message. `kestrel pkg` (unprivileged) and later
+  the agent's packages MCP server change them by proposing a diff through the broker.
+- **Consequences:** A package change is a one-line JSON diff anyone can review, ledgered and
+  undoable like any other. A user-tier change can only add nixpkgs packages to that user's profile
+  (nothing is linked system-wide). GUI apps via Flatpak (ARCHITECTURE.md) remain a later layer.
