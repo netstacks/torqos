@@ -6,7 +6,7 @@
 1. UTM → Create → **Virtualize** → **Linux**. Leave "Use Apple Virtualization" **off** (QEMU).
 2. Boot ISO: `latest-nixos-graphical-aarch64-linux.iso` (verify SHA-256).
 3. 8 GB RAM (16 if available), 4+ cores, 64 GB disk. Hardware OpenGL **off** for install.
-4. Install with the graphical installer. Create user **casey** (matches the template).
+4. Install with the graphical installer. Any (lowercase) user name works; setup below uses `$USER`.
    Desktop choice doesn't matter — it gets replaced.
 5. Shut down, remove the ISO from the CD drive, boot the installed system.
 
@@ -29,7 +29,8 @@ git clone <your GitHub repo URL> ~/kestrel
 # c) Create this machine's config repo from the template
 sudo nix flake new -t ~/kestrel#config /var/lib/kestrel/config
 sudo cp /etc/nixos/hardware-configuration.nix /var/lib/kestrel/config/
-#   If your username isn't casey: edit system.nix, users/, flake.nix (kestrel.url path).
+sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/kestrel/config/system.nix          # the one place a user name is set
+sudo sed -i "s|github:netstacks/kestrel|path:$HOME/kestrel|" /var/lib/kestrel/config/flake.nix  # dev: your checkout
 
 # d) First switch into Kestrel (explicit host name the first time)
 sudo nixos-rebuild switch --flake /var/lib/kestrel/config#kestrel-utm
@@ -45,12 +46,26 @@ sudo cp -r /var/lib/kestrel/config /tmp/cfg && sudo chown -R $USER /tmp/cfg
 sed -i 's/kestrel.desktop.enable = true;/kestrel.desktop.enable = true;\n  services.printing.enable = true;/' /tmp/cfg/desktop.nix
 (cd /tmp/cfg && git diff > /tmp/printing.diff)
 sudo kestrel-broker propose --diff /tmp/printing.diff --reason "Enable printing" --actor user
-sudo kestrel-broker apply <seq> --approved-by casey      # commits + nixos-rebuild switch
+sudo kestrel-broker apply <seq> --approved-by $USER      # commits + nixos-rebuild switch
 sudo kestrel-broker log
-sudo kestrel-broker rollback <applied-seq> --approved-by casey
+sudo kestrel-broker rollback <applied-seq> --approved-by $USER
 sudo kestrel-broker verify
 ```
 (Producing diffs by hand is temporary — the agent and the Activity UI will do this in M2/M3.)
+
+Software has its own command, which writes the diff for you (ADR-011):
+```bash
+kestrel pkg search ripgrep
+kestrel pkg add ripgrep            # for you (user tier); --system for everyone (system tier)
+kestrel pkg remove ripgrep
+kestrel pkg list
+```
+It checks the change against the whole system first, then proposes and applies it through the
+broker, so it is ledgered and `kestrel-broker rollback` undoes it.
+
+Do not run `nixos-rebuild` against `/etc/nixos`: on Kestrel those files are stubs that refuse to
+build (`kestrel.broker.guardEtcNixos`), because building them replaces the whole system outside
+the ledger.
 
 ### 3. Editing from macOS
 VS Code Remote-SSH (or run Claude Code inside the VM). Develop the distribution in `~/kestrel`;

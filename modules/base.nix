@@ -10,6 +10,18 @@ in
   };
 
   config = {
+    assertions = [
+      {
+        assertion = cfg.user != "CHANGE-ME";
+        message = "Set kestrel.user to your login name in the config repo's system.nix.";
+      }
+      {
+        # The same shape the broker accepts for users/<name>.packages.json (user tier).
+        assertion = builtins.match "[a-z_][a-z0-9_-]*" cfg.user != null;
+        message = "kestrel.user '${cfg.user}' must be a lowercase login name ([a-z_][a-z0-9_-]*).";
+      }
+    ];
+
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
       # Only root (i.e. the broker via sudo/systemd) may drive system builds.

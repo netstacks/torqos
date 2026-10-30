@@ -66,8 +66,8 @@ nix build .#checks.aarch64-linux.trust-loop       # run the trust-loop VM test
 # Inside the UTM VM, against the machine's config repo
 sudo nixos-rebuild switch --flake /var/lib/kestrel/config#kestrel-utm   # first time only
 sudo kestrel-broker propose --diff change.diff --reason "..." --actor user
-sudo kestrel-broker apply <seq> --approved-by casey
-sudo kestrel-broker rollback <applied-seq> --approved-by casey
+sudo kestrel-broker apply <seq> --approved-by $USER
+sudo kestrel-broker rollback <applied-seq> --approved-by $USER
 sudo kestrel-broker log && sudo kestrel-broker verify
 ```
 
@@ -109,8 +109,8 @@ proposes nothing. See `docs/ROADMAP.md`.
 - Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
 ### You are probably running inside the dev VM
-- Host `kestrel-utm`, user **`viper`** (not casey — the VM's config repo was adapted; the template
-  still says casey). `kestrel.dev.enable = true` there: passwordless sudo, you have root (ADR-009).
+- Host `kestrel-utm`, user **`viper`** (the template no longer names a user; `kestrel.user` in
+  the config repo's `system.nix` is the one place). `kestrel.dev.enable = true` there: passwordless sudo, you have root (ADR-009).
 - `~/kestrel` = this repo (working copy; push to `github.com/netstacks/kestrel`, branch `main`).
 - `/var/lib/kestrel/config` = the machine's config repo; its `kestrel` input is
   `path:/home/viper/kestrel`.

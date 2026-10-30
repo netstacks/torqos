@@ -2,20 +2,22 @@
 # kestrel-broker after it has been initialised. Every change here is a commit + ledger entry.
 {
   inputs = {
-    # During development: your local checkout of the Kestrel repo.
-    # Later: "github:<owner>/kestrel". Bumping this is itself a broker-approved commit.
-    kestrel.url = "path:/home/casey/kestrel";
+    # The Kestrel distribution. While developing Kestrel itself, point this at your checkout
+    # instead, e.g. "path:/home/<you>/kestrel". Bumping it is itself a broker-approved commit.
+    kestrel.url = "github:netstacks/kestrel";
     nixpkgs.follows = "kestrel/nixpkgs";
   };
 
   outputs = { kestrel, ... }: {
     nixosConfigurations.kestrel-utm = kestrel.lib.mkSystem {
       system = "aarch64-linux";
+      # Installed software is read from packages.json and users/<name>.packages.json here
+      # (`kestrel pkg add`; ADR-011).
+      configDir = ./.;
       modules = [
         ./machine.nix
         ./system.nix
         ./desktop.nix
-        ./users/casey.nix
       ];
     };
   };

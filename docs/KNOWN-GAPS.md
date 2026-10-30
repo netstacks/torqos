@@ -41,7 +41,8 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 ## Desktop
 7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
    `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a Kestrel niri config.
-8. Template hard-codes user `casey`; should take the username from one place.
+8. ~~Template hard-codes user `casey`.~~ Fixed: `kestrel.user` in `system.nix` is the one place
+   (asserted set and well-formed); per-user apps are `users/<name>.packages.json`.
 
 ## UTM VM quirks (not Kestrel bugs)
 - niri needs 3D: UTM display card must be `virtio-gpu-gl-pci` with GPU acceleration on
