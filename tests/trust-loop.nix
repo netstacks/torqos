@@ -5,10 +5,14 @@
 pkgs.testers.runNixOSTest {
   name = "torq-trust-loop";
 
-  nodes.machine = { ... }: {
+  nodes.machine = { options, ... }: {
     imports = [ self.nixosModules.default ];
     torq.user = "dev";
     torq.desktop.enable = false;
+    # Rebuilds are stubbed through the broker's fixed settings (a root broker refuses a
+    # TORQ_REBUILD_CMD from its caller). What a real machine would run is checked below.
+    torq.broker.rebuildCommand = "true";
+    environment.etc."torq-test/default-rebuild".text = options.torq.broker.rebuildCommand.default;
     specialisation.noguard.configuration.torq.broker.guardEtcNixos = false;
     # The test VM's disk is tiny: min-free would garbage-collect mid-test, deleting the unrooted
     # nixpkgs source the stray-rebuild check uses.
@@ -34,7 +38,6 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     machine.wait_for_unit("multi-user.target")
-    env = "TORQ_REBUILD_CMD=true "
     repo = "/var/lib/torq/config"
     # The boot-time drift check ran (a unit that never ran also reports Result=success, so check
     # that it started and what it said), and passed on a machine with nothing ledgered yet.
@@ -43,10 +46,11 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test ! -e /run/torq/drift")
     # The broker builds the fixed configuration `torq`, not one named after the host (this host is
     # "machine"): changing the host name must never leave rebuilds looking for a missing config.
-    machine.succeed("grep -q \"flake {repo}#torq'\" \"$(readlink -f \"$(command -v torq-broker)\")\"")
+    machine.succeed("grep -qx 'nixos-rebuild switch --flake {repo}#torq' /etc/torq-test/default-rebuild")
+    machine.succeed("jq -e '.rebuild == \"true\" and .repo == \"/var/lib/torq/config\"' /etc/torq/broker.json")
 
     machine.succeed(f"mkdir -p {repo} && cp /etc/torq-test/desktop.nix {repo}/ && touch {repo}/flake.nix")
-    machine.succeed(env + "torq-broker init")
+    machine.succeed("torq-broker init")
 
     with subtest("init unit never re-runs on an initialised repo"):
         # Re-running would sweep out-of-band edits into a 'baseline' commit, and during a broker
@@ -58,26 +62,38 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"rm {repo}/stray.nix")
 
     with subtest("agent proposes, user approves, change lands"):
-        out = machine.succeed(env + "torq-broker propose --actor agent "
+        out = machine.succeed("torq-broker propose --actor agent "
                               "--diff /etc/torq-test/night-light.diff --reason 'Night light'")
         assert "proposal #2" in out, out
-        machine.succeed(env + "torq-broker apply 2 --approved-by tester")
+        machine.succeed("torq-broker apply 2 --approved-by tester")
         machine.succeed(f"grep -q 'nightLight = true' {repo}/desktop.nix")
         machine.succeed(f"git -C {repo} log -1 --format=%B | grep -q 'Ledger-Entry: 3'")
 
     with subtest("one-command undo"):
-        machine.succeed(env + "torq-broker revert 3 --approved-by tester")
+        machine.succeed("torq-broker revert 3 --approved-by tester")
         machine.succeed(f"grep -q 'nightLight = false' {repo}/desktop.nix")
 
+    with subtest("a root broker takes its settings only from /etc/torq/broker.json"):
+        # A caller's override is refused, loudly, by variable or by flag.
+        for override in ["TORQ_REBUILD_CMD='touch /tmp/pwned' torq-broker",
+                         "TORQ_STATE_DIR=/tmp/fresh torq-broker",
+                         "TORQ_CONFIG_REPO=/tmp/other torq-broker",
+                         "torq-broker --state-dir /tmp/fresh"]:
+            out = machine.fail(f"{override} verify 2>&1")
+            assert "takes its settings only from /etc/torq/broker.json" in out, out
+        machine.succeed("test ! -e /tmp/pwned -a ! -e /tmp/fresh")
+        # Nothing of the caller's environment reaches git: a GIT_DIR elsewhere is ignored.
+        machine.succeed("GIT_DIR=/nonexistent torq-broker status")
+
     with subtest("agent cannot touch policy"):
-        machine.fail(env + "torq-broker propose --actor agent "
+        machine.fail("torq-broker propose --actor agent "
                      "--diff /etc/torq-test/policy.diff --reason 'loosen permissions'")
 
     with subtest("ledger is tamper-evident"):
-        machine.succeed(env + "torq-broker verify")
+        machine.succeed("torq-broker verify")
         machine.succeed("cp /var/lib/torq/state/ledger.jsonl /tmp/ledger.good")
         machine.succeed("sed -i 's/Night light/Nothing here/' /var/lib/torq/state/ledger.jsonl")
-        machine.fail(env + "torq-broker verify")
+        machine.fail("torq-broker verify")
         machine.succeed("systemctl start torq-status")  # never fails (it runs during switches)...
         machine.succeed("grep -q 'ledger' /run/torq/drift")  # ...but reports it
         machine.succeed("cp /tmp/ledger.good /var/lib/torq/state/ledger.jsonl")  # for what follows

@@ -1,28 +1,36 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use torq_broker::config::{self, Requested, Settings};
 use torq_broker::{ledger::Entry, policy::Actor, Broker, Busy};
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// TorqOS change broker — the only writer of the system config repo.
+///
+/// Run as root on a TorqOS machine, it takes its settings only from /etc/torq/broker.json and
+/// refuses flags or TORQ_* variables that differ from it. It always runs with a cleared
+/// environment.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Path to the config git repository.
-    #[arg(long, env = "TORQ_CONFIG_REPO", default_value = "/var/lib/torq/config")]
-    repo: PathBuf,
-    /// Directory for the ledger and broker state.
-    #[arg(long, env = "TORQ_STATE_DIR", default_value = "/var/lib/torq/state")]
-    state_dir: PathBuf,
-    /// Command run after each commit; `{repo}` is replaced with the repo path.
-    #[arg(long, env = "TORQ_REBUILD_CMD", default_value = "nixos-rebuild switch --flake {repo}")]
-    rebuild_cmd: String,
-    /// Link to the running system, recorded after every rebuild and compared by `status`.
-    #[arg(long, env = "TORQ_CURRENT_SYSTEM", default_value = "/run/current-system")]
-    current_system: PathBuf,
-    /// The system profile: what the next boot starts. Compared by `status`.
-    #[arg(long, env = "TORQ_SYSTEM_PROFILE", default_value = "/nix/var/nix/profiles/system")]
-    system_profile: PathBuf,
+    /// Path to the config git repository [default: /var/lib/torq/config].
+    #[arg(long, env = "TORQ_CONFIG_REPO")]
+    repo: Option<PathBuf>,
+    /// Directory for the ledger and broker state [default: /var/lib/torq/state].
+    #[arg(long, env = "TORQ_STATE_DIR")]
+    state_dir: Option<PathBuf>,
+    /// Command run after each commit; `{repo}` is replaced with the repo path
+    /// [default: nixos-rebuild switch --flake {repo}].
+    #[arg(long, env = "TORQ_REBUILD_CMD")]
+    rebuild_cmd: Option<String>,
+    /// Link to the running system, recorded after every rebuild and compared by `status`
+    /// [default: /run/current-system].
+    #[arg(long, env = "TORQ_CURRENT_SYSTEM")]
+    current_system: Option<PathBuf>,
+    /// The system profile: what the next boot starts, compared by `status`
+    /// [default: /nix/var/nix/profiles/system].
+    #[arg(long, env = "TORQ_SYSTEM_PROFILE")]
+    system_profile: Option<PathBuf>,
     /// Machine-readable output: one JSON value per command (a ledger entry, or the status), and
     /// `{"error": "..."}` on failure. For the `torq` CLI (ADR-014); people get plain text.
     #[arg(long, global = true)]
@@ -112,18 +120,46 @@ fn print_entry(e: &Entry) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the settings (config.rs), then replace this process's environment with the broker's own,
+/// before anything runs: every child (git, sh, the rebuild) inherits it, and nothing of the
+/// caller's — GIT_*, NIX_*, LD_*, their HOME and its .gitconfig — may reach a root broker's work.
+fn settings(cli: &Cli) -> Result<Settings> {
+    let root = config::running_as_root()?;
+    let path = std::env::var("PATH").unwrap_or_default();
+    let home = if root { PathBuf::from("/root") } else { std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into()) };
+    let asked = Requested {
+        repo: cli.repo.clone(),
+        state_dir: cli.state_dir.clone(),
+        rebuild: cli.rebuild_cmd.clone(),
+        current_system: cli.current_system.clone(),
+        system_profile: cli.system_profile.clone(),
+    };
+    let s = config::resolve(root, Settings::read(Path::new(config::FIXED))?, asked, Settings::defaults(path, home))?;
+    let inherited = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
+    let env = config::environment(&s, inherited);
+    // Single-threaded here, before any child is started.
+    for (k, _) in std::env::vars_os() {
+        std::env::remove_var(k);
+    }
+    for (k, v) in env {
+        std::env::set_var(k, v);
+    }
+    Ok(s)
+}
+
 fn run(cli: Cli) -> Result<()> {
     let json = cli.json;
-    let b = Broker::new(&cli.repo, &cli.state_dir, &cli.rebuild_cmd)
-        .with_current_system(&cli.current_system)
-        .with_system_profile(&cli.system_profile);
+    let s = settings(&cli)?;
+    let b = Broker::new(&s.repo, &s.state_dir, &s.rebuild)
+        .with_current_system(&s.current_system)
+        .with_system_profile(&s.system_profile);
     match cli.cmd {
         Cmd::Init => {
             b.init()?;
             if json {
-                println!("{}", json!({ "initialised": cli.repo, "ledger": b.ledger.path() }));
+                println!("{}", json!({ "initialised": s.repo, "ledger": b.ledger.path() }));
             } else {
-                println!("initialised {} (ledger: {})", cli.repo.display(), b.ledger.path().display());
+                println!("initialised {} (ledger: {})", s.repo.display(), b.ledger.path().display());
             }
         }
         Cmd::Propose { diff, reason, actor, tainted, base } => {

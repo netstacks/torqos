@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const REPO: &str = "/var/lib/torq/config";
-const BROKER: &str = "sudo torq-broker";
+/// By absolute path: nothing earlier on PATH can stand in for sudo or the broker.
+const BROKER: &str = "/run/wrappers/bin/sudo /run/current-system/sw/bin/torq-broker";
 /// The configuration the broker builds, whatever the host is called (torq.broker.configName).
 const CONFIG: &str = "torq";
 

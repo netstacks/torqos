@@ -1205,3 +1205,54 @@ fn base_must_look_like_a_commit() {
         assert!(err.contains("full commit id"), "{bad}: {err}");
     }
 }
+
+/// The broker with extra environment variables, as a caller (through sudo, say) could pass them.
+fn run_cli_env(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_torq-broker"))
+        .arg("--repo").arg(dir.join("config"))
+        .arg("--state-dir").arg(dir.join("state"))
+        .arg("--rebuild-cmd").arg("true")
+        .envs(env.iter().copied())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// A folder with a pre-commit hook that fails: if git ever runs it, a commit fails.
+fn failing_hooks(dir: &Path) -> std::path::PathBuf {
+    let hooks = dir.join("evil-hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    fs::write(&hook, "#!/bin/sh\ntouch \"$(dirname \"$0\")/ran\"\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    hooks
+}
+
+/// Nothing in the caller's environment reaches the git (or rebuild) the broker runs: not GIT_*,
+/// not git configuration in variables, not the caller's ~/.gitconfig (review N3).
+#[test]
+fn the_callers_environment_does_not_reach_git() {
+    let (dir, b) = setup("true");
+    let hooks = failing_hooks(dir.path());
+    let home = dir.path().join("caller-home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".gitconfig"), format!("[core]\n\thooksPath = {}\n", hooks.display())).unwrap();
+    let hooks_s = hooks.display().to_string();
+    let home_s = home.display().to_string();
+    let hostile: [&[(&str, &str)]; 3] = [
+        &[("GIT_DIR", "/nonexistent")],
+        &[("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "core.hooksPath"), ("GIT_CONFIG_VALUE_0", &hooks_s)],
+        &[("HOME", &home_s)],
+    ];
+    for env in hostile {
+        let d = write_diff(dir.path(), "theme.diff", THEME);
+        let out = run_cli_env(dir.path(), env, &["--json", "propose", "--diff", &d.to_string_lossy(), "--reason", "x"]);
+        assert!(out.status.success(), "{env:?}: {}", String::from_utf8_lossy(&out.stdout));
+        let seq = serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["seq"].as_u64().unwrap();
+        let out = run_cli_env(dir.path(), env, &["--json", "apply", &seq.to_string(), "--approved-by", "casey"]);
+        assert!(out.status.success(), "{env:?}: {}", String::from_utf8_lossy(&out.stdout));
+        assert!(!hooks.join("ran").exists(), "{env:?}: the caller's hook ran");
+        let applied = serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["seq"].as_u64().unwrap();
+        b.revert(applied, "casey").unwrap(); // back to the start for the next case
+    }
+}

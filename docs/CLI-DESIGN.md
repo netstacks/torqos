@@ -230,7 +230,13 @@ The broker stays small; its additions for this model:
   `pending.json` gains a version field so an older broker refuses a newer record clearly.
 - `status` reports a pending confirmation (its deadline) instead of calling it drift.
 - The broker clears its environment at start and takes its paths and rebuild commands from fixed
-  configuration, not from the caller (closes part of KNOWN-GAPS #4); sudo uses a fixed `secure_path`.
+  configuration, not from the caller (closes part of KNOWN-GAPS #4). Done (1e): as root it reads
+  only `/etc/torq/broker.json` (written by the module from `torq.broker.*`, including
+  `rebuildCommand`) and refuses a flag or `TORQ_*` variable that differs, instead of ignoring it;
+  it keeps only `LANG`, `LC_ALL`, `TERM`, `TZ` from its caller, sets `PATH` and `HOME` from the file,
+  and tells git to read no global or system configuration. That fixed `PATH` takes the place of a
+  sudo `secure_path`; the CLI calls sudo and the broker by absolute path. Without root (tests),
+  flags apply.
 - User-tier files are an explicit allow-list in `policy.rs` (`USER_LEAVES`, kept in step with the
   module's): `users/<name>/packages.json` today, `users/<name>/cli.json` when the CLI-style setting
   gives it a type — a leaf joins only with its typed reader. Each must be a regular file (git mode

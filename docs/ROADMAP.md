@@ -21,7 +21,8 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 **`torqcli`: the network-device model (ADR-016)** — replaces `torq pkg/service/update/log/undo/status`:
 - [ ] Broker: `propose --base`, `apply --confirm` (test activation, anchor), `confirm`, `expire-confirm`
       (transient timer, direct restore, boot check), pending-confirm interlock, `revert`, JSON-only
-      user-tier files at `users/<name>/<leaf>.json`; VM tests.
+      user-tier files at `users/<name>/<leaf>.json`; VM tests. Done so far: `--base` (1c), `revert`
+      (1d), user-tier JSON files, fixed settings + cleared environment for a root broker (1e).
 - [ ] Schema-driven tree: `system packages/host-name/time-zone/cli`, `services`,
       `users <name> packages/cli`; `share/torq/schema.json` in the system; fixed output
       `nixosConfigurations.torq`.

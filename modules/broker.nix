@@ -33,6 +33,16 @@ in
         host name would leave the next rebuild looking for a configuration that does not exist.
       '';
     };
+    rebuildCommand = lib.mkOption {
+      type = lib.types.str;
+      default = "nixos-rebuild switch --flake {repo}#${cfg.configName}";
+      defaultText = lib.literalExpression ''"nixos-rebuild switch --flake {repo}#''${config.torq.broker.configName}"'';
+      description = ''
+        What the broker runs after each commit; `{repo}` is replaced with the config repo's path.
+        Part of the broker's fixed settings (/etc/torq/broker.json): a root broker refuses any other
+        command from its caller. Tests set it to `true`.
+      '';
+    };
     guardEtcNixos = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -49,25 +59,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # The broker with this machine's rebuild command baked in (a default, so it survives sudo's
-    # environment reset; TORQ_REBUILD_CMD still overrides it, see KNOWN-GAPS #4).
-    environment.systemPackages = [
-      (pkgs.symlinkJoin {
-        name = "torq-broker-${cfg.configName}";
-        paths = [ cfg.package ];
-        nativeBuildInputs = [ pkgs.makeWrapper ];
-        postBuild = ''
-          wrapProgram $out/bin/torq-broker \
-            --set-default TORQ_REBUILD_CMD ${lib.escapeShellArg "nixos-rebuild switch --flake {repo}#${cfg.configName}"}
-        '';
-        meta.mainProgram = "torq-broker";
-      })
-    ];
-
-    environment.variables = {
-      TORQ_CONFIG_REPO = cfg.configRepo;
-      TORQ_STATE_DIR = cfg.stateDir;
-    };
+    environment.systemPackages = [ cfg.package ];
 
     systemd.tmpfiles.rules = [
       "d /var/lib/torq 0755 root root -"
@@ -87,11 +79,6 @@ in
       after = [ "torq-broker-init.service" ];
       wantedBy = [ "multi-user.target" ];
       restartIfChanged = false;
-      path = [ pkgs.git ];
-      environment = {
-        TORQ_CONFIG_REPO = cfg.configRepo;
-        TORQ_STATE_DIR = cfg.stateDir;
-      };
       serviceConfig.Type = "oneshot";
       # Never exits non-zero (see above), whatever happens in here.
       script = ''
@@ -127,9 +114,25 @@ in
       fi
     '';
 
+    # The broker's fixed settings: a root broker takes them only from here and refuses a caller's
+    # flags or TORQ_* variables that differ (broker/src/config.rs; KNOWN-GAPS #4). PATH and HOME for
+    # what it runs are fixed too, never the caller's.
+    environment.etc = lib.mkMerge [
+     {
+      "torq/broker.json".text = builtins.toJSON {
+        repo = cfg.configRepo;
+        stateDir = cfg.stateDir;
+        rebuild = cfg.rebuildCommand;
+        currentSystem = "/run/current-system";
+        systemProfile = "/nix/var/nix/profiles/system";
+        path = "/run/current-system/sw/bin";
+        home = "/root";
+      };
+     }
+
     # A stray `nixos-rebuild switch` (a person, or another tool following stock NixOS habits) must
     # fail loudly instead of switching the machine away from its ledgered config.
-    environment.etc = lib.mkIf cfg.guardEtcNixos (
+     (lib.mkIf cfg.guardEtcNixos (
       let
         # Deliberately does not name the moved-aside files: building any other config is the same
         # mistake.
@@ -160,7 +163,8 @@ in
           }
         '';
       }
-    );
+    ))
+    ];
     # /etc activation replaces existing files silently: move the owner's files aside first.
     # A symlink is moved as a link, never opened (it could point at a FIFO or a hung mount, and this
     # runs at boot). A regular file is left in place only if it is byte-identical to our stub in the
@@ -198,11 +202,7 @@ in
         "${cfg.configRepo}/flake.nix"
         "!${cfg.configRepo}/.git"
       ];
-      path = [ pkgs.git ];
-      environment = {
-        TORQ_CONFIG_REPO = cfg.configRepo;
-        TORQ_STATE_DIR = cfg.stateDir;
-      };
+      # Its settings (and PATH) come from /etc/torq/broker.json.
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;

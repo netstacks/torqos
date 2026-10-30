@@ -5,6 +5,7 @@
 //! If a rebuild fails, the repo is reset to the previous commit, that commit is rebuilt (the
 //! failed rebuild may already have activated), and the failure is ledgered.
 
+pub mod config;
 pub mod ledger;
 pub mod policy;
 pub mod repo;
