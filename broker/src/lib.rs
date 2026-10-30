@@ -40,7 +40,9 @@ impl Lock {
         // Read-only: the fd is handed to the rebuild as stdin, and nothing should write into it.
         let f = fs::File::open(&p)?;
         f.try_lock().with_context(|| {
-            format!("another broker operation is running ({}; held by: {})", p.display(), holders(&p))
+            let h = holders(&p);
+            let h = if h.is_empty() { "unknown".to_string() } else { h.join(", ") };
+            format!("another broker operation is running ({}; held by: {h})", p.display())
         })?;
         Ok(Lock(f))
     }
@@ -56,26 +58,27 @@ impl Lock {
     }
 }
 
-/// Processes with the lock file open, for the "operation is running" error: a process that
-/// inherited the lock from a rebuild and outlived it would otherwise wedge the broker silently.
-fn holders(lock: &Path) -> String {
-    let lock = fs::canonicalize(lock).unwrap_or_else(|_| lock.to_path_buf());
+/// Processes with `path` open. For the "operation is running" error (a process that inherited the
+/// lock from a rebuild and outlived it would otherwise wedge the broker silently), and to tell a
+/// stale git `index.lock` from a live one.
+fn holders(path: &Path) -> Vec<String> {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let me = std::process::id().to_string();
     let mut found = Vec::new();
     for proc in fs::read_dir("/proc").into_iter().flatten().flatten() {
         let name = proc.file_name();
-        // Skip ourselves (we have it open too, having just failed to lock it) and the non-pid
-        // entries `self`/`thread-self`, which are links back to us.
+        // Skip ourselves (we have the broker lock open too, having just failed to lock it) and the
+        // non-pid entries `self`/`thread-self`, which are links back to us.
         if name == me.as_str() || !name.to_string_lossy().bytes().all(|c| c.is_ascii_digit()) {
             continue;
         }
         let Ok(fds) = fs::read_dir(proc.path().join("fd")) else { continue };
-        if fds.flatten().any(|fd| fs::read_link(fd.path()).is_ok_and(|t| t == lock)) {
+        if fds.flatten().any(|fd| fs::read_link(fd.path()).is_ok_and(|t| t == path)) {
             let comm = fs::read_to_string(proc.path().join("comm")).unwrap_or_default();
             found.push(format!("{} ({})", proc.file_name().to_string_lossy(), comm.trim()));
         }
     }
-    if found.is_empty() { "unknown".into() } else { found.join(", ") }
+    found
 }
 
 /// An apply or rollback in flight, written to `state/pending.json` before its commit and removed
@@ -230,10 +233,13 @@ impl Broker {
     /// record whose outcome was ledgered, and refuse while one still needs reconciling.
     fn refuse_if_interrupted(&self) -> Result<()> {
         if let Some(p) = self.read_pending()? {
+            // Only trust an outcome entry on an intact chain.
+            self.ledger.verify().context("cannot settle an interrupted operation on a broken ledger")?;
             if !self.outcome_recorded(&p)? {
                 bail!(
                     "the {} of #{} was interrupted and must be reconciled first: run `kestrel-broker \
-                     reconcile` (it resets the config to the last ledgered commit and rebuilds)",
+                     reconcile --approved-by <name>` (it resets the config to the last ledgered commit \
+                     and rebuilds)",
                     p.op, p.target
                 );
             }
@@ -244,21 +250,33 @@ impl Broker {
 
     /// Finish an apply or rollback whose broker died: discard its unledgered commit (kept under
     /// `refs/kestrel/discarded/`), reset to the last ledgered commit, rebuild, and ledger it.
-    pub fn reconcile(&self) -> Result<Option<Entry>> {
+    /// `by` is who ran it (the approver of the operation that triggered it, or of `reconcile`).
+    pub fn reconcile(&self, by: &str) -> Result<Option<Entry>> {
         let lock = Lock::acquire(&self.state_dir)?;
-        self.reconcile_locked(&lock)
+        self.reconcile_locked(&lock, by)
     }
 
-    fn reconcile_locked(&self, lock: &Lock) -> Result<Option<Entry>> {
+    fn reconcile_locked(&self, lock: &Lock, by: &str) -> Result<Option<Entry>> {
         let Some(mut p) = self.read_pending()? else { return Ok(None) };
+        // On a broken chain the final append fails, after a full reset and rebuild, on every retry
+        // — and an outcome entry found on it is not trustworthy.
+        self.ledger.verify().context("cannot reconcile on a broken ledger")?;
         if self.outcome_recorded(&p)? {
             self.clear_pending()?;
             return Ok(None);
         }
+        // Fails open if systemctl is unavailable: broker rebuilds are covered by the lock anyway.
         if switch_running() {
             bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then retry");
         }
-        self.repo.remove_stale_index_lock()?;
+        let index_lock = self.repo.index_lock();
+        if index_lock.exists() {
+            let h = holders(&index_lock);
+            if !h.is_empty() {
+                bail!("git is still running on the config repo ({}); retry when it exits", h.join(", "));
+            }
+            self.repo.remove_stale_index_lock()?;
+        }
         let head = self.repo.head()?;
         // Record the commit before resetting, so a crash in here cannot lose it from the audit.
         if p.commit.is_none() && head != p.before {
@@ -274,6 +292,12 @@ impl Broker {
                  refusing to reset",
                 p.before, p.op
             );
+        }
+        // The reset destroys uncommitted changes — a half-applied diff, or someone's edit made
+        // outside the broker. Keep them too.
+        let uncommitted = self.repo.snapshot_dirty()?;
+        if let Some(s) = &uncommitted {
+            self.repo.keep(s)?;
         }
         // Always rebuild, even when nothing was committed: the broker may have died inside a
         // restore, after a failed rebuild had already activated the new system.
@@ -297,8 +321,10 @@ impl Broker {
                 "op": p.op,
                 "target": p.target,
                 "discarded_commit": p.commit,
+                "discarded_uncommitted": uncommitted,
                 "commit": p.before,
                 "restored": restored,
+                "reconciled_by": by,
             }),
         })?;
         self.clear_pending()?;
@@ -355,7 +381,7 @@ impl Broker {
 
     pub fn apply(&self, proposal_seq: u64, approved_by: &str, confirm_tainted: bool) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
-        self.reconcile_locked(&lock)?;
+        self.reconcile_locked(&lock, approved_by)?;
         let p = self.ledger.get(proposal_seq)?;
         if p.body.kind != "proposal" {
             bail!("entry {proposal_seq} is a '{}', not a proposal", p.body.kind);
@@ -432,7 +458,7 @@ impl Broker {
 
     pub fn rollback(&self, applied_seq: u64, approved_by: &str) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
-        self.reconcile_locked(&lock)?;
+        self.reconcile_locked(&lock, approved_by)?;
         let a = self.ledger.get(applied_seq)?;
         if a.body.kind != "applied" {
             bail!("entry {applied_seq} is a '{}', not an applied change", a.body.kind);

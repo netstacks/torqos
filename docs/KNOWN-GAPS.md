@@ -3,9 +3,15 @@
 Open issues found while bringing up M1 (2026-10-30). Fix with a failing test first.
 
 ## Broker / trust model
-1. **Crash between commit and ledger append** leaves a commit whose `Ledger-Entry: N` is then
-   reused by the next ledger entry. Needs an intent entry written before the commit, or a
-   reconcile step on start.
+1. ~~**Crash between commit and ledger append.**~~ Fixed (ADR-010): reconciled on the next
+   operation. Still manual: leftover git locks other than `index.lock` (`refs/heads/main.lock`,
+   `HEAD.lock`, `packed-refs.lock`) after power loss, and HEAD not descending from the recorded
+   commit — both refuse loudly; inspect `/var/lib/kestrel/config`, fix, rerun `reconcile`. A
+   process that inherits the broker lock and never exits blocks the broker until it is killed
+   (the error names it). Not yet: reconcile at boot; recording who triggered a reconcile beyond
+   `reconciled_by`; edits made in the repo *during* a rebuild are still reset by a failed
+   apply's restore (only reconcile snapshots them). The broker runs git hooks as root (the repo
+   is root-only, so planting one already needs root); consider `core.hooksPath=/dev/null`.
 2. **`verify` cannot detect truncation of the newest entries** and does not cross-check git
    `Ledger-Entry` trailers against the ledger. Planned: anchor the head hash (M3).
 3. **Path-based tiers cannot see semantic escalation inside system-tier files** — e.g.
@@ -17,7 +23,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    `KESTREL_REBUILD_CMD` are trusted as given. Fine under sudo in M1; the M3 socket must take
    identity from `SO_PEERCRED` and the rebuild command from fixed config.
 5. **`kestrel.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
-   is copied into the store on every evaluation. Prefer `git+file://`.
+   is copied into the store on every evaluation. Prefer `git+file://`. Related: the rebuild
+   builds the config repo's *working tree*; building the exact ledgered commit
+   (`git+file://…?rev=<commit>`) would make "running system = ledgered commit" hold by
+   construction instead of by fsync discipline.
 
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is

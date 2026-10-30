@@ -167,13 +167,30 @@ impl Repo {
         }
     }
 
-    /// Remove an `index.lock` left by a git process that died with the broker. Only call this while
-    /// holding the broker lock: then no git process of the broker's can still be running.
+    pub fn index_lock(&self) -> PathBuf {
+        self.root.join(".git/index.lock")
+    }
+
+    /// Remove an `index.lock` left by a git process that died. The caller must first check that no
+    /// process still has it open: git children do not inherit the broker lock, so a git started by
+    /// a broker that was just killed may still be finishing.
     pub fn remove_stale_index_lock(&self) -> Result<()> {
-        match std::fs::remove_file(self.root.join(".git/index.lock")) {
+        match std::fs::remove_file(self.index_lock()) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
             _ => Ok(()),
         }
+    }
+
+    /// A commit capturing uncommitted changes (tracked and untracked), without touching the tree or
+    /// any ref; None when the tree is clean. Used to keep what a reset is about to destroy (it stages
+    /// everything to include untracked files; the reset then rewrites the index anyway).
+    pub fn snapshot_dirty(&self) -> Result<Option<String>> {
+        if self.git(&["status", "--porcelain"])?.trim().is_empty() {
+            return Ok(None);
+        }
+        self.git(&["add", "-A"])?;
+        let stash = self.git(&["stash", "create", "uncommitted changes discarded by reconcile"])?;
+        Ok(Some(stash.trim().to_string()).filter(|s| !s.is_empty()))
     }
 
     pub fn show(&self, commit: &str) -> Result<String> {

@@ -312,6 +312,7 @@ fn crash_mid_rollback_is_reconciled_by_next_operation() {
     let i = &b.ledger.read_all().unwrap()[3];
     assert_eq!(i.body.data["discarded_commit"], orphan.as_str());
     assert_eq!(i.body.data["commit"], applied_head.as_str());
+    assert_eq!(git(&b, &["rev-parse", &format!("refs/kestrel/discarded/{orphan}")]).trim(), orphan);
     assert_eq!(i.body.data["restored"], true);
     assert_eq!(
         fs::read_to_string(&calls).unwrap(),
@@ -393,10 +394,10 @@ fn propose_refuses_until_reconcile_runs() {
     let err = format!("{:#}", b.propose(&t, "Light theme", Actor::Agent, false).unwrap_err());
     assert!(err.contains("kestrel-broker reconcile"), "{err}");
 
-    let out = run_cli(dir.path(), "true", &["reconcile"]);
+    let out = run_cli(dir.path(), "true", &["reconcile", "--approved-by", "casey"]);
     assert!(out.status.success(), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stdout).contains("Interrupted apply of #2"), "{out:?}");
-    let out = run_cli(dir.path(), "true", &["reconcile"]);
+    let out = run_cli(dir.path(), "true", &["reconcile", "--approved-by", "casey"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to reconcile"), "{out:?}");
 
     b.propose(&t, "Light theme", Actor::Agent, false).unwrap();
@@ -413,12 +414,12 @@ fn failed_reconcile_rebuild_is_ledgered_and_reported() {
     assert_killed(&run_cli(dir.path(), CRASH, &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]));
 
     let failing = Broker::new(dir.path().join("config"), dir.path().join("state"), "false");
-    let err = format!("{:#}", failing.reconcile().unwrap_err());
+    let err = format!("{:#}", failing.reconcile("casey").unwrap_err());
     assert!(err.contains("restore rebuild failed"), "{err}");
     let i = b.ledger.read_all().unwrap().pop().unwrap();
     assert_eq!(i.body.kind, "interrupted");
     assert_eq!(i.body.data["restored"], false);
-    assert!(b.reconcile().unwrap().is_none(), "already reconciled");
+    assert!(b.reconcile("casey").unwrap().is_none(), "already reconciled");
     assert!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap().contains("false"));
 }
 
@@ -443,7 +444,7 @@ fn ledgered_outcome_is_not_undone() {
 
     // Both paths that settle a record: reconcile (apply, rollback, the CLI) and propose/init.
     write_pending(dir.path(), stale.clone());
-    assert!(b.reconcile().unwrap().is_none());
+    assert!(b.reconcile("casey").unwrap().is_none());
     assert_eq!(b.repo.head().unwrap(), head);
     assert!(!dir.path().join("state/pending.json").exists());
 
@@ -470,7 +471,7 @@ fn crash_before_commit_still_rebuilds() {
         "approved_by": "casey", "tier": "system", "tainted": false,
     }));
 
-    let i = b.reconcile().unwrap().expect("reconciled");
+    let i = b.reconcile("casey").unwrap().expect("reconciled");
     assert_eq!(i.body.data["discarded_commit"], serde_json::Value::Null);
     assert_eq!(i.body.data["restored"], true);
     assert_eq!(fs::read_to_string(&calls).unwrap(), "{ nightLight = false; }\n");
@@ -498,4 +499,139 @@ fn failed_commit_leaves_repo_clean() {
     fs::remove_file(&hook).unwrap();
     b.apply(p.body.seq, "casey", false).unwrap();
     assert_eq!(kinds(&b), ["init", "proposal", "applied"]);
+}
+
+/// Crash after an apply, then hand-written state, for reconcile's own guards.
+fn crashed_apply() -> (tempfile::TempDir, Broker, String) {
+    let (dir, b) = setup("true");
+    let before = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    assert_killed(&run_cli(dir.path(), CRASH, &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]));
+    (dir, b, before)
+}
+
+/// The commit exists but the broker died before recording it: reconcile must still record and keep it.
+#[test]
+fn unrecorded_commit_is_still_kept() {
+    let (dir, b) = setup("true");
+    let before = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    git(&b, &["apply", "--index", d.to_str().unwrap()]);
+    git(&b, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "half-done apply"]);
+    let orphan = b.repo.head().unwrap();
+    write_pending(dir.path(), serde_json::json!({
+        "op": "apply", "target": p.body.seq, "before": before, "ledger_len": 2, "commit": null,
+        "approved_by": "casey", "tier": "system", "tainted": false,
+    }));
+
+    let i = b.reconcile("casey").unwrap().expect("reconciled");
+    assert_eq!(i.body.data["discarded_commit"], orphan.as_str());
+    assert_eq!(git(&b, &["rev-parse", &format!("refs/kestrel/discarded/{orphan}")]).trim(), orphan);
+    assert_eq!(b.repo.head().unwrap(), before);
+}
+
+/// HEAD does not descend from the recorded commit: something else rewrote the repo. Refuse
+/// rather than reset to a commit that is not in its history.
+#[test]
+fn reconcile_refuses_when_before_is_not_an_ancestor() {
+    let (dir, b, _) = crashed_apply();
+    let head = b.repo.head().unwrap();
+    let tree = git(&b, &["rev-parse", "HEAD^{tree}"]);
+    let unrelated = git(&b, &["-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree.trim(), "-m", "unrelated"]);
+    let mut p: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("state/pending.json")).unwrap()).unwrap();
+    p["before"] = unrelated.trim().into();
+    write_pending(dir.path(), p);
+
+    let err = format!("{:#}", b.reconcile("casey").unwrap_err());
+    assert!(err.contains("does not descend"), "{err}");
+    assert_eq!(b.repo.head().unwrap(), head, "must not reset");
+    assert!(dir.path().join("state/pending.json").exists());
+}
+
+#[test]
+fn init_refuses_until_reconciled() {
+    let (_dir, b, _) = crashed_apply();
+    let err = format!("{:#}", b.init().unwrap_err());
+    assert!(err.contains("kestrel-broker reconcile"), "{err}");
+}
+
+#[test]
+fn failed_rollback_commit_leaves_repo_clean() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+    let applied = b.repo.head().unwrap();
+    let hook = b.repo.root().join(".git/hooks/pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    assert!(b.rollback(a.body.seq, "casey").is_err());
+    assert_eq!(b.repo.head().unwrap(), applied);
+    b.repo.ensure_clean().unwrap();
+    assert!(!dir.path().join("state/pending.json").exists());
+}
+
+/// An edit made in the repo outside the broker would be destroyed by the reset: keep it.
+#[test]
+fn reconcile_keeps_uncommitted_changes() {
+    let (_dir, b, _) = crashed_apply();
+    fs::write(b.repo.root().join("stray.nix"), "{ edited = \"by hand\"; }\n").unwrap();
+
+    let i = b.reconcile("casey").unwrap().expect("reconciled");
+    let kept = i.body.data["discarded_uncommitted"].as_str().expect("snapshot recorded").to_string();
+    assert_eq!(git(&b, &["show", &format!("{kept}:stray.nix")]), "{ edited = \"by hand\"; }\n");
+    assert_eq!(git(&b, &["rev-parse", &format!("refs/kestrel/discarded/{kept}")]).trim(), kept);
+    assert_eq!(i.body.data["reconciled_by"], "casey");
+    b.repo.ensure_clean().unwrap();
+}
+
+/// On a broken chain the final append would fail after a full reset and rebuild, on every retry.
+#[test]
+fn reconcile_refuses_on_a_broken_ledger_before_touching_anything() {
+    let (dir, b, _) = crashed_apply();
+    let head = b.repo.head().unwrap();
+    let ledger = dir.path().join("state/ledger.jsonl");
+    fs::write(&ledger, fs::read_to_string(&ledger).unwrap().replace("Night light", "Day light")).unwrap();
+    let calls = dir.path().join("calls.log");
+    let logging = Broker::new(dir.path().join("config"), dir.path().join("state"), format!("touch {}", calls.display()));
+
+    let err = format!("{:#}", logging.reconcile("casey").unwrap_err());
+    assert!(err.contains("broken ledger"), "{err}");
+    assert_eq!(b.repo.head().unwrap(), head);
+    assert!(!calls.exists(), "must not rebuild");
+}
+
+/// git children do not hold the broker lock, so an index.lock may belong to a git that is still
+/// running: only a lock nobody has open may be removed.
+#[test]
+fn live_index_lock_is_refused_stale_one_removed() {
+    let (_dir, b, _) = crashed_apply();
+    let index_lock = b.repo.index_lock();
+    fs::write(&index_lock, "").unwrap();
+    let mut holder = Command::new("sh")
+        .arg("-c")
+        .arg("exec 3<\"$0\"; sleep 30")
+        .arg(&index_lock)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let err = loop {
+        let err = format!("{:#}", b.reconcile("casey").unwrap_err());
+        if err.contains("git is still running") || std::time::Instant::now() > deadline {
+            break err;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50)); // until the shell has opened it
+    };
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    assert!(err.contains("git is still running") && err.contains("(sleep)"), "{err}");
+    assert!(index_lock.exists());
+
+    b.reconcile("casey").unwrap().expect("stale lock removed, reconciled");
+    assert!(!index_lock.exists());
 }

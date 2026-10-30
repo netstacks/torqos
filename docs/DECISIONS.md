@@ -57,3 +57,26 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** Every rebuild prints a warning while it is on. Shutting AI access off is
   a single broker commit (`kestrel.dev.enable = false`), itself ledgered and undoable. The
   shipped product and all tests run with it off.
+
+## ADR-010 — A broker that dies mid-operation is reconciled, never left half-done
+- **Context:** apply/rollback commit *before* the minutes-long rebuild and ledger *after* it. A
+  broker killed in between (OOM, Ctrl-C under sudo, power loss) left a commit nobody ledgered:
+  the next apply failed ("does not apply"), rollback failed (empty commit), and an unaudited
+  change stayed live. Killing the broker also does not stop `nixos-rebuild`, which may still
+  switch the system after a retry has "restored" it.
+- **Decision:**
+  - The rebuild gets the broker lock as its stdin, so its whole process tree — including the
+    `systemd-run --pipe` switch unit — holds the lock until the last process exits. git writes are
+    fsynced (`core.fsync=all`, then `sync --file-system` on the repo).
+  - apply/rollback record themselves in `state/pending.json` before committing, add the commit as
+    soon as it exists, and remove the record once the outcome is ledgered.
+  - The next apply/rollback, or `kestrel-broker reconcile --approved-by <name>`, finishes an
+    interrupted operation: it keeps the unledgered commit (and any uncommitted changes) under
+    `refs/kestrel/discarded/`, resets to the last ledgered commit, **always** rebuilds, and ledgers
+    an `interrupted` entry. `propose` (the agent's entry point) and `init` never rebuild: they
+    refuse until reconciled.
+- **Consequences:** An interrupted change is never silently kept; it is discarded, recorded and
+  can be re-applied. A reconcile costs one rebuild. Some states still need a human (see
+  `KNOWN-GAPS.md`): a broken ledger, a HEAD that does not descend from the recorded commit, or
+  leftover git lock files other than `index.lock`. Until the boot-time hook lands, a machine that
+  lost power mid-switch runs whatever generation it booted until the next broker command.
