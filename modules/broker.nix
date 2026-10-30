@@ -125,7 +125,17 @@ in
         rebuild = cfg.rebuildCommand;
         currentSystem = "/run/current-system";
         systemProfile = "/nix/var/nix/profiles/system";
-        path = "/run/current-system/sw/bin";
+        # The tools undo depends on, by store path first: a reviewed but mistaken change that drops
+        # git or nixos-rebuild from the system must not leave `revert` unable to run them. The
+        # running system's tools come after, for anything else.
+        path = lib.makeBinPath [
+          config.system.build.nixos-rebuild
+          config.nix.package
+          pkgs.git
+          pkgs.coreutils
+          pkgs.bash
+          config.systemd.package
+        ] + ":/run/current-system/sw/bin";
         home = "/root";
       };
      }

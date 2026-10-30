@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use torq_broker::config::{self, Requested, Settings};
 use torq_broker::{ledger::Entry, policy::Actor, Broker, Busy};
@@ -120,11 +120,23 @@ fn print_entry(e: &Entry) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the settings (config.rs), then replace this process's environment with the broker's own,
-/// before anything runs: every child (git, sh, the rebuild) inherits it, and nothing of the
-/// caller's — GIT_*, NIX_*, LD_*, their HOME and its .gitconfig — may reach a root broker's work.
-fn settings(cli: &Cli) -> Result<Settings> {
-    let root = config::running_as_root()?;
+/// Resolve the settings (config.rs), then replace this process's environment, working directory and
+/// umask with the broker's own, before anything runs: every child (git, sh, the rebuild) inherits
+/// them, and nothing of the caller's — GIT_*, NIX_*, LD_*, their HOME and its .gitconfig, their
+/// current directory — may reach a root broker's work. Path arguments are made absolute first, so a
+/// relative `--diff` still means what the caller meant.
+fn settings(cli: &mut Cli) -> Result<Settings> {
+    let abs = |p: &mut PathBuf| -> Result<()> {
+        *p = std::path::absolute(&*p).with_context(|| format!("resolving {}", p.display()))?;
+        Ok(())
+    };
+    for p in [&mut cli.repo, &mut cli.state_dir, &mut cli.current_system, &mut cli.system_profile].into_iter().flatten() {
+        abs(p)?;
+    }
+    if let Cmd::Propose { diff, .. } = &mut cli.cmd {
+        abs(diff)?;
+    }
+    let root = config::running_as_root();
     let path = std::env::var("PATH").unwrap_or_default();
     let home = if root { PathBuf::from("/root") } else { std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into()) };
     let asked = Requested {
@@ -136,20 +148,13 @@ fn settings(cli: &Cli) -> Result<Settings> {
     };
     let s = config::resolve(root, Settings::read(Path::new(config::FIXED))?, asked, Settings::defaults(path, home))?;
     let inherited = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
-    let env = config::environment(&s, inherited);
-    // Single-threaded here, before any child is started.
-    for (k, _) in std::env::vars_os() {
-        std::env::remove_var(k);
-    }
-    for (k, v) in env {
-        std::env::set_var(k, v);
-    }
+    config::take_over_process(&config::environment(&s, inherited))?;
     Ok(s)
 }
 
-fn run(cli: Cli) -> Result<()> {
+fn run(mut cli: Cli) -> Result<()> {
     let json = cli.json;
-    let s = settings(&cli)?;
+    let s = settings(&mut cli)?;
     let b = Broker::new(&s.repo, &s.state_dir, &s.rebuild)
         .with_current_system(&s.current_system)
         .with_system_profile(&s.system_profile);

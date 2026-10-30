@@ -1229,7 +1229,9 @@ fn failing_hooks(dir: &Path) -> std::path::PathBuf {
 }
 
 /// Nothing in the caller's environment reaches the git (or rebuild) the broker runs: not GIT_*,
-/// not git configuration in variables, not the caller's ~/.gitconfig (review N3).
+/// not git configuration in variables, not the caller's ~/.gitconfig (review N3). These run without
+/// root, so the caller's HOME is kept and only GIT_CONFIG_GLOBAL keeps its .gitconfig out; as root,
+/// HOME is /root as well.
 #[test]
 fn the_callers_environment_does_not_reach_git() {
     let (dir, b) = setup("true");
@@ -1255,4 +1257,43 @@ fn the_callers_environment_does_not_reach_git() {
         let applied = serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["seq"].as_u64().unwrap();
         b.revert(applied, "casey").unwrap(); // back to the start for the next case
     }
+}
+
+/// The broker works from `/`, whatever the caller's directory; a relative `--diff` still means the
+/// file the caller meant (it is made absolute first).
+#[test]
+fn relative_diff_path_is_the_callers() {
+    let (dir, _b) = setup("true");
+    write_diff(dir.path(), "theme.diff", THEME);
+    let out = Command::new(env!("CARGO_BIN_EXE_torq-broker"))
+        .current_dir(dir.path())
+        .args(["--repo", "config", "--state-dir", "state", "--rebuild-cmd", "true"])
+        .args(["--json", "propose", "--diff", "theme.diff", "--reason", "x"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+}
+
+/// A caller's umask does not reach what the broker writes: the config repo stays readable to the
+/// unprivileged CLI even when the caller's umask is 077.
+#[test]
+fn callers_umask_does_not_reach_the_repo() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "theme.diff", THEME);
+    let broker = format!(
+        "umask 077; exec '{}' --repo '{}' --state-dir '{}' --rebuild-cmd true",
+        env!("CARGO_BIN_EXE_torq-broker"),
+        dir.path().join("config").display(),
+        dir.path().join("state").display()
+    );
+    let sh = |args: &str| Command::new("sh").arg("-c").arg(format!("{broker} {args}")).output().unwrap();
+    let out = sh(&format!("--json propose --diff '{}' --reason x", d.display()));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let seq = serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["seq"].as_u64().unwrap();
+    let out = sh(&format!("--json apply {seq} --approved-by casey"));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let perms = fs::metadata(dir.path().join("config/users/casey.nix")).unwrap().permissions();
+    let mode = std::os::unix::fs::PermissionsExt::mode(&perms) & 0o777;
+    assert_eq!(mode, 0o644, "the changed file is readable to others");
+    drop(b);
 }

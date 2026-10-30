@@ -233,10 +233,13 @@ The broker stays small; its additions for this model:
   configuration, not from the caller (closes part of KNOWN-GAPS #4). Done (1e): as root it reads
   only `/etc/torq/broker.json` (written by the module from `torq.broker.*`, including
   `rebuildCommand`) and refuses a flag or `TORQ_*` variable that differs, instead of ignoring it;
-  it keeps only `LANG`, `LC_ALL`, `TERM`, `TZ` from its caller, sets `PATH` and `HOME` from the file,
-  and tells git to read no global or system configuration. That fixed `PATH` takes the place of a
-  sudo `secure_path`; the CLI calls sudo and the broker by absolute path. Without root (tests),
-  flags apply.
+  without the file a root broker refuses to run. It clears its caller's environment (keeping only
+  `TERM`; `LANG=C.UTF-8`), sets `PATH` and `HOME` from the file, tells git to read no global or
+  system configuration, works from `/` (path arguments made absolute first) with umask 022. The
+  fixed `PATH` starts with store paths of nixos-rebuild, nix, git, coreutils, bash and systemd, so a
+  change that drops one of them from the system cannot break its own `revert`; it takes the place
+  of a sudo `secure_path`. The CLI calls sudo and the broker by absolute path. Without root
+  (tests), flags apply.
 - User-tier files are an explicit allow-list in `policy.rs` (`USER_LEAVES`, kept in step with the
   module's): `users/<name>/packages.json` today, `users/<name>/cli.json` when the CLI-style setting
   gives it a type — a leaf joins only with its typed reader. Each must be a regular file (git mode

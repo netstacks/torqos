@@ -3,9 +3,9 @@
 //! A root broker on a TorqOS machine takes them only from the fixed file the NixOS module writes,
 //! `/etc/torq/broker.json`: a caller (through sudo, later the socket) must not be able to point a
 //! root broker at another repo or state directory, or have it run another rebuild command. A flag
-//! or `TORQ_*` variable that differs from the file is refused, not ignored, so a mistake is loud.
-//! Without root — tests, or a broker that cannot change the system anyway — flags and defaults
-//! apply as given.
+//! or `TORQ_*` variable that differs from the file is refused, not ignored, so a mistake is loud,
+//! and a root broker without the file refuses to run at all. Without root (tests, or a broker that
+//! cannot change the system anyway), flags and defaults apply as given.
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -67,6 +67,10 @@ impl Settings {
 /// there is one.
 pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: Settings) -> Result<Settings> {
     match fixed {
+        None if root => bail!(
+            "refused: running as root, but {FIXED} is missing; a root broker takes its settings only \
+             from that file (the TorqOS module writes it)"
+        ),
         Some(f) if root => {
             let mut differs = Vec::new();
             let mut check = |name: &str, asked: Option<String>, fixed: String| {
@@ -101,14 +105,15 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
 }
 
 /// The environment variables the broker keeps from its caller; everything else is removed before it
-/// runs anything (GIT_*, NIX_*, LD_*, XDG_*, TORQ_*, ...).
-pub const KEEP: &[&str] = &["LANG", "LC_ALL", "TERM", "TZ"];
+/// runs anything (GIT_*, NIX_*, LD_*, XDG_*, TORQ_*, TZ, locale, ...). TERM only shapes output.
+pub const KEEP: &[&str] = &["TERM"];
 
-/// The environment the broker runs its children with: the kept variables, then PATH and HOME from
-/// the settings, and git told to read no global or system configuration (the broker passes what it
-/// needs with `-c`).
+/// The environment the broker runs its children with: the kept variables, a fixed locale (C.UTF-8 is
+/// built into glibc, it needs no LOCALE_ARCHIVE), PATH and HOME from the settings, and git told to
+/// read no global or system configuration (the broker passes what it needs with `-c`).
 pub fn environment(settings: &Settings, inherited: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = inherited.filter(|(k, _)| KEEP.contains(&k.as_str())).collect();
+    env.push(("LANG".into(), "C.UTF-8".into()));
     env.push(("PATH".into(), settings.path.clone()));
     env.push(("HOME".into(), settings.home.display().to_string()));
     env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
@@ -116,15 +121,29 @@ pub fn environment(settings: &Settings, inherited: impl Iterator<Item = (String,
     env
 }
 
-/// Whether this process runs as root (effective uid 0), from /proc/self/status.
-pub fn running_as_root() -> Result<bool> {
-    let status = std::fs::read_to_string("/proc/self/status").context("reading /proc/self/status")?;
-    let uid = status
-        .lines()
-        .find_map(|l| l.strip_prefix("Uid:"))
-        .and_then(|ids| ids.split_whitespace().nth(1))
-        .context("no effective uid in /proc/self/status")?;
-    Ok(uid == "0")
+/// Whether this process runs as root (effective uid 0).
+pub fn running_as_root() -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Replace the whole process state a caller hands down with the broker's own: the environment
+/// (`env`, from `environment`), the working directory (`/`) and the umask (022, so the config repo
+/// stays readable to the unprivileged CLI whatever the caller's umask). Call before any thread or
+/// child is started.
+pub fn take_over_process(env: &[(String, String)]) -> Result<()> {
+    // SAFETY: single-threaded at this point (documented precondition). clearenv removes every
+    // variable, including ones std::env::remove_var cannot name (a key containing '=').
+    unsafe {
+        if libc::clearenv() != 0 {
+            bail!("clearing the environment failed");
+        }
+        libc::umask(0o022);
+    }
+    for (k, v) in env {
+        std::env::set_var(k, v);
+    }
+    std::env::set_current_dir("/").context("changing to /")
 }
 
 #[cfg(test)]
@@ -173,19 +192,31 @@ mod tests {
     }
 
     #[test]
-    fn without_root_or_without_the_file_flags_and_defaults_apply() {
+    fn without_root_flags_and_defaults_apply() {
         let asked = || Requested { repo: Some("/tmp/test-repo".into()), ..Default::default() };
-        for (root, file) in [(false, Some(fixed())), (false, None), (true, None)] {
-            let s = resolve(root, file, asked(), defaults()).unwrap();
+        for file in [Some(fixed()), None] {
+            let s = resolve(false, file, asked(), defaults()).unwrap();
             assert_eq!(s.repo, PathBuf::from("/tmp/test-repo"));
             assert_eq!((s.path.as_str(), s.home.to_str().unwrap()), ("/caller/bin", "/home/caller"));
         }
     }
 
     #[test]
+    fn root_without_the_fixed_file_refuses_to_run() {
+        for asked in [Requested::default(), Requested { repo: Some("/tmp/test-repo".into()), ..Default::default() }] {
+            let err = format!("{:#}", resolve(true, None, asked, defaults()).unwrap_err());
+            assert!(err.contains("/etc/torq/broker.json is missing"), "{err}");
+        }
+    }
+
+    #[test]
     fn the_environment_keeps_almost_nothing() {
         let inherited = [
-            ("LANG", "C.UTF-8"),
+            ("TERM", "xterm-256color"),
+            ("LANG", "de_DE.UTF-8"),
+            ("LC_ALL", "de_DE.UTF-8"),
+            ("TZ", "/home/caller/zone"),
+            ("LOCALE_ARCHIVE", "/home/caller/locale-archive"),
             ("GIT_DIR", "/tmp/elsewhere"),
             ("GIT_CONFIG_COUNT", "1"),
             ("NIX_CONFIG", "substituters = https://evil"),
@@ -198,8 +229,9 @@ mod tests {
         .map(|(k, v)| (k.to_string(), v.to_string()));
         let env = environment(&fixed(), inherited.into_iter());
         let get = |k: &str| env.iter().filter(|(n, _)| n == k).map(|(_, v)| v.as_str()).collect::<Vec<_>>();
-        assert_eq!(get("LANG"), ["C.UTF-8"]);
-        for gone in ["GIT_DIR", "GIT_CONFIG_COUNT", "NIX_CONFIG", "LD_PRELOAD", "XDG_CONFIG_HOME", "TORQ_STATE_DIR"] {
+        assert_eq!(get("TERM"), ["xterm-256color"]);
+        assert_eq!(get("LANG"), ["C.UTF-8"], "a fixed locale, not the caller's");
+        for gone in ["LC_ALL", "TZ", "LOCALE_ARCHIVE", "GIT_DIR","GIT_CONFIG_COUNT", "NIX_CONFIG", "LD_PRELOAD", "XDG_CONFIG_HOME", "TORQ_STATE_DIR"] {
             assert!(get(gone).is_empty(), "{gone}");
         }
         assert_eq!(get("PATH"), ["/run/current-system/sw/bin"]);

@@ -48,6 +48,8 @@ pkgs.testers.runNixOSTest {
     # "machine"): changing the host name must never leave rebuilds looking for a missing config.
     machine.succeed("grep -qx 'nixos-rebuild switch --flake {repo}#torq' /etc/torq-test/default-rebuild")
     machine.succeed("jq -e '.rebuild == \"true\" and .repo == \"/var/lib/torq/config\"' /etc/torq/broker.json")
+    # Undo's tools come from fixed store paths, not only from the (changeable) running system.
+    machine.succeed("jq -r .path /etc/torq/broker.json | tr : '\\n' | head -1 | grep -q '^/nix/store/.*nixos-rebuild'")
 
     machine.succeed(f"mkdir -p {repo} && cp /etc/torq-test/desktop.nix {repo}/ && touch {repo}/flake.nix")
     machine.succeed("torq-broker init")
@@ -82,6 +84,11 @@ pkgs.testers.runNixOSTest {
             out = machine.fail(f"{override} verify 2>&1")
             assert "takes its settings only from /etc/torq/broker.json" in out, out
         machine.succeed("test ! -e /tmp/pwned -a ! -e /tmp/fresh")
+        # Without the file, a root broker does not fall back to its caller's settings: it stops.
+        machine.succeed("mv /etc/torq/broker.json /tmp/broker.json")
+        out = machine.fail("TORQ_STATE_DIR=/tmp/fresh torq-broker verify 2>&1")
+        assert "broker.json is missing" in out, out
+        machine.succeed("mv /tmp/broker.json /etc/torq/broker.json")
         # Nothing of the caller's environment reaches git: a GIT_DIR elsewhere is ignored.
         machine.succeed("GIT_DIR=/nonexistent torq-broker status")
 
