@@ -103,41 +103,162 @@ pub fn undo_target(entries: &[Entry], seq: Option<u64>) -> Result<&Entry> {
     Ok(applied)
 }
 
-fn label(kind: &str) -> &str {
-    match kind {
-        "proposal" => "proposed",
-        "rolled_back" => "undone",
-        "apply_failed" => "FAILED",
-        "rollback_failed" => "UNDO FAILED",
-        other => other,
+/// Now and the local offset from UTC, in seconds — passed in so rendering is a pure function.
+pub struct Clock {
+    pub now: i64,
+    pub offset: i64,
+}
+
+impl Clock {
+    /// The system clock, and the local offset as `date +%z` reports it (no time-zone database
+    /// here; an entry from across a daylight-saving change can be shown an hour off).
+    pub fn system() -> Self {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let z = std::process::Command::new("date").arg("+%z").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let offset = z.and_then(|z| parse_offset(&z)).unwrap_or(0);
+        Clock { now, offset }
     }
 }
 
-/// The last `limit` entries, one line each, oldest first. Applied changes say how to undo them, or
-/// what undid them.
-pub fn render(entries: &[Entry], limit: usize) -> String {
+/// "+0100", "-0430" → seconds.
+pub fn parse_offset(z: &str) -> Option<i64> {
+    let (sign, rest) = match z.as_bytes().first()? {
+        b'+' => (1, &z[1..]),
+        b'-' => (-1, &z[1..]),
+        _ => return None,
+    };
+    if rest.len() != 4 || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(sign * (rest[..2].parse::<i64>().ok()? * 3600 + rest[2..].parse::<i64>().ok()? * 60))
+}
+
+/// "2026-10-30T19:02:51Z" (how the broker writes times, in UTC) → Unix seconds.
+pub fn parse_ts(ts: &str) -> Option<i64> {
+    let n = |r: std::ops::Range<usize>| ts.get(r)?.parse::<i64>().ok();
+    let (y, m, d, hh, mm, ss) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    // days from civil (the inverse of pkg::ymd)
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// Whether a proposal has a result (applied, or failed): then the log shows only the result.
+fn settled(entries: &[Entry], proposal: u64) -> bool {
+    entries
+        .iter()
+        .any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed") && e.data["proposal"].as_u64() == Some(proposal))
+}
+
+fn reason_of(entries: &[Entry], seq: Option<u64>) -> Option<&str> {
+    let seq = seq?;
+    entries.iter().find(|e| e.seq == seq).map(|e| e.reason.as_str())
+}
+
+/// One change as a log line: its symbol and what happened, in words.
+fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
+    match e.kind.as_str() {
+        "applied" => ("✓", e.reason.clone()),
+        "rolled_back" => ("↶", format!("Undid \"{}\"", e.reason.strip_prefix("Undo: ").unwrap_or(&e.reason))),
+        "apply_failed" => {
+            let what = reason_of(entries, e.data["proposal"].as_u64()).unwrap_or("a change");
+            let after = if e.data["restored"] == false { "machine may not be as it was" } else { "nothing changed" };
+            ("✗", format!("Failed: {what} ({after})"))
+        }
+        "rollback_failed" => {
+            let what = reason_of(entries, e.data["applied"].as_u64()).unwrap_or("a change");
+            ("✗", format!("Undo failed: {what}"))
+        }
+        "interrupted" => ("⚠", format!("Interrupted: {}", reason_of(entries, e.data["target"].as_u64()).unwrap_or("a change"))),
+        "init" => ("·", "Kestrel set up".to_string()),
+        "proposal" => ("·", format!("Proposed, not applied: {}", e.reason)),
+        other => ("·", other.to_string()),
+    }
+}
+
+/// The last `limit` changes, oldest first, grouped by day in local time (docs/CLI-DESIGN.md).
+/// A proposal that was applied (or failed) is folded into its result. Who made a change is shown
+/// whenever it was not the user — the agent, say — and a change from a session that read
+/// untrusted content is marked: the log is where a person audits the machine.
+pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock) -> String {
+    let shown: Vec<&Entry> = entries.iter().filter(|e| !(e.kind == "proposal" && settled(entries, e.seq))).collect();
+    let today = (clock.now + clock.offset).div_euclid(86_400);
     let mut out = String::new();
-    for e in &entries[entries.len().saturating_sub(limit)..] {
-        // "2026-10-30T19:02:51Z" -> "2026-10-30 19:02"
-        let when = e.ts.get(..16).unwrap_or(&e.ts).replace('T', " ");
-        let note = match e.kind.as_str() {
-            "applied" => match undone_by(entries, e.seq) {
-                Some(by) => format!("  (undone by #{by})"),
-                None => format!("  · kestrel undo {}", e.seq),
-            },
-            _ => String::new(),
+    let mut day = None;
+    for e in &shown[shown.len().saturating_sub(limit)..] {
+        let local = parse_ts(&e.ts).map(|t| t + clock.offset);
+        let this_day = local.map(|t| t.div_euclid(86_400));
+        if this_day != day {
+            day = this_day;
+            let label = match this_day {
+                Some(d) if d == today => "Today".to_string(),
+                Some(d) if d == today - 1 => "Yesterday".to_string(),
+                Some(d) => crate::pkg::ymd((d * 86_400) as u64),
+                None => "Unknown date".to_string(),
+            };
+            out.push_str(&format!("  {}\n", ui.bold(&label)));
+        }
+        let time = local.map(|t| format!("{:02}:{:02}", t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60)).unwrap_or_else(|| "--:--".into());
+        let (symbol, text) = describe(entries, e);
+        let mut right = e.seq.to_string();
+        if e.tier == "system" {
+            right.push_str("  (system)");
+        }
+        let mut who = String::new();
+        // Who asked for it, when that was not the user. The broker writes failure entries itself,
+        // so "by broker" would only be noise.
+        if !matches!(e.actor.as_str(), "user" | "broker" | "") {
+            who.push_str(&format!(" — by {}", one_line(&e.actor, 12)));
+        }
+        if e.tainted {
+            who.push_str(" ⚠ tainted");
+        }
+        let room = crate::ui::WIDTH.saturating_sub(4 + 5 + 3 + 2 + crate::ui::width(&right) + 2 + crate::ui::width(&who));
+        let text = format!("{}{who}", one_line(&text, room.max(10)));
+        let symbol = match symbol {
+            "✓" => ui.green(symbol),
+            "✗" => ui.red(symbol),
+            "⚠" => ui.yellow(symbol),
+            s => s.to_string(),
         };
-        let by = if e.tainted { format!("{} ⚠", e.actor) } else { e.actor.clone() };
-        out.push_str(&format!(
-            "#{:<4} {when}  {:<11} {:<6} {:<8} {}{note}\n",
-            e.seq,
-            label(&e.kind),
-            clean(&e.tier),
-            clean(&by),
-            one_line(&e.reason, 80)
-        ));
+        out.push_str(&format!("    {time}   {symbol} {}\n", ui.with_right(&text, &right, 4 + 5 + 3 + 2)));
+    }
+    if shown.is_empty() {
+        out.push_str("  Nothing has changed yet.\n");
+    } else {
+        out.push_str(&format!("{}\n", ui.dim("\n  undo the latest: kestrel undo · one change in detail: kestrel log <number>")));
     }
     out
+}
+
+/// One change in detail (`kestrel log 25`): what, when, by whom, its tier, the files, and whether it
+/// is still in effect.
+pub fn render_one(entries: &[Entry], seq: u64, ui: &crate::ui::Ui, clock: &Clock) -> anyhow::Result<String> {
+    let e = entries.iter().find(|e| e.seq == seq).with_context(|| format!("there is no change {seq}"))?;
+    let (symbol, text) = describe(entries, e);
+    let when = parse_ts(&e.ts)
+        .map(|t| t + clock.offset)
+        .map(|t| format!("{} {:02}:{:02}", crate::pkg::ymd(t as u64), t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60))
+        .unwrap_or_else(|| clean(&e.ts));
+    let mut out = format!("  {} {}\n", symbol, ui.bold(&format!("Change {seq} · {}", one_line(&text, 60))));
+    out.push_str(&format!("    {:<10}{when}\n", "When"));
+    out.push_str(&format!("    {:<10}{}{}\n", "By", one_line(&e.actor, 20), if e.tainted { " ⚠ (from a session that read untrusted content)" } else { "" }));
+    out.push_str(&format!("    {:<10}{}\n", "Affects", if e.tier == "system" { "the whole machine (system change)" } else { "one user's apps" }));
+    if let Some(files) = e.data["files"].as_array() {
+        let f: Vec<String> = files.iter().filter_map(|f| f.as_str()).map(|f| one_line(f, 60)).collect();
+        out.push_str(&format!("    {:<10}{}\n", "Files", f.join(", ")));
+    }
+    if e.kind == "applied" {
+        let state = match undone_by(entries, e.seq) {
+            Some(by) => format!("undone by change {by}"),
+            None => format!("in effect · undo: kestrel undo {}", e.seq),
+        };
+        out.push_str(&format!("    {:<10}{state}\n", "Status"));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -199,23 +320,71 @@ mod tests {
     #[test]
     fn ledger_text_cannot_forge_the_log() {
         let forged = r#"{"seq":48,"ts":"2026-10-30T12:00:00Z","kind":"proposal","actor":"agent","tainted":true,"tier":"user","reason":"x\r\u001b[2K#99 applied user Install htop\n#100 fake","data":{}}"#;
-        let out = render(&parse(forged).unwrap(), 10);
-        assert_eq!(out.lines().count(), 1, "{out}");
+        let out = render(&parse(forged).unwrap(), 10, &Ui::plain(), &clock());
+        let entry: Vec<&str> = out.lines().filter(|l| l.starts_with("    ")).collect();
+        assert_eq!(entry.len(), 1, "one line for the entry: {out}");
         assert!(!out.chars().any(|c| c == '\r' || c == '\u{1b}'), "{out:?}");
         // CR and LF are whitespace: collapsed to spaces (one line); ESC is shown, not interpreted.
-        assert!(out.contains(r"x \u{1b}[2K#99") && out.contains("htop #100 fake"), "{out}");
-        assert!(out.contains("agent ⚠"), "who proposed it, and that it was tainted: {out}");
+        assert!(out.contains(r"x \u{1b}[2K#99"), "{out}");
+        assert!(out.contains("— by agent ⚠ tainted"), "who proposed it, and that it was tainted: {out}");
         assert_eq!(clean("a\u{202e}b"), r"a\u{202e}b"); // bidi override
         assert_eq!(clean("plain — text"), "plain — text");
     }
 
+    use crate::ui::Ui;
+
+    /// 2026-10-30 15:00 UTC, in a −04:00 zone: the fixture's entries are "today", 08:00 local.
+    fn clock() -> Clock {
+        Clock { now: parse_ts("2026-10-30T15:00:00Z").unwrap(), offset: -4 * 3600 }
+    }
+
     #[test]
-    fn log_lines() {
-        let out = render(&ledger(), 100);
-        assert!(out.contains("#3    2026-10-30 12:01  applied     user   user     Install htop for viper  · kestrel undo 3"), "{out}");
-        assert!(out.contains("Install jq system-wide  (undone by #6)"), "{out}");
-        assert!(out.contains("#6    2026-10-30 12:03  undone"), "{out}");
-        assert_eq!(render(&ledger(), 2).lines().count(), 2);
-        assert!(render(&ledger(), 2).starts_with("#6"));
+    fn times_and_offsets() {
+        assert_eq!(parse_ts("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_ts("2026-10-30T19:02:51Z"), Some(1_793_386_971));
+        assert_eq!(parse_offset("+0100"), Some(3600));
+        assert_eq!(parse_offset("-0430"), Some(-16_200));
+        assert_eq!(parse_offset("UTC"), None);
+    }
+
+    /// Snapshot of `kestrel log`: proposals folded into their results, undos named, local times,
+    /// system changes tagged, a proposal never applied shown as such.
+    #[test]
+    fn log_snapshot() {
+        let out = render(&ledger(), 100, &Ui::plain(), &clock());
+        let expected = [
+            "  Today",
+            "    08:00   · Kestrel set up                                         1  (system)",
+            "    08:01   ✓ Install htop for viper                                           3",
+            "    08:02   ✓ Install jq system-wide                                 5  (system)",
+            "    08:03   ↶ Undid \"Install jq system-wide\"                         6  (system)",
+            "    08:04   · Proposed, not applied: Install vim for viper                     7",
+            "",
+            "  undo the latest: kestrel undo · one change in detail: kestrel log <number>",
+        ]
+        .join("\n");
+        assert_eq!(out.trim_end(), expected, "\n{out}");
+        assert!(out.lines().all(|l| crate::ui::width(l) <= crate::ui::WIDTH), "80 columns");
+        assert_eq!(render(&ledger(), 2, &Ui::plain(), &clock()).lines().filter(|l| l.starts_with("    ")).count(), 2);
+    }
+
+    #[test]
+    fn failures_name_the_change_not_the_broker() {
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(r#"{"seq":8,"ts":"2026-10-30T12:05:00Z","kind":"proposal","actor":"agent","tier":"user","reason":"Install x","data":{}}"#.into());
+        lines.push(r#"{"seq":9,"ts":"2026-10-30T12:05:05Z","kind":"apply_failed","actor":"broker","tier":"user","reason":"Rebuild failed; ...","data":{"proposal":8,"restored":true}}"#.into());
+        let out = render(&parse(&lines.join("\n")).unwrap(), 10, &Ui::plain(), &clock());
+        assert!(out.contains("✗ Failed: Install x (nothing changed)"), "{out}");
+        assert!(!out.contains("by broker"), "{out}");
+    }
+
+    #[test]
+    fn one_change_in_detail() {
+        let out = render_one(&ledger(), 5, &Ui::plain(), &clock()).unwrap();
+        assert!(out.contains("Change 5 · Install jq system-wide"), "{out}");
+        assert!(out.contains("When      2026-10-30 08:02"), "{out}");
+        assert!(out.contains("the whole machine (system change)"), "{out}");
+        assert!(out.contains("Status    undone by change 6"), "{out}");
+        assert!(render_one(&ledger(), 99, &Ui::plain(), &clock()).is_err());
     }
 }

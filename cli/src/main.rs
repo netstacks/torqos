@@ -48,9 +48,11 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// What changed on this machine, and how to undo it.
+    /// What changed on this machine, and how to undo it; with a number, that change in detail.
     Log {
-        /// How many entries to show (newest last).
+        /// One change in detail.
+        change: Option<u64>,
+        /// How many changes to show (newest last).
         #[arg(long, short, default_value_t = 20)]
         n: usize,
     },
@@ -126,7 +128,14 @@ fn main() {
         Cmd::Service(ServiceCmd::Enable { names }) => service_change(&cli, names, Edit::Add),
         Cmd::Service(ServiceCmd::Disable { names }) => service_change(&cli, names, Edit::Remove),
         Cmd::Update { all } => update(&cli, *all),
-        Cmd::Log { n } => read_ledger(&cli).map(|l| print!("{}", history::render(&l, *n))),
+        Cmd::Log { change, n } => read_ledger(&cli).and_then(|l| {
+            let (ui, clock) = (ui::Ui::detect(), history::Clock::system());
+            match change {
+                Some(seq) => print!("{}", history::render_one(&l, *seq, &ui, &clock)?),
+                None => print!("{}", history::render(&l, *n, &ui, &clock)),
+            }
+            Ok(())
+        }),
         Cmd::Undo { seq, yes } => undo(&cli, *seq, *yes),
         Cmd::Status => {
             // The broker's own report and exit code (75: busy, not checked).
@@ -298,9 +307,6 @@ fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result
         println!("  Nothing changed.");
         return Ok(());
     }
-    // Ask for the administrator password (if sudo needs one) now, not under a spinner that would
-    // draw over the prompt.
-    sudo_ready(cli)?;
     let diff_file = scratch.join("change.diff");
     fs::write(&diff_file, &diff)?;
     let proposed = run::broker_json(
@@ -313,18 +319,20 @@ fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result
             // What was shown and asked must be what the broker will apply.
             let shown = if s.system { "system" } else { "user" };
             if v["tier"].as_str() != Some(shown) {
-                bail!(
-                    "The broker treats this as a {} change, not the {shown} change shown here, so it was \
-                     not applied (it is recorded as proposal {seq}).",
-                    history::one_line(v["tier"].as_str().unwrap_or("?"), 20)
-                );
+                let tier = history::one_line(v["tier"].as_str().unwrap_or("?"), 20);
+                println!("{}", ui.fail(&format!("Not applied: the broker treats this as a {tier} change, not a {shown} one.")));
+                println!("    Nothing changed.");
+                println!("    {}", ui.dim(&format!("(Your request is recorded as proposal {seq}, not applied.)")));
+                std::process::exit(1);
             }
             seq
         }
         other => return fail(cli, &ui, &s.what, other, &log, None),
     };
     let applied = {
-        let _p = run::Progress::start("Applying");
+        // A spinner redraws its line every 100 ms and would wipe out a sudo password prompt: only
+        // show one when the broker will run without asking.
+        let _p = if asks_for_password(cli) { None } else { Some(run::Progress::start("Applying")) };
         run::broker_json(broker(cli, &["apply", &seq.to_string(), "--approved-by", &me()?]), &log)?
     };
     match applied {
@@ -336,47 +344,64 @@ fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result
     }
 }
 
-/// When the broker runs through sudo, make sure sudo is ready (asking for the password, if it
-/// needs one, on a clean line) before anything else talks to the terminal.
-fn sudo_ready(cli: &Cli) -> Result<()> {
-    if cli.broker.split_whitespace().next().is_some_and(|w| w == "sudo" || w.ends_with("/sudo")) {
-        let ok = Command::new("sudo").arg("-v").status().map(|s| s.success()).unwrap_or(false);
-        if !ok {
-            bail!("Couldn't get administrator rights (sudo), so nothing was changed.");
-        }
+/// Whether running the broker would stop to ask for a password: it runs through sudo, and sudo
+/// cannot run it non-interactively (`sudo -n`). Checked against the broker itself, not `sudo -v`,
+/// which follows the rules for *all* commands and could ask when the broker does not need it.
+fn asks_for_password(cli: &Cli) -> bool {
+    let words: Vec<&str> = cli.broker.split_whitespace().collect();
+    match words.split_first() {
+        Some((first, rest)) if *first == "sudo" || first.ends_with("/sudo") => !Command::new(first)
+            .arg("-n")
+            .args(rest)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success()),
+        _ => false,
     }
-    Ok(())
 }
 
 /// A change that did not go through: what went wrong, and — from the ledger, not assumed — what
 /// actually happened: applied after all, or nothing changed and the machine is as it was, or not
 /// sure. `proposal`: the proposal made for it, if it got that far. Exits 1.
 fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path, proposal: Option<u64>) -> Result<()> {
-    let msg = match outcome {
-        run::Outcome::Busy if proposal.is_none() => {
+    let log_line = || println!("    {}", ui.dim(&format!("log: {}", log.display())));
+    if let run::Outcome::Busy = outcome {
+        if proposal.is_none() {
             println!("{}", ui.fail("Another change is being applied right now. Try again when it is done."));
             println!("    Nothing changed.");
             std::process::exit(1);
         }
+    }
+    // The broker may have applied it before failing (killed after ledgering, a late error): the
+    // ledger says, so look before saying anything — and if it cannot be read, claim nothing.
+    if let Some(p) = proposal {
+        match read_ledger(cli) {
+            Ok(l) => {
+                if let Some(a) = l.iter().find(|e| e.kind == "applied" && e.data["proposal"].as_u64() == Some(p)).map(|e| e.seq) {
+                    println!("{}", ui.warn(&format!("Done, but something went wrong afterwards ({what}: change {a}).")));
+                    println!("    Check with: kestrel status");
+                    log_line();
+                    std::process::exit(1);
+                }
+            }
+            Err(_) => {
+                println!("{}", ui.fail(&format!("Couldn't tell whether this worked ({what}).")));
+                println!("    Your machine may not be as it was: see kestrel status");
+                log_line();
+                std::process::exit(1);
+            }
+        }
+    }
+    let msg = match outcome {
         run::Outcome::Busy => format!("Couldn't {what}: another change started first. Try again when it is done."),
         run::Outcome::Refused(m) => pkg::explain_apply_error(what, &history::one_line(&m, 200)),
         run::Outcome::Broken(m) => format!("Couldn't {what}: {m}."),
         run::Outcome::Done(_) => unreachable!("fail() is for outcomes that are not Done"),
     };
     println!("{}", ui.fail(&msg));
-    // The broker may have applied it before failing (killed after ledgering, a late error): the
-    // ledger says, so look rather than guess.
-    if let Some(p) = proposal {
-        let applied_as = read_ledger(cli)
-            .ok()
-            .and_then(|l| l.iter().find(|e| e.kind == "applied" && e.data["proposal"].as_u64() == Some(p)).map(|e| e.seq));
-        if let Some(a) = applied_as {
-            println!("{}", ui.warn(&format!("The change was applied anyway (change {a}), but something went wrong afterwards.")));
-            println!("    Check with: kestrel status");
-            println!("    {}", ui.dim(&format!("log: {}", log.display())));
-            std::process::exit(1);
-        }
-    }
     let consistent = matches!(run::broker_json(broker(cli, &["status"]), log), Ok(run::Outcome::Done(v)) if v["ok"] == true);
     if consistent {
         println!("    Nothing changed — your machine is as it was.");
