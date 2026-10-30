@@ -139,6 +139,36 @@ or
 - **Flags everywhere**: `--verbose` (internals inline), `--json` (scripts), `--diff` (the raw
   change), `NO_COLOR` respected, plain text when stdout is not a terminal.
 
+## The broker's JSON interface (ADR-014)
+
+`kestrel-broker --json <command>` prints exactly one JSON value on stdout (the rebuild's own
+output goes to stderr); `log --json` prints one per line. These shapes are an interface: change
+them deliberately, with tests on both sides.
+
+| Command | stdout |
+|---|---|
+| `propose`, `apply`, `rollback`, `show` | the ledger entry |
+| `log [--brief]` | one entry per line (`--brief`: without `data.diff`) |
+| `reconcile` | `{"reconciled": <entry> \| null}` |
+| `status` | `{ok, busy, problems[], ledger_entries, ledger_error, head, ledgered_commit, dirty, interrupted: {op, target} \| null, unrestored, running_system, next_boot, ledgered_system, checked_running_system}` |
+| `verify` | `{"entries": n}` |
+| `init` | `{"initialised": path, "ledger": path}` |
+| any failure | `{"error": "...", "busy": bool}` |
+
+A ledger entry is flat: `seq, ts, actor, approved_by, kind, tier, tainted, reason, data,
+prev_hash, hash`. `kind` is one of `init, proposal, applied, apply_failed, rolled_back,
+rollback_failed, interrupted`; `tier` is `observe, user, system, forbidden`; `data` depends on
+`kind` (e.g. `proposal`: `files, diff, diff_sha256`; `applied`: `proposal, commit, files, system`).
+
+Exit codes: **0** success; **1** refused or failed; **75** another operation is running (try
+later — any command); **2** bad arguments (clap, plain text); anything else, or stdout that is
+not JSON, means the broker itself failed — show its stderr.
+
+**JSON-escaped is not terminal-safe.** Text in entries (`reason`, `actor`, `files`, `diff`),
+`problems` and `error` comes from whoever proposed and may hold bidi overrides or C1 controls;
+the CLI runs every string through its own neutraliser before printing, and never prints a raw
+JSON line to a terminal.
+
 ## Acceptance criteria
 
 - No command prints a commit hash, store path, ledger kind, `Caused by:` or a git hint by default.

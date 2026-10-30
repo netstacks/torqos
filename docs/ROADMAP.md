@@ -18,8 +18,8 @@ In an ARM NixOS VM (UTM on the M4 Mac):
 ### M1.5 — CLI polish: the everyday commands feel finished  ← current
 The commands work (`kestrel pkg`, `service`, `update`, `log`, `undo`, `status`), but they print
 the broker's plumbing. Target and acceptance criteria: `docs/CLI-DESIGN.md`.
-- [ ] Broker `--json` for `propose`, `apply`, `rollback`, `status`, `log`; the CLI stops parsing
-      broker text (ADR-014).
+- [x] Broker `--json` for every command (shapes and exit codes in `CLI-DESIGN.md`).
+- [ ] The CLI uses it and stops parsing broker text (ADR-014).
 - [ ] Human output for every command: changes shown as packages/services with versions and
       descriptions, not diffs; one result line with the change number and how to undo it.
 - [ ] Quiet progress: phase + elapsed time; full log to `~/.local/state/kestrel/last.log`, shown

@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::os::fd::AsFd;
 use std::process::{Command, Stdio};
 
 pub struct Broker {
@@ -31,6 +32,26 @@ pub struct Broker {
     current_system: PathBuf,
     /// The system profile (`/nix/var/nix/profiles/system`): what the next boot starts.
     system_profile: PathBuf,
+}
+
+/// Another broker operation holds the lock: try again later. Its own type, so the CLI can say
+/// "busy" (exit 75) without matching error text.
+#[derive(Debug)]
+pub struct Busy(pub String);
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "another broker operation is running ({})", self.0)
+    }
+}
+
+impl std::error::Error for Busy {}
+
+/// An apply or rollback that was interrupted and not yet reconciled.
+#[derive(Debug, Clone, Serialize)]
+pub struct Interrupted {
+    pub op: String,
+    pub target: u64,
 }
 
 /// How the machine compares with its ledger. See `Broker::status`.
@@ -52,7 +73,7 @@ pub struct Status {
     /// The last rebuild failed and could not restore the previous system (its ledger entry).
     pub unrestored: Option<String>,
     /// An apply or rollback that was interrupted and not yet reconciled.
-    pub interrupted: Option<String>,
+    pub interrupted: Option<Interrupted>,
     /// A broker operation is running (who holds the lock): mid-switch, the running system has
     /// changed before the ledger records it, so nothing is compared.
     pub busy: Option<String>,
@@ -70,7 +91,7 @@ impl Status {
             p.push(format!("ledger: {e}"));
         }
         if let Some(i) = &self.interrupted {
-            p.push(format!("{i} was interrupted: run `kestrel-broker reconcile --approved-by <name>`"));
+            p.push(format!("the {} of #{} was interrupted: run `kestrel-broker reconcile --approved-by <name>`", i.op, i.target));
         }
         if let Some(e) = &self.unrestored {
             p.push(format!(
@@ -124,7 +145,7 @@ impl Lock {
                 return Ok(l);
             }
             if std::time::Instant::now() >= deadline {
-                bail!("another broker operation is running ({})", Self::busy(dir));
+                return Err(Busy(Self::busy(dir)).into());
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -297,7 +318,7 @@ impl Broker {
                 .find_map(|e| e.body.data.get(key).and_then(|v| v.as_str()).map(String::from))
         };
         let interrupted = match self.read_pending()? {
-            Some(p) if !self.outcome_recorded(&p)? => Some(format!("the {} of #{}", p.op, p.target)),
+            Some(p) if !self.outcome_recorded(&p)? => Some(Interrupted { op: p.op, target: p.target }),
             _ => None,
         };
         // The latest entry that recorded a system (init, or any rebuild). A null there (the link
@@ -540,6 +561,9 @@ impl Broker {
             .arg("-c")
             .arg(&cmd)
             .stdin(lock.for_child()?)
+            // stdout carries the broker's result (one JSON line with --json): the rebuild's own output
+            // (activation scripts print to stdout via systemd-run --pipe) goes to stderr.
+            .stdout(Stdio::from(std::io::stderr().as_fd().try_clone_to_owned()?))
             .status()
             .context("running rebuild")?;
         if !status.success() {

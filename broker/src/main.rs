@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use kestrel_broker::{ledger::Entry, policy::Actor, Broker};
+use kestrel_broker::{ledger::Entry, policy::Actor, Broker, Busy};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -86,12 +86,14 @@ fn main() {
     let cli = Cli::parse();
     let json = cli.json;
     if let Err(e) = run(cli) {
+        // Another operation is running: "try again later", exit 75 (EX_TEMPFAIL) from any command.
+        let busy = e.downcast_ref::<Busy>().is_some();
         if json {
-            println!("{}", json!({ "error": format!("{e:#}") }));
+            println!("{}", json!({ "error": format!("{e:#}"), "busy": busy }));
         } else {
             eprintln!("Error: {e:?}");
         }
-        std::process::exit(1);
+        std::process::exit(if busy { 75 } else { 1 });
     }
 }
 
@@ -151,8 +153,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("rolled back #{} as commit {} (ledger #{})", seq, e.body.data["commit"], e.body.seq);
         }
         Cmd::Reconcile { approved_by } => match (b.reconcile(&approved_by)?, json) {
-            (Some(e), true) => print_entry(&e)?,
-            (None, true) => println!("null"),
+            (e, true) => println!("{}", json!({ "reconciled": e })),
             (Some(e), false) => println!("{} (ledger #{})", e.body.reason, e.body.seq),
             (None, false) => println!("nothing to reconcile"),
         },
@@ -200,6 +201,10 @@ fn run(cli: Cli) -> Result<()> {
                         "running_system": s.running_system,
                         "next_boot": s.next_boot,
                         "ledgered_system": s.ledgered_system,
+                        "checked_running_system": s.ledgered_system.is_some(),
+                        "dirty": s.dirty,
+                        "interrupted": s.interrupted,
+                        "unrestored": s.unrestored,
                     })
                 );
                 std::process::exit(if s.busy.is_some() { 75 } else if problems.is_empty() { 0 } else { 1 });

@@ -896,3 +896,52 @@ fn json_output_for_every_command_the_cli_uses() {
     assert_eq!(code, Some(1));
     assert!(e["error"].as_str().unwrap().contains("already rolled back"), "{e}");
 }
+
+/// stdout carries the result and nothing else: the rebuild's own output (activation scripts print
+/// to stdout through systemd-run --pipe) goes to stderr, or a JSON consumer could not parse a
+/// change that was already applied.
+#[test]
+fn rebuild_output_never_mixes_into_the_json_result() {
+    let (dir, _b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let noisy = "echo REBUILD-STDOUT-NOISE";
+    run_cli(dir.path(), noisy, &["propose", "--diff", d.to_str().unwrap(), "--reason", "r"]);
+    let out = run_cli(dir.path(), noisy, &["--json", "apply", "2", "--approved-by", "casey"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "stdout is exactly the result: {stdout:?}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["kind"], "applied");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("REBUILD-STDOUT-NOISE"), "still visible, on stderr");
+}
+
+/// "Busy" is one contract: exit 75 (and "busy": true) from any command that finds another
+/// operation running, not only status.
+#[test]
+fn every_command_exits_75_when_busy() {
+    let (dir, _b) = setup("true");
+    let held = fs::OpenOptions::new().write(true).open(dir.path().join("state/broker.lock")).unwrap();
+    held.lock().unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let out = run_cli(dir.path(), "true", &["--json", "propose", "--diff", d.to_str().unwrap(), "--reason", "r"]);
+    assert_eq!(out.status.code(), Some(75), "{out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["busy"], true, "{v}");
+    let out = run_cli(dir.path(), "true", &["--json", "status"]);
+    assert_eq!(out.status.code(), Some(75));
+}
+
+/// status --json carries the facts as fields, so the CLI never matches English problem text.
+#[test]
+fn status_json_has_facts_as_fields() {
+    let (dir, b, _) = crashed_apply();
+    fs::write(b.repo.root().join("stray.nix"), "{ }\n").unwrap();
+    let out = run_cli(dir.path(), "true", &["--json", "status"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["dirty"], true, "{v}");
+    assert_eq!(v["interrupted"]["op"], "apply", "{v}");
+    assert_eq!(v["interrupted"]["target"], 2, "{v}");
+    assert!(v.get("unrestored").is_some() && v.get("checked_running_system").is_some(), "{v}");
+    let out = run_cli(dir.path(), "true", &["--json", "reconcile", "--approved-by", "casey"]);
+    let r: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(r["reconciled"]["kind"], "interrupted", "{r}");
+}
