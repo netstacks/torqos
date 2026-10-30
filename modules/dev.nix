@@ -9,7 +9,7 @@ in
     default = false;
     description = ''
       Development mode: convenience over security while Kestrel itself is being built.
-      Passwordless sudo for wheel, Claude Code + gh installed, the owner is a trusted Nix user.
+      Passwordless sudo for wheel, Claude Code + gh + tmux installed, the owner is a trusted Nix user.
       An AI coding agent working in this mode has full root and can bypass the broker.
       Never enable on a real install; turning it off is one broker commit (ADR-009).
     '';
@@ -24,7 +24,9 @@ in
     nix.settings.trusted-users = [ config.kestrel.user ];
 
     nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
-    environment.systemPackages = with pkgs; [ claude-code gh ];
+    # tmux: run Claude Code inside it (`tmux new -A -s claude`) so a dropped SSH connection — the
+    # Mac sleeping, UTM pausing, the network restarting during a switch — does not kill the session.
+    environment.systemPackages = with pkgs; [ claude-code gh tmux ];
 
     # Claude Code ships a new build most days; nixpkgs lags it by weeks, and the upstream
     # native installer is useless here (its binary is a plain dynamically-linked ELF — it
