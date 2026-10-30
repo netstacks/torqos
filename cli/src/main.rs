@@ -352,7 +352,8 @@ fn services(repo: &Path, host: &str) -> Result<Services> {
         .args([
             "--apply",
             "c: { inherit (c.kestrel.services) catalog enabled; owner = c.kestrel.user; \
-             ssh_outside = c.services.openssh.enable && !(builtins.elem \"ssh\" c.kestrel.services.enabled); }",
+             ssh_outside = c.services.openssh.enable && !(builtins.elem \"ssh\" c.kestrel.services.enabled) \
+             && c.services.openssh.settings.PasswordAuthentication != false; }",
         ])
         .output()
         .context("running nix eval")?;
@@ -386,20 +387,50 @@ fn service_list(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// The owner's SSH keys, from both places the catalog's sshd reads (AuthorizedKeysFile):
-/// ~owner/.ssh/authorized_keys and /etc/ssh/authorized_keys.d/owner. Each as `ssh-keygen -l` shows
-/// it, so the person approving sees exactly whose keys will get in.
-fn owner_keys(owner: &str) -> Result<Vec<String>> {
+/// Who will be able to log in as the owner over SSH under the configuration being approved (`copy`,
+/// already changed): the files sshd reads (`services.openssh.authorizedKeysFiles`) and the keys
+/// declared in the config (`users.users.<owner>.openssh.authorizedKeys`, which NixOS writes to
+/// /etc/ssh/authorized_keys.d/<owner> — taken from the config, not from what is running now).
+/// One description per key line, as `ssh-keygen -l` shows it, so the person approving sees exactly
+/// whose keys will get in.
+fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<String>> {
+    if !pkg::valid_user(owner) {
+        bail!("'{owner}' is not a valid user name");
+    }
+    let out = Command::new("nix")
+        .args(["eval", "--json"])
+        .arg(format!("{}#nixosConfigurations.{host}.config", flake_ref(copy)))
+        .arg("--apply")
+        .arg(format!(
+            "c: let k = c.users.users.{owner}.openssh.authorizedKeys; in \
+             {{ files = c.services.openssh.authorizedKeysFiles; declared = k.keys ++ map builtins.readFile k.keyFiles; }}"
+        ))
+        .output()
+        .context("running nix eval")?;
+    if !out.status.success() {
+        bail!("cannot read the SSH settings: {}", last_error(&out.stderr));
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let out = Command::new("getent").args(["passwd", owner]).output().context("running getent")?;
     let entry = String::from_utf8_lossy(&out.stdout);
     let home = entry.split(':').nth(5).filter(|h| !h.is_empty()).with_context(|| format!("no user '{owner}' on this machine"))?;
+
+    let mut sources: Vec<(String, String)> = Vec::new(); // (where, text)
+    for pattern in v["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()) {
+        if pattern.starts_with("/etc/ssh/authorized_keys.d/") {
+            let declared = v["declared"].as_array().into_iter().flatten().filter_map(|k| k.as_str());
+            sources.push(("declared in the config".into(), declared.collect::<Vec<_>>().join("\n")));
+            continue;
+        }
+        let file = pattern.replace("%h", home).replace("%u", owner).replace("%%", "%");
+        match fs::read_to_string(&file) {
+            Ok(t) => sources.push((file, t)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => bail!("cannot read {file}: {e} (run this as {owner})"),
+        }
+    }
     let mut keys = Vec::new();
-    for file in [PathBuf::from(home).join(".ssh/authorized_keys"), PathBuf::from("/etc/ssh/authorized_keys.d").join(owner)] {
-        let text = match fs::read_to_string(&file) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => bail!("cannot read {}: {e}", file.display()),
-        };
+    for (place, text) in sources {
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let mut c = Command::new("ssh-keygen");
             c.args(["-l", "-f", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
@@ -407,7 +438,8 @@ fn owner_keys(owner: &str) -> Result<Vec<String>> {
             child.stdin.take().unwrap().write_all(line.as_bytes())?;
             let out = child.wait_with_output()?;
             if out.status.success() {
-                keys.push(format!("{} ({})", String::from_utf8_lossy(&out.stdout).trim(), file.display()));
+                let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                keys.push(format!("{}{id} ({place})", pkg::key_options_note(line)));
             }
         }
     }
@@ -431,18 +463,6 @@ fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
         for (name, what) in svc.catalog.iter().filter(|(c, _)| names.contains(c)) {
             println!("{name}: {what}");
         }
-        // The catalog's SSH is keys only, for the owner only: without one of their keys it would
-        // lock everyone out; with them, approving it means approving exactly these keys.
-        if names.iter().any(|n| n == "ssh") {
-            let keys = owner_keys(&svc.owner)?;
-            if keys.is_empty() {
-                bail!("ssh allows {}'s keys only, and they have none: everyone would be locked out", svc.owner);
-            }
-            println!("keys that will be able to log in as {}:", svc.owner);
-            for k in keys {
-                println!("  {}", history::clean(&k));
-            }
-        }
     }
     let old = read_list(&cli.repo, SERVICES)?;
     let (new, changed) = pkg::edit(old.as_ref().map(|f| f.names.as_slice()).unwrap_or_default(), names, how);
@@ -462,6 +482,19 @@ fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
     }
     let new_text = pkg::render(&new);
     fs::write(copy.join(SERVICES), &new_text)?;
+    // The catalog's SSH is keys only, for the owner only: without one of their keys it would lock
+    // everyone out; with them, approving it means approving exactly these keys — as the changed
+    // configuration will have it.
+    if how == Edit::Add && names.iter().any(|n| n == "ssh") {
+        let keys = owner_keys(&copy, &host, &svc.owner)?;
+        if keys.is_empty() {
+            bail!("ssh allows {}'s keys only, and they have none: everyone would be locked out", svc.owner);
+        }
+        println!("keys that will be able to log in as {}:", svc.owner);
+        for k in keys {
+            println!("  {}", history::clean(&k));
+        }
+    }
     let verb = if how == Edit::Add { "Enable" } else { "Disable" };
     let change = Change {
         copy: &copy,

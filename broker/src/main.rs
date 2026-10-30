@@ -178,7 +178,8 @@ fn hidden(c: char) -> bool {
         || matches!(c,
             '\u{200b}'..='\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}'
             | '\u{2060}'..='\u{2069}' | '\u{061c}' | '\u{00ad}' | '\u{feff}'
-            | '\u{fe00}'..='\u{fe0f}' | '\u{e0000}'..='\u{e007f}')
+            | '\u{fe00}'..='\u{fe0f}' | '\u{e0000}'..='\u{e007f}'
+            | '\u{3164}' | '\u{ffa0}' | '\u{2800}' | '\u{115f}' | '\u{1160}')
 }
 
 /// One line: every hidden character escaped, newlines included.

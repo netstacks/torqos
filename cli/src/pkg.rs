@@ -93,6 +93,28 @@ pub fn proposal_seq(broker_output: &str) -> Option<u64> {
     rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
 }
 
+/// What an authorized_keys line's options mean for who gets in, as a prefix for its description:
+/// a `cert-authority` line is not one key but everyone holding a certificate that CA signed.
+pub fn key_options_note(line: &str) -> String {
+    let line = line.trim();
+    let is_key_type = |t: &str| t.starts_with("ssh-") || t.starts_with("ecdsa-") || t.starts_with("sk-");
+    if line.split_whitespace().next().is_some_and(is_key_type) {
+        return String::new();
+    }
+    // Options come before the key type; they may contain quoted spaces (command="...").
+    let opts = line
+        .match_indices(' ')
+        .map(|(i, _)| i)
+        .find(|&i| is_key_type(&line[i + 1..]))
+        .map(|i| &line[..i])
+        .unwrap_or(line);
+    if opts.split(',').any(|o| o.trim() == "cert-authority") {
+        "CERTIFICATE AUTHORITY — admits anyone with a certificate it signed: ".into()
+    } else {
+        format!("restricted ({}): ", opts.chars().take(60).collect::<String>())
+    }
+}
+
 /// The inputs `nix flake update` reports ("• Updated|Added|Removed input 'x': ..." plus detail
 /// lines), for the change's reason. Only a summary: the diff the person approves is what matters.
 pub fn moved_inputs(nix_stderr: &str) -> Vec<String> {
@@ -168,6 +190,15 @@ mod tests {
         assert_eq!((l, c), (v(&["ripgrep"]), v(&["htop"])));
         let (_, c) = edit(&v(&["htop"]), &v(&["htop"]), Edit::Add);
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn key_option_notes() {
+        assert_eq!(key_options_note("ssh-ed25519 AAAA me@mac"), "");
+        assert!(key_options_note("cert-authority ssh-ed25519 AAAA ca").starts_with("CERTIFICATE AUTHORITY"));
+        assert!(key_options_note("cert-authority,principals=\"a b\" ecdsa-sha2-nistp256 AAAA").starts_with("CERTIFICATE"));
+        let r = key_options_note("command=\"echo hi there\",from=\"10.0.0.1\" ssh-rsa AAAA x");
+        assert!(r.starts_with("restricted (command=\"echo hi there\",from=\"10.0.0.1\")"), "{r}");
     }
 
     #[test]
