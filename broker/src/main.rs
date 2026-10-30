@@ -187,6 +187,12 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Status => {
             let s = b.status()?;
             let problems = s.problems();
+            if json && s.busy.is_some() {
+                // Mid-operation, pending.json exists and the tree may be half-applied: reporting
+                // `interrupted` or `dirty` now would describe a running change as a broken one.
+                println!("{}", json!({ "ok": false, "busy": s.busy, "problems": [] }));
+                std::process::exit(75);
+            }
             if json {
                 println!(
                     "{}",

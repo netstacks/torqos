@@ -945,3 +945,16 @@ fn status_json_has_facts_as_fields() {
     let r: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(r["reconciled"]["kind"], "interrupted", "{r}");
 }
+
+/// While an operation runs, status --json says busy and nothing else: mid-apply pending.json exists,
+/// so `interrupted` would describe a running change as a broken one.
+#[test]
+fn status_json_reports_nothing_else_while_busy() {
+    let (dir, _b, _) = crashed_apply(); // pending.json exists, as during a running apply
+    let held = fs::OpenOptions::new().write(true).open(dir.path().join("state/broker.lock")).unwrap();
+    held.lock().unwrap();
+    let out = run_cli(dir.path(), "true", &["--json", "status"]);
+    assert_eq!(out.status.code(), Some(75));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["busy"].is_string() && v.get("interrupted").is_none() && v.get("dirty").is_none(), "{v}");
+}

@@ -160,6 +160,11 @@ prev_hash, hash`. `kind` is one of `init, proposal, applied, apply_failed, rolle
 rollback_failed, interrupted`; `tier` is `observe, user, system, forbidden`; `data` depends on
 `kind` (e.g. `proposal`: `files, diff, diff_sha256`; `applied`: `proposal, commit, files, system`).
 
+When `status` is busy it reports `{ok: false, busy: "<who holds the lock>", problems: []}` and
+nothing else (mid-operation the other facts are in flux). In `status`, `busy` is that string or
+null; in an error object it is a boolean. `unrestored` is text (`"#7 apply_failed"`). A failed
+`apply` returns `{"error"}`; its `apply_failed` ledger entry (with `restored`) is in `log`.
+
 Exit codes: **0** success; **1** refused or failed; **75** another operation is running (try
 later — any command); **2** bad arguments (clap, plain text); anything else, or stdout that is
 not JSON, means the broker itself failed — show its stderr.
