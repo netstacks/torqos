@@ -84,6 +84,49 @@ fn failed_rebuild_resets_config() {
     b.ledger.verify().unwrap();
 }
 
+/// A rebuild can fail *after* activating the new system (switch-to-configuration exit 4).
+/// The broker must then rebuild the reset config so the running system matches the repo.
+#[test]
+fn failed_rebuild_restores_previous_system() {
+    let dir = tempfile::tempdir().unwrap();
+    let calls = dir.path().join("calls.log");
+    // Record what each rebuild saw; fail whenever the new setting is present.
+    let rebuild = format!(
+        "cat {{repo}}/desktop.nix >> {c}; ! grep -q true {{repo}}/desktop.nix",
+        c = calls.display()
+    );
+    let (dir2, b) = setup(&rebuild);
+    let d = write_diff(dir2.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "activates but fails", Actor::User, false).unwrap();
+    assert!(b.apply(p.body.seq, "casey", false).is_err());
+
+    let log = fs::read_to_string(&calls).unwrap();
+    assert_eq!(log, "{ nightLight = true; }\n{ nightLight = false; }\n", "must rebuild the reset config");
+    let last = b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!(last.body.kind, "apply_failed");
+    assert_eq!(last.body.data["restored"], true);
+}
+
+#[test]
+fn failed_rollback_is_ledgered_and_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let flag = dir.path().join("fail");
+    let rebuild = format!("! test -e {}", flag.display());
+    let (dir2, b) = setup(&rebuild);
+    let d = write_diff(dir2.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "night light", Actor::User, false).unwrap();
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+    let head = b.repo.head().unwrap();
+
+    fs::write(&flag, "").unwrap();
+    assert!(b.rollback(a.body.seq, "casey").is_err());
+    assert_eq!(b.repo.head().unwrap(), head, "config must be reset to the applied state");
+    let last = b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!(last.body.kind, "rollback_failed");
+    assert_eq!(last.body.data["restored"], false, "restore rebuild also failed, and must say so");
+    b.ledger.verify().unwrap();
+}
+
 #[test]
 fn user_tier_detected() {
     let (dir, b) = setup("true");

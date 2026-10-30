@@ -33,8 +33,17 @@ pkgs.testers.runNixOSTest {
     env = "KESTREL_REBUILD_CMD=true "
     repo = "/var/lib/kestrel/config"
 
-    machine.succeed(f"mkdir -p {repo} && cp /etc/kestrel-test/desktop.nix {repo}/")
+    machine.succeed(f"mkdir -p {repo} && cp /etc/kestrel-test/desktop.nix {repo}/ && touch {repo}/flake.nix")
     machine.succeed(env + "kestrel-broker init")
+
+    with subtest("init unit never re-runs on an initialised repo"):
+        # Re-running would sweep out-of-band edits into a 'baseline' commit, and during a broker
+        # apply it fails the switch on the broker lock.
+        machine.succeed(f"echo tampered > {repo}/stray.nix")
+        machine.succeed("systemctl start kestrel-broker-init")
+        machine.succeed("systemctl show -p ConditionResult kestrel-broker-init | grep -qx ConditionResult=no")
+        machine.succeed(f"git -C {repo} status --porcelain | grep -q stray.nix")
+        machine.succeed(f"rm {repo}/stray.nix")
 
     with subtest("agent proposes, user approves, change lands"):
         out = machine.succeed(env + "kestrel-broker propose --actor agent "

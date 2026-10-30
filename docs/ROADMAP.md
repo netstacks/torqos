@@ -5,14 +5,15 @@
 ### M1 — The trust loop  ← current
 In an ARM NixOS VM (UTM on the M4 Mac):
 
-- [ ] `broker/Cargo.lock` generated; `cargo test` green.
-- [ ] UTM VM switches to `/var/lib/kestrel/config#kestrel-utm` (from `templates/config`).
-- [ ] `kestrel-broker-init` turns the config dir into a git repo + ledger on boot.
-- [ ] `kestrel-broker propose` accepts a diff + reason, shows it.
-- [ ] `kestrel-broker apply` commits (with `Ledger-Entry` trailer), rebuilds, appends ledger.
-- [ ] `kestrel-broker rollback` reverts, rebuilds, appends ledger.
-- [ ] `kestrel-broker verify` detects any edit to the ledger.
+- [x] `broker/Cargo.lock` generated; `cargo test` green.
+- [x] UTM VM switches to `/var/lib/kestrel/config#kestrel-utm` (from `templates/config`).
+- [x] `kestrel-broker-init` turns the config dir into a git repo + ledger on boot.
+- [x] `kestrel-broker propose` accepts a diff + reason, shows it.
+- [x] `kestrel-broker apply` commits (with `Ledger-Entry` trailer), rebuilds, appends ledger.
+- [x] `kestrel-broker rollback` reverts, rebuilds, appends ledger.
+- [x] `kestrel-broker verify` detects any edit to the ledger.
 - [ ] NixOS VM test `tests/trust-loop.nix` proves propose → apply → rollback.
+  (Needs KVM: the UTM VM has no `/dev/kvm`, so run it on Linux/x86 or a linux-builder.)
 
 ### M2 — The agent sees
 - Local model reachable (llama.cpp on the Mac host during dev).

@@ -34,3 +34,13 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 
 ## ADR-007 — Privileged code in Rust, UI in QML
 - **Decision:** Broker, ledger, tools in Rust. Shell in Quickshell (QML), unprivileged.
+
+## ADR-008 — A failed rebuild is followed by a restore rebuild
+- **Context:** `nixos-rebuild switch` can fail *after* activating the new system
+  (switch-to-configuration exits 4 when a unit fails). Found in the UTM VM: the broker reset the
+  repo but the running system kept the change, so system and config diverged.
+- **Decision:** On a failed apply or rollback, the broker resets the repo to the previous commit
+  *and rebuilds it*, then ledgers `apply_failed` / `rollback_failed` with `restored: true|false`.
+  `kestrel-broker-init` runs only once (`ConditionPathExists=!…/.git`), never during a switch.
+- **Consequences:** A failed change costs a second (usually cached) switch. If the restore also
+  fails, the ledger says so explicitly rather than claiming the system is unchanged.

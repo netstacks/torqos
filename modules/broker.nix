@@ -38,10 +38,17 @@ in
     ];
 
     # Initialise repo + ledger once a config flake has been placed in the repo directory.
+    # Runs exactly once: after that, only the broker writes to the repo. Re-running it on every
+    # boot or switch would commit out-of-band edits as "baseline" with no ledger entry, and
+    # during a broker apply it collides with the broker lock and fails the switch.
     systemd.services.kestrel-broker-init = {
       description = "Initialise Kestrel config repo and ledger";
       wantedBy = [ "multi-user.target" ];
-      unitConfig.ConditionPathExists = "${cfg.configRepo}/flake.nix";
+      restartIfChanged = false;
+      unitConfig.ConditionPathExists = [
+        "${cfg.configRepo}/flake.nix"
+        "!${cfg.configRepo}/.git"
+      ];
       path = [ pkgs.git ];
       environment = {
         KESTREL_CONFIG_REPO = cfg.configRepo;
@@ -49,6 +56,7 @@ in
       };
       serviceConfig = {
         Type = "oneshot";
+        RemainAfterExit = true;
         ExecStart = "${lib.getExe cfg.package} init";
         # TODO(M3): run the broker as a socket-activated daemon with tighter sandboxing.
         ProtectHome = true;

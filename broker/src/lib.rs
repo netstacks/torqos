@@ -2,7 +2,8 @@
 //!
 //! Lifecycle: propose (validated + ledgered, diff stored in the ledger) → apply (approved,
 //! committed, rebuilt, ledgered) → rollback (reverted, rebuilt, ledgered).
-//! If a rebuild fails, the repo is reset to the previous commit and the failure is ledgered.
+//! If a rebuild fails, the repo is reset to the previous commit, that commit is rebuilt (the
+//! failed rebuild may already have activated), and the failure is ledgered.
 
 pub mod ledger;
 pub mod policy;
@@ -116,6 +117,23 @@ impl Broker {
         Ok(())
     }
 
+    /// Reset the config to `before` and rebuild it. A failed rebuild may already have activated
+    /// the new system (switch-to-configuration exits non-zero when a unit fails), so resetting
+    /// the repo alone would leave the running system out of step with it. Returns whether the
+    /// restore rebuild succeeded.
+    fn restore(&self, before: &str) -> Result<bool> {
+        self.repo.hard_reset(before)?;
+        Ok(self.rebuild().is_ok())
+    }
+
+    fn failure_reason(what: &str, before: &str, restored: bool) -> String {
+        if restored {
+            format!("{what} failed; config reset to {before} and rebuilt")
+        } else {
+            format!("{what} failed; config reset to {before} but the restore rebuild ALSO failed — running system may not match the config")
+        }
+    }
+
     pub fn apply(&self, proposal_seq: u64, approved_by: &str, confirm_tainted: bool) -> Result<Entry> {
         let _l = Lock::acquire(&self.state_dir)?;
         let p = self.ledger.get(proposal_seq)?;
@@ -151,15 +169,15 @@ impl Broker {
         let _ = fs::remove_file(&tmp);
 
         if let Err(e) = self.rebuild() {
-            self.repo.hard_reset(&before)?;
+            let restored = self.restore(&before)?;
             self.ledger.append(NewEntry {
                 actor: "broker".into(),
                 approved_by: Some(approved_by.into()),
                 kind: "apply_failed".into(),
                 tier: tier.to_string(),
                 tainted: p.body.tainted,
-                reason: format!("Rebuild failed; config reset to {before}"),
-                data: json!({ "proposal": proposal_seq, "error": e.to_string() }),
+                reason: Self::failure_reason("Rebuild", &before, restored),
+                data: json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored }),
             })?;
             return Err(e.context("apply rolled back because the rebuild failed"));
         }
@@ -193,7 +211,16 @@ impl Broker {
         let before = self.repo.head()?;
         let new_commit = self.repo.revert_and_commit(&commit, &msg)?;
         if let Err(e) = self.rebuild() {
-            self.repo.hard_reset(&before)?;
+            let restored = self.restore(&before)?;
+            self.ledger.append(NewEntry {
+                actor: "broker".into(),
+                approved_by: Some(approved_by.into()),
+                kind: "rollback_failed".into(),
+                tier: a.body.tier.clone(),
+                tainted: false,
+                reason: Self::failure_reason("Rollback rebuild", &before, restored),
+                data: json!({ "applied": applied_seq, "error": e.to_string(), "restored": restored }),
+            })?;
             return Err(e.context("rollback aborted because the rebuild failed"));
         }
         self.ledger.append(NewEntry {
