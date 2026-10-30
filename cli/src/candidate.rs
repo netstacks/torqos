@@ -43,6 +43,7 @@ impl Repo {
         }
         let root = self.root.to_string_lossy();
         let out = c
+            .env("TZ", "UTC") // dates in the ledger's time
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .args(["-C", &root, "-c", &format!("safe.directory={root}"), "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"])
@@ -63,7 +64,7 @@ impl Repo {
     /// makes one commit per change on one branch, and resets an undone one away, so the branch's
     /// first-parent history is the machine's history of configurations.
     pub fn history(&self, count: usize) -> Result<Vec<Commit>> {
-        let out = self.git(&["log", "--first-parent", "-z", &format!("-n{count}"), "--date=iso-strict-local", "--format=%H%x1f%cd%x1f%s", "HEAD"])?;
+        let out = self.git(&["log", "--first-parent", "-z", &format!("-n{count}"), "--date=iso-strict-local", "--format=%H%x1f%cd%x1f%s", "HEAD", "--"])?;
         String::from_utf8_lossy(&out)
             .split('\0')
             .filter(|r| !r.trim().is_empty())
@@ -81,7 +82,14 @@ impl Repo {
     /// The tree's files at `rev` (exact bytes): only paths the schema describes, and only regular
     /// files — a symlink or anything else at a tree path is refused, never followed.
     pub fn tree_files(&self, schema: &Schema, rev: &str) -> Result<BTreeMap<String, Vec<u8>>> {
-        let listing = self.git(&["ls-tree", "-r", "-z", "--full-tree", rev])?;
+        // A commit id (from head() or history()) or HEAD — never anything git could read as an
+        // option or a path (`--output=…`, `HEAD:system`).
+        let is_id = rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !(is_id || rev == "HEAD") {
+            bail!("not a commit id: {rev:?}");
+        }
+        let commit = format!("{rev}^{{commit}}");
+        let listing = self.git(&["ls-tree", "-r", "-z", "--full-tree", "--end-of-options", &commit])?;
         let mut files = BTreeMap::new();
         for entry in listing.split(|b| *b == 0).filter(|e| !e.is_empty()) {
             let entry = String::from_utf8_lossy(entry);
@@ -92,7 +100,7 @@ impl Repo {
                 continue;
             }
             if mode != "100644" || kind != "blob" {
-                bail!("{path} at {rev} is not a regular file (mode {mode}); torqcli does not follow links");
+                bail!("{path} at {rev} is not a plain data file (git mode {mode}: a link, an executable or a folder)");
             }
             files.insert(path.to_string(), self.git(&["cat-file", "blob", id])?);
         }
@@ -126,8 +134,15 @@ impl Candidate {
         Ok(state.join("torq/candidate.json"))
     }
 
-    /// The saved candidate, if there is one (None: start from the active configuration).
+    /// The saved candidate, if there is one (None: start from the active configuration). Only from
+    /// a private folder, and never through a link.
     pub fn load(path: &Path, schema: &Schema) -> Result<Option<Candidate>> {
+        if let Some(dir) = path.parent().filter(|d| d.exists()) {
+            private_dir(dir)?;
+        }
+        if fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_file()) {
+            bail!("{} is not a plain file; remove it", path.display());
+        }
         let bytes = match fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -145,10 +160,11 @@ impl Candidate {
         Ok(Some(Candidate { base, config }))
     }
 
-    /// Save it atomically, readable by its owner only.
+    /// Save it atomically, readable by its owner only, in a folder only its owner can write: anyone
+    /// else who could replace the file could change what the user commits under their name.
     pub fn save(&self, path: &Path) -> Result<()> {
         let dir = path.parent().context("candidate path")?;
-        fs::create_dir_all(dir)?;
+        private_dir(dir)?;
         let files: serde_json::Map<String, serde_json::Value> =
             self.config.files.iter().map(|(p, d)| (p.clone(), d.render().into())).collect();
         let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 1, "base": self.base, "files": files }))?;
@@ -156,6 +172,7 @@ impl Candidate {
         tmp.write_all(&body)?;
         tmp.as_file().sync_all()?;
         tmp.persist(path).map_err(|e| e.error).with_context(|| format!("saving {}", path.display()))?;
+        fs::File::open(dir)?.sync_all()?;
         Ok(())
     }
 
@@ -165,6 +182,26 @@ impl Candidate {
             _ => Ok(()),
         }
     }
+}
+
+/// Make sure `dir` exists, belongs to this user and only they can write it (created 0700).
+fn private_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    if !dir.exists() {
+        if let Some(parent) = dir.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::DirBuilder::new().mode(0o700).create(dir).or_else(|e| if dir.is_dir() { Ok(()) } else { Err(e) })?;
+    }
+    let me = fs::metadata("/proc/self").context("reading /proc/self")?.uid();
+    let m = fs::symlink_metadata(dir)?;
+    if !m.is_dir() || m.uid() != me || m.permissions().mode() & 0o022 != 0 {
+        bail!(
+            "{} must be a folder of your own that only you can write (it holds your uncommitted configuration)",
+            dir.display()
+        );
+    }
+    Ok(())
 }
 
 /// The changes from the base's files (exact text) to the candidate's: per changed file, its path,
@@ -246,7 +283,7 @@ mod tests {
         let s = schema();
         let now = r.tree_files(&s, "HEAD").unwrap();
         assert_eq!(now.keys().collect::<Vec<_>>(), ["system/host.json", "system/packages.json"], "flake.nix is not a tree file");
-        let first = r.tree_files(&s, "HEAD~2").unwrap();
+        let first = r.tree_files(&s, &r.history(3).unwrap()[2].id).unwrap();
         assert_eq!(String::from_utf8_lossy(&first["system/host.json"]), "{ \"host-name\": \"one\" }\n");
     }
 
@@ -255,7 +292,7 @@ mod tests {
         let (d, r) = repo();
         sh(d.path(), "ln -s ../flake.nix users/dev/cli.json && git add -A && git commit -q -m link");
         let e = format!("{:#}", r.tree_files(&schema(), "HEAD").unwrap_err());
-        assert!(e.contains("users/dev/cli.json") && e.contains("not a regular file"), "{e}");
+        assert!(e.contains("users/dev/cli.json") && e.contains("not a plain data file"), "{e}");
     }
 
     /// `rollback 2` is the configuration two changes back, as a new change on today's HEAD.
@@ -263,7 +300,7 @@ mod tests {
     fn a_rollback_loads_an_old_configuration_on_the_current_base() {
         let (_d, r) = repo();
         let s = schema();
-        let c = Candidate::from_repo(&r, &s, "HEAD~2").unwrap();
+        let c = Candidate::from_repo(&r, &s, &r.history(3).unwrap()[2].id).unwrap();
         assert_eq!(c.base, r.head().unwrap());
         assert_eq!(s.show(&c.config, &[]).unwrap(), "system {\n    host-name one;\n}\n");
     }
@@ -312,5 +349,63 @@ mod tests {
         assert_eq!(applied, "{\n  \"host-name\": \"three\",\n  \"time-zone\": \"UTC\"\n}\n");
         assert!(!d.path().join("system/packages.json").exists());
         assert_eq!(fs::read_to_string(d.path().join("users/dev/cli.json")).unwrap(), "{\n  \"style\": \"cisco\"\n}\n");
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    fn schema() -> Schema {
+        Schema::parse(include_str!("schema-fixture.json")).unwrap()
+    }
+    fn sh(dir: &Path, script: &str) {
+        let st = Command::new("sh").arg("-c").arg(script).current_dir(dir).env("GIT_CONFIG_GLOBAL", "/dev/null").status().unwrap();
+        assert!(st.success(), "{script}");
+    }
+
+    /// A hand-ordered list with a repeat is the same configuration after a save and a load: no
+    /// phantom change (review of d373172).
+    #[test]
+    fn list_order_is_no_change() {
+        let d = tempfile::tempdir().unwrap();
+        sh(d.path(), "git init -q -b main && git config user.name t && git config user.email t@t && mkdir system \
+            && echo '[\"zsh\",\"htop\",\"zsh\"]' > system/packages.json && git add -A && git commit -qm x");
+        let (r, s) = (Repo::new(d.path()), schema());
+        let c = Candidate::from_repo(&r, &s, "HEAD").unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let p = state.path().join("torq/candidate.json");
+        c.save(&p).unwrap();
+        let again = Candidate::load(&p, &s).unwrap().unwrap();
+        assert!(changes(&s, &r.tree_files(&s, "HEAD").unwrap(), &again.config).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_candidate_folder_must_be_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path().join("torq");
+        let c = Candidate { base: "x".into(), config: Config::default() };
+        c.save(&dir.join("candidate.json")).unwrap();
+        assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "created private");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        for e in [c.save(&dir.join("candidate.json")).unwrap_err(), Candidate::load(&dir.join("candidate.json"), &schema()).unwrap_err()] {
+            assert!(format!("{e:#}").contains("only you can write"), "{e:#}");
+        }
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_file(dir.join("candidate.json")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("candidate.json")).unwrap();
+        assert!(format!("{:#}", Candidate::load(&dir.join("candidate.json"), &schema()).unwrap_err()).contains("not a plain file"));
+    }
+
+    #[test]
+    fn only_commit_ids_reach_git() {
+        let d = tempfile::tempdir().unwrap();
+        sh(d.path(), "git init -q -b main && git config user.name t && git config user.email t@t && touch a && git add -A && git commit -qm x");
+        let r = Repo::new(d.path());
+        for bad in ["--output=/tmp/x", "HEAD:system", "HEAD~1", "main", "ABCDEF0123456789ABCDEF0123456789ABCDEF01", ""] {
+            assert!(format!("{:#}", r.tree_files(&schema(), bad).unwrap_err()).contains("not a commit id"), "{bad}");
+        }
+        assert!(r.tree_files(&schema(), &r.head().unwrap()).is_ok());
     }
 }

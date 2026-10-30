@@ -115,7 +115,13 @@ impl Schema {
 
     /// Whether `path` is one of the tree's files.
     pub fn describes(&self, path: &str) -> bool {
-        self.nodes.values().any(|n| n.file.as_deref().is_some_and(|p| matches_file(p, path).is_some()))
+        self.tier_of(path).is_some()
+    }
+
+    /// The tier of a tree file (`system` or `user`), None if it is not one. (The broker decides;
+    /// this is what the shell expects it to say.)
+    pub fn tier_of(&self, path: &str) -> Option<&str> {
+        self.nodes.values().find(|n| n.file.as_deref().is_some_and(|p| matches_file(p, path).is_some())).map(|n| n.tier.as_str())
     }
 
     fn node(&self, key: &str) -> &Node {
@@ -370,6 +376,11 @@ impl Schema {
                 for i in &items {
                     value_ok(first_key, i)?;
                 }
+                // A list's order and repeats carry no meaning (the modules read it as a set): in
+                // normal form, a reordered file is the same configuration, not a change.
+                let mut items = items;
+                items.sort();
+                items.dedup();
                 Data::List(items)
             } else {
                 let obj = v.as_object().ok_or_else(|| bad("must be a JSON object".into()))?;
