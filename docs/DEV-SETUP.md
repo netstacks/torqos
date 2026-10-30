@@ -60,6 +60,9 @@ kestrel pkg add ripgrep            # for you (user tier); --system for everyone 
 kestrel pkg remove ripgrep
 kestrel pkg list
 ```
+To move the machine to the newest Kestrel (and so nixpkgs) — one ledgered, undoable `flake.lock`
+change: `kestrel update`. `sudo kestrel-broker status` says whether the machine is as its ledger
+says; it is also checked at boot and every 15 minutes, and a new shell warns if not.
 It checks the change against the whole system first, then proposes and applies it through the
 broker, so it is ledgered and `kestrel-broker rollback` undoes it.
 

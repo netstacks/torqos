@@ -122,12 +122,18 @@ proposes nothing. See `docs/ROADMAP.md`.
 - `~/kestrel` = this repo (working copy; push to `github.com/netstacks/kestrel`, branch `main`).
 - `/var/lib/kestrel/config` = the machine's config repo; its `kestrel` input is
   `path:/home/viper/kestrel`.
-- **Ship a distribution change to the running VM through the broker**, so it is ledgered:
+- **Ship a distribution change to the running VM through the broker**, so it is ledgered. Commit
+  in `~/kestrel` first (the config repo's `kestrel` input is that working tree), then:
   ```bash
-  rm -rf /tmp/cfg && cp -r /var/lib/kestrel/config /tmp/cfg && cd /tmp/cfg
-  nix flake update kestrel && git diff > /tmp/bump.diff     # + edit other files if needed
-  sudo kestrel-broker propose --diff /tmp/bump.diff --reason "..." --actor user
+  kestrel update          # evaluates, shows the diff, asks, applies; needs a terminal (use tmux)
+  ```
+  To change the machine's config repo itself (not just bump inputs), do it by hand:
+  ```bash
+  rm -rf /tmp/cfg && cp -r /var/lib/kestrel/config /tmp/cfg && cd /tmp/cfg   # edit, then:
+  git diff > /tmp/change.diff
+  sudo kestrel-broker propose --diff /tmp/change.diff --reason "..." --actor user
   sudo kestrel-broker apply <seq> --approved-by viper
+  sudo kestrel-broker status        # the machine is as the ledger says?
   ```
 - Dev mode is a temporary exception for *building* Kestrel. Do not design the Kestrel agent around
   having root; the agent itself stays unprivileged and broker-only.

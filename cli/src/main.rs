@@ -33,6 +33,8 @@ enum Cmd {
     /// Installed software.
     #[command(subcommand)]
     Pkg(PkgCmd),
+    /// Move this machine to the newest Kestrel and nixpkgs (a system change: always asks).
+    Update,
 }
 
 #[derive(Subcommand)]
@@ -75,6 +77,7 @@ fn main() {
         Cmd::Pkg(PkgCmd::Search { terms }) => search(&cli.repo, terms),
         Cmd::Pkg(PkgCmd::Add { names, system, yes }) => change(&cli, names, *system, *yes, Edit::Add),
         Cmd::Pkg(PkgCmd::Remove { names, system, yes }) => change(&cli, names, *system, *yes, Edit::Remove),
+        Cmd::Update => update(&cli),
     };
     if let Err(e) = r {
         eprintln!("kestrel: {e:#}");
@@ -157,18 +160,79 @@ fn flake_ref(dir: &Path) -> String {
     format!("path:{}", dir.display())
 }
 
+/// Decide how approval happens before proposing anything, so a refusal leaves no proposal behind.
+/// The CLI cannot enforce who approves (anything running as you can run it; KNOWN-GAPS #4) — but it
+/// will not make a system-tier change without a person answering a prompt.
+fn approval(system: bool, yes: bool) -> Result<()> {
+    if system && yes {
+        bail!("system changes are always confirmed at the prompt; run again without --yes");
+    }
+    if !yes && !std::io::stdin().is_terminal() {
+        if system {
+            bail!("nothing proposed: a system change is confirmed at a prompt, and there is no terminal");
+        }
+        bail!("nothing proposed: there is no terminal to ask on (--yes applies a change to your own packages)");
+    }
+    Ok(())
+}
+
+/// A private (0700), unpredictable scratch directory: the broker, as root, reads the diff from it.
+/// In XDG_RUNTIME_DIR (the user's own) if there is one, else /tmp; TMPDIR is not consulted.
+fn scratch_dir() -> Result<tempfile::TempDir> {
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
+    tempfile::Builder::new().prefix("kestrel-").tempdir_in(base).context("creating a scratch directory")
+}
+
+/// One change to one file of the config repo, already made in a scratch copy of it (`copy`).
+struct Change<'a> {
+    copy: &'a Path,
+    /// Repo-relative path of the changed file.
+    path: &'a str,
+    /// Its exact current text (None: the file is new) — a diff must start from that.
+    old: Option<&'a str>,
+    new: &'a str,
+    reason: String,
+}
+
+/// Evaluate the changed copy, then propose the diff, ask (unless `yes`) and apply it.
+fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result<()> {
+    eprintln!("checking the change against this machine's configuration ({host})...");
+    evaluate(c.copy, host)?;
+    let diff = make_diff(scratch, c.path, c.old, c.new)?;
+    let diff_file = scratch.join("change.diff");
+    fs::write(&diff_file, &diff)?;
+
+    let out = broker(cli, &["propose", "--diff", &diff_file.to_string_lossy(), "--reason", &c.reason, "--actor", "user"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit()) // the broker's (or sudo's) own reason, if it refuses
+        .output()
+        .context("running the broker")?;
+    let shown = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        bail!("the broker refused the proposal (see above)");
+    }
+    let seq = pkg::proposal_seq(&shown).context("could not read the proposal number from the broker")?;
+    // The broker's own "approve with: ..." hint does not apply: we ask, then apply.
+    for line in shown.lines().filter(|l| !l.starts_with("approve with:")) {
+        println!("{line}");
+    }
+    if !yes && !confirm(&format!("{}?", c.reason))? {
+        println!("not applied; proposal #{seq} stays in the ledger unapplied.");
+        return Ok(());
+    }
+    let st = broker(cli, &["apply", &seq.to_string(), "--approved-by", &me()?])
+        .status()
+        .context("running the broker")?;
+    if !st.success() {
+        bail!("apply of proposal #{seq} failed (see above; nothing was left half-applied)");
+    }
+    Ok(())
+}
+
 fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Result<()> {
     check_repo(cli)?;
     let user = me()?;
-    // Decide how approval happens before proposing anything, so a refusal leaves no proposal
-    // behind. The CLI cannot enforce who approves (anything running as you can run it; KNOWN-GAPS
-    // #4) — but it will not make a system-wide change without a person answering a prompt.
-    if system && yes {
-        bail!("system-wide changes are always confirmed at the prompt; run again without --yes");
-    }
-    if !yes && !std::io::stdin().is_terminal() {
-        bail!("nothing proposed: there is no terminal to ask on (--yes applies a change to your own packages)");
-    }
+    approval(system, yes)?;
     let target = if system {
         Target::System
     } else {
@@ -190,50 +254,71 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
         return Ok(());
     }
 
-    // Private (0700) and unpredictable: the broker, as root, reads the diff from here.
-    // In XDG_RUNTIME_DIR (the user's own) if there is one, else /tmp; TMPDIR is not consulted.
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    let scratch = tempfile::Builder::new()
-        .prefix("kestrel-pkg-")
-        .tempdir_in(base)
-        .context("creating a scratch directory")?;
+    let scratch = scratch_dir()?;
     let scratch = scratch.path();
-    let new_text = pkg::render(&new);
     let host = config_name(&cli.repo)?;
-    eprintln!("checking the change against this machine's configuration ({host})...");
-    check(&cli.repo, scratch, &target, &new_text, &host)?;
+    let copy = scratch.join("config");
+    copy_tree(&cli.repo, &copy)?;
+    if !reads_package_lists(&copy, &host)? {
+        bail!(
+            "this machine's config does not read package lists yet: its flake.nix must call \
+             kestrel.lib.mkSystem with `configDir = ./.;` (a system change)"
+        );
+    }
+    let path = target.path();
+    let new_text = pkg::render(&new);
+    let file = copy.join(&path);
+    fs::create_dir_all(file.parent().unwrap())?;
+    fs::write(&file, &new_text)?;
+    let change = Change {
+        copy: &copy,
+        path: &path,
+        old: old.as_ref().map(|f| f.text.as_str()),
+        new: &new_text,
+        reason: format!("{verb} {} {}", changed.join(", "), target.describe()),
+    };
+    submit(cli, scratch, &host, change, yes)
+}
 
-    let diff = make_diff(scratch, &target, old.as_ref().map(|f| f.text.as_str()), &new_text)?;
-    let diff_file = scratch.join("change.diff");
-    fs::write(&diff_file, &diff)?;
-
-    let reason = format!("{verb} {} {}", changed.join(", "), target.describe());
-    let out = broker(cli, &["propose", "--diff", &diff_file.to_string_lossy(), "--reason", &reason, "--actor", "user"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit()) // the broker's (or sudo's) own reason, if it refuses
+/// `kestrel update`: move this machine to the newest Kestrel (and so nixpkgs), as one ledgered,
+/// undoable change to flake.lock (ADR-004).
+fn update(cli: &Cli) -> Result<()> {
+    check_repo(cli)?;
+    approval(true, false)?;
+    let scratch = scratch_dir()?;
+    let scratch = scratch.path();
+    let host = config_name(&cli.repo)?;
+    let copy = scratch.join("config");
+    copy_tree(&cli.repo, &copy)?;
+    let old = fs::read_to_string(copy.join("flake.lock")).context("reading flake.lock")?;
+    eprintln!("fetching the newest inputs...");
+    let out = Command::new("nix")
+        .args(["flake", "update", "--flake"])
+        .arg(flake_ref(&copy))
         .output()
-        .context("running the broker")?;
-    let shown = String::from_utf8_lossy(&out.stdout);
+        .context("running nix flake update")?;
     if !out.status.success() {
-        bail!("the broker refused the proposal (see above)");
+        bail!("nix flake update failed: {}", last_error(&out.stderr));
     }
-    let seq = pkg::proposal_seq(&shown).context("could not read the proposal number from the broker")?;
-    // The broker's own "approve with: ..." hint does not apply: we ask, then apply.
-    for line in shown.lines().filter(|l| !l.starts_with("approve with:")) {
-        println!("{line}");
-    }
-
-    if !yes && !confirm(&format!("{reason}?"))? {
-        println!("not applied; proposal #{seq} stays in the ledger unapplied.");
+    let new = fs::read_to_string(copy.join("flake.lock")).context("reading the updated flake.lock")?;
+    if new == old {
+        println!("already up to date");
         return Ok(());
     }
-    let st = broker(cli, &["apply", &seq.to_string(), "--approved-by", &user])
-        .status()
-        .context("running the broker")?;
-    if !st.success() {
-        bail!("apply of proposal #{seq} failed (see above; nothing was left half-applied)");
-    }
-    Ok(())
+    // nix reports each moved input as "• Updated input 'x': <old> → <new>" (plus a detail line).
+    let moved: Vec<String> = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("• Updated input '").and_then(|r| r.split('\'').next()).map(String::from))
+        .collect();
+    eprint!("{}", String::from_utf8_lossy(&out.stderr));
+    let change = Change {
+        copy: &copy,
+        path: "flake.lock",
+        old: Some(&old),
+        new: &new,
+        reason: if moved.is_empty() { "Update".to_string() } else { format!("Update {}", moved.join(", ")) },
+    };
+    submit(cli, scratch, &host, change, false)
 }
 
 /// The broker. Its repo is never passed: the real broker (as root) manages the machine's config
@@ -277,35 +362,33 @@ fn config_name(repo: &Path) -> Result<String> {
     }
 }
 
-/// Evaluate the whole system with the new list, in a scratch copy of the repo: the same module
-/// that will build it reports unknown, unfree or unsupported packages now, before anything is
-/// proposed. Also refuses if this machine's config does not read package lists at all.
-fn check(repo: &Path, scratch: &Path, target: &Target, new_text: &str, host: &str) -> Result<()> {
-    let copy = scratch.join("config");
-    copy_tree(repo, &copy)?;
-    let file = copy.join(target.path());
-    fs::create_dir_all(file.parent().unwrap())?;
-    fs::write(&file, new_text)?;
+/// Evaluate the whole system from the changed scratch copy: the same modules that will build it
+/// report unknown, unfree or unsupported packages, or a broken update, before anything is proposed.
+fn evaluate(copy: &Path, host: &str) -> Result<()> {
     let out = Command::new("nix")
-        .args(["eval", "--json"])
-        .arg(format!("{}#nixosConfigurations.{host}.config", flake_ref(&copy)))
-        .args([
-            "--apply",
-            "c: { drv = c.system.build.toplevel.drvPath; reads = c.kestrel.packages.configDir or null != null; }",
-        ])
+        .args(["eval", "--raw"])
+        .arg(format!("{}#nixosConfigurations.{host}.config.system.build.toplevel.drvPath", flake_ref(copy)))
         .output()
         .context("running nix eval")?;
     if !out.status.success() {
         bail!("this change would not build: {}", last_error(&out.stderr));
     }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    if v["reads"] != true {
-        bail!(
-            "this machine's config does not read package lists yet: its flake.nix must call \
-             kestrel.lib.mkSystem with `configDir = ./.;` (a system change)"
-        );
-    }
     Ok(())
+}
+
+/// Whether this machine's config reads package lists at all (`configDir`); if not, changing them
+/// would do nothing.
+fn reads_package_lists(copy: &Path, host: &str) -> Result<bool> {
+    let out = Command::new("nix")
+        .args(["eval", "--json"])
+        .arg(format!("{}#nixosConfigurations.{host}.config.kestrel", flake_ref(copy)))
+        .args(["--apply", "k: (k.packages.configDir or null) != null"])
+        .output()
+        .context("running nix eval")?;
+    if !out.status.success() {
+        bail!("cannot read the config repo: {}", last_error(&out.stderr));
+    }
+    Ok(serde_json::from_slice(&out.stdout)?)
 }
 
 /// The most useful line of a nix error: ours if there is one, else nix's last `error:`.
@@ -322,12 +405,12 @@ fn last_error(stderr: &[u8]) -> String {
 
 /// `old` is the file's exact current text — not a re-rendering of it — or the diff would not apply
 /// to a hand-formatted list. `new` is the canonical rendering that was evaluated.
-fn make_diff(scratch: &Path, target: &Target, old: Option<&str>, new: &str) -> Result<String> {
+fn make_diff(scratch: &Path, path: &str, old: Option<&str>, new: &str) -> Result<String> {
     let (a, a_label) = match old {
         Some(text) => {
             let f = scratch.join("old");
             fs::write(&f, text)?;
-            (f, format!("a/{}", target.path()))
+            (f, format!("a/{path}"))
         }
         None => (PathBuf::from("/dev/null"), "/dev/null".to_string()),
     };
@@ -335,7 +418,7 @@ fn make_diff(scratch: &Path, target: &Target, old: Option<&str>, new: &str) -> R
     fs::write(&b, new)?;
     let out = Command::new("diff")
         .arg("-u")
-        .args(["--label", &a_label, "--label", &format!("b/{}", target.path())])
+        .args(["--label", &a_label, "--label", &format!("b/{path}")])
         .arg(&a)
         .arg(&b)
         .output()
