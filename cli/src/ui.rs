@@ -92,7 +92,12 @@ pub fn width(s: &str) -> usize {
 
 /// A row in a change summary: `+ name version` and a dimmed description, in aligned columns.
 pub fn change_row(ui: &Ui, sign: char, name: &str, version: &str, description: &str) -> String {
-    let left = format!("{sign} {name}{}", if version.is_empty() { String::new() } else { format!(" {version}") });
+    package_row(ui, &format!("{sign} {name}"), version, description)
+}
+
+/// A package as a row: `name version` and a dimmed description, in aligned columns (for lists).
+pub fn package_row(ui: &Ui, name: &str, version: &str, description: &str) -> String {
+    let left = format!("{name}{}", if version.is_empty() { String::new() } else { format!(" {version}") });
     // The description gets whatever the name leaves of 80 columns (none, if the name is very long).
     let room = WIDTH.saturating_sub(4 + width(&left).max(22) + 1);
     let desc = if room < 8 { String::new() } else { crate::history::one_line(description, room) };
@@ -139,6 +144,7 @@ mod tests {
         let p = Ui::plain();
         assert_eq!(change_row(&p, '+', "htop", "3.4.1", "Interactive process viewer"), "    + htop 3.4.1           Interactive process viewer");
         assert_eq!(change_row(&p, '-', "ripgrep", "", ""), "    - ripgrep");
+        assert_eq!(package_row(&p, "htop", "3.5.1", "Interactive process viewer"), "    htop 3.5.1             Interactive process viewer");
         let long = change_row(&p, '+', "python313Packages.scikit-learn", "1.6.1", &"a long description ".repeat(5));
         assert!(width(&long) <= WIDTH, "{} > 80: {long}", width(&long));
     }

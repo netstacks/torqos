@@ -179,26 +179,37 @@ fn read_list(repo: &Path, path: &str) -> Result<Option<ListFile>> {
     }
 }
 
+/// `kestrel pkg list`: your apps and everyone's, with versions and descriptions.
 fn list(repo: &Path) -> Result<()> {
+    let ui = ui::Ui::detect();
     let user = me()?;
+    let host = config_name(repo).ok();
     let mut failed = false;
-    for target in [Target::System, Target::User(user)] {
-        println!("{} ({}):", target.describe(), target.path());
+    for (title, target) in [("Yours", Target::User(user)), ("Everyone", Target::System)] {
+        println!("  {}", ui.bold(title));
         match read_list(repo, &target.path()) {
             Ok(f) => {
                 let names = f.map(|f| f.names).unwrap_or_default();
                 if names.is_empty() {
-                    println!("  (none)");
+                    println!("    {}", ui.dim("(nothing extra)"));
                 }
-                for n in names {
-                    println!("  {n}");
+                let facts = match &host {
+                    Some(h) if !names.is_empty() => {
+                        let _p = run::Progress::start("Reading");
+                        package_facts(repo, h, &names)
+                    }
+                    _ => vec![(String::new(), String::new()); names.len()],
+                };
+                for (n, (version, description)) in names.iter().zip(facts) {
+                    println!("{}", ui::package_row(&ui, &history::one_line(n, 40), &version, &description));
                 }
             }
             Err(e) => {
-                println!("  (unreadable: {e:#})");
+                println!("    {}", ui.fail(&format!("unreadable: {}", history::one_line(&format!("{e:#}"), 60))));
                 failed = true;
             }
         }
+        println!();
     }
     if failed {
         bail!("a package list could not be read");
@@ -533,7 +544,36 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
         reason: format!("{verb} {list} {}", target.describe()),
         summary,
     };
-    submit(cli, scratch, &host, change, yes)
+    let result = submit(cli, scratch, &host, change, yes);
+    // A misspelt name: offer the closest real ones (only now, when it is needed: the list of names
+    // takes a moment to read).
+    if let Err(e) = &result {
+        if how == Edit::Add && e.to_string().contains("isn't a package.") {
+            if let Some(hint) = did_you_mean(&copy, &host, &changed) {
+                bail!("{hint}");
+            }
+        }
+    }
+    result
+}
+
+/// "\"htpo\" isn't a package. Did you mean htop?" for the first name that does not exist and has
+/// close matches in this machine's nixpkgs; None if there is nothing to suggest.
+fn did_you_mean(copy: &Path, host: &str, names: &[String]) -> Option<String> {
+    let out = Command::new("nix")
+        .args(["eval", "--json"])
+        .arg(format!("{}#nixosConfigurations.{host}.pkgs", flake_ref(copy)))
+        .args(["--apply", "builtins.attrNames"])
+        .output()
+        .ok()?;
+    let all: Vec<String> = serde_json::from_slice(&out.stdout).ok()?;
+    names.iter().filter(|n| !n.contains('.') && !all.contains(n)).find_map(|n| {
+        let close = pkg::suggest(n, &all);
+        (!close.is_empty()).then(|| {
+            let close: Vec<String> = close.iter().map(|c| history::one_line(c, 40)).collect();
+            format!("\"{n}\" isn't a package. Did you mean {}? (or: kestrel pkg search {n})", close.join(", "))
+        })
+    })
 }
 
 const SERVICES: &str = "services.json";

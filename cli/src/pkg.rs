@@ -102,6 +102,45 @@ pub fn explain_check_error(msg: &str) -> String {
     }
 }
 
+/// Up to three names close to a misspelt one ("htpo" → "htop"): case-insensitive edit distance of at
+/// most 2 (1 for short names), closest first.
+pub fn suggest(name: &str, candidates: &[String]) -> Vec<String> {
+    let wanted = name.to_lowercase();
+    let max = if wanted.chars().count() <= 4 { 1 } else { 2 };
+    let mut close: Vec<(usize, &String)> = candidates
+        .iter()
+        .filter(|c| c.len().abs_diff(name.len()) <= max)
+        .filter_map(|c| {
+            let d = edit_distance(&wanted, &c.to_lowercase());
+            (d <= max && d > 0 || (d == 0 && c.as_str() != name)).then_some((d, c))
+        })
+        .collect();
+    close.sort();
+    close.into_iter().take(3).map(|(_, c)| c.clone()).collect()
+}
+
+/// Levenshtein distance, counting a swap of two neighbours as one edit (htpo → htop).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for j in 0..=b.len() {
+        d[0][j] = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    d[a.len()][b.len()]
+}
+
 /// What a broker refusal while proposing or applying means. `what` is the change in words
 /// ("install htop"); whether the machine is as it was is decided by the caller from `status`.
 pub fn explain_apply_error(what: &str, msg: &str) -> String {
@@ -310,6 +349,18 @@ mod tests {
         let same = lock_changes(&lock(1_793_380_000, 1), &lock(1_793_386_952, 1));
         assert_eq!(same[0].1, "2026-10-30 17:06"); // date -u -d @1793380000
         assert_eq!(same[0].2, "2026-10-30 19:02");
+    }
+
+    #[test]
+    fn did_you_mean() {
+        let names = v(&["htop", "btop", "atop", "ripgrep", "firefox", "Firefox-esr", "git", "gitg", "neovim"]);
+        assert_eq!(suggest("htpo", &names), v(&["htop"]), "a swap is one edit");
+        assert_eq!(suggest("ripgerp", &names), v(&["ripgrep"]));
+        assert_eq!(suggest("firefx", &names), v(&["firefox"]));
+        assert_eq!(suggest("neovin", &names), v(&["neovim"]));
+        assert!(suggest("zzzzzz", &names).is_empty());
+        assert_eq!(suggest("gti", &names), v(&["git"]), "short names: one edit at most");
+        assert_eq!(suggest("FIREFOX", &names), v(&["firefox"]), "case differences count as a match");
     }
 
     #[test]

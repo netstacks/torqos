@@ -19,17 +19,18 @@ In an ARM NixOS VM (UTM on the M4 Mac):
 The commands work (`kestrel pkg`, `service`, `update`, `log`, `undo`, `status`), but they print
 the broker's plumbing. Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [x] Broker `--json` for every command (shapes and exit codes in `CLI-DESIGN.md`).
-- [ ] The CLI uses it and stops parsing broker text (ADR-014).
-- [ ] Human output for every command: changes shown as packages/services with versions and
+- [x] The CLI uses it and stops parsing broker text (ADR-014).
+- [x] Human output for every command: changes shown as packages/services with versions and
       descriptions, not diffs; one result line with the change number and how to undo it.
-- [ ] Quiet progress: phase + elapsed time; full log to `~/.local/state/kestrel/last.log`, shown
+- [x] Quiet progress: phase + elapsed time; full log to `~/.local/state/kestrel/last.log`, shown
       on failure.
 - [ ] Errors say what, why and what to do; no `Caused by:`, git hints, hashes or store paths by
-      default (`--verbose`, `--diff`, `--json` for those).
-- [ ] Tier visible in every prompt: system changes marked and defaulting to No.
-- [ ] Colour with meaning; plain text for `NO_COLOR` and non-terminals; fits 80 columns.
-- [ ] Snapshot tests of every command's output (success, refusal, failure).
-- [ ] New, small: "did you mean" for misspelled packages; `kestrel status --repair` to return a
+      default — done; still to add: CLI `--verbose` and `--json` (only `--diff` exists).
+- [x] Tier visible in every prompt: system changes marked and defaulting to No.
+- [x] Colour with meaning; plain text for `NO_COLOR` and non-terminals; fits 80 columns.
+- [ ] Snapshot tests of every command's output — done for log, status, rows and errors; still to
+      do: whole-command snapshots of pkg/service/update/undo (success, refusal, failure).
+- [x] New, small: "did you mean" for misspelled packages; `kestrel status --repair` to return a
       drifted machine to its ledgered system (asks first; ADR-012 still: never automatic).
 - [ ] Terminal look to match (prompt, palette, font) — with the desktop work, soon after.
 - [ ] Usability check: someone new to Kestrel installs, removes, undoes and reads the log unaided.
