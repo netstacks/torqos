@@ -324,7 +324,7 @@ fn rebuild_outliving_a_killed_broker_keeps_the_lock() {
 
     // Kill the broker, then keep "rebuilding" (this shell survives its parent) until told to stop.
     let rebuild = format!(
-        "kill -KILL $PPID; while [ ! -e {go} ]; do sleep 0.05; done; touch {done}",
+        "kill -KILL $PPID; i=0; while [ ! -e {go} ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done; touch {done}",
         go = go.display(),
         done = done.display()
     );
@@ -345,7 +345,7 @@ fn rebuild_outliving_a_killed_broker_keeps_the_lock() {
     let locked = |b: &Broker| lock_error(b).is_some_and(|e| e.contains("another broker operation is running"));
     let err = lock_error(&b).unwrap();
     assert!(err.contains("another broker operation is running"), "the surviving rebuild must still hold the broker lock: {err}");
-    assert!(!err.contains("held by: unknown"), "the error must name the process holding the lock: {err}");
+    assert!(err.contains("(sh)"), "the error must name the surviving rebuild shell: {err}");
     fs::write(&go, "").unwrap();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);

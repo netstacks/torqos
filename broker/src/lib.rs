@@ -61,8 +61,11 @@ fn holders(lock: &Path) -> String {
     let me = std::process::id().to_string();
     let mut found = Vec::new();
     for proc in fs::read_dir("/proc").into_iter().flatten().flatten() {
-        if proc.file_name() == me.as_str() {
-            continue; // we have it open too, having just failed to lock it
+        let name = proc.file_name();
+        // Skip ourselves (we have it open too, having just failed to lock it) and the non-pid
+        // entries `self`/`thread-self`, which are links back to us.
+        if name == me.as_str() || !name.to_string_lossy().bytes().all(|c| c.is_ascii_digit()) {
+            continue;
         }
         let Ok(fds) = fs::read_dir(proc.path().join("fd")) else { continue };
         if fds.flatten().any(|fd| fs::read_link(fd.path()).is_ok_and(|t| t == lock)) {
