@@ -44,10 +44,10 @@ enum PkgCmd {
     Add {
         #[arg(required = true)]
         names: Vec<String>,
-        /// Install for every user (system tier: always needs explicit approval).
+        /// Install for every user (a system-tier change: always asks, --yes is refused).
         #[arg(long)]
         system: bool,
-        /// Apply without asking.
+        /// Apply your own (user-tier) change without asking.
         #[arg(long, short)]
         yes: bool,
     },
@@ -55,8 +55,10 @@ enum PkgCmd {
     Remove {
         #[arg(required = true)]
         names: Vec<String>,
+        /// Remove for every user (a system-tier change: always asks, --yes is refused).
         #[arg(long)]
         system: bool,
+        /// Apply your own (user-tier) change without asking.
         #[arg(long, short)]
         yes: bool,
     },
@@ -85,10 +87,20 @@ fn me() -> Result<String> {
     Ok(user)
 }
 
-fn read_list(repo: &Path, target: &Target) -> Result<Option<Vec<String>>> {
+/// A package list as it is on disk: its exact text (a diff must start from that, whatever its
+/// formatting) and its parsed names. None if the file does not exist yet.
+struct ListFile {
+    text: String,
+    names: Vec<String>,
+}
+
+fn read_list(repo: &Path, target: &Target) -> Result<Option<ListFile>> {
     let p = repo.join(target.path());
     match fs::read_to_string(&p) {
-        Ok(t) => Ok(Some(pkg::parse_list(&t).with_context(|| p.display().to_string())?)),
+        Ok(text) => {
+            let names = pkg::parse_list(&text).with_context(|| p.display().to_string())?;
+            Ok(Some(ListFile { text, names }))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| p.display().to_string()),
     }
@@ -96,15 +108,27 @@ fn read_list(repo: &Path, target: &Target) -> Result<Option<Vec<String>>> {
 
 fn list(repo: &Path) -> Result<()> {
     let user = me()?;
+    let mut failed = false;
     for target in [Target::System, Target::User(user)] {
-        let l = read_list(repo, &target)?.unwrap_or_default();
         println!("{} ({}):", target.describe(), target.path());
-        if l.is_empty() {
-            println!("  (none)");
+        match read_list(repo, &target) {
+            Ok(f) => {
+                let names = f.map(|f| f.names).unwrap_or_default();
+                if names.is_empty() {
+                    println!("  (none)");
+                }
+                for n in names {
+                    println!("  {n}");
+                }
+            }
+            Err(e) => {
+                println!("  (unreadable: {e:#})");
+                failed = true;
+            }
         }
-        for n in l {
-            println!("  {n}");
-        }
+    }
+    if failed {
+        bail!("a package list could not be read");
     }
     Ok(())
 }
@@ -131,6 +155,15 @@ fn flake_ref(dir: &Path) -> String {
 
 fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Result<()> {
     let user = me()?;
+    // Decide how approval happens before proposing anything, so a refusal leaves no proposal
+    // behind. The CLI cannot enforce who approves (anything running as you can run it; KNOWN-GAPS
+    // #4) — but it will not make a system-wide change without a person answering a prompt.
+    if system && yes {
+        bail!("system-wide changes are always confirmed at the prompt; run again without --yes");
+    }
+    if !yes && !std::io::stdin().is_terminal() {
+        bail!("nothing proposed: there is no terminal to ask on (--yes applies a change to your own packages)");
+    }
     let target = if system {
         Target::System
     } else {
@@ -145,31 +178,34 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
         }
     }
     let old = read_list(&cli.repo, &target)?;
-    let (new, changed) = pkg::edit(old.as_deref().unwrap_or_default(), names, how);
+    let (new, changed) = pkg::edit(old.as_ref().map(|f| f.names.as_slice()).unwrap_or_default(), names, how);
     let verb = if how == Edit::Add { "Install" } else { "Remove" };
     if changed.is_empty() {
         println!("nothing to do: {} {}", if how == Edit::Add { "already installed" } else { "not installed" }, target.describe());
         return Ok(());
     }
 
-    let scratch = Scratch::new()?;
+    // Private (0700) and unpredictable: the broker, as root, reads the diff from here.
+    let scratch = tempfile::Builder::new().prefix("kestrel-pkg-").tempdir().context("creating a scratch directory")?;
+    let scratch = scratch.path();
     let new_text = pkg::render(&new);
     let host = config_name(&cli.repo)?;
     eprintln!("checking the change against this machine's configuration ({host})...");
-    check(&cli.repo, &scratch.0, &target, &new_text, &host)?;
+    check(&cli.repo, scratch, &target, &new_text, &host)?;
 
-    let diff = make_diff(&scratch.0, &target, old.as_ref().map(|l| pkg::render(l)), &new_text)?;
-    let diff_file = scratch.0.join("change.diff");
+    let diff = make_diff(scratch, &target, old.as_ref().map(|f| f.text.as_str()), &new_text)?;
+    let diff_file = scratch.join("change.diff");
     fs::write(&diff_file, &diff)?;
 
     let reason = format!("{verb} {} {}", changed.join(", "), target.describe());
     let out = broker(cli, &["propose", "--diff", &diff_file.to_string_lossy(), "--reason", &reason, "--actor", "user"])
         .stdout(Stdio::piped())
+        .stderr(Stdio::inherit()) // the broker's (or sudo's) own reason, if it refuses
         .output()
         .context("running the broker")?;
     let shown = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() {
-        bail!("the broker refused the proposal");
+        bail!("the broker refused the proposal (see above)");
     }
     let seq = pkg::proposal_seq(&shown).context("could not read the proposal number from the broker")?;
     // The broker's own "approve with: ..." hint does not apply: we ask, then apply.
@@ -190,10 +226,12 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
     Ok(())
 }
 
+/// The broker, told explicitly which repo: the one this CLI read and evaluated (sudo drops
+/// KESTREL_CONFIG_REPO from the environment).
 fn broker(cli: &Cli, args: &[&str]) -> Command {
     let mut words = cli.broker.split_whitespace();
     let mut c = Command::new(words.next().unwrap_or("kestrel-broker"));
-    c.args(words).args(args);
+    c.args(words).arg("--repo").arg(&cli.repo).args(args);
     c
 }
 
@@ -259,8 +297,10 @@ fn last_error(stderr: &[u8]) -> String {
         .unwrap_or_else(|| s.trim().to_string())
 }
 
-fn make_diff(scratch: &Path, target: &Target, old: Option<String>, new: &str) -> Result<String> {
-    let (a, a_label) = match &old {
+/// `old` is the file's exact current text — not a re-rendering of it — or the diff would not apply
+/// to a hand-formatted list. `new` is the canonical rendering that was evaluated.
+fn make_diff(scratch: &Path, target: &Target, old: Option<&str>, new: &str) -> Result<String> {
+    let (a, a_label) = match old {
         Some(text) => {
             let f = scratch.join("old");
             fs::write(&f, text)?;
@@ -281,10 +321,11 @@ fn make_diff(scratch: &Path, target: &Target, old: Option<String>, new: &str) ->
     if out.status.code() != Some(1) {
         bail!("diff failed: {}", String::from_utf8_lossy(&out.stderr));
     }
-    // An unchanged old file that was not rewritten in our format still diffs as a reformat; fine.
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Copy the config repo (minus .git) for the pre-check. Symlinks are copied as symlinks, never
+/// followed, so the copy evaluates exactly like the original.
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to)?;
     for e in fs::read_dir(from).with_context(|| from.display().to_string())? {
@@ -294,7 +335,9 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
         }
         let (src, dst) = (e.path(), to.join(e.file_name()));
         let t = e.file_type()?;
-        if t.is_dir() {
+        if t.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&src)?, &dst)?;
+        } else if t.is_dir() {
             copy_tree(&src, &dst)?;
         } else if t.is_file() {
             fs::copy(&src, &dst).with_context(|| src.display().to_string())?;
@@ -303,32 +346,11 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Ask on the terminal (`change` has already refused when there is none).
 fn confirm(question: &str) -> Result<bool> {
-    if !std::io::stdin().is_terminal() {
-        bail!("not applied: no terminal to ask on (use --yes to apply without asking)");
-    }
     print!("{question} [y/N] ");
     std::io::stdout().flush()?;
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
-}
-
-/// A private scratch directory, removed when done.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Result<Self> {
-        let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        let dir = base.join(format!("kestrel-pkg-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir)?;
-        Ok(Scratch(dir))
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
 }

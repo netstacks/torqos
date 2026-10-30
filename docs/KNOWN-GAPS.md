@@ -21,7 +21,11 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    diff protected options?).
 4. **Caller-supplied identity:** `--actor`, `--tainted`, `--approved-by` and
    `KESTREL_REBUILD_CMD` are trusted as given. Fine under sudo in M1; the M3 socket must take
-   identity from `SO_PEERCRED` and the rebuild command from fixed config.
+   identity from `SO_PEERCRED` and the rebuild command from fixed config. `kestrel pkg` inherits
+   this: it passes `--actor user --approved-by $(id -un)` itself, so anything running as the user
+   (a script, an AI tool in their terminal) can approve a user-tier change with `--yes`; it does
+   refuse `--yes` for system tier and asks first, but that prompt is in the same process. It also
+   needs `sudo` for the broker, so only wheel users can use it until the socket exists.
 5. **`kestrel.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
    is copied into the store on every evaluation. Prefer `git+file://`. Related: the rebuild
    builds the config repo's *working tree*; building the exact ledgered commit
