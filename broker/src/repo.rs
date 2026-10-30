@@ -38,6 +38,9 @@ impl Repo {
             .arg(&user_email)
             .arg("-c")
             .arg("commit.gpgsign=false") // TODO(M3): sign with the broker key
+            // The ledger is fsynced on every append; git must not fall behind it on power loss.
+            .arg("-c")
+            .arg("core.fsync=all")
             .args(args)
             .output()
             .context("running git")?;

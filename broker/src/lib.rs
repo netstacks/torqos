@@ -17,7 +17,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub struct Broker {
     pub repo: Repo,
@@ -28,16 +28,25 @@ pub struct Broker {
 }
 
 /// Exclusive lock so only one broker operation runs at a time. An OS file lock (flock), so the
-/// kernel releases it when the process dies: a broker killed mid-rebuild cannot wedge later ones.
-struct Lock(#[allow(dead_code)] fs::File);
+/// kernel releases it when the last process holding it dies: a dead broker cannot wedge later ones.
+struct Lock(fs::File);
 impl Lock {
     fn acquire(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir)?;
         let p = dir.join("broker.lock");
-        let f = OpenOptions::new().write(true).create(true).truncate(false).open(&p)?;
+        let f = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&p)?;
         f.try_lock()
             .with_context(|| format!("another broker operation is running ({})", p.display()))?;
         Ok(Lock(f))
+    }
+
+    /// The lock as a child's stdin, so the rebuild's whole process tree holds it too. Killing the
+    /// broker does not stop `nixos-rebuild`, which may still switch the system; the next operation
+    /// must wait for it rather than race it. A dup shares the open file description, which is what
+    /// flock locks belong to, so the lock lasts until the last holder exits. (Read as stdin, the
+    /// empty lock file is just EOF.)
+    fn for_child(&self) -> Result<Stdio> {
+        Ok(Stdio::from(self.0.try_clone()?))
     }
 }
 
@@ -102,9 +111,14 @@ impl Broker {
             .find(|e| e.body.kind == kind && e.body.data.get(key).and_then(|v| v.as_u64()) == Some(seq)))
     }
 
-    fn rebuild(&self) -> Result<()> {
+    fn rebuild(&self, lock: &Lock) -> Result<()> {
         let cmd = self.rebuild_cmd.replace("{repo}", &self.repo.root().to_string_lossy());
-        let status = Command::new("sh").arg("-c").arg(&cmd).status().context("running rebuild")?;
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .stdin(lock.for_child()?)
+            .status()
+            .context("running rebuild")?;
         if !status.success() {
             bail!("rebuild command failed ({status}): {cmd}");
         }
@@ -115,9 +129,9 @@ impl Broker {
     /// the new system (switch-to-configuration exits non-zero when a unit fails), so resetting
     /// the repo alone would leave the running system out of step with it. Returns whether the
     /// restore rebuild succeeded.
-    fn restore(&self, before: &str) -> Result<bool> {
+    fn restore(&self, before: &str, lock: &Lock) -> Result<bool> {
         self.repo.hard_reset(before)?;
-        Ok(self.rebuild().is_ok())
+        Ok(self.rebuild(lock).is_ok())
     }
 
     fn failure_reason(what: &str, before: &str, restored: bool) -> String {
@@ -129,7 +143,7 @@ impl Broker {
     }
 
     pub fn apply(&self, proposal_seq: u64, approved_by: &str, confirm_tainted: bool) -> Result<Entry> {
-        let _l = Lock::acquire(&self.state_dir)?;
+        let lock = Lock::acquire(&self.state_dir)?;
         let p = self.ledger.get(proposal_seq)?;
         if p.body.kind != "proposal" {
             bail!("entry {proposal_seq} is a '{}', not a proposal", p.body.kind);
@@ -162,8 +176,8 @@ impl Broker {
         let commit = self.repo.apply_and_commit(&tmp, &msg)?;
         let _ = fs::remove_file(&tmp);
 
-        if let Err(e) = self.rebuild() {
-            let restored = self.restore(&before)?;
+        if let Err(e) = self.rebuild(&lock) {
+            let restored = self.restore(&before, &lock)?;
             self.ledger.append(NewEntry {
                 actor: "broker".into(),
                 approved_by: Some(approved_by.into()),
@@ -188,7 +202,7 @@ impl Broker {
     }
 
     pub fn rollback(&self, applied_seq: u64, approved_by: &str) -> Result<Entry> {
-        let _l = Lock::acquire(&self.state_dir)?;
+        let lock = Lock::acquire(&self.state_dir)?;
         let a = self.ledger.get(applied_seq)?;
         if a.body.kind != "applied" {
             bail!("entry {applied_seq} is a '{}', not an applied change", a.body.kind);
@@ -204,8 +218,8 @@ impl Broker {
         );
         let before = self.repo.head()?;
         let new_commit = self.repo.revert_and_commit(&commit, &msg)?;
-        if let Err(e) = self.rebuild() {
-            let restored = self.restore(&before)?;
+        if let Err(e) = self.rebuild(&lock) {
+            let restored = self.restore(&before, &lock)?;
             self.ledger.append(NewEntry {
                 actor: "broker".into(),
                 approved_by: Some(approved_by.into()),

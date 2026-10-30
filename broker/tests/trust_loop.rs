@@ -227,3 +227,124 @@ fn concurrent_operation_is_refused() {
     let err = b.propose(&d, "racing", Actor::User, false).unwrap_err();
     assert!(err.to_string().contains("another broker operation"), "{err:#}");
 }
+
+/// Run the real binary, so a crash is a real crash: the rebuild command SIGKILLs the broker.
+fn run_cli(dir: &Path, rebuild: &str, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_kestrel-broker"))
+        .arg("--repo").arg(dir.join("config"))
+        .arg("--state-dir").arg(dir.join("state"))
+        .arg("--rebuild-cmd").arg(rebuild)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+const CRASH: &str = "kill -KILL $PPID";
+
+fn assert_killed(out: &std::process::Output) {
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(out.status.signal(), Some(9), "broker should have been killed mid-rebuild: {out:?}");
+}
+
+fn trailers(b: &Broker) -> Vec<String> {
+    let log = Command::new("git").arg("-C").arg(b.repo.root()).args(["log", "--format=%B", "main"]).output().unwrap();
+    String::from_utf8_lossy(&log.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("Ledger-Entry: ").map(String::from))
+        .collect()
+}
+
+/// A broker killed mid-rebuild leaves a commit that was never ledgered. The next operation must
+/// discard it (it never completed), rebuild the last ledgered config, and ledger what happened.
+#[test]
+#[ignore = "needs reconcile (next commit)"]
+fn crash_mid_apply_is_reconciled_by_next_operation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let calls = tmp.path().join("calls.log");
+    let (dir, b) = setup(&format!("cat {{repo}}/desktop.nix >> {}", calls.display()));
+    let before = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+
+    assert_killed(&run_cli(dir.path(), CRASH, &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]));
+    let orphan = b.repo.head().unwrap();
+    assert_ne!(orphan, before, "the crash window leaves an unledgered commit behind");
+
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+
+    let entries = b.ledger.read_all().unwrap();
+    let kinds: Vec<_> = entries.iter().map(|e| e.body.kind.as_str()).collect();
+    assert_eq!(kinds, ["init", "proposal", "interrupted", "applied"]);
+    let i = &entries[2];
+    assert_eq!(i.body.data["discarded_commit"], orphan.as_str());
+    assert_eq!(i.body.data["restored"], true);
+    // The orphan's trailer named the entry that now explains it.
+    assert_eq!(i.body.seq, 3);
+    assert_eq!(
+        fs::read_to_string(&calls).unwrap(),
+        "{ nightLight = false; }\n{ nightLight = true; }\n",
+        "reconcile must rebuild the last ledgered config before the re-apply"
+    );
+    assert!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap().contains("true"));
+    assert_eq!(trailers(&b), [a.body.seq.to_string(), "init".to_string()], "one commit per trailer");
+    b.ledger.verify().unwrap();
+}
+
+#[test]
+#[ignore = "needs reconcile (next commit)"]
+fn crash_mid_rollback_is_reconciled_by_next_operation() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+    let applied_head = b.repo.head().unwrap();
+
+    assert_killed(&run_cli(dir.path(), CRASH, &["rollback", &a.body.seq.to_string(), "--approved-by", "casey"]));
+    assert_ne!(b.repo.head().unwrap(), applied_head);
+
+    // Reconcile puts the applied change back; the user can then undo it for real.
+    b.rollback(a.body.seq, "casey").unwrap();
+    let kinds: Vec<_> = b.ledger.read_all().unwrap().into_iter().map(|e| e.body.kind).collect();
+    assert_eq!(kinds, ["init", "proposal", "applied", "interrupted", "rolled_back"]);
+    assert!(fs::read_to_string(b.repo.root().join("desktop.nix")).unwrap().contains("false"));
+    b.ledger.verify().unwrap();
+}
+
+/// Killing the broker does not kill its rebuild: `nixos-rebuild` carries on and may still switch
+/// the system. The rebuild's process tree must therefore keep holding the broker lock, so the next
+/// operation waits for it instead of racing it.
+#[test]
+fn rebuild_outliving_a_killed_broker_keeps_the_lock() {
+    use std::os::unix::process::ExitStatusExt;
+    let (dir, b) = setup("true");
+    let done = dir.path().join("late-rebuild-finished");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+
+    // Kill the broker, then keep "rebuilding" for a while (this shell survives its parent).
+    let rebuild = format!("kill -KILL $PPID; sleep 2; touch {}", done.display());
+    let status = Command::new(env!("CARGO_BIN_EXE_kestrel-broker"))
+        .arg("--repo").arg(dir.path().join("config"))
+        .arg("--state-dir").arg(dir.path().join("state"))
+        .arg("--rebuild-cmd").arg(&rebuild)
+        .args(["apply", &p.body.seq.to_string(), "--approved-by", "casey"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.signal(), Some(9));
+    assert!(!done.exists(), "the rebuild should still be running");
+
+    let locked = |b: &Broker| match b.apply(p.body.seq, "casey", false) {
+        Err(e) => format!("{e:#}").contains("another broker operation is running"),
+        Ok(_) => false,
+    };
+    assert!(locked(&b), "the surviving rebuild must still hold the broker lock");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while locked(&b) {
+        assert!(std::time::Instant::now() < deadline, "lock never released");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(done.exists(), "the lock must be held until the rebuild has finished");
+}
