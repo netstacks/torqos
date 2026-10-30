@@ -114,7 +114,8 @@ proposes nothing. See `docs/ROADMAP.md`.
   another tool on this VM; never build `/etc/nixos` or any config other than the broker's.
 - **Way of working:** small steps; an independent reviewer agent behind every meaningful change;
   mutation-check new guards (break them, see a test fail); verify in the Nix sandbox and VM test.
-- Next: M2 (`docs/ROADMAP.md`). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
+- Next: M1.5, CLI polish (`docs/CLI-DESIGN.md`, ADR-014), then M2 (`docs/ROADMAP.md`). Open
+  issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
 ### You are probably running inside the dev VM
 - Host `kestrel-utm`, user **`viper`** (the template no longer names a user; `kestrel.user` in

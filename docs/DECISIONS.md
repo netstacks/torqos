@@ -131,3 +131,13 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** Common services are one confirmed, ledgered, undoable command. Anything outside
   the catalog is still a system-tier `.nix` change. The catalog grows deliberately, one reviewed
   entry at a time.
+
+## ADR-014 — The broker speaks data; presentation lives in the CLI
+- **Context:** The CLI prints the broker's output (git diffs, hashes, ledger kinds) and scrapes its
+  text for numbers (`proposal #N`). That is both ugly and fragile, and making the broker "pretty"
+  would grow the privileged code the project wants small and auditable.
+- **Decision:** The broker keeps its plain text for people who run it directly and gains `--json`
+  output for every command the CLI uses. All formatting, colour, progress, wording and help live in
+  the unprivileged `kestrel` CLI (`docs/CLI-DESIGN.md`).
+- **Consequences:** Polishing the experience never touches privileged code. The JSON shapes become
+  an interface: changes to them are deliberate and tested on both sides.

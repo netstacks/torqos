@@ -15,7 +15,26 @@ In an ARM NixOS VM (UTM on the M4 Mac):
 - [x] NixOS VM test `tests/trust-loop.nix` proves propose → apply → rollback.
   (Runs inside the UTM VM without `/dev/kvm`: QEMU falls back to TCG; ~75 s of test time.)
 
-### M2 — The agent sees  ← current
+### M1.5 — CLI polish: the everyday commands feel finished  ← current
+The commands work (`kestrel pkg`, `service`, `update`, `log`, `undo`, `status`), but they print
+the broker's plumbing. Target and acceptance criteria: `docs/CLI-DESIGN.md`.
+- [ ] Broker `--json` for `propose`, `apply`, `rollback`, `status`, `log`; the CLI stops parsing
+      broker text (ADR-014).
+- [ ] Human output for every command: changes shown as packages/services with versions and
+      descriptions, not diffs; one result line with the change number and how to undo it.
+- [ ] Quiet progress: phase + elapsed time; full log to `~/.local/state/kestrel/last.log`, shown
+      on failure.
+- [ ] Errors say what, why and what to do; no `Caused by:`, git hints, hashes or store paths by
+      default (`--verbose`, `--diff`, `--json` for those).
+- [ ] Tier visible in every prompt: system changes marked and defaulting to No.
+- [ ] Colour with meaning; plain text for `NO_COLOR` and non-terminals; fits 80 columns.
+- [ ] Snapshot tests of every command's output (success, refusal, failure).
+- [ ] New, small: "did you mean" for misspelled packages; `kestrel status --repair` to return a
+      drifted machine to its ledgered system (asks first; ADR-012 still: never automatic).
+- [ ] Terminal look to match (prompt, palette, font) — with the desktop work, soon after.
+- [ ] Usability check: someone new to Kestrel installs, removes, undoes and reads the log unaided.
+
+### M2 — The agent sees
 - Local model reachable (llama.cpp on the Mac host during dev).
 - `kestrel-agent` with read-only MCP tools (logs, hardware, config.read).
 - "Doctor" mode: diagnose and explain, propose nothing.
