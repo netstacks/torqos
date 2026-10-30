@@ -1,6 +1,7 @@
 //! `kestrel`: the unprivileged command line. It never changes the system itself: it writes a
 //! proposed change as a diff and hands it to `kestrel-broker`, which ledgers, applies and can undo it.
 
+mod history;
 mod pkg;
 
 use anyhow::{bail, Context, Result};
@@ -39,6 +40,21 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// What changed on this machine, and how to undo it.
+    Log {
+        /// How many entries to show (newest last).
+        #[arg(long, short, default_value_t = 20)]
+        n: usize,
+    },
+    /// Undo a change (the number `kestrel log` shows); without one, the latest change.
+    Undo {
+        seq: Option<u64>,
+        /// Undo your own (user-tier) change without asking; system changes always ask.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Is this machine as its ledger says? (exits non-zero if not)
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -82,6 +98,13 @@ fn main() {
         Cmd::Pkg(PkgCmd::Add { names, system, yes }) => change(&cli, names, *system, *yes, Edit::Add),
         Cmd::Pkg(PkgCmd::Remove { names, system, yes }) => change(&cli, names, *system, *yes, Edit::Remove),
         Cmd::Update { all } => update(&cli, *all),
+        Cmd::Log { n } => read_ledger(&cli).map(|l| print!("{}", history::render(&l, *n))),
+        Cmd::Undo { seq, yes } => undo(&cli, *seq, *yes),
+        Cmd::Status => {
+            // The broker's own report and exit code (75: busy, not checked).
+            let st = broker(&cli, &["status"]).status();
+            std::process::exit(st.ok().and_then(|s| s.code()).unwrap_or(1));
+        }
     };
     if let Err(e) = r {
         eprintln!("kestrel: {e:#}");
@@ -282,6 +305,47 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
         reason: format!("{verb} {} {}", changed.join(", "), target.describe()),
     };
     submit(cli, scratch, &host, change, yes)
+}
+
+/// The ledger, read through the broker (it is root-only).
+fn read_ledger(cli: &Cli) -> Result<Vec<history::Entry>> {
+    let out = broker(cli, &["log", "--json"])
+        .stderr(Stdio::inherit())
+        .output()
+        .context("running the broker")?;
+    if !out.status.success() {
+        bail!("could not read the ledger (see above)");
+    }
+    history::parse(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `kestrel undo [n]`: roll back an applied change through the broker, after saying what it was.
+fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
+    let entries = read_ledger(cli)?;
+    let target = history::undo_target(&entries, seq)?;
+    let files = target.data["files"].as_array().map(|f| {
+        f.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+    });
+    // Say what it is before anything else, refusals included.
+    println!(
+        "#{}  {}  ({} tier{})",
+        target.seq,
+        target.reason,
+        target.tier,
+        files.map(|f| format!("; {f}")).unwrap_or_default()
+    );
+    approval(target.tier != "user", yes)?;
+    if !yes && !confirm(&format!("Undo \"{}\"?", target.reason))? {
+        println!("not undone");
+        return Ok(());
+    }
+    let st = broker(cli, &["rollback", &target.seq.to_string(), "--approved-by", &me()?])
+        .status()
+        .context("running the broker")?;
+    if !st.success() {
+        bail!("undo of #{} failed (see above)", target.seq);
+    }
+    Ok(())
 }
 
 /// `kestrel update`: move this machine to the newest Kestrel (and so nixpkgs, which follows it), as

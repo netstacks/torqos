@@ -41,6 +41,9 @@ impl Repo {
             // The ledger is fsynced on every append; git must not fall behind it on power loss.
             .arg("-c")
             .arg("core.fsync=all")
+            // Its advice is about resolving conflicts by hand, in a repo only the broker may write.
+            .arg("-c")
+            .arg("advice.mergeConflict=false")
             .args(args)
             .output()
             .context("running git")?;
@@ -134,7 +137,8 @@ impl Repo {
             let _ = self.git(&["revert", "--abort"]);
             self.git(&["reset", "-q", "--hard", "HEAD"])?;
             self.sync()?;
-            return Err(e.context(format!("cannot undo {commit} cleanly: later changes conflict with it")));
+            return Err(e.context(format!("cannot undo {commit} cleanly: later changes conflict with it \
+                 (undo those first, newest first, or propose the opposite change)")));
         }
         self.git(&["commit", "-q", "-m", message])?;
         self.sync()?;

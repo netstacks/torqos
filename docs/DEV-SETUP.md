@@ -60,6 +60,13 @@ kestrel pkg add ripgrep            # for you (user tier); --system for everyone 
 kestrel pkg remove ripgrep
 kestrel pkg list
 ```
+History and undo, without the broker's sequence-number plumbing:
+```bash
+kestrel log                        # what changed, and `kestrel undo N` for each change
+kestrel undo                       # the latest change (asks; system changes always ask)
+kestrel undo 23                    # a specific one (the applied number, or its proposal number)
+kestrel status                     # is the machine as its ledger says?
+```
 To move the machine to the newest Kestrel (and so nixpkgs) — one ledgered, undoable `flake.lock`
 change: `kestrel update`. `sudo kestrel-broker status` says whether the machine is as its ledger
 says; it is also checked at boot and every 15 minutes, and a new shell warns if not.
