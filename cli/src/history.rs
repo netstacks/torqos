@@ -158,6 +158,12 @@ fn reason_of(entries: &[Entry], seq: Option<u64>) -> Option<&str> {
     entries.iter().find(|e| e.seq == seq).map(|e| e.reason.as_str())
 }
 
+/// The latest change that took effect (applied, undone, repaired), in the log's words.
+pub fn last_change(entries: &[Entry]) -> Option<String> {
+    let e = entries.iter().rev().find(|e| matches!(e.kind.as_str(), "applied" | "rolled_back" | "repaired"))?;
+    Some(describe(entries, e).1)
+}
+
 /// One change as a log line: its symbol and what happened, in words.
 fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
     match e.kind.as_str() {
@@ -174,6 +180,8 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         }
         "interrupted" => ("⚠", format!("Interrupted: {}", reason_of(entries, e.data["target"].as_u64()).unwrap_or("a change"))),
         "init" => ("·", "Kestrel set up".to_string()),
+        "repaired" if e.data["restored"] == false => ("✗", "Tried to return the machine to its history".to_string()),
+        "repaired" => ("✓", "Returned the machine to its history".to_string()),
         "proposal" => ("·", format!("Proposed, not applied: {}", e.reason)),
         other => ("·", other.to_string()),
     }

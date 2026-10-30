@@ -4,6 +4,7 @@
 mod history;
 mod pkg;
 mod run;
+mod status;
 mod ui;
 
 use anyhow::{bail, Context, Result};
@@ -64,8 +65,12 @@ enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Is this machine as its ledger says? (exits non-zero if not)
-    Status,
+    /// Is this machine as its history says? (exits 1 if not, 75 while a change is being applied)
+    Status {
+        /// Return the machine to its history if it drifted (asks first; never automatic).
+        #[arg(long)]
+        repair: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -137,13 +142,7 @@ fn main() {
             Ok(())
         }),
         Cmd::Undo { seq, yes } => undo(&cli, *seq, *yes),
-        Cmd::Status => {
-            // The broker's own report and exit code (75: busy, not checked).
-            match broker(&cli, &["status"]).status() {
-                Ok(st) => std::process::exit(st.code().unwrap_or(1)),
-                Err(e) => Err(e).context("could not run the broker"),
-            }
-        }
+        Cmd::Status { repair } => status_cmd(&cli, *repair),
     };
     if let Err(e) = r {
         // One clean line, whatever the error carried (paths, quoted config text, io errors).
@@ -402,7 +401,7 @@ fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path, p
         run::Outcome::Done(_) => unreachable!("fail() is for outcomes that are not Done"),
     };
     println!("{}", ui.fail(&msg));
-    let consistent = matches!(run::broker_json(broker(cli, &["status"]), log), Ok(run::Outcome::Done(v)) if v["ok"] == true);
+    let consistent = matches!(run::broker_status(broker(cli, &["status"]), log), Ok(Ok(v)) if v["ok"] == true);
     if consistent {
         println!("    Nothing changed — your machine is as it was.");
     } else {
@@ -720,6 +719,57 @@ fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
         summary,
     };
     submit(cli, scratch, &host, change, false)
+}
+
+/// `kestrel status [--repair]`: the machine against its history, in words; with --repair, and only
+/// for what a rebuild can fix, ask and then return it to its history (the broker's `repair`).
+fn status_cmd(cli: &Cli, repair: bool) -> Result<()> {
+    let ui = ui::Ui::detect();
+    let log = run::start_log()?;
+    let v = match run::broker_status(broker(cli, &["status"]), &log)? {
+        Ok(v) => v,
+        Err(why) => bail!("Couldn't check this machine: {why}."),
+    };
+    let last = read_ledger(cli).ok().and_then(|l| history::last_change(&l));
+    let report = status::render(&v, last.as_deref(), &ui);
+    print!("{}", report.text);
+    if !repair {
+        std::process::exit(report.exit);
+    }
+    match report.fix {
+        status::Fix::Nothing if report.exit == 0 => {
+            println!("  Nothing to repair.");
+            return Ok(());
+        }
+        status::Fix::Repair => {}
+        _ => std::process::exit(report.exit), // busy, or a person has to look: said above
+    }
+    approval(true, false)?;
+    println!("\n{}", ui.heading("Return this machine to its history", true));
+    println!("    · Rebuild the configuration of its last recorded change, and switch to it.");
+    println!();
+    if !confirm(&ui, "Repair?", false)? {
+        println!("  Nothing changed.");
+        return Ok(());
+    }
+    let done = {
+        let _p = if asks_for_password(cli) { None } else { Some(run::Progress::start("Repairing")) };
+        run::broker_json(broker(cli, &["repair", "--approved-by", &me()?]), &log)?
+    };
+    match done {
+        run::Outcome::Done(e) => {
+            println!("{}", ui.ok("Back to its history", &format!("change {}", e["seq"].as_u64().unwrap_or(0))));
+            Ok(())
+        }
+        run::Outcome::Busy => bail!("Another change is being applied right now. Try again when it is done."),
+        run::Outcome::Refused(m) => {
+            println!("{}", ui.fail(&format!("Couldn't repair: {}", history::one_line(&m, 200))));
+            println!("    See: kestrel status");
+            println!("    {}", ui.dim(&format!("log: {}", log.display())));
+            std::process::exit(1);
+        }
+        run::Outcome::Broken(m) => bail!("Couldn't repair: {m}."),
+    }
 }
 
 /// The ledger, read through the broker (it is root-only).

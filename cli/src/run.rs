@@ -101,9 +101,10 @@ pub enum Outcome {
     Broken(String),
 }
 
-/// Run `broker` (already built with its arguments) with `--json`: stdout is the result, stderr
-/// (and the rebuild's output) goes to `log`.
-pub fn broker_json(mut broker: Command, log: &std::path::Path) -> Result<Outcome> {
+/// Run `broker` (already built with its arguments) with `--json`: its exit code and parsed stdout.
+/// stderr (and the rebuild's output) goes to `log`; so does stdout when it is not a success, since
+/// with --json the broker's own explanation is there and the log is where a person looks.
+fn call(mut broker: Command, log: &std::path::Path) -> Result<(Option<i32>, Option<Value>)> {
     let log_file = fs::OpenOptions::new().append(true).create(true).open(log).context("opening the log")?;
     let out = broker
         .arg("--json")
@@ -112,22 +113,40 @@ pub fn broker_json(mut broker: Command, log: &std::path::Path) -> Result<Outcome
         .stderr(Stdio::from(log_file))
         .output()
         .context("running the broker")?;
-    let v: Option<Value> = serde_json::from_slice(&out.stdout).ok();
-    let error = || v.as_ref().and_then(|v| v["error"].as_str()).unwrap_or_default().to_string();
-    let outcome = match (out.status.code(), &v) {
-        (Some(0), Some(v)) => Outcome::Done(v.clone()),
-        (Some(75), _) => Outcome::Busy,
-        (Some(1), Some(_)) => Outcome::Refused(error()),
-        // 2: it did not understand the request — an installed broker older than this command.
-        (Some(2), _) => Outcome::Broken("the installed broker is older than this kestrel command (update the machine first)".into()),
-        (Some(code), _) => Outcome::Broken(format!("the broker stopped unexpectedly (exit code {code})")),
-        (None, _) => Outcome::Broken("the broker was stopped before it finished".into()),
-    };
-    // With --json the broker's own explanation is on stdout: keep it in the log too, which is
-    // where a person looks when something failed (stdout itself is only ever parsed).
-    if !matches!(outcome, Outcome::Done(_)) {
+    if out.status.code() != Some(0) {
         let mut f = fs::OpenOptions::new().append(true).open(log).context("opening the log")?;
         writeln!(f, "\nkestrel-broker {:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stdout).trim())?;
     }
-    Ok(outcome)
+    Ok((out.status.code(), serde_json::from_slice(&out.stdout).ok()))
+}
+
+fn broken(code: Option<i32>) -> String {
+    match code {
+        // 2: it did not understand the request — an installed broker older than this command.
+        Some(2) => "the installed broker is older than this kestrel command (update the machine first)".into(),
+        Some(code) => format!("the broker stopped unexpectedly (exit code {code})"),
+        None => "the broker was stopped before it finished".into(),
+    }
+}
+
+/// A broker command that changes something, or reads one thing: done, busy, refused, or broken.
+pub fn broker_json(broker: Command, log: &std::path::Path) -> Result<Outcome> {
+    let (code, v) = call(broker, log)?;
+    Ok(match (code, v) {
+        (Some(0), Some(v)) => Outcome::Done(v),
+        (Some(75), _) => Outcome::Busy,
+        (Some(1), Some(v)) => Outcome::Refused(v["error"].as_str().unwrap_or_default().to_string()),
+        (code, _) => Outcome::Broken(broken(code)),
+    })
+}
+
+/// `status --json` is an answer whatever its exit code — 0 all well, 1 problems found, 75 busy —
+/// so its JSON is returned for all three (or why there is none).
+pub fn broker_status(broker: Command, log: &std::path::Path) -> Result<std::result::Result<Value, String>> {
+    let (code, v) = call(broker, log)?;
+    Ok(match (code, v) {
+        (Some(0 | 1 | 75), Some(v)) if v.get("error").is_none() => Ok(v),
+        (Some(1), Some(v)) => Err(crate::history::one_line(v["error"].as_str().unwrap_or("the broker refused"), 200)),
+        (code, _) => Err(broken(code)),
+    })
 }
