@@ -13,10 +13,11 @@ pkgs.testers.runNixOSTest {
     # TORQ_REBUILD_CMD from its caller). What a real machine would run is checked below.
     torq.broker.rebuildCommand = "true";
     environment.etc."torq-test/default-rebuild".text = options.torq.broker.rebuildCommand.default;
-    # commit confirmed: the test activation and the boot default are stubbed too (no new system is
-    # built, and the test VM has no boot loader); the rollback timer, the old broker it runs, and
-    # the boot-time check are real.
-    torq.broker.testCommand = "true";
+    # commit confirmed: the "build" is a prebuilt specialisation (the VM cannot build systems), and
+    # the boot default is stubbed (the test VM has no boot loader). The activations — into that
+    # system and back — the rollback timer, the old broker it runs, and the boot-time check are real.
+    specialisation.confirmtarget.configuration.environment.etc."torq-test/new-system".text = "yes";
+    torq.broker.buildCommand = "readlink -f /run/booted-system/specialisation/confirmtarget";
     torq.broker.bootCommand = "true";
     specialisation.noguard.configuration.torq.broker.guardEtcNixos = false;
     # The test VM's disk is tiny: min-free would garbage-collect mid-test, deleting the unrooted
@@ -167,23 +168,58 @@ pkgs.testers.runNixOSTest {
     def propose_night_light():
         return broker("propose --diff /etc/torq-test/night-light.diff --reason 'Night light'")["seq"]
 
-    with subtest("commit confirmed: rolled back by its timer unless confirmed"):
+    booted = machine.succeed("readlink -f /run/booted-system").strip()
+    new_system = machine.succeed("readlink -f /run/booted-system/specialisation/confirmtarget").strip()
+    def running():
+        return machine.succeed("readlink -f /run/current-system").strip()
+
+    with subtest("commit confirmed: rolled back by its timer unless confirmed, retrying while busy"):
+        assert running() == booted
         a = broker(f"apply {propose_night_light()} --approved-by tester --confirm 1")
+        # The new system really runs; the boot default is untouched.
+        assert running() == new_system and a["data"]["system"] == new_system, a
+        machine.succeed("test -e /etc/torq-test/new-system")
         machine.succeed(f"grep -q 'nightLight = true' {repo}/desktop.nix")
-        # A real transient timer, running the broker that made the change by its store path.
+        # A real wall-clock timer, running the broker that made the change by its store path.
         unit = f"torq-confirm-{a['seq']}"
         machine.succeed(f"systemctl is-active {unit}.timer")
+        machine.succeed(f"systemctl show -p TimersCalendar {unit}.timer | grep -q 'UTC'")
         machine.succeed(f"systemctl show -p ExecStart {unit}.service "
                         f"| grep -Eq 'argv\\[\\]=/nix/store/[^ ]+/bin/torq-broker expire-confirm {a['seq']} '")
         out = machine.succeed("torq-broker status")
         assert "rolls back at" in out, out
         out = machine.fail(f"torq-broker revert {a['seq']} --approved-by tester 2>&1")
         assert "waiting for confirmation" in out, out
-        machine.wait_until_succeeds(f"grep -q 'nightLight = false' {repo}/desktop.nix", timeout=180)
+        # Another operation holds the broker lock past the deadline: the timer's run is refused as
+        # busy, and retried until it gets through.
+        machine.succeed("systemd-run --unit=hold-lock flock /var/lib/torq/state/broker.lock "
+                        "/run/current-system/sw/bin/sleep 100")
+        machine.succeed("systemctl is-active hold-lock")
+        machine.wait_until_succeeds(f"journalctl -u {unit}.service | grep -q 'another broker operation is running'", timeout=150)
+        assert running() == new_system, "not rolled back while busy"
+        # The ledger entry is the last step (the config is reset first, then the system activated).
+        machine.wait_until_succeeds("tail -n1 /var/lib/torq/state/ledger.jsonl | grep -q rolled_back", timeout=180)
+        machine.succeed(f"grep -q 'nightLight = false' {repo}/desktop.nix")
         e = last_entry()
         assert e["kind"] == "rolled_back" and e["data"]["unconfirmed"] and not e["data"]["by_reboot"], e
         assert e["data"]["restored"] and e["data"]["applied"] == a["seq"], e
+        assert running() == booted, "the old system runs again"
+        machine.succeed("test ! -e /etc/torq-test/new-system")
         machine.succeed("torq-broker status")
+
+    with subtest("commit confirmed: a restart before confirming rolls back"):
+        a = broker(f"apply {propose_night_light()} --approved-by tester --confirm 30")
+        assert running() == new_system
+        machine.shutdown()
+        machine.start()
+        machine.wait_for_unit("multi-user.target")
+        assert running() == booted, "the boot default was never changed"
+        machine.wait_until_succeeds("tail -n1 /var/lib/torq/state/ledger.jsonl | grep -q rolled_back", timeout=120)
+        e = last_entry()
+        assert e["data"]["by_reboot"] and e["data"]["restored"] and e["data"]["applied"] == a["seq"], e
+        machine.succeed(f"grep -q 'nightLight = false' {repo}/desktop.nix")
+        machine.succeed("torq-broker status")
+        machine.succeed("torq-broker verify")
 
     with subtest("commit confirmed: confirmed in time, it stays"):
         a = broker(f"apply {propose_night_light()} --approved-by tester --confirm 1")
@@ -191,22 +227,9 @@ pkgs.testers.runNixOSTest {
         assert c["kind"] == "confirmed" and c["data"]["applied"] == a["seq"], c
         # The timer still fires at the deadline, and finds nothing to roll back.
         machine.wait_until_succeeds(f"journalctl -u torq-confirm-{a['seq']}.service | grep -q 'nothing is waiting'", timeout=180)
+        assert running() == new_system
         machine.succeed(f"grep -q 'nightLight = true' {repo}/desktop.nix")
         assert last_entry()["kind"] == "confirmed"
         machine.succeed("torq-broker status")
-        broker(f"revert {a['seq']} --approved-by tester")  # back to nightLight = false
-
-    with subtest("commit confirmed: a restart before confirming rolls back"):
-        a = broker(f"apply {propose_night_light()} --approved-by tester --confirm 30")
-        machine.succeed(f"grep -q 'nightLight = true' {repo}/desktop.nix")
-        machine.shutdown()
-        machine.start()
-        machine.wait_for_unit("torq-confirm-boot.service")
-        machine.succeed(f"grep -q 'nightLight = false' {repo}/desktop.nix")
-        e = last_entry()
-        assert e["kind"] == "rolled_back" and e["data"]["by_reboot"] and e["data"]["restored"], e
-        assert e["data"]["applied"] == a["seq"], e
-        machine.succeed("torq-broker status")
-        machine.succeed("torq-broker verify")
   '';
 }

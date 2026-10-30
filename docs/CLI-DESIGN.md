@@ -212,24 +212,37 @@ Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 The broker stays small; its additions for this model:
 - `propose --base <commit>`: `apply` refuses if the config repo's HEAD is not that commit.
 - `apply --confirm <minutes>` (1–1440; done, 1f): records the anchor (previous commit and running
-  system) and the kernel boot ID in the `applied` entry, activates with the fixed `test` command
-  (not the caller's), and schedules the expiry as a transient systemd timer (`AccuracySec=1s`,
-  retried while the broker is busy) that runs *this* — the old, known-good — broker by its store
-  path. Instead of a separate GC root, it requires the running system to be the boot default: the
-  anchor is then the profile's current generation (rooted, and what a reboot starts). If the `test`
-  activation or the scheduling fails, the restore goes straight to the anchor system, not a rebuild.
-- `confirm`: requires the running system to be the one the commit activated, sets the system
-  profile to it and runs `switch-to-configuration boot` (no rebuild); ledger `confirmed`. Accepted
-  until an expiry has started (under the lock), not by the clock. It reads what the applying broker
-  wrote from the ledger only.
+  system) and the kernel boot ID in the `applied` entry. In this order: builds the system (fixed
+  `build` command, not the caller's), schedules the expiry, and only then activates it (`activate`,
+  `switch-to-configuration test`) — so the new system never runs without a timer to undo it. The
+  expiry is a transient wall-clock timer at the deadline (`--on-calendar`, `AccuracySec=1s`: it
+  fires on resume if the machine slept through the deadline), retried every 5 s, at most 60 times
+  in 15 minutes, while the broker is busy or the restore has not taken; it runs *this* — the old,
+  known-good — broker by its store path. Instead of a separate GC root, it requires the running
+  system to be the boot default: the anchor is then the profile's current generation (rooted, and
+  what a reboot starts). If any step fails, or the broker is killed in any step, the restore goes
+  straight to the anchor system, not a rebuild (`pending.json` records the anchor; the next
+  operation — or the timer, once scheduled — reconciles).
+- Every restore of an anchor is judged by the machine (running system and boot default are the
+  anchor), not by exit codes (`switch-to-configuration` exits non-zero when a unit fails, after
+  switching), and uses the anchor system's own commands and `PATH`
+  (`<anchor>/etc/torq/broker.json`): the change being undone may have broken the new system's. The
+  timer's broker reads the fixed file leniently (an unknown field, which a newer system adds, is
+  ignored; a missing one is still an error).
+- `confirm`: requires the running system to be the one the commit activated, and the same boot
+  (boot ID); sets the system profile to it and runs `switch-to-configuration boot` (no rebuild);
+  ledger `confirmed`. Accepted until an expiry has started (under the lock), not by the clock. It
+  reads what the applying broker wrote from the ledger only.
 - `expire-confirm [<seq>] [--reboot]`: resets the repo to the anchor commit (keeping the discarded
   commit and any uncommitted change under `refs/torq/discarded/`), activates the anchor system
   directly unless it is already running, puts the boot default back if something moved it; ledger
-  `rolled_back` with `unconfirmed: true`, `by_reboot`, `restored` and what it found. Nothing waiting
-  is not an error (a confirmed commit's timer still fires). It is its own pending operation (`op:
-  expire`): an interrupted one is finished by the next operation, not undone. The boot-time unit
-  `torq-confirm-boot` runs `expire-confirm --reboot`, which acts only if the boot ID differs from
-  the recorded one (a switch that first adds the unit starts it too).
+  `rolled_back` with `unconfirmed: true`, `by_reboot` and what it found — only once the restore has
+  taken; until then it fails, stays pending and the change unsettled, so it is retried. Nothing
+  waiting is not an error (a confirmed commit's timer still fires). It is its own pending operation
+  (`op: expire`): an interrupted one is finished by the next operation, not undone. The boot-time
+  unit `torq-confirm-boot` (`Type=exec`: boot does not wait for it) runs `expire-confirm
+  --reboot`, which acts only if the boot ID differs from the recorded one (a switch that first adds
+  the unit starts it too).
 - While a confirmed commit is pending, `apply`, `revert` and `repair` are refused (reconciling is
   not).
 - The pending confirmation is derived from the ledger, never from a separate state file;

@@ -23,10 +23,10 @@ struct Cli {
     /// [default: nixos-rebuild switch --flake {repo}].
     #[arg(long, env = "TORQ_REBUILD_CMD")]
     rebuild_cmd: Option<String>,
-    /// `apply --confirm`: build and activate without changing the boot default; `{repo}`
-    /// [default: nixos-rebuild test --flake {repo}].
-    #[arg(long, env = "TORQ_TEST_CMD")]
-    test_cmd: Option<String>,
+    /// `apply --confirm`: build the system and print its store path; `{repo}`
+    /// [default: nix build --no-link --print-out-paths {repo}#nixosConfigurations.torq...].
+    #[arg(long, env = "TORQ_BUILD_CMD")]
+    build_cmd: Option<String>,
     /// Activate an existing system (rollback of an unconfirmed commit); `{system}`.
     #[arg(long, env = "TORQ_ACTIVATE_CMD")]
     activate_cmd: Option<String>,
@@ -173,7 +173,7 @@ fn settings(cli: &mut Cli) -> Result<Settings> {
         repo: cli.repo.clone(),
         state_dir: cli.state_dir.clone(),
         rebuild: cli.rebuild_cmd.clone(),
-        test: cli.test_cmd.clone(),
+        build: cli.build_cmd.clone(),
         activate: cli.activate_cmd.clone(),
         boot: cli.boot_cmd.clone(),
         schedule: cli.schedule_cmd.clone(),
@@ -181,8 +181,10 @@ fn settings(cli: &mut Cli) -> Result<Settings> {
         system_profile: cli.system_profile.clone(),
     };
     // Only a root broker uses the file, so only it reads it: a malformed or newer one must not
-    // break a test broker.
-    let fixed = if root { Settings::read(Path::new(config::FIXED))? } else { None };
+    // break a test broker. The rollback of an unconfirmed commit is run by the broker that made it,
+    // which may be older than the file the change installed: it reads leniently.
+    let lenient = matches!(cli.cmd, Cmd::ExpireConfirm { .. });
+    let fixed = if root { Settings::read(Path::new(config::FIXED), lenient)? } else { None };
     let s = config::resolve(root, fixed, asked, Settings::defaults(path, home))?;
     let inherited = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
     config::take_over_process(&config::environment(&s, inherited))?;
@@ -195,7 +197,9 @@ fn run(mut cli: Cli) -> Result<()> {
     let b = Broker::new(&s.repo, &s.state_dir, &s.rebuild)
         .with_current_system(&s.current_system)
         .with_system_profile(&s.system_profile)
-        .with_confirm_commands(&s.test, &s.activate, &s.boot, &s.schedule);
+        .with_confirm_commands(&s.build, &s.activate, &s.boot, &s.schedule)
+        // On a real machine the rollback uses the old system's own commands (its etc/torq/broker.json).
+        .with_anchor_settings(config::running_as_root());
     match cli.cmd {
         Cmd::Init => {
             b.init()?;

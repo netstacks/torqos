@@ -45,16 +45,17 @@ in
     };
     # `commit confirmed` (ADR-016). Fixed settings too; overridden only by tests. See
     # broker/src/config.rs for what each does and its placeholders.
-    testCommand = lib.mkOption {
+    buildCommand = lib.mkOption {
       type = lib.types.str;
-      default = "nixos-rebuild test --flake {repo}#${cfg.configName}";
-      defaultText = lib.literalExpression ''"nixos-rebuild test --flake {repo}#''${config.torq.broker.configName}"'';
-      description = "Build and activate a commit confirmed without making it the boot default.";
+      default = "nix build --no-link --print-out-paths {repo}#nixosConfigurations.${cfg.configName}.config.system.build.toplevel";
+      defaultText = lib.literalExpression
+        ''"nix build --no-link --print-out-paths {repo}#nixosConfigurations.''${config.torq.broker.configName}.config.system.build.toplevel"'';
+      description = "Build a commit confirmed's system without activating it; prints its store path.";
     };
     activateCommand = lib.mkOption {
       type = lib.types.str;
       default = "{system}/bin/switch-to-configuration test";
-      description = "Activate an existing system: the rollback of an unconfirmed commit.";
+      description = "Activate a built system without making it the boot default: a commit confirmed, and its rollback.";
     };
     bootCommand = lib.mkOption {
       type = lib.types.str;
@@ -63,9 +64,12 @@ in
     };
     scheduleCommand = lib.mkOption {
       type = lib.types.str;
+      # A wall-clock timer (it fires on resume if the deadline passed during suspend), retried a
+      # bounded number of times while the broker is busy or the restore has not taken.
       default = lib.concatStringsSep " " [
-        "systemd-run --quiet --collect --unit=torq-confirm-{seq} --on-active={seconds}"
+        "systemd-run --quiet --collect --unit=torq-confirm-{seq} --on-calendar={deadline}"
         "--timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=5"
+        "--property=StartLimitIntervalSec=900 --property=StartLimitBurst=60"
         "{broker} expire-confirm {seq}"
       ];
       description = "Schedule the rollback of an unconfirmed commit (a transient timer).";
@@ -150,7 +154,7 @@ in
         repo = cfg.configRepo;
         stateDir = cfg.stateDir;
         rebuild = cfg.rebuildCommand;
-        test = cfg.testCommand;
+        build = cfg.buildCommand;
         activate = cfg.activateCommand;
         boot = cfg.bootCommand;
         schedule = cfg.scheduleCommand;
@@ -269,7 +273,9 @@ in
       startLimitIntervalSec = 600;
       startLimitBurst = 30; # then failed, and `torq-broker status` reports it overdue
       serviceConfig = {
-        Type = "oneshot";
+        # Not oneshot: boot (and login) must not wait for it. The boot default is already the old
+        # system, so nothing waits on the rollback being ledgered.
+        Type = "exec";
         RemainAfterExit = true;
         ExecStart = "${lib.getExe cfg.package} expire-confirm --reboot";
         Restart = "on-failure"; # busy: try again

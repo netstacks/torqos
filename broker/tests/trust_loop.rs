@@ -1304,7 +1304,8 @@ const SYS1: &str = "/nix/store/aaa-system-1";
 const SYS2: &str = "/nix/store/bbb-system-2";
 
 /// A machine whose running system and boot default are links the commands move, as the real ones
-/// do: `test` activates SYS2, `activate`/`boot` point the links at `{system}`. Every command logs.
+/// do: `build` prints SYS2, `activate`/`boot` point the links at `{system}`. Every command logs, in
+/// order, to `log`.
 struct Confirmable {
     dir: tempfile::TempDir,
     b: Broker,
@@ -1312,46 +1313,49 @@ struct Confirmable {
     profile: std::path::PathBuf,
 }
 
+const BUILD: &str = "echo build >> LOG && echo SYS2";
+const ACTIVATE: &str = "ln -sfn {system} CUR && echo activate {system} >> LOG";
+const SCHEDULE: &str = "echo schedule {seq} {seconds} {broker} {deadline} >> LOG";
+
 impl Confirmable {
     fn log(&self) -> String {
         fs::read_to_string(self.dir.path().join("log")).unwrap_or_default()
     }
-    fn commands(dir: &Path, test: &str, activate: &str, schedule: &str) -> [String; 4] {
-        let (cur, profile, log) = (dir.join("current-system"), dir.join("profile"), dir.join("log"));
+    /// The commands with CUR, PROFILE, LOG, SYS2 filled in: rebuild, build, activate, boot, schedule.
+    fn commands(dir: &Path, build: &str, activate: &str, schedule: &str) -> [String; 5] {
         let fill = |s: &str| {
-            s.replace("CUR", &cur.display().to_string())
-                .replace("PROFILE", &profile.display().to_string())
-                .replace("LOG", &log.display().to_string())
+            s.replace("CUR", &dir.join("current-system").display().to_string())
+                .replace("PROFILE", &dir.join("profile").display().to_string())
+                .replace("LOG", &dir.join("log").display().to_string())
+                .replace("SYS2", SYS2)
+                .replace("DIR", &dir.display().to_string())
         };
         [
-            fill(test),
+            fill("echo rebuild >> LOG"),
+            fill(build),
             fill(activate),
             fill("ln -sfn {system} PROFILE && echo boot {system} >> LOG"),
             fill(schedule),
         ]
     }
-    fn new_with(test: &str, activate: &str, schedule: &str) -> Self {
+    fn new_with(build: &str, activate: &str, schedule: &str) -> Self {
         let (dir, repo) = config_dir();
         let (cur, profile) = (dir.path().join("current-system"), dir.path().join("profile"));
         std::os::unix::fs::symlink(SYS1, &cur).unwrap();
         std::os::unix::fs::symlink(SYS1, &profile).unwrap();
-        let [t, a, bt, s] = Self::commands(dir.path(), test, activate, schedule);
         fs::write(dir.path().join("boot_id"), "boot-1\n").unwrap();
-        let b = Broker::new(&repo, dir.path().join("state"), "true")
-            .with_boot_id_file(dir.path().join("boot_id"))
+        let [r, bd, a, bt, s] = Self::commands(dir.path(), build, activate, schedule);
+        let b = Broker::new(&repo, dir.path().join("state"), r)
             .with_current_system(&cur)
             .with_system_profile(&profile)
-            .with_confirm_commands(&t, &a, &bt, &s)
+            .with_confirm_commands(&bd, &a, &bt, &s)
+            .with_boot_id_file(dir.path().join("boot_id"))
             .with_exe("/nix/store/old-broker/bin/torq-broker");
         b.init().unwrap();
         Confirmable { dir, b, cur, profile }
     }
     fn new() -> Self {
-        Self::new_with(
-            &format!("ln -sfn {SYS2} CUR && echo test >> LOG"),
-            "ln -sfn {system} CUR && echo activate {system} >> LOG",
-            "echo schedule {seq} {seconds} {broker} >> LOG",
-        )
+        Self::new_with(BUILD, ACTIVATE, SCHEDULE)
     }
     fn propose_theme(&self) -> u64 {
         let d = write_diff(self.dir.path(), "theme.diff", THEME);
@@ -1359,6 +1363,26 @@ impl Confirmable {
     }
     fn link(p: &Path) -> String {
         fs::read_link(p).unwrap().display().to_string()
+    }
+    /// The broker binary on this machine, with `activate` (and the others) as given.
+    fn cli(&self, build: &str, activate: &str, args: &[&str]) -> std::process::Output {
+        let [r, bd, a, bt, s] = Self::commands(self.dir.path(), build, activate, SCHEDULE);
+        Command::new(env!("CARGO_BIN_EXE_torq-broker"))
+            .arg("--repo").arg(self.b.repo.root())
+            .arg("--state-dir").arg(self.dir.path().join("state"))
+            .arg("--current-system").arg(&self.cur)
+            .arg("--system-profile").arg(&self.profile)
+            .args(["--rebuild-cmd", &r, "--build-cmd", &bd, "--activate-cmd", &a, "--boot-cmd", &bt, "--schedule-cmd", &s])
+            .args(args)
+            .output()
+            .unwrap()
+    }
+    /// Back as before the change: config, running system, boot default; status clean.
+    fn assert_back(&self, anchor: &str) {
+        assert_eq!(self.b.repo.head().unwrap(), anchor, "the config is back");
+        assert_eq!((Self::link(&self.cur), Self::link(&self.profile)), (SYS1.to_string(), SYS1.to_string()));
+        let s = self.b.status().unwrap();
+        assert!(s.pending_confirm.is_none() && s.problems().is_empty(), "{:?}", s.problems());
     }
 }
 
@@ -1370,13 +1394,20 @@ fn commit_confirmed_then_confirm() {
     let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
     let c = &a.body.data["confirm"];
     assert_eq!((c["minutes"].as_u64(), c["anchor_commit"].as_str(), c["anchor_system"].as_str()), (Some(10), Some(anchor.as_str()), Some(SYS1)));
-    assert_eq!(a.body.data["system"], SYS2, "the test activation is the running system");
+    assert_eq!(c["boot_id"], "boot-1");
+    assert_eq!(a.body.data["system"], SYS2, "the new system is running");
     assert_eq!(Confirmable::link(&m.profile), SYS1, "the boot default is untouched: a reboot rolls back");
-    assert!(m.log().contains(&format!("schedule {} 600 /nix/store/old-broker/bin/torq-broker", a.body.seq)), "{}", m.log());
+    // Built, then the rollback scheduled, and only then activated: never the new system without a timer.
+    let log = m.log();
+    let sched = format!("schedule {} 600 /nix/store/old-broker/bin/torq-broker ", a.body.seq);
+    let (b, s, act) = (log.find("build").unwrap(), log.find(&sched).unwrap(), log.find(&format!("activate {SYS2}")).unwrap());
+    assert!(b < s && s < act, "{log}");
+    assert!(log[s..].lines().next().unwrap().ends_with(" UTC"), "a wall-clock deadline: {log}");
+    assert!(!log.contains("rebuild"), "{log}");
     // Waiting is not drift: the boot default is the anchor on purpose.
-    let s = m.b.status().unwrap();
-    assert_eq!(s.pending_confirm.as_ref().map(|pc| pc.applied), Some(a.body.seq));
-    assert!(s.problems().is_empty(), "{:?}", s.problems());
+    let st = m.b.status().unwrap();
+    assert_eq!(st.pending_confirm.as_ref().map(|pc| pc.applied), Some(a.body.seq));
+    assert!(st.problems().is_empty(), "{:?}", st.problems());
 
     // Nothing else changes the machine meanwhile.
     let d = write_diff(m.dir.path(), "night.diff", NIGHT_LIGHT);
@@ -1411,14 +1442,11 @@ fn unconfirmed_commit_rolls_back_at_the_deadline() {
     assert_eq!(r.body.kind, "rolled_back");
     assert_eq!((r.body.data["unconfirmed"].as_bool(), r.body.data["by_reboot"].as_bool(), r.body.data["restored"].as_bool()), (Some(true), Some(false), Some(true)));
     assert_eq!(r.body.data["commit"], anchor.as_str());
-    assert_eq!(m.b.repo.head().unwrap(), anchor, "the config is back");
     assert!(fs::read_to_string(m.b.repo.root().join("users/casey.nix")).unwrap().contains("dark"));
-    assert_eq!(Confirmable::link(&m.cur), SYS1, "the old system is running again");
-    assert!(m.log().contains(&format!("activate {SYS1}")), "activated directly, not rebuilt: {}", m.log());
+    assert!(m.log().contains(&format!("activate {SYS1}")) && !m.log().contains("rebuild"), "activated directly, not rebuilt: {}", m.log());
     // The unconfirmed commit is kept for the audit.
     assert_eq!(git(&m.b, &["rev-parse", &format!("refs/torq/discarded/{committed}")]).trim(), committed);
-    let s = m.b.status().unwrap();
-    assert!(s.pending_confirm.is_none() && s.problems().is_empty(), "{:?}", s.problems());
+    m.assert_back(&anchor);
     // Once only; and too late to confirm.
     assert!(m.b.expire_confirm(None, false).unwrap().is_none());
     assert!(format!("{:#}", m.b.confirm("casey").unwrap_err()).contains("nothing is waiting"));
@@ -1428,9 +1456,9 @@ fn unconfirmed_commit_rolls_back_at_the_deadline() {
 #[test]
 fn a_reboot_before_confirming_rolls_back() {
     let m = Confirmable::new();
+    let anchor = m.b.repo.head().unwrap();
     let seq = m.propose_theme();
     let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
-    assert_eq!(a.body.data["confirm"]["boot_id"], "boot-1");
     // The boot-time unit also starts on the switch that first adds it: without a restart, it does
     // nothing (the change is waiting for its owner, not abandoned).
     assert!(m.b.expire_confirm(None, true).unwrap().is_none());
@@ -1439,70 +1467,142 @@ fn a_reboot_before_confirming_rolls_back() {
     fs::write(m.dir.path().join("boot_id"), "boot-2\n").unwrap();
     switch_to(&m.cur, SYS1);
     let err = m.b.confirm("casey").unwrap_err();
-    assert!(format!("{err:#}").contains("cannot be confirmed"), "{err:#}");
+    assert!(format!("{err:#}").contains("restarted since"), "{err:#}");
     let r = m.b.expire_confirm(None, true).unwrap().expect("rolled back");
     assert_eq!((r.body.data["by_reboot"].as_bool(), r.body.data["restored"].as_bool()), (Some(true), Some(true)));
     assert_eq!(r.body.data["applied"].as_u64(), Some(a.body.seq));
-    assert!(!m.log().contains("activate"), "already running the old system: nothing to activate");
-    assert!(m.b.status().unwrap().problems().is_empty());
+    assert!(!m.log().contains(&format!("activate {SYS1}")), "already running the old system: {}", m.log());
+    m.assert_back(&anchor);
+}
+
+/// A confirm that died after setting the boot default, then a restart into the new system: the
+/// change was never confirmed, and is not confirmable now.
+#[test]
+fn a_restart_into_the_unconfirmed_system_is_still_rolled_back() {
+    let m = Confirmable::new();
+    let anchor = m.b.repo.head().unwrap();
+    let seq = m.propose_theme();
+    m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    switch_to(&m.profile, SYS2);
+    fs::write(m.dir.path().join("boot_id"), "boot-2\n").unwrap();
+    let err = m.b.confirm("casey").unwrap_err();
+    assert!(format!("{err:#}").contains("restarted since"), "{err:#}");
+    let r = m.b.expire_confirm(None, true).unwrap().unwrap();
+    assert_eq!(r.body.data["by_reboot"].as_bool(), Some(true));
+    m.assert_back(&anchor);
 }
 
 #[test]
 fn a_moved_boot_default_is_put_back_by_the_rollback() {
     let m = Confirmable::new();
+    let anchor = m.b.repo.head().unwrap();
     let seq = m.propose_theme();
     m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
     switch_to(&m.profile, SYS2); // e.g. a confirm that died between the profile and the ledger
-    let r = m.b.expire_confirm(None, false).unwrap().unwrap();
+    m.b.expire_confirm(None, false).unwrap().unwrap();
+    m.assert_back(&anchor);
+}
+
+/// switch-to-configuration exits non-zero when a unit fails to start, after switching: the restore
+/// is judged by where the machine ended up.
+#[test]
+fn a_restore_is_judged_by_the_machine_not_the_exit_code() {
+    let m = Confirmable::new_with(BUILD, "ln -sfn {system} CUR; exit 4", SCHEDULE);
+    let anchor = m.b.repo.head().unwrap();
+    let seq = m.propose_theme();
+    // The apply's own activation "fails" too: it is undone, restored.
+    let err = m.b.apply_confirmed(seq, "casey", false, 10).unwrap_err();
+    assert!(format!("{err:#}").contains("activation command failed"), "{err:#}");
+    let last = m.b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!((last.body.kind.as_str(), last.body.data["restored"].as_bool()), ("apply_failed", Some(true)));
+    m.assert_back(&anchor);
+}
+
+/// A rollback that does not take is not final: it stays pending, the change unsettled, and the next
+/// try (the timer's retry, any operation, the next boot) finishes it.
+#[test]
+fn a_rollback_that_did_not_take_is_retried() {
+    // Activation fails, without switching, while DIR/broken exists.
+    let m = Confirmable::new_with(BUILD, "test -e DIR/broken && exit 1; ln -sfn {system} CUR", SCHEDULE);
+    let anchor = m.b.repo.head().unwrap();
+    let seq = m.propose_theme();
+    let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    let broken = m.dir.path().join("broken");
+    fs::write(&broken, "").unwrap();
+    let err = m.b.expire_confirm(Some(a.body.seq), false).unwrap_err();
+    assert!(format!("{err:#}").contains("did not take"), "{err:#}");
+    assert!(m.b.ledger.read_all().unwrap().iter().all(|e| e.body.kind != "rolled_back"));
+    let st = m.b.status().unwrap();
+    assert_eq!(st.interrupted.map(|i| i.op), Some("expire".to_string()));
+    assert!(st.pending_confirm.is_some(), "still unsettled: nothing else may change the machine");
+    fs::remove_file(&broken).unwrap();
+    let r = m.b.expire_confirm(Some(a.body.seq), false).unwrap().expect("finished");
     assert_eq!(r.body.data["restored"].as_bool(), Some(true));
-    assert_eq!(Confirmable::link(&m.profile), SYS1);
+    m.assert_back(&anchor);
 }
 
 #[test]
-fn failed_test_activation_goes_straight_back() {
-    let m = Confirmable::new_with(
-        &format!("ln -sfn {SYS2} CUR; false"),
-        "ln -sfn {system} CUR && echo activate {system} >> LOG",
-        "echo schedule >> LOG",
-    );
+fn failed_build_changes_nothing() {
+    let m = Confirmable::new_with("echo build >> LOG; exit 1", ACTIVATE, SCHEDULE);
     let anchor = m.b.repo.head().unwrap();
     let seq = m.propose_theme();
     let err = m.b.apply_confirmed(seq, "casey", false, 10).unwrap_err();
-    assert!(format!("{err:#}").contains("test activation command failed"), "{err:#}");
-    assert_eq!(m.b.repo.head().unwrap(), anchor);
-    assert_eq!(Confirmable::link(&m.cur), SYS1);
-    assert!(m.log().contains(&format!("activate {SYS1}")) && !m.log().contains("schedule"), "{}", m.log());
-    let last = m.b.ledger.read_all().unwrap().pop().unwrap();
-    assert_eq!((last.body.kind.as_str(), last.body.data["restored"].as_bool()), ("apply_failed", Some(true)));
-    assert!(m.b.status().unwrap().pending_confirm.is_none());
+    assert!(format!("{err:#}").contains("build command failed"), "{err:#}");
+    assert!(!m.log().contains("schedule") && !m.log().contains("activate"), "{}", m.log());
+    assert_eq!(m.b.ledger.read_all().unwrap().pop().unwrap().body.kind, "apply_failed");
+    m.assert_back(&anchor);
 }
 
 #[test]
-fn unschedulable_rollback_is_not_applied() {
-    let m = Confirmable::new_with(
-        &format!("ln -sfn {SYS2} CUR"),
-        "ln -sfn {system} CUR",
-        "false",
-    );
+fn unschedulable_rollback_is_never_activated() {
+    let m = Confirmable::new_with(BUILD, ACTIVATE, "false");
     let anchor = m.b.repo.head().unwrap();
     let seq = m.propose_theme();
     let err = m.b.apply_confirmed(seq, "casey", false, 10).unwrap_err();
     assert!(format!("{err:#}").contains("rollback timer command failed"), "{err:#}");
-    assert_eq!((m.b.repo.head().unwrap(), Confirmable::link(&m.cur)), (anchor, SYS1.to_string()));
+    assert!(!m.log().contains("activate"), "no timer, no new system: {}", m.log());
     assert_eq!(m.b.ledger.read_all().unwrap().pop().unwrap().body.kind, "apply_failed");
+    m.assert_back(&anchor);
 }
 
 #[test]
-fn commit_confirmed_needs_the_running_system_to_be_the_boot_default() {
+fn commit_confirmed_preconditions() {
     let m = Confirmable::new();
-    switch_to(&m.profile, "/nix/store/ccc-system-9");
     let seq = m.propose_theme();
-    let err = m.b.apply_confirmed(seq, "casey", false, 10).unwrap_err();
-    assert!(format!("{err:#}").contains("next boot would start"), "{err:#}");
-    assert!(m.log().is_empty(), "nothing ran");
     for minutes in [0, 24 * 60 + 1] {
         let err = m.b.apply_confirmed(seq, "casey", false, minutes).unwrap_err();
         assert!(format!("{err:#}").contains("1 to 1440 minutes"), "{err:#}");
+    }
+    switch_to(&m.profile, "/nix/store/ccc-system-9");
+    let err = m.b.apply_confirmed(seq, "casey", false, 10).unwrap_err();
+    assert!(format!("{err:#}").contains("next boot would start"), "{err:#}");
+    switch_to(&m.profile, SYS1);
+    fs::remove_file(m.dir.path().join("boot_id")).unwrap();
+    let err = m.b.apply_confirmed(seq, "casey", false, 10).unwrap_err();
+    assert!(format!("{err:#}").contains("cannot read the boot ID"), "{err:#}");
+    assert!(m.log().is_empty(), "nothing ran: {}", m.log());
+}
+
+/// A broker killed at any step of a commit confirmed leaves nothing for long: the next operation —
+/// or the timer, if it was already scheduled — puts the anchor back directly, without a rebuild.
+#[test]
+fn crash_during_commit_confirmed_goes_back_to_the_anchor() {
+    for (step, build, activate) in [
+        ("build", "kill -KILL $PPID", ACTIVATE),
+        // After the timer is scheduled and the new system activated, before the ledger.
+        ("activation", BUILD, "ln -sfn {system} CUR; kill -KILL $PPID"),
+    ] {
+        let m = Confirmable::new();
+        let anchor = m.b.repo.head().unwrap();
+        let seq = m.propose_theme();
+        assert_killed(&m.cli(build, activate, &["apply", &seq.to_string(), "--approved-by", "casey", "--confirm", "10"]));
+        assert_eq!(m.b.status().unwrap().interrupted.map(|i| i.op), Some("apply".to_string()), "{step}");
+        // What the timer runs (or any operation) reconciles first.
+        assert!(m.b.expire_confirm(Some(seq + 1), false).unwrap().is_none(), "{step}: nothing was ever waiting");
+        let last = m.b.ledger.read_all().unwrap().pop().unwrap();
+        assert_eq!((last.body.kind.as_str(), last.body.data["restored"].as_bool()), ("interrupted", Some(true)), "{step}");
+        assert!(!m.log().contains("rebuild"), "{step}: straight back, no rebuild: {}", m.log());
+        m.assert_back(&anchor);
     }
 }
 
@@ -1513,27 +1613,57 @@ fn crash_mid_rollback_is_finished_by_the_next_operation() {
     let anchor = m.b.repo.head().unwrap();
     let seq = m.propose_theme();
     let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
-    let [t, _, bt, s] = Confirmable::commands(m.dir.path(), "true", "", "true");
-    let out = Command::new(env!("CARGO_BIN_EXE_torq-broker"))
-        .arg("--repo").arg(m.b.repo.root())
-        .arg("--state-dir").arg(m.dir.path().join("state"))
-        .arg("--rebuild-cmd").arg("true")
-        .arg("--current-system").arg(&m.cur)
-        .arg("--system-profile").arg(&m.profile)
-        .args(["--test-cmd", &t, "--activate-cmd", CRASH, "--boot-cmd", &bt, "--schedule-cmd", &s])
-        .args(["expire-confirm", &a.body.seq.to_string()])
-        .output()
-        .unwrap();
-    assert_killed(&out);
+    assert_killed(&m.cli(BUILD, "kill -KILL $PPID", &["expire-confirm", &a.body.seq.to_string()]));
     assert_eq!(m.b.status().unwrap().interrupted.map(|i| i.op), Some("expire".to_string()));
     // Anything else (here: confirm) finishes the rollback first, then finds nothing to confirm.
     let err = m.b.confirm("casey").unwrap_err();
     assert!(format!("{err:#}").contains("nothing is waiting"), "{err:#}");
     let rolled: Vec<_> = m.b.ledger.read_all().unwrap().into_iter().filter(|e| e.body.kind == "rolled_back").collect();
     assert_eq!(rolled.len(), 1);
-    assert_eq!(rolled[0].body.data["restored"].as_bool(), Some(true));
-    assert_eq!((m.b.repo.head().unwrap(), Confirmable::link(&m.cur)), (anchor, SYS1.to_string()));
-    assert!(m.b.status().unwrap().problems().is_empty());
+    m.assert_back(&anchor);
+}
+
+/// On a real machine the rollback uses the anchor system's own commands and PATH
+/// (`<system>/etc/torq/broker.json`), not those of the change it undoes.
+#[test]
+fn the_rollback_uses_the_anchor_systems_own_commands() {
+    let (dir, repo) = config_dir();
+    let anchor_sys = dir.path().join("anchor-system");
+    fs::create_dir_all(anchor_sys.join("etc/torq")).unwrap();
+    let (cur, log) = (dir.path().join("current-system"), dir.path().join("log"));
+    let anchor_activate = format!("ln -sfn {{system}} {} && echo anchor-activate $PATH >> {}", cur.display(), log.display());
+    fs::write(
+        anchor_sys.join("etc/torq/broker.json"),
+        serde_json::json!({
+            "repo": "/r", "stateDir": "/s", "rebuild": "x", "build": "x", "activate": anchor_activate,
+            "boot": "x", "schedule": "x", "currentSystem": "/c", "systemProfile": "/p",
+            "path": format!("/anchor/bin:{}", std::env::var("PATH").unwrap()), "home": "/root",
+            "aFieldFromTheFuture": 1,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&anchor_sys, &cur).unwrap();
+    fs::write(dir.path().join("boot_id"), "boot-1\n").unwrap();
+    let b = Broker::new(&repo, dir.path().join("state"), "true")
+        .with_current_system(&cur)
+        .with_system_profile(dir.path().join("no-profile"))
+        .with_boot_id_file(dir.path().join("boot_id"))
+        .with_confirm_commands(
+            &format!("echo {SYS2}"),
+            &format!("ln -sfn {{system}} {} && echo new-activate >> {}", cur.display(), log.display()),
+            "true",
+            "true",
+        )
+        .with_anchor_settings(true);
+    b.init().unwrap();
+    let d = write_diff(dir.path(), "theme.diff", THEME);
+    let seq = b.propose(&d, "x", Actor::User, false).unwrap().body.seq;
+    let a = b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    b.expire_confirm(Some(a.body.seq), false).unwrap().unwrap();
+    let log = fs::read_to_string(&log).unwrap();
+    assert!(log.contains("anchor-activate /anchor/bin:"), "{log}");
+    assert_eq!(log.matches("new-activate").count(), 1, "only the apply used this system's: {log}");
 }
 
 #[test]
@@ -1547,4 +1677,15 @@ fn a_pending_record_from_a_newer_broker_is_refused() {
     for err in [m.b.apply(2, "casey", false).unwrap_err(), m.b.status().unwrap_err()] {
         assert!(format!("{err:#}").contains("written by a newer broker"), "{err:#}");
     }
+}
+
+/// An activation that "succeeds" without the new system running is not a commit confirmed.
+#[test]
+fn activation_that_does_not_switch_is_a_failure() {
+    let m = Confirmable::new_with(BUILD, "echo activate {system} >> LOG", SCHEDULE);
+    let anchor = m.b.repo.head().unwrap();
+    let seq = m.propose_theme();
+    let err = m.b.apply_confirmed(seq, "casey", false, 10).unwrap_err();
+    assert!(format!("{err:#}").contains("the running system is not"), "{err:#}");
+    m.assert_back(&anchor);
 }
