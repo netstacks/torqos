@@ -16,8 +16,21 @@ In an ARM NixOS VM (UTM on the M4 Mac):
   (Runs inside the UTM VM without `/dev/kvm`: QEMU falls back to TCG; ~75 s of test time.)
 
 ### M1.5 — CLI polish: the everyday commands feel finished  ← current
-The commands work (`torq pkg`, `service`, `update`, `log`, `undo`, `status`), but they print
-the broker's plumbing. Target and acceptance criteria: `docs/CLI-DESIGN.md`.
+Target and acceptance criteria: `docs/CLI-DESIGN.md`.
+
+**Junos configuration model (ADR-016)** — replaces `pkg`, `service`, `update`, `log`, `undo`, `status`:
+- [ ] Candidate configuration per user; `set` / `delete` (`packages`, `system packages`,
+      `services`), `request system update [all]`, `rollback 0`.
+- [ ] `show configuration`, `show compare`, `show system commit`, `show system rollback <n>
+      [compare <m>]`, `show packages available`, `show services`, `show system alarms`.
+- [ ] `commit check` (evaluate + build, no switch); `commit [comment]` (one ledgered change).
+- [ ] `commit confirmed [<minutes>]`: broker `apply --confirm-within`, `confirm`, `expire-confirm`;
+      a system timer rolls back as root, also after a reboot; VM test.
+- [ ] `rollback <n>` loads a whole earlier configuration into the candidate.
+- [ ] `request system repair` (was `status --repair`).
+- [ ] Later: `torq configure` (interactive `[edit]` mode), `commit at <time>`, `load override`.
+
+**First round** (done with the earlier command names; carried over):
 - [x] Broker `--json` for every command (shapes and exit codes in `CLI-DESIGN.md`).
 - [x] The CLI uses it and stops parsing broker text (ADR-014).
 - [x] Human output for every command: changes shown as packages/services with versions and

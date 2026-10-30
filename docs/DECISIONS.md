@@ -152,3 +152,21 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** The dev VM is cut over with a fresh config repo and a fresh ledger under
   `/var/lib/torq`; its old history is not migrated. Anything still saying Kestrel is either history
   (old ledger, git log) or a miss.
+
+## ADR-016 — The CLI follows the Junos configuration model
+- **Context:** Commands applied each change immediately (`pkg add` = propose + apply), and undo
+  reverted one old change, which conflicts when later changes touched the same file. The owner is a
+  network engineer; the Junos model (candidate config, `show | compare`, `commit check`,
+  `commit confirmed`, `rollback <n>`) is the best-tested answer to "change a live system safely".
+- **Decision:** Edits (`set`/`delete`, `request system update`) go into a per-user candidate
+  configuration and change nothing until `commit`, which applies them as one ledgered change.
+  Commit numbers count backwards (0 = active); `rollback <n>` loads a whole earlier configuration
+  into the candidate. `commit confirmed <minutes>` rolls back automatically unless confirmed — done
+  by the broker from a system timer, so it works when the session is gone and across reboots.
+  Junos forms only: the earlier `pkg`, `service`, `update`, `log`, `undo` and `status` commands are
+  removed (`torq configure`, an interactive mode, comes later).
+- **Consequences:** The candidate, `show`, `commit check` and `rollback <n>` are unprivileged CLI
+  work; the broker gains only `apply --confirm-within`, `confirm` and `expire-confirm`, and a ledger
+  kind `confirmed`. Rollback is always a new change forward, so it cannot conflict. `commit` asks no
+  question — it is the approval — and whoever can run it approves until the broker identifies its
+  caller (M3).
