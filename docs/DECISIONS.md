@@ -166,7 +166,10 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     the default is a setting. The earlier `torq pkg/service/update/log/undo/status` are removed.
   - The configuration is a tree whose containers are the config repo's folders and whose leaves are
     small data files; each setting is declared in a schema next to its NixOS module and installed
-    with the system (help, completion, syntax). Tiers follow the paths: `users/<name>/` is user tier.
+    with the system (help, completion, syntax); the modules' types, not the schema, are the authority.
+    User tier is an explicit allow-list (`users/<name>/packages.json`, `users/<name>/cli.json`).
+    Environment variables are held for their own design (values are effectively code). The broker
+    always builds `nixosConfigurations.torq`, so changing the host name cannot break rebuilds.
   - Edits go into a per-user candidate that remembers its base commit; `commit` applies the change
     from base to candidate as one ledgered change, and the broker refuses it if the base is stale.
     A system-tier commit prints exactly what it commits and needs a terminal.
@@ -180,7 +183,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     made.
 - **Consequences:** Most of this is unprivileged CLI work. The broker gains `propose --base`,
   `apply --confirm`, `confirm`, `expire-confirm`, the pending-confirm interlock and boot check, the
-  ledger kind `confirmed`, JSON-only user-tier files at `users/<name>/<leaf>.json`, and renames
+  ledger kind `confirmed`, allow-listed JSON-only user-tier files, a cleared environment with fixed
+  paths and rebuild commands, and renames
   single-change undo to `revert`. Rollback is always a new change forward, so it cannot conflict.
   An automatic rollback of an unconfirmed commit is consented to in advance by `commit confirmed`
   and ledgered; it is not the silent drift correction ADR-012 rules out.

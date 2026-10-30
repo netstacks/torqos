@@ -22,8 +22,11 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [ ] Broker: `propose --base`, `apply --confirm` (test activation, anchor), `confirm`, `expire-confirm`
       (transient timer, direct restore, boot check), pending-confirm interlock, `revert`, JSON-only
       user-tier files at `users/<name>/<leaf>.json`; VM tests.
-- [ ] Schema-driven tree: `system packages/environment/host-name/time-zone/cli`, `services`,
-      `users <name> packages/environment/cli`; `share/torq/schema.json` in the system.
+- [ ] Schema-driven tree: `system packages/host-name/time-zone/cli`, `services`,
+      `users <name> packages/cli`; `share/torq/schema.json` in the system; fixed output
+      `nixosConfigurations.torq`.
+- [ ] Environment variables: their own design first (allow-list, per-user delivery, escaping,
+      never reaching root or the broker, secrets check) — review N2/N3.
 - [ ] `torqcli` shell: operational + configuration modes, Juniper style, pipes, `?`, Tab, history.
 - [ ] Cisco style and `switch cli`.
 - [ ] Candidate per user with its base commit; `set` / `delete` on the tree; `rollback 0`.

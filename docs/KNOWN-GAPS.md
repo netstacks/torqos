@@ -28,6 +28,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    (a script, an AI tool in their terminal) can approve a user-tier change with `--yes`; it does
    refuse `--yes` for system tier and asks first, but that prompt is in the same process. It also
    needs `sudo` for the broker, so only wheel users can use it until the socket exists.
+   Under `torqcli` (ADR-016) the same holds for `commit`: a system-tier commit needs a terminal,
+   which stops background jobs but not anything started from the user's terminal. The per-user
+   candidate is user-writable, so its integrity between `show | compare` and `commit` rests on the
+   user's account; the agent must never write a user's candidate (it proposes as `actor=agent`).
 5. **`torq.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
    is copied into the store on every evaluation. Prefer `git+file://`. Related: the rebuild
    builds the config repo's *working tree*; building the exact ledgered commit
