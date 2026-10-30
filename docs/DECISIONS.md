@@ -120,9 +120,14 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   not always Kestrel's (SSH allows passwords and root by default).
 - **Decision:** `services.json` in the config repo (system tier) lists names from a catalog in
   `modules/services.nix`; each entry is a service *with Kestrel's defaults* (SSH: keys only, no root
-  login; Podman: rootless, with a `docker` command). `kestrel service list|enable|disable` changes
+  login, only the owner; Podman: rootless, a `docker` command, no root API socket) and says what
+  enabling it implies, because the approved diff is only `+ "name"`. The catalog's settings are
+  asserted (a `mkForce` elsewhere fails the build), and SSH enabled outside the catalog with
+  passwords is a build warning and is reported by `kestrel service list`. No `fwupd` yet: firmware
+  must go through the broker. `kestrel service list|enable|disable` changes
   it through the broker like packages (ADR-011). Unknown names are a type error listing the
-  catalog. Enabling SSH refuses when the user has no `authorized_keys` (it would lock them out).
+  catalog. Enabling SSH lists the owner's keys (both `~/.ssh/authorized_keys` and
+  `/etc/ssh/authorized_keys.d`) for the person approving, and refuses when there are none.
 - **Consequences:** Common services are one confirmed, ledgered, undoable command. Anything outside
   the catalog is still a system-tier `.nix` change. The catalog grows deliberately, one reviewed
   entry at a time.

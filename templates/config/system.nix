@@ -6,6 +6,5 @@
   # setup: sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/kestrel/config/system.nix
   kestrel.user = "CHANGE-ME";
 
-  # Dev convenience inside the VM: SSH in from macOS (key-based login recommended).
-  services.openssh.enable = true;
+  # Services (SSH included) are in services.json: `kestrel service list`. SSH there is keys only.
 }

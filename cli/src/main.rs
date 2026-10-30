@@ -334,33 +334,84 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
 
 const SERVICES: &str = "services.json";
 
-/// The service catalog (name → what it is) and what is enabled, from the machine's config.
-fn services(repo: &Path, host: &str) -> Result<(Vec<(String, String)>, Vec<String>)> {
+/// What the machine's config says about services.
+struct Services {
+    /// Catalog name → what enabling it implies.
+    catalog: Vec<(String, String)>,
+    enabled: Vec<String>,
+    /// sshd is on outside the catalog (stock settings), e.g. `services.openssh.enable` in a .nix file.
+    ssh_outside: bool,
+    /// The machine's owner (`kestrel.user`): the one user the catalog's SSH admits.
+    owner: String,
+}
+
+fn services(repo: &Path, host: &str) -> Result<Services> {
     let out = Command::new("nix")
         .args(["eval", "--json"])
-        .arg(format!("{}#nixosConfigurations.{host}.config.kestrel.services", flake_ref(repo)))
-        .args(["--apply", "s: { inherit (s) catalog enabled; }"])
+        .arg(format!("{}#nixosConfigurations.{host}.config", flake_ref(repo)))
+        .args([
+            "--apply",
+            "c: { inherit (c.kestrel.services) catalog enabled; owner = c.kestrel.user; \
+             ssh_outside = c.services.openssh.enable && !(builtins.elem \"ssh\" c.kestrel.services.enabled); }",
+        ])
         .output()
         .context("running nix eval")?;
     if !out.status.success() {
         bail!("cannot read this machine's services: {}", last_error(&out.stderr));
     }
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    let catalog = v["catalog"]
-        .as_object()
-        .map(|o| o.iter().map(|(k, d)| (k.clone(), d.as_str().unwrap_or_default().to_string())).collect())
-        .unwrap_or_default();
-    let enabled = serde_json::from_value(v["enabled"].clone())?;
-    Ok((catalog, enabled))
+    Ok(Services {
+        catalog: v["catalog"]
+            .as_object()
+            .map(|o| o.iter().map(|(k, d)| (k.clone(), d.as_str().unwrap_or_default().to_string())).collect())
+            .unwrap_or_default(),
+        enabled: serde_json::from_value(v["enabled"].clone())?,
+        ssh_outside: v["ssh_outside"] == true,
+        owner: v["owner"].as_str().unwrap_or_default().to_string(),
+    })
 }
 
 fn service_list(cli: &Cli) -> Result<()> {
-    let (catalog, enabled) = services(&cli.repo, &config_name(&cli.repo)?)?;
-    for (name, what) in catalog {
-        let on = if enabled.contains(&name) { "on " } else { "   " };
+    let s = services(&cli.repo, &config_name(&cli.repo)?)?;
+    for (name, what) in &s.catalog {
+        let on = if s.enabled.contains(name) { "on " } else { "   " };
         println!("[{on}] {name:<10} {what}");
     }
+    if s.ssh_outside {
+        println!(
+            "\nSSH is ON outside this catalog, with stock settings (password logins allowed).\n\
+             `kestrel service enable ssh` replaces them with keys only."
+        );
+    }
     Ok(())
+}
+
+/// The owner's SSH keys, from both places the catalog's sshd reads (AuthorizedKeysFile):
+/// ~owner/.ssh/authorized_keys and /etc/ssh/authorized_keys.d/owner. Each as `ssh-keygen -l` shows
+/// it, so the person approving sees exactly whose keys will get in.
+fn owner_keys(owner: &str) -> Result<Vec<String>> {
+    let out = Command::new("getent").args(["passwd", owner]).output().context("running getent")?;
+    let entry = String::from_utf8_lossy(&out.stdout);
+    let home = entry.split(':').nth(5).filter(|h| !h.is_empty()).with_context(|| format!("no user '{owner}' on this machine"))?;
+    let mut keys = Vec::new();
+    for file in [PathBuf::from(home).join(".ssh/authorized_keys"), PathBuf::from("/etc/ssh/authorized_keys.d").join(owner)] {
+        let text = match fs::read_to_string(&file) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => bail!("cannot read {}: {e}", file.display()),
+        };
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            let mut c = Command::new("ssh-keygen");
+            c.args(["-l", "-f", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+            let mut child = c.spawn().context("running ssh-keygen")?;
+            child.stdin.take().unwrap().write_all(line.as_bytes())?;
+            let out = child.wait_with_output()?;
+            if out.status.success() {
+                keys.push(format!("{} ({})", String::from_utf8_lossy(&out.stdout).trim(), file.display()));
+            }
+        }
+    }
+    Ok(keys)
 }
 
 /// `kestrel service enable|disable`: a system change to services.json, always asked.
@@ -368,19 +419,29 @@ fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
     check_repo(cli)?;
     approval(true, false)?;
     let host = config_name(&cli.repo)?;
-    let (catalog, _) = services(&cli.repo, &host)?;
+    let svc = services(&cli.repo, &host)?;
     for n in names {
-        if !catalog.iter().any(|(c, _)| c == n) {
-            let all: Vec<_> = catalog.iter().map(|(c, _)| c.as_str()).collect();
+        if !svc.catalog.iter().any(|(c, _)| c == n) {
+            let all: Vec<_> = svc.catalog.iter().map(|(c, _)| c.as_str()).collect();
             bail!("'{n}' is not in the service catalog ({})", all.join(", "));
         }
     }
-    // SSH from the catalog is keys-only: turning it on without a key would lock you out.
-    if how == Edit::Add && names.iter().any(|n| n == "ssh") {
-        let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?;
-        let keys = fs::read_to_string(home.join(".ssh/authorized_keys")).unwrap_or_default();
-        if !keys.lines().any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')) {
-            bail!("ssh here allows keys only, and ~/.ssh/authorized_keys has none: you would be locked out");
+    if how == Edit::Add {
+        // What a bare `+ "name"` in the diff means.
+        for (name, what) in svc.catalog.iter().filter(|(c, _)| names.contains(c)) {
+            println!("{name}: {what}");
+        }
+        // The catalog's SSH is keys only, for the owner only: without one of their keys it would
+        // lock everyone out; with them, approving it means approving exactly these keys.
+        if names.iter().any(|n| n == "ssh") {
+            let keys = owner_keys(&svc.owner)?;
+            if keys.is_empty() {
+                bail!("ssh allows {}'s keys only, and they have none: everyone would be locked out", svc.owner);
+            }
+            println!("keys that will be able to log in as {}:", svc.owner);
+            for k in keys {
+                println!("  {}", history::clean(&k));
+            }
         }
     }
     let old = read_list(&cli.repo, SERVICES)?;
@@ -429,7 +490,7 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
     let entries = read_ledger(cli)?;
     let target = history::undo_target(&entries, seq)?;
     let files: Vec<&str> = target.data["files"].as_array().map(|f| f.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
-    let reason = history::clean(&target.reason);
+    let reason = history::one_line(&target.reason, 80);
     // Say what it is before anything else, refusals included.
     println!(
         "#{}  {reason}  ({} tier, by {}{}{})",

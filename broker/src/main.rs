@@ -93,14 +93,14 @@ fn main() -> Result<()> {
             println!("proposal #{} · tier: {} · actor: {}{}", e.body.seq, e.body.tier, e.body.actor,
                 if tainted { " · TAINTED" } else { "" });
             println!("files: {}", e.body.data["files"]);
-            println!("\n{}", e.body.data["diff"].as_str().unwrap_or_default());
+            println!("\n{}", printable_text(e.body.data["diff"].as_str().unwrap_or_default()));
             println!("approve with: kestrel-broker apply {} --approved-by <name>", e.body.seq);
         }
         Cmd::Show { seq } => {
             let e = b.ledger.get(seq)?;
-            println!("{}", serde_json::to_string_pretty(&e)?);
+            println!("{}", printable_text(&serde_json::to_string_pretty(&e)?));
             if let Some(c) = e.body.data.get("commit").and_then(|c| c.as_str()) {
-                println!("\n{}", b.repo.show(c)?);
+                println!("\n{}", printable_text(&b.repo.show(c)?));
             }
         }
         Cmd::Apply { seq, approved_by, confirm_tainted } => {
@@ -169,14 +169,26 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Control characters (escape sequences, carriage returns, newlines) and bidi overrides as visible
-/// escapes: ledger text is written by whoever proposed, the agent included, and must not be able to
-/// make one entry look like another on a terminal.
+/// Ledger text and proposed diffs are written by whoever proposed, the agent included, and must not
+/// be able to make one thing look like another on a terminal (escape sequences, carriage returns,
+/// bidi overrides — "Trojan Source" — invisible characters). Show those as visible escapes.
+/// (The CLI's `history::clean` does the same; keep the two in step.)
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{200b}'..='\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2069}' | '\u{061c}' | '\u{00ad}' | '\u{feff}'
+            | '\u{fe00}'..='\u{fe0f}' | '\u{e0000}'..='\u{e007f}')
+}
+
+/// One line: every hidden character escaped, newlines included.
 fn printable(s: &str) -> String {
+    s.chars().map(|c| if hidden(c) { c.escape_unicode().to_string() } else { c.to_string() }).collect()
+}
+
+/// Multi-line text (diffs, `git show`): keeps newlines and tabs, escapes every other hidden character.
+fn printable_text(s: &str) -> String {
     s.chars()
-        .map(|c| {
-            let bidi = matches!(c, '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
-            if c.is_control() || bidi { c.escape_unicode().to_string() } else { c.to_string() }
-        })
+        .map(|c| if hidden(c) && c != '\n' && c != '\t' { c.escape_unicode().to_string() } else { c.to_string() })
         .collect()
 }

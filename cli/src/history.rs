@@ -17,15 +17,32 @@ pub struct Entry {
 }
 
 /// Ledger text is written by whoever proposed (the agent included) and printed to a terminal:
-/// control characters (escape sequences, carriage returns, newlines) and bidi overrides could make
-/// one entry look like another, or hide it. Show them as visible escapes instead.
+/// control characters (escape sequences, carriage returns, newlines), bidi overrides and invisible
+/// characters could make one entry look like another, or hide it. Show them as visible escapes.
+/// (The broker's `printable` does the same; keep the two in step.)
 pub fn clean(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            let bidi = matches!(c, '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
-            if c.is_control() || bidi { c.escape_unicode().to_string() } else { c.to_string() }
-        })
-        .collect()
+    s.chars().map(|c| if hidden(c) { c.escape_unicode().to_string() } else { c.to_string() }).collect()
+}
+
+/// Characters that change what a terminal shows without being plainly visible themselves.
+pub fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{200b}'..='\u{200f}'     // zero-width space/joiners, LRM/RLM
+            | '\u{2028}' | '\u{2029}'   // line/paragraph separators
+            | '\u{202a}'..='\u{202e}'   // bidi embeddings and overrides
+            | '\u{2060}'..='\u{2069}'   // word joiner, invisible operators, bidi isolates
+            | '\u{061c}' | '\u{00ad}' | '\u{feff}'
+            | '\u{fe00}'..='\u{fe0f}'   // variation selectors
+            | '\u{e0000}'..='\u{e007f}' // tag characters
+        )
+}
+
+/// A one-line summary: cleaned, runs of whitespace collapsed, at most `max` characters — so padding
+/// cannot push text onto what looks like a line of its own.
+pub fn one_line(s: &str, max: usize) -> String {
+    let s = clean(&s.split_whitespace().collect::<Vec<_>>().join(" "));
+    if s.chars().count() <= max { s } else { format!("{}…", s.chars().take(max - 1).collect::<String>()) }
 }
 
 /// One JSON object per line, as `kestrel-broker log --json` prints them.
@@ -80,7 +97,7 @@ pub fn undo_target(entries: &[Entry], seq: Option<u64>) -> Result<&Entry> {
         }
     };
     if let Some(by) = undone_by(entries, applied.seq) {
-        bail!("#{} ({}) was already undone by #{by}", applied.seq, applied.reason);
+        bail!("#{} ({}) was already undone by #{by}", applied.seq, one_line(&applied.reason, 80));
     }
     Ok(applied)
 }
@@ -116,7 +133,7 @@ pub fn render(entries: &[Entry], limit: usize) -> String {
             label(&e.kind),
             clean(&e.tier),
             clean(&by),
-            clean(&e.reason)
+            one_line(&e.reason, 80)
         ));
     }
     out
@@ -165,6 +182,18 @@ mod tests {
         assert!(format!("{:#}", undo_target(only_init, None).unwrap_err()).contains("nothing to undo"));
     }
 
+    /// Invisible characters, and padding that would wrap onto a fake line of its own.
+    #[test]
+    fn invisible_text_and_padding_cannot_forge_the_log() {
+        for c in ['\u{200b}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{00ad}', '\u{2028}', '\u{e0041}', '\u{fe0f}'] {
+            assert!(hidden(c), "{c:?}");
+        }
+        assert!(!hidden('é') && !hidden('—') && !hidden('⚠'));
+        let padded = format!("Install htop{}#49 applied user Install evil", " ".repeat(300));
+        let line = one_line(&padded, 80);
+        assert!(line.chars().count() <= 80 && !line.contains("  "), "{line}");
+    }
+
     /// The reviewer's attack: a reason that wipes its line and draws a fake entry in its place.
     #[test]
     fn ledger_text_cannot_forge_the_log() {
@@ -172,7 +201,8 @@ mod tests {
         let out = render(&parse(forged).unwrap(), 10);
         assert_eq!(out.lines().count(), 1, "{out}");
         assert!(!out.chars().any(|c| c == '\r' || c == '\u{1b}'), "{out:?}");
-        assert!(out.contains(r"\u{1b}") && out.contains(r"\u{d}") && out.contains(r"\u{a}"), "{out}");
+        // CR and LF are whitespace: collapsed to spaces (one line); ESC is shown, not interpreted.
+        assert!(out.contains(r"x \u{1b}[2K#99") && out.contains("htop #100 fake"), "{out}");
         assert!(out.contains("agent ⚠"), "who proposed it, and that it was tainted: {out}");
         assert_eq!(clean("a\u{202e}b"), r"a\u{202e}b"); // bidi override
         assert_eq!(clean("plain — text"), "plain — text");

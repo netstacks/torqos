@@ -30,6 +30,8 @@ git clone <your GitHub repo URL> ~/kestrel
 sudo nix flake new -t ~/kestrel#config /var/lib/kestrel/config
 sudo cp /etc/nixos/hardware-configuration.nix /var/lib/kestrel/config/
 sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/kestrel/config/system.nix          # the one place a user name is set
+# SSH on Kestrel is keys only (services.json): from the Mac, before the first switch:
+#   ssh-copy-id <user>@<vm-address>
 sudo sed -i "s|github:netstacks/kestrel|path:$HOME/kestrel|" /var/lib/kestrel/config/flake.nix  # dev: your checkout
 
 # d) First switch into Kestrel (explicit host name the first time)

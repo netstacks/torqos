@@ -841,3 +841,22 @@ fn log_neutralises_control_characters_and_brief_drops_diffs() {
     let full = String::from_utf8(run_cli(dir.path(), "true", &["log", "--json"]).stdout).unwrap();
     assert!(full.contains("\"diff\":"));
 }
+
+/// `show` is where a person reviews an agent's change: a bidi override in the diff ("Trojan Source")
+/// or an escape sequence must be shown, not interpreted.
+#[test]
+fn show_and_propose_neutralise_hidden_characters_in_diffs() {
+    let (dir, b) = setup("true");
+    let d = write_diff(
+        dir.path(),
+        "t.diff",
+        "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{ nightLight = false; }\n+{ nightLight = true; /* \u{202e} } \u{2066} */ \u{1b}[2K}\n",
+    );
+    let out = run_cli(dir.path(), "true", &["propose", "--diff", d.to_str().unwrap(), "--reason", "r", "--actor", "agent"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains(r"\u{202e}") && text.contains(r"\u{1b}"), "{text}");
+    assert!(!text.contains('\u{202e}') && !text.contains('\u{1b}'), "{text:?}");
+    let shown = String::from_utf8(run_cli(dir.path(), "true", &["show", "2"]).stdout).unwrap();
+    assert!(!shown.contains('\u{202e}') && !shown.contains('\u{1b}') && shown.contains('\n'), "{shown:?}");
+    let _ = b;
+}

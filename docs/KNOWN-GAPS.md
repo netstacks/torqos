@@ -48,6 +48,14 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    that store path without re-fetching. The ledgered rev may then not identify what was built.
    Fix: the broker re-fetches changed locked inputs as root and compares narHashes.
 
+6d. **Service catalog limits** (ADR-013): the SSH key check and the key listing run in the CLI only;
+   an agent proposing `+ "ssh"` skips them (the broker cannot see home directories) — keep
+   `~/.ssh` out of any future user-tier dotfiles, or "plant a key, then enable ssh" becomes
+   possible. Tailscale keeps its own settings (Tailscale SSH, exit node) in `/var/lib/tailscale`,
+   outside the ledger, and re-enabling it rejoins with the old identity. Firmware updates (fwupd)
+   are not offered until they can go through the broker (SECURITY-MODEL.md). The terminal-safe
+   printing is duplicated in the broker and the CLI (`printable` / `history::clean`).
+
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing
