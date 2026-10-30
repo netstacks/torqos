@@ -53,18 +53,24 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
     "ledger/",      // anything about audit configuration
 ];
 
-/// User tier: data files that only affect one user's own environment. Deliberately an exact shape,
-/// not a directory: any `.nix` file is a full NixOS module (sudo rules, services, ...) no matter
-/// where it lives, so it is system tier. Today that is `users/<name>.packages.json`, read by
-/// `modules/packages.nix` into that user's profile.
-fn is_user_data(p: &str) -> bool {
-    let Some(name) = p.strip_prefix("users/").and_then(|f| f.strip_suffix(".packages.json")) else {
+/// The per-user data files that are user tier: `users/<name>/<leaf>`. An explicit allow-list, not
+/// a directory: a leaf a later release starts reading (say `ssh-keys.json`) must not become user
+/// tier by accident, and a file planted today must not become active then. Any `.nix` file is a
+/// full NixOS module (sudo rules, services, ...) wherever it lives, so it is system tier. Keep in
+/// step with the user-tier leaves of the configuration tree (docs/CLI-DESIGN.md).
+pub const USER_LEAVES: &[&str] = &["packages.json", "cli.json"];
+
+/// User tier: exactly `users/<name>/<leaf>` with an allow-listed leaf. The broker also checks the
+/// content of such a file before accepting it (`Broker::check_user_data`).
+pub fn is_user_data(p: &str) -> bool {
+    let Some((name, leaf)) = p.strip_prefix("users/").and_then(|rest| rest.split_once('/')) else {
         return false;
     };
     // A conservative user name: what `useradd` accepts by default, minus uppercase.
     let mut chars = name.chars();
-    matches!(chars.next(), Some('a'..='z' | '_'))
-        && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
+    let valid_name = matches!(chars.next(), Some('a'..='z' | '_'))
+        && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'));
+    valid_name && USER_LEAVES.contains(&leaf)
 }
 
 pub fn tier_for_path(path: &str) -> Tier {
@@ -102,8 +108,9 @@ mod tests {
 
     #[test]
     fn classifies() {
-        assert_eq!(tier_for_path("users/casey.packages.json"), Tier::User);
-        assert_eq!(tier_for_path("./users/casey.packages.json"), Tier::User);
+        assert_eq!(tier_for_path("users/casey/packages.json"), Tier::User);
+        assert_eq!(tier_for_path("./users/casey/packages.json"), Tier::User);
+        assert_eq!(tier_for_path("users/casey/cli.json"), Tier::User);
         assert_eq!(tier_for_path("users/casey.nix"), Tier::System, "a NixOS module is never user tier");
         assert_eq!(tier_for_path("desktop.nix"), Tier::System);
         assert_eq!(tier_for_path("policy/tiers.toml"), Tier::Forbidden);
@@ -112,29 +119,37 @@ mod tests {
         assert_eq!(tier_for_paths::<&str>(&[]), Tier::Observe);
     }
 
-    /// Only exact per-user data files are user tier; anything that could be a module, or that
-    /// escapes the one-file-per-user shape, is system tier.
+    /// Only allow-listed per-user data files are user tier. Anything that could be a module, any
+    /// other leaf (a later `ssh-keys.json` must not become user tier by accident), and anything that
+    /// escapes the exact `users/<name>/<leaf>` shape is system tier.
     #[test]
-    fn user_tier_is_data_files_only() {
+    fn user_tier_is_an_allow_list_of_data_files() {
         for p in [
             "users/casey.nix",
             "users/default.nix",
-            "users/casey/packages.json",
-            "users/casey.packages.json.bak",
-            "users/.packages.json",
-            "users/-x.packages.json",
-            "users/Casey.packages.json",
-            "users/ca sey.packages.json",
-            "users/casey.packages.nix",
-            "themes/dark.nix",
+            "users/casey/default.nix",
+            "users/casey/packages.nix",
+            "users/casey/ssh-keys.json",
+            "users/casey/environment.json",
+            "users/casey/packages.json.bak",
+            "users/casey/sub/packages.json",
+            "users/casey/packages.json/x",
+            "users/casey.packages.json",
+            "users/.hidden/packages.json",
+            "users/-x/packages.json",
+            "users/Casey/packages.json",
+            "users/ca sey/packages.json",
+            "users//packages.json",
+            "users/packages.json",
             "themes/dark.json",
             "users",
         ] {
             assert_eq!(tier_for_path(p), Tier::System, "{p}");
         }
-        for p in ["users/casey.packages.json", "users/_svc.packages.json", "users/a-b_9.packages.json"] {
+        for p in ["users/casey/packages.json", "users/_svc/cli.json", "users/a-b_9/packages.json"] {
             assert_eq!(tier_for_path(p), Tier::User, "{p}");
         }
+        assert_eq!(USER_LEAVES, ["packages.json", "cli.json"]);
     }
 
     #[test]

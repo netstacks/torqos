@@ -19,6 +19,9 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// The largest user-tier data file the broker accepts (`Broker::check_user_data`).
+const USER_DATA_MAX: u64 = 64 * 1024;
 use std::os::fd::AsFd;
 use std::process::{Command, Stdio};
 
@@ -436,6 +439,30 @@ impl Broker {
         Ok(())
     }
 
+    /// User-tier files are data by construction, whoever proposes them: a regular file (git mode
+    /// 100644 — never a symlink) holding a JSON object or list, at most `USER_DATA_MAX` bytes.
+    /// Deleting one is always fine. The NixOS module reading the file is still the authority on
+    /// what the data means; this makes sure it is data at all.
+    fn check_user_data(&self, diff_path: &Path, files: &[String]) -> Result<()> {
+        let user: Vec<String> = files.iter().filter(|f| policy::is_user_data(f)).cloned().collect();
+        if user.is_empty() {
+            return Ok(());
+        }
+        for (path, file) in self.repo.proposed_files(diff_path, &user, USER_DATA_MAX)? {
+            let Some(f) = file else { continue };
+            let data = f.mode == "100644"
+                && f.size <= USER_DATA_MAX
+                && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| v.is_object() || v.is_array());
+            if !data {
+                bail!(
+                    "refused: {path} must be a regular file holding JSON data (an object or a list) of at most {} KiB",
+                    USER_DATA_MAX / 1024
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn propose(&self, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         let _l = Lock::acquire(&self.state_dir)?;
         self.refuse_if_interrupted()?;
@@ -445,7 +472,10 @@ impl Broker {
         // could change between two reads.
         let copy = self.state_dir.join("proposing.diff");
         fs::write(&copy, &diff)?;
-        let files = self.repo.diff_files(&copy);
+        let files = self.repo.diff_files(&copy).and_then(|files| {
+            self.check_user_data(&copy, &files)?;
+            Ok(files)
+        });
         let _ = fs::remove_file(&copy);
         let files = files?;
         if files.is_empty() {
@@ -687,6 +717,7 @@ impl Broker {
         let tmp = self.state_dir.join(format!("proposal-{proposal_seq}.diff"));
         fs::write(&tmp, diff)?;
         let files = self.repo.diff_files(&tmp)?;
+        self.check_user_data(&tmp, &files)?;
         let tier = policy::tier_for_paths(&files);
         let actor = if p.body.actor == "agent" { Actor::Agent } else { Actor::User };
         policy::check_allowed(actor, tier)?;

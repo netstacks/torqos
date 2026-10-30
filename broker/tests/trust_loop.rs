@@ -141,10 +141,65 @@ fn user_tier_detected() {
     let d = write_diff(
         dir.path(),
         "t.diff",
-        "--- /dev/null\n+++ b/users/casey.packages.json\n@@ -0,0 +1,3 @@\n+[\n+  \"htop\"\n+]\n",
+        "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1,3 @@\n+[\n+  \"htop\"\n+]\n",
     );
     let p = b.propose(&d, "install htop", Actor::Agent, false).unwrap();
     assert_eq!(p.body.tier, "user");
+}
+
+/// A new file at a user-tier path, as a diff.
+fn new_user_file(path: &str, body: &str) -> String {
+    let lines: Vec<String> = body.lines().map(|l| format!("+{l}\n")).collect();
+    format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n{}", lines.len(), lines.concat())
+}
+
+/// User-tier files are data, by construction: a regular file holding a JSON object or list, small.
+/// Anything else at a user-tier path is refused, whoever proposes it.
+#[test]
+fn user_tier_files_must_be_json_data() {
+    let (dir, b) = setup("true");
+    let refused = |name: &str, diff: String| {
+        let d = write_diff(dir.path(), name, &diff);
+        let err = format!("{:#}", b.propose(&d, "sneaky", Actor::Agent, false).unwrap_err());
+        assert!(err.contains("must be a regular file holding JSON data"), "{name}: {err}");
+    };
+    refused("not-json.diff", new_user_file("users/casey/packages.json", "{ pkgs, ... }: { }"));
+    refused("string.diff", new_user_file("users/casey/packages.json", "\"htop\""));
+    refused("number.diff", new_user_file("users/casey/cli.json", "42"));
+    let big = format!("[\n{}\"x\"\n]", "\"padding-padding-padding-padding\",\n".repeat(2200));
+    refused("big.diff", new_user_file("users/casey/packages.json", &big));
+    // A symlink (mode 120000) pointing at a module, under a user-tier name.
+    refused(
+        "symlink.diff",
+        "diff --git a/users/casey/packages.json b/users/casey/packages.json\nnew file mode 120000\n\
+         --- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+../../desktop.nix\n\\ No newline at end of file\n"
+            .to_string(),
+    );
+    // A symlink whose target text happens to be valid JSON: only the mode check can refuse it.
+    refused(
+        "symlink-json.diff",
+        "diff --git a/users/casey/cli.json b/users/casey/cli.json\nnew file mode 120000\n\
+         --- /dev/null\n+++ b/users/casey/cli.json\n@@ -0,0 +1 @@\n+[]\n\\ No newline at end of file\n"
+            .to_string(),
+    );
+    // JSON objects and lists are fine.
+    let ok = write_diff(dir.path(), "ok.diff", &new_user_file("users/casey/cli.json", "{ \"style\": \"cisco\" }"));
+    assert_eq!(b.propose(&ok, "cisco style", Actor::Agent, false).unwrap().body.tier, "user");
+}
+
+/// Removing a user-tier file is a plain user-tier change: there is no content to check.
+#[test]
+fn user_tier_file_can_be_deleted() {
+    let (dir, b) = setup("true");
+    let add = write_diff(dir.path(), "add.diff", &new_user_file("users/casey/packages.json", "[\"htop\"]"));
+    let p = b.propose(&add, "add", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    let del = write_diff(
+        dir.path(),
+        "del.diff",
+        "--- a/users/casey/packages.json\n+++ /dev/null\n@@ -1 +0,0 @@\n-[\"htop\"]\n",
+    );
+    assert_eq!(b.propose(&del, "remove", Actor::Agent, false).unwrap().body.tier, "user");
 }
 
 /// `users/*.nix` is a full NixOS module (sudo rules, services, ...): changing it must never be

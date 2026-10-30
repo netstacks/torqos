@@ -9,6 +9,16 @@ pub struct Repo {
     root: PathBuf,
 }
 
+/// A file as a proposal would leave it (`Repo::proposed_files`).
+#[derive(Debug)]
+pub struct ProposedFile {
+    /// The git mode: "100644" for a regular file; "100755", "120000" (symlink), "160000" otherwise.
+    pub mode: String,
+    pub size: u64,
+    /// The exact bytes; empty when the file is larger than was asked for.
+    pub content: Vec<u8>,
+}
+
 const NAME: &str = "torq-broker";
 const EMAIL: &str = "broker@torq.local";
 
@@ -26,6 +36,11 @@ impl Repo {
     }
 
     fn git_env(&self, env: &[(&str, &OsStr)], args: &[&str]) -> Result<String> {
+        Ok(String::from_utf8_lossy(&self.git_env_bytes(env, args)?).to_string())
+    }
+
+    /// Like `git_env`, but stdout's exact bytes (file contents must not be "repaired" into text).
+    fn git_env_bytes(&self, env: &[(&str, &OsStr)], args: &[&str]) -> Result<Vec<u8>> {
         let user_name = format!("user.name={NAME}");
         let user_email = format!("user.email={EMAIL}");
         let out = Command::new("git")
@@ -54,7 +69,7 @@ impl Repo {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        Ok(out.stdout)
     }
 
     /// Flush the repo's whole filesystem (`syncfs`): working tree, objects, refs and directory
@@ -106,18 +121,51 @@ impl Repo {
     /// what the diff *does*, not what its headers say: a rename reports both the old and the new
     /// path (numstat reports only the new one), and names are raw (`-z`), not C-quoted.
     pub fn diff_files(&self, diff_path: &Path) -> Result<Vec<String>> {
+        self.with_proposal_index(diff_path, |env| {
+            let out = self.git_env(env, &["diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD"])?;
+            Ok(out.split('\0').filter(|s| !s.is_empty()).map(String::from).collect())
+        })
+    }
+
+    /// Each of `paths` as the diff would leave it: its git mode, size and — when at most
+    /// `max_bytes` — exact content; None when the diff deletes it. Read from the same scratch index
+    /// as `diff_files`, so it is what the proposal *does*, never the repo's own tree.
+    pub fn proposed_files(&self, diff_path: &Path, paths: &[String], max_bytes: u64) -> Result<Vec<(String, Option<ProposedFile>)>> {
+        self.with_proposal_index(diff_path, |env| {
+            let mut out = Vec::new();
+            for path in paths {
+                // "<mode> <object> <stage>\t<path>\0", or nothing when the path is gone.
+                let entry = self.git_env(env, &["ls-files", "--stage", "-z", "--", path])?;
+                let Some((meta, _)) = entry.split_once('\t') else {
+                    out.push((path.clone(), None));
+                    continue;
+                };
+                let mut fields = meta.split(' ');
+                let (Some(mode), Some(object)) = (fields.next(), fields.next()) else {
+                    bail!("unexpected git ls-files output for {path}: {entry:?}");
+                };
+                let size: u64 = self.git_env(env, &["cat-file", "-s", object])?.trim().parse().context("blob size")?;
+                let content = if size <= max_bytes { self.git_env_bytes(env, &["cat-file", "blob", object])? } else { Vec::new() };
+                out.push((path.clone(), Some(ProposedFile { mode: mode.to_string(), size, content })));
+            }
+            Ok(out)
+        })
+    }
+
+    /// Run `f` with GIT_INDEX_FILE pointing at a scratch index holding HEAD with the diff applied:
+    /// the proposal's result, without touching the repo's own index or working tree.
+    fn with_proposal_index<T>(&self, diff_path: &Path, f: impl FnOnce(&[(&str, &OsStr)]) -> Result<T>) -> Result<T> {
         let p = path::absolute(diff_path)?.to_string_lossy().into_owned();
         let index = path::absolute(self.root.join(".git/torq-proposal.index"))?;
         let env = [("GIT_INDEX_FILE", index.as_os_str())];
-        let files = (|| {
+        let result = (|| {
             self.git_env(&env, &["read-tree", "HEAD"])?;
             self.git_env(&env, &["apply", "--cached", p.as_str()])
                 .context("diff does not apply cleanly to the current config")?;
-            let out = self.git_env(&env, &["diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD"])?;
-            Ok(out.split('\0').filter(|s| !s.is_empty()).map(String::from).collect())
+            f(&env)
         })();
         let _ = std::fs::remove_file(&index);
-        files
+        result
     }
 
     pub fn apply_and_commit(&self, diff_path: &Path, message: &str) -> Result<String> {
