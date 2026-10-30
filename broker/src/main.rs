@@ -69,6 +69,13 @@ enum Cmd {
         #[arg(long)]
         approved_by: String,
     },
+    /// Return the machine to its last ledgered configuration after drift (switched outside the
+    /// broker, a changed boot default, a failed restore): rebuild it and ledger that. Never
+    /// automatic (ADR-012). Refuses when the config repo itself was changed outside the broker.
+    Repair {
+        #[arg(long)]
+        approved_by: String,
+    },
     /// Print the ledger.
     Log {
         /// Leave out proposals' full diffs (for listing: the diffs make the ledger large).
@@ -157,6 +164,13 @@ fn run(cli: Cli) -> Result<()> {
             (Some(e), false) => println!("{} (ledger #{})", e.body.reason, e.body.seq),
             (None, false) => println!("nothing to reconcile"),
         },
+        Cmd::Repair { approved_by } => {
+            let e = b.repair(&approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
         Cmd::Log { brief } => {
             for mut e in b.ledger.read_all()? {
                 if brief {

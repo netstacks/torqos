@@ -147,7 +147,7 @@ them deliberately, with tests on both sides.
 
 | Command | stdout |
 |---|---|
-| `propose`, `apply`, `rollback`, `show` | the ledger entry |
+| `propose`, `apply`, `rollback`, `show`, `repair` | the ledger entry (`repair` of an interruption: the `interrupted` entry) |
 | `log [--brief]` | one entry per line (`--brief`: without `data.diff`) |
 | `reconcile` | `{"reconciled": <entry> \| null}` |
 | `status` | `{ok, busy, problems[], ledger_entries, ledger_error, head, ledgered_commit, dirty, interrupted: {op, target} \| null, unrestored, running_system, next_boot, ledgered_system, checked_running_system}` |
@@ -157,7 +157,7 @@ them deliberately, with tests on both sides.
 
 A ledger entry is flat: `seq, ts, actor, approved_by, kind, tier, tainted, reason, data,
 prev_hash, hash`. `kind` is one of `init, proposal, applied, apply_failed, rolled_back,
-rollback_failed, interrupted`; `tier` is `observe, user, system, forbidden`; `data` depends on
+rollback_failed, interrupted, repaired`; `tier` is `observe, user, system, forbidden`; `data` depends on
 `kind` (e.g. `proposal`: `files, diff, diff_sha256`; `applied`: `proposal, commit, files, system`).
 
 When `status` is busy it reports `{ok: false, busy: "<who holds the lock>", problems: []}` and

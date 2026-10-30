@@ -958,3 +958,61 @@ fn status_json_reports_nothing_else_while_busy() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v["busy"].is_string() && v.get("interrupted").is_none() && v.get("dirty").is_none(), "{v}");
 }
+
+/// `repair`: the person's way back to the ledgered system after drift (ADR-012: never automatic).
+/// A machine switched outside the broker is rebuilt from its last ledgered config, and that is
+/// ledgered, recording the system it is now running.
+#[test]
+fn repair_returns_a_drifted_machine_to_its_ledgered_system() {
+    let tmp = tempfile::tempdir().unwrap();
+    let calls = tmp.path().join("calls.log");
+    let (dir, repo) = config_dir();
+    let link = dir.path().join("current-system");
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", &link).unwrap();
+    // The "rebuild" switches the link back to the ledgered system, as nixos-rebuild switch would.
+    let rebuild = format!("echo rebuilt >> {}; ln -sfn /nix/store/aaa-system-1 {}", calls.display(), link.display());
+    let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_current_system(&link).with_system_profile(dir.path().join("none"));
+    b.init().unwrap();
+    switch_to(&link, "/nix/store/zzz-switched-outside");
+    assert!(!b.status().unwrap().problems().is_empty());
+
+    let e = b.repair("casey").unwrap();
+    assert_eq!(e.body.kind, "repaired");
+    assert_eq!(e.body.data["system"], "/nix/store/aaa-system-1");
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "rebuilt\n");
+    assert!(b.status().unwrap().problems().is_empty(), "{:?}", b.status().unwrap().problems());
+    b.ledger.verify().unwrap();
+}
+
+/// A failed restore leaves the machine unknown; repair rebuilds and clears it.
+#[test]
+fn repair_clears_a_failed_restore() {
+    let (dir, _, link) = setup_with_system();
+    let failing = Broker::new(dir.path().join("config"), dir.path().join("state"), "false")
+        .with_current_system(&link)
+        .with_system_profile(dir.path().join("no-profile"));
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = failing.propose(&d, "Night light", Actor::User, false).unwrap();
+    assert!(failing.apply(p.body.seq, "casey", false).is_err());
+    let ok = Broker::new(dir.path().join("config"), dir.path().join("state"), "true")
+        .with_current_system(&link)
+        .with_system_profile(dir.path().join("no-profile"));
+    assert!(!ok.status().unwrap().problems().is_empty());
+    ok.repair("casey").unwrap();
+    assert!(ok.status().unwrap().problems().is_empty(), "{:?}", ok.status().unwrap().problems());
+}
+
+/// The config repo itself changed outside the broker: a rebuild would build that, so repair refuses
+/// and says why. An interrupted operation is finished by reconciling, which is the repair.
+#[test]
+fn repair_refuses_a_changed_repo_and_reconciles_an_interruption() {
+    let (_dir, b) = setup("true");
+    fs::write(b.repo.root().join("stray.nix"), "{ }\n").unwrap();
+    let err = format!("{:#}", b.repair("casey").unwrap_err());
+    assert!(err.contains("changed outside the broker"), "{err}");
+    fs::remove_file(b.repo.root().join("stray.nix")).unwrap();
+
+    let (_dir2, b2, _) = crashed_apply();
+    let e = b2.repair("casey").unwrap();
+    assert_eq!(e.body.kind, "interrupted", "an interruption is repaired by reconciling it");
+}

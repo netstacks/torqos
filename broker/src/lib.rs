@@ -245,6 +245,16 @@ fn sync_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The commit the ledger says the config repo is at: that of the last entry that moved it.
+/// (apply_failed / rollback_failed carry none: the config is back at the previous commit.)
+fn ledgered_commit(entries: &[Entry]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .filter(|e| matches!(e.body.kind.as_str(), "init" | "applied" | "rolled_back" | "interrupted" | "repaired"))
+        .find_map(|e| e.body.data.get("commit").and_then(|v| v.as_str()).map(String::from))
+}
+
 /// nixos-rebuild runs the switch in this transient unit (`systemd-run --pipe`). A broker rebuild's
 /// switch inherits the lock through stdin, but a manual `nixos-rebuild` outside the broker does not.
 const SWITCH_UNIT: &str = "nixos-rebuild-switch-to-configuration.service";
@@ -311,13 +321,6 @@ impl Broker {
         let busy = lock.is_none().then(|| Lock::busy(&self.state_dir));
         let ledger = self.ledger.verify().map_err(|e| format!("{e:#}"));
         let entries = self.ledger.read_all().unwrap_or_default();
-        let last = |key: &str, kinds: &[&str]| {
-            entries
-                .iter()
-                .rev()
-                .filter(|e| kinds.is_empty() || kinds.contains(&e.body.kind.as_str()))
-                .find_map(|e| e.body.data.get(key).and_then(|v| v.as_str()).map(String::from))
-        };
         let interrupted = match self.read_pending()? {
             Some(p) if !self.outcome_recorded(&p)? => Some(Interrupted { op: p.op, target: p.target }),
             _ => None,
@@ -332,8 +335,7 @@ impl Broker {
             ledger,
             head: self.repo.head().ok(),
             dirty: self.repo.ensure_clean().is_err() && self.repo.head().is_ok(),
-            // apply_failed / rollback_failed carry no commit: the config is back at the previous one.
-            ledgered_commit: last("commit", &["init", "applied", "rolled_back", "interrupted"]),
+            ledgered_commit: ledgered_commit(&entries),
             running_system: self.running_system(),
             next_boot: self.next_boot(),
             ledgered_system: last_record.and_then(|e| e.body.data["system"].as_str().map(String::from)),
@@ -341,6 +343,47 @@ impl Broker {
             interrupted,
             busy,
         })
+    }
+
+    /// Return the machine to its last ledgered configuration (ADR-012): the person's explicit way
+    /// back after drift — a system switched outside the broker, a changed boot default, a failed
+    /// restore. Never run automatically. An interrupted operation is finished by reconciling it,
+    /// which is the repair. A config repo changed outside the broker is refused: a rebuild would
+    /// build that change, so a person must look at it first.
+    pub fn repair(&self, by: &str) -> Result<Entry> {
+        let lock = Lock::acquire(&self.state_dir)?;
+        self.ledger.verify().context("cannot repair on a broken ledger")?;
+        if let Some(e) = self.reconcile_locked(&lock, by)? {
+            return Ok(e);
+        }
+        let head = self.repo.head()?;
+        let ledgered = ledgered_commit(&self.ledger.read_all()?);
+        if ledgered.as_deref() != Some(head.as_str()) || self.repo.ensure_clean().is_err() {
+            bail!(
+                "the config repo was changed outside the broker (it is at {head}, the ledger says {}); a \
+                 rebuild would build that change, so look at {} first",
+                ledgered.as_deref().unwrap_or("nothing"),
+                self.repo.root().display()
+            );
+        }
+        let restored = self.rebuild(&lock).is_ok();
+        let e = self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(by.into()),
+            kind: "repaired".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: if restored {
+                "Returned the machine to its ledgered configuration".into()
+            } else {
+                "Tried to return the machine to its ledgered configuration, but the rebuild failed".into()
+            },
+            data: self.with_system(json!({ "commit": head, "restored": restored })),
+        })?;
+        if !restored {
+            bail!("the rebuild failed: the machine may still not match its ledger (recorded as #{})", e.body.seq);
+        }
+        Ok(e)
     }
 
     pub fn init(&self) -> Result<()> {
