@@ -43,11 +43,18 @@ pub struct Status {
     pub ledgered_system: Option<String>,
     /// An apply or rollback that was interrupted and not yet reconciled.
     pub interrupted: Option<String>,
+    /// A broker operation is running (who holds the lock): mid-switch, the running system has
+    /// changed before the ledger records it, so nothing is compared.
+    pub busy: Option<String>,
 }
 
 impl Status {
-    /// Everything that is not as the ledger says, worded for a person. Empty means all is well.
+    /// Everything that is not as the ledger says, worded for a person. Empty means all is well —
+    /// or that it could not be checked because an operation is running (`busy`).
     pub fn problems(&self) -> Vec<String> {
+        if self.busy.is_some() {
+            return Vec::new();
+        }
         let mut p = Vec::new();
         if let Err(e) = &self.ledger {
             p.push(format!("ledger: {e}"));
@@ -80,17 +87,31 @@ impl Status {
 struct Lock(fs::File);
 impl Lock {
     fn acquire(dir: &Path) -> Result<Self> {
+        match Self::try_acquire(dir)? {
+            Some(l) => Ok(l),
+            None => bail!("another broker operation is running ({})", Self::busy(dir)),
+        }
+    }
+
+    /// The lock, or None while another operation holds it.
+    fn try_acquire(dir: &Path) -> Result<Option<Self>> {
         fs::create_dir_all(dir)?;
         let p = dir.join("broker.lock");
         OpenOptions::new().write(true).create(true).truncate(false).open(&p)?;
         // Read-only: the fd is handed to the rebuild as stdin, and nothing should write into it.
         let f = fs::File::open(&p)?;
-        f.try_lock().with_context(|| {
-            let h = holders(&p);
-            let h = if h.is_empty() { "unknown".to_string() } else { h.join(", ") };
-            format!("another broker operation is running ({}; held by: {h})", p.display())
-        })?;
-        Ok(Lock(f))
+        match f.try_lock() {
+            Ok(()) => Ok(Some(Lock(f))),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(e)) => Err(e).context("locking the broker"),
+        }
+    }
+
+    /// Who holds the lock, for messages.
+    fn busy(dir: &Path) -> String {
+        let p = dir.join("broker.lock");
+        let h = holders(&p);
+        format!("{}; held by: {}", p.display(), if h.is_empty() { "unknown".to_string() } else { h.join(", ") })
     }
 
     /// The lock as a child's stdin, so the rebuild's whole process tree holds it too. Killing the
@@ -204,8 +225,11 @@ impl Broker {
         data
     }
 
-    /// Compare the machine with its ledger. Read-only; takes no lock.
+    /// Compare the machine with its ledger. Read-only, but under the lock: during an operation the
+    /// comparison would be meaningless, so it reports `busy` instead.
     pub fn status(&self) -> Result<Status> {
+        let lock = Lock::try_acquire(&self.state_dir)?; // held until the comparison is done
+        let busy = lock.is_none().then(|| Lock::busy(&self.state_dir));
         let ledger = self.ledger.verify().map_err(|e| format!("{e:#}"));
         let entries = self.ledger.read_all().unwrap_or_default();
         let last = |key: &str, kinds: &[&str]| {
@@ -227,6 +251,7 @@ impl Broker {
             running_system: self.running_system(),
             ledgered_system: last("system", &[]),
             interrupted,
+            busy,
         })
     }
 

@@ -128,6 +128,10 @@ fn main() -> Result<()> {
         }
         Cmd::Status => {
             let s = b.status()?;
+            if let Some(who) = &s.busy {
+                println!("a broker operation is running ({who}); not checked — try again when it is done");
+                return Ok(());
+            }
             let or = |v: &Option<String>, none: &str| v.clone().unwrap_or_else(|| none.to_string());
             println!("ledger          {}", match &s.ledger { Ok(n) => format!("OK, {n} entries"), Err(e) => e.clone() });
             println!("config repo     {}  (ledgered: {})", or(&s.head, "?"), or(&s.ledgered_commit, "none"));

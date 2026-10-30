@@ -72,7 +72,56 @@ in
     systemd.tmpfiles.rules = [
       "d /var/lib/kestrel 0755 root root -"
       "d ${cfg.stateDir} 0700 root root -"
+      "d /run/kestrel 0755 root root -"
     ];
+
+    # Drift from the ledger (the machine switched to another configuration, the config repo
+    # changed behind the broker's back, an interrupted operation, a broken ledger) must not go
+    # unnoticed: check at boot and every 15 minutes; problems go to /run/kestrel/drift (shown by
+    # every new interactive shell) and to the journal at warning priority.
+    # The unit never fails: it can run *during* a switch (the timer fires then), and a failed unit
+    # fails the switch, which the broker treats as a failed rebuild and rolls back (ADR-008).
+    # A monitor must not be able to undo the changes it watches.
+    systemd.services.kestrel-status = {
+      description = "Check that this machine is as its Kestrel ledger says";
+      after = [ "kestrel-broker-init.service" ];
+      wantedBy = [ "multi-user.target" ];
+      restartIfChanged = false;
+      path = [ pkgs.git ];
+      environment = {
+        KESTREL_CONFIG_REPO = cfg.configRepo;
+        KESTREL_STATE_DIR = cfg.stateDir;
+      };
+      serviceConfig.Type = "oneshot";
+      script = ''
+        out=$(${lib.getExe cfg.package} status 2>&1) && ok=1 || ok=0
+        case "$out" in
+          *"not checked"*)  # an operation is running: keep any earlier finding as it is
+            printf '%s\n' "$out"
+            exit 0 ;;
+        esac
+        if [ $ok = 1 ]; then
+          rm -f /run/kestrel/drift
+          printf '%s\n' "$out"
+        else
+          printf '%s\n' "$out" | grep '^PROBLEM' > /run/kestrel/drift || printf 'PROBLEM: %s\n' "$out" > /run/kestrel/drift
+          printf '%s\n' "$out" | sed 's/^/<4>/'  # journal priority: warning
+        fi
+      '';
+    };
+    systemd.timers.kestrel-status = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "2min";
+        OnUnitActiveSec = "15min";
+      };
+    };
+    environment.interactiveShellInit = ''
+      if [ -s /run/kestrel/drift ]; then
+        echo "Kestrel: this machine is not as its ledger says (details: sudo kestrel-broker status):" >&2
+        sed 's/^PROBLEM: /  - /' /run/kestrel/drift >&2
+      fi
+    '';
 
     # A stray `nixos-rebuild switch` (a person, or another tool following stock NixOS habits) must
     # fail loudly instead of switching the machine away from its ledgered config.

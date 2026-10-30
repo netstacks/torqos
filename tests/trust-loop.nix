@@ -33,6 +33,9 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     env = "KESTREL_REBUILD_CMD=true "
     repo = "/var/lib/kestrel/config"
+    # The boot-time drift check ran, and passed on a machine with nothing ledgered yet.
+    machine.succeed("systemctl show -p Result --value kestrel-status | grep -qx success")
+    machine.succeed("test ! -e /run/kestrel/drift")
 
     machine.succeed(f"mkdir -p {repo} && cp /etc/kestrel-test/desktop.nix {repo}/ && touch {repo}/flake.nix")
     machine.succeed(env + "kestrel-broker init")
@@ -64,8 +67,13 @@ pkgs.testers.runNixOSTest {
 
     with subtest("ledger is tamper-evident"):
         machine.succeed(env + "kestrel-broker verify")
+        machine.succeed("cp /var/lib/kestrel/state/ledger.jsonl /tmp/ledger.good")
         machine.succeed("sed -i 's/Night light/Nothing here/' /var/lib/kestrel/state/ledger.jsonl")
         machine.fail(env + "kestrel-broker verify")
+        machine.succeed("systemctl start kestrel-status")  # never fails (it runs during switches)...
+        machine.succeed("grep -q 'ledger' /run/kestrel/drift")  # ...but reports it
+        machine.succeed("cp /tmp/ledger.good /var/lib/kestrel/state/ledger.jsonl")  # for what follows
+        machine.succeed("systemctl start kestrel-status && test ! -e /run/kestrel/drift")
 
     with subtest("a stray nixos-rebuild cannot switch away from the ledgered config"):
         # The owner's files are moved aside, never overwritten or opened: a config that merely
@@ -99,5 +107,20 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test ! -e /etc/nixos/flake.nix -a ! -e /etc/nixos/configuration.nix")
         machine.succeed("test -e /etc/nixos/configuration.nix.pre-kestrel -a -L /etc/nixos/flake.nix.pre-kestrel")
 
+    with subtest("a machine switched outside the broker is reported"):
+        # The guard subtest just switched to another configuration (the specialisation) without the
+        # broker: the running system is no longer the last ledgered build. (That switch also ran the
+        # check mid-switch, and succeeded: a monitor must not be able to fail a switch.)
+        machine.succeed("systemctl start kestrel-status")
+        machine.succeed("grep -q 'running system' /run/kestrel/drift")
+        machine.succeed("journalctl -b -u kestrel-status -p warning | grep -q 'PROBLEM: running system'")
+        out = machine.succeed("bash -ic true 2>&1")
+        assert "not as its ledger says" in out, out
+        # Back on the ledgered system, all is well again.
+        machine.succeed("/run/booted-system/bin/switch-to-configuration test")
+        machine.succeed("systemctl start kestrel-status")
+        machine.succeed("test ! -e /run/kestrel/drift")
+        out = machine.succeed("bash -ic true 2>&1")
+        assert "not as its ledger says" not in out, out
   '';
 }

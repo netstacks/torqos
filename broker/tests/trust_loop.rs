@@ -711,3 +711,22 @@ fn status_reports_an_interrupted_operation_and_a_broken_ledger() {
     let problems = b.status().unwrap().problems().join("\n");
     assert!(problems.contains("ledger"), "{problems}");
 }
+
+/// Mid-apply, the system has switched but the ledger entry is not written yet: comparing then would
+/// report drift that is not there. status must say an operation is running instead.
+#[test]
+fn status_does_not_compare_during_an_operation() {
+    let (dir, b, link) = setup_with_system();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    switch_to(&link, "/nix/store/ccc-being-switched-to");
+    let held = fs::OpenOptions::new().write(true).open(dir.path().join("state/broker.lock")).unwrap();
+    held.lock().unwrap();
+
+    let s = b.status().unwrap();
+    assert!(s.busy.is_some(), "{s:?}");
+    assert!(s.problems().is_empty(), "{:?}", s.problems());
+    drop(held);
+    assert!(!b.status().unwrap().problems().is_empty(), "once the lock is free, the drift is reported");
+}
