@@ -1,11 +1,14 @@
 # Installed software, as data. The package lists live in the machine's config repo as JSON so that
-# tools (the `torq pkg` CLI, later the agent's MCP packages server) can change them by proposing
-# a plain diff through the broker, instead of editing Nix code:
+# tools (`torqcli`, later the agent) can change them by proposing a plain diff through the broker,
+# instead of editing Nix code. They are leaves of the configuration tree (docs/CLI-DESIGN.md):
 #
-#   packages.json                 system-wide packages     (system tier: explicit approval)
-#   users/<name>.packages.json    one user's packages      (user tier)
+#   system/packages.json          system packages <name>          (system tier)
+#   users/<name>/packages.json    users <name> packages <name>    (user tier)
 #
 # Each file is a JSON list of nixpkgs attribute paths, e.g. [ "htop", "python3Packages.numpy" ].
+# A user's folder may hold only the user-tier leaves the broker allows (broker/src/policy.rs,
+# USER_LEAVES); anything else there fails evaluation, so nothing planted can lie in wait for a
+# later release to start reading it.
 { config, lib, pkgs, ... }:
 
 let
@@ -42,17 +45,32 @@ let
 
   readList = file: if builtins.pathExists file then lib.importJSON file else [ ];
 
-  # Same shape the broker treats as user tier (broker/src/policy.rs, is_user_data).
+  # Same shape and leaves the broker treats as user tier (broker/src/policy.rs, is_user_data).
   isUserName = s: builtins.match "[a-z_][a-z0-9_-]*" s != null;
+  userLeaves = [ "packages.json" "cli.json" ];
   usersDir = dir + "/users";
-  userFiles =
-    if dir != null && builtins.pathExists usersDir then
-      lib.mapAttrs (n: _:
-        let user = lib.removeSuffix ".packages.json" n;
-        in if isUserName user then user else throw "torq.packages: users/${n} does not name a valid user"
-      ) (lib.filterAttrs (n: t: t == "regular" && lib.hasSuffix ".packages.json" n) (builtins.readDir usersDir))
+  entries = if dir != null && builtins.pathExists usersDir then builtins.readDir usersDir else { };
+
+  # users/<name>/ folders, checked: a valid name, and nothing in them but allow-listed regular files.
+  # Other top-level entries in users/ are left alone (e.g. a <name>.nix module the config's flake
+  # imports, which is system tier), except the old flat `<name>.packages.json`, which would
+  # otherwise be silently ignored.
+  userDirs = lib.mapAttrs (name: _:
+    let
+      leaves = builtins.readDir (usersDir + "/${name}");
+      unknown = lib.attrNames (lib.filterAttrs (leaf: _: !(builtins.elem leaf userLeaves)) leaves);
+      notFiles = lib.attrNames (lib.filterAttrs (_: type: type != "regular") leaves);
+    in
+    if !(isUserName name) then
+      throw "torq: users/${name}/ does not name a valid user (a lowercase login name)"
+    else if unknown != [ ] then
+      throw "torq: users/${name}/${lib.head unknown} is not a setting (a user's folder holds only ${lib.concatStringsSep ", " userLeaves})"
+    else if notFiles != [ ] then
+      throw "torq: users/${name}/${lib.head notFiles} must be a regular file, not a ${leaves.${lib.head notFiles}}"
     else
-      { };
+      leaves
+  ) (lib.filterAttrs (_: type: type == "directory") entries);
+  oldLayout = lib.filterAttrs (n: type: type == "regular" && lib.hasSuffix ".packages.json" n) entries;
 in
 {
   options.torq.cli.package = lib.mkOption {
@@ -65,8 +83,8 @@ in
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = ''
-        The machine's config repo. When set, `packages.json` and `users/<name>.packages.json` in it
-        are read into `system` and `user`. Set by `torq.lib.mkSystem { configDir = ./.; }`.
+        The machine's config repo. When set, `system/packages.json` and `users/<name>/packages.json`
+        in it are read into `system` and `user`. Set by `torq.lib.mkSystem { configDir = ./.; }`.
       '';
     };
     system = lib.mkOption {
@@ -82,15 +100,21 @@ in
   };
 
   config = {
-    torq.packages.system = lib.mkIf (dir != null) (readList (dir + "/packages.json"));
+    torq.packages.system = lib.mkIf (dir != null) (readList (dir + "/system/packages.json"));
     torq.packages.user = lib.mkIf (dir != null) (
-      lib.mapAttrs' (n: user: lib.nameValuePair user (lib.importJSON (usersDir + "/${n}"))) userFiles
+      lib.mapAttrs (name: _: lib.importJSON (usersDir + "/${name}/packages.json"))
+        (lib.filterAttrs (_: leaves: leaves ? "packages.json") userDirs)
     );
 
-    assertions = lib.mapAttrsToList (user: _: {
-      assertion = config.users.users.${user}.isNormalUser or false;
-      message = "torq.packages: users/${user}.packages.json names '${user}', which is not a normal user on this machine.";
-    }) cfg.user;
+    assertions =
+      lib.mapAttrsToList (user: _: {
+        assertion = config.users.users.${user}.isNormalUser or false;
+        message = "torq: users/${user}/ names '${user}', which is not a normal user on this machine.";
+      }) userDirs
+      ++ lib.mapAttrsToList (n: _: {
+        assertion = false;
+        message = "torq: users/${n} is the old layout; move it to users/${lib.removeSuffix ".packages.json" n}/packages.json.";
+      }) oldLayout;
 
     environment.systemPackages = [ config.torq.cli.package ] ++ map (resolve "system") cfg.system;
     users.users = lib.mapAttrs (user: names: { packages = map (resolve "user ${user}") names; }) cfg.user;

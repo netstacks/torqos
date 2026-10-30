@@ -16,7 +16,7 @@ in
         message = "Set torq.user to your login name in the config repo's system.nix.";
       }
       {
-        # The same shape the broker accepts for users/<name>.packages.json (user tier).
+        # The same shape the broker accepts for users/<name>/ (user tier).
         assertion = builtins.match "[a-z_][a-z0-9_-]*" cfg.user != null;
         message = "torq.user '${cfg.user}' must be a lowercase login name ([a-z_][a-z0-9_-]*).";
       }

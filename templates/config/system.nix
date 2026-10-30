@@ -2,7 +2,7 @@
 { ... }:
 {
   # The owner's login name — the only place a user name is set. Their account, their package list
-  # (users/<name>.packages.json) and their broker approvals all follow from it. Set it once at
+  # (users/<name>/packages.json) and their broker approvals all follow from it. Set it once at
   # setup: sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/torq/config/system.nix
   torq.user = "CHANGE-ME";
 

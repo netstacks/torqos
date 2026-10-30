@@ -109,7 +109,7 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
   `tests/trust-loop.nix` passes inside the UTM VM (no `/dev/kvm`: QEMU falls back to TCG, ~2.5 min).
   Broker: 40 tests green (`cargo test`, also run in the Nix build sandbox).
 - **Package system works** (ADR-011): `torq pkg add|remove|list|search` writes
-  `users/<name>.packages.json` (user tier) or `packages.json` (`--system`, system tier) and goes
+  `users/<name>/packages.json` (user tier) or `system/packages.json` (`--system`, system tier) and goes
   through the broker. Verified live (`ripgrep` for viper, ledger #23).
 - **Services, updates, history work** (ADR-012, ADR-013): `torq service`, `torq update`,
   `torq log`, `torq undo`, `torq status`; drift checked at boot and every 15 min. Verified

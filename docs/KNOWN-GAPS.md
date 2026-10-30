@@ -60,6 +60,11 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    `status --json`; the CLI hides the head finding only when HEAD is `before` or that commit.
    Also low: `history::asked_by` credits a failed/interrupted *undo* to the original change's
    actor; undo is user-only, so rollbacks should show "user". (Found by review of f2da8b7.)
+6f. **Nothing evaluates `templates/config` itself.** The VM test checks the broker builds `#torq`,
+   but no `nix flake check` entry builds a config made from the template (it needs a hardware
+   file and a user name), so a template that stopped exposing `nixosConfigurations.torq` would
+   only show at the next install. A config repo made from an older template (output `torq-utm`)
+   must be renamed to `torq` before its broker is updated; only the dev VM ever had one.
 6c. **`torq update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
    that store path without re-fetching. The ledgered rev may then not identify what was built.
@@ -85,7 +90,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
    `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a TorqOS niri config.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq.user` in `system.nix` is the one place
-   (asserted set and well-formed); per-user apps are `users/<name>.packages.json`.
+   (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
 
 ## UTM VM quirks (not TorqOS bugs)
 - niri needs 3D: UTM display card must be `virtio-gpu-gl-pci` with GPU acceleration on

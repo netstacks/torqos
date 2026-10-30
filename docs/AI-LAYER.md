@@ -15,7 +15,7 @@
 | Tier | Examples | Requirement |
 |---|---|---|
 | `observe` | read logs, hardware info, settings, config repo | automatic, still ledgered |
-| `user` | one user's *data* files: today `users/<name>.packages.json` (apps); later themes, dotfiles. Never a `.nix` module (that is `system`, wherever it lives) | approve once per category; /home snapshot first |
+| `user` | one user's *data* files: today `users/<name>/packages.json` (apps) and `users/<name>/cli.json`; later themes, dotfiles. Never a `.nix` module (that is `system`, wherever it lives) | approve once per category; /home snapshot first |
 | `system` | services, drivers, kernel params, packages | always preview + explicit approval; commit + generation |
 | `forbidden` | AI permissions, ledger, Secure Boot keys, firmware password, disabling audit | **never** via agent; user-only UI |
 

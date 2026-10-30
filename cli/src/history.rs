@@ -419,10 +419,10 @@ mod tests {
     #[test]
     fn what_stands_in_the_way_of_an_undo() {
         let lines = [
-            r#"{"seq":1,"ts":"2026-10-30T12:00:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install a","data":{"files":["users/v.packages.json"]}}"#,
+            r#"{"seq":1,"ts":"2026-10-30T12:00:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install a","data":{"files":["users/v/packages.json"]}}"#,
             r#"{"seq":2,"ts":"2026-10-30T12:01:00Z","kind":"applied","actor":"user","tier":"system","reason":"Enable ssh","data":{"files":["services.json"]}}"#,
-            r#"{"seq":3,"ts":"2026-10-30T12:02:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install b","data":{"files":["users/v.packages.json"]}}"#,
-            r#"{"seq":4,"ts":"2026-10-30T12:03:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install c","data":{"files":["users/v.packages.json"]}}"#,
+            r#"{"seq":3,"ts":"2026-10-30T12:02:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install b","data":{"files":["users/v/packages.json"]}}"#,
+            r#"{"seq":4,"ts":"2026-10-30T12:03:00Z","kind":"applied","actor":"user","tier":"user","reason":"Install c","data":{"files":["users/v/packages.json"]}}"#,
             r#"{"seq":5,"ts":"2026-10-30T12:04:00Z","kind":"rolled_back","actor":"user","tier":"user","reason":"Undo: Install c","data":{"applied":4}}"#,
         ];
         let l = parse(&lines.join("\n")).unwrap();

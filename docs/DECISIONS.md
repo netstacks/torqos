@@ -85,7 +85,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Context:** Installing software is the most common change anyone makes, and the agent will make
   it too. Having tools edit Nix lists inside `.nix` files is fragile, and `users/<name>.nix` was
   user tier even though it is a full NixOS module (sudo rules, services: an escalation path).
-- **Decision:** `packages.json` (system tier) and `users/<name>.packages.json` (user tier) are JSON
+- **Decision:** (Paths since ADR-016: `system/packages.json`, `users/<name>/packages.json`.) `packages.json` (system tier) and `users/<name>.packages.json` (user tier) are JSON
   lists of nixpkgs attribute paths, read by `modules/packages.nix` when the config flake passes
   `torq.lib.mkSystem { configDir = ./.; }`. User tier is that exact data-file shape and
   nothing else: any `.nix` file is system tier wherever it lives (`broker/src/policy.rs`). Names

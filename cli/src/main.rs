@@ -17,6 +17,8 @@ use std::process::{Command, Stdio};
 
 const REPO: &str = "/var/lib/torq/config";
 const BROKER: &str = "sudo torq-broker";
+/// The configuration the broker builds, whatever the host is called (torq.broker.configName).
+const CONFIG: &str = "torq";
 
 #[derive(Parser)]
 #[command(name = "torq", version, about = "TorqOS: change this machine through the broker")]
@@ -866,7 +868,7 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
     println!();
     // --yes only for a change to exactly your own package list — not someone else's, not the system.
     let me = me()?;
-    let mine = files == [format!("users/{me}.packages.json").as_str()];
+    let mine = files == [format!("users/{me}/packages.json").as_str()];
     if yes && !mine {
         bail!("--yes only undoes changes to your own packages; this one changes something else: run again without --yes");
     }
@@ -990,8 +992,8 @@ fn check_repo(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// The single nixosConfiguration in the config repo. (Not the hostname: a machine whose config was
-/// switched away from TorqOS may have another one.)
+/// The configuration to evaluate: always `torq`, the one the broker builds (never the host name),
+/// and the config repo must have it.
 fn config_name(repo: &Path) -> Result<String> {
     let out = Command::new("nix")
         .args(["eval", "--json"])
@@ -1003,9 +1005,15 @@ fn config_name(repo: &Path) -> Result<String> {
         bail!("cannot read the config repo: {}", last_error(&out.stderr));
     }
     let names: Vec<String> = serde_json::from_slice(&out.stdout)?;
-    match names.as_slice() {
-        [one] => Ok(one.clone()),
-        _ => bail!("expected one nixosConfiguration in {}, found {names:?}", repo.display()),
+    // The broker always builds `torq` (torq.broker.configName): checking any other configuration
+    // here would approve something it never builds.
+    if names.iter().any(|n| n == CONFIG) {
+        Ok(CONFIG.to_string())
+    } else {
+        bail!(
+            "{} has no configuration named `{CONFIG}` (it has {names:?}); the broker builds only `{CONFIG}`",
+            repo.display()
+        )
     }
 }
 

@@ -11,12 +11,12 @@ pub enum Target {
 }
 
 impl Target {
-    /// Path in the config repo. `users/<name>.packages.json` is the exact shape the broker treats as
-    /// user tier; `packages.json` is system tier.
+    /// Path in the config repo. `users/<name>/packages.json` is one of the exact shapes the broker
+    /// treats as user tier; `system/packages.json` is system tier.
     pub fn path(&self) -> String {
         match self {
-            Target::System => "packages.json".into(),
-            Target::User(u) => format!("users/{u}.packages.json"),
+            Target::System => "system/packages.json".into(),
+            Target::User(u) => format!("users/{u}/packages.json"),
         }
     }
 
@@ -287,8 +287,8 @@ mod tests {
 
     #[test]
     fn paths_match_the_broker_tiers() {
-        assert_eq!(Target::System.path(), "packages.json");
-        assert_eq!(Target::User("viper".into()).path(), "users/viper.packages.json");
+        assert_eq!(Target::System.path(), "system/packages.json");
+        assert_eq!(Target::User("viper".into()).path(), "users/viper/packages.json");
     }
 
     #[test]
