@@ -63,8 +63,11 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 6f. **Nothing evaluates `templates/config` itself.** The VM test checks the broker builds `#torq`,
    but no `nix flake check` entry builds a config made from the template (it needs a hardware
    file and a user name), so a template that stopped exposing `nixosConfigurations.torq` would
-   only show at the next install. A config repo made from an older template (output `torq-utm`)
-   must be renamed to `torq` before its broker is updated; only the dev VM ever had one.
+   only show at the next install. (`tests/tree.nix` does read the template's data files.) A config
+   repo made from an older template (output `torq-utm`) must be renamed to `torq` before its broker
+   is updated; only the dev VM ever had one. Such a repo also sets `networking.hostName` in
+   `machine.nix`: adding `system/host.json` with a host name to it is a conflict until that line
+   goes (the template now keeps the host name only in `system/host.json`).
 6g. **`propose --base` is optional.** Without it a diff applies wherever it applies, so a stale
    change can still mix with a newer commit. `torqcli` will always pass it; once the agent exists,
    the broker should require a base for `--actor agent` (and for anything approved from a shown

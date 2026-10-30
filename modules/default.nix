@@ -7,6 +7,7 @@
     ./ai.nix
     ./dev.nix
     ./packages.nix
+    ./host.nix
     ./services.nix
   ];
 }

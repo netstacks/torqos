@@ -79,7 +79,7 @@ settings (more are added one schema entry at a time):
 | Path in the tree | File in the config repo | Tier |
 |---|---|---|
 | `system packages <name>` | `system/packages.json` | system |
-| `system host-name <name>` · `system time-zone <tz>` | `system/host.json` | system |
+| `system host-name <name>` · `system time-zone <tz>` | `system/host.json` (done: `modules/host.nix`) | system |
 | `system cli style juniper\|cisco` | `system/cli.json` | system |
 | `services <name>` (catalog: ssh, …) | `services.json` | system |
 | `users <name> packages <pkg>` | `users/<name>/packages.json` | user |

@@ -26,7 +26,8 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       `apply --confirm` / `confirm` / `expire-confirm` with the timer, boot check and freeze (1f).
 - [ ] Schema-driven tree: `system packages/host-name/time-zone/cli`, `services`,
       `users <name> packages/cli`; `share/torq/schema.json` in the system; fixed output
-      `nixosConfigurations.torq`.
+      `nixosConfigurations.torq`. Done: `system/host.json` (host-name, time-zone; 2b) with an
+      evaluation test (`tests/tree.nix`).
 - [ ] Environment variables: their own design first (allow-list, per-user delivery, escaping,
       never reaching root or the broker, secrets check) — review N2/N3.
 - [ ] `torqcli` shell: operational + configuration modes, Juniper style, pipes, `?`, Tab, history.
