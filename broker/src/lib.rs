@@ -384,8 +384,11 @@ impl Broker {
         let rebuilt = self.rebuild(&lock).is_ok();
         // A switch sets the running system and the next boot alike; if they differ afterwards,
         // something else changed one of them, and this was not a repair.
+        // A switch started meanwhile would set both alike, so look for one too; and a profile that
+        // vanished during the repair is not one we can vouch for.
         let (running, next) = (self.running_system(), self.next_boot());
-        let restored = rebuilt && (next.is_none() || next == running);
+        let profile_ok = if before.next_boot.is_some() { next.is_some() && next == running } else { next.is_none() || next == running };
+        let restored = rebuilt && profile_ok && !switch_running();
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(by.into()),

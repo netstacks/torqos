@@ -1067,3 +1067,21 @@ fn repair_fixes_next_boot_drift_and_refusals_rebuild_nothing() {
     assert_eq!(e.body.data["commit"].as_str(), b.repo.head().ok().as_deref(), "the ledgered commit, unchanged");
     assert!(b.status().unwrap().problems().is_empty(), "{:?}", b.status().unwrap().problems());
 }
+
+/// A boot profile that vanishes during the repair is not something the repair can vouch for.
+#[test]
+fn repair_does_not_vouch_when_the_boot_profile_vanishes() {
+    let (dir, repo) = config_dir();
+    let link = dir.path().join("current-system");
+    let profile = dir.path().join("system-profile");
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", &link).unwrap();
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", &profile).unwrap();
+    let rebuild = format!("ln -sfn /nix/store/aaa-system-1 {}; rm -f {}", link.display(), profile.display());
+    let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_current_system(&link).with_system_profile(&profile);
+    b.init().unwrap();
+    switch_to(&link, "/nix/store/zzz-outside");
+    let err = format!("{:#}", b.repair("casey").unwrap_err());
+    assert!(err.contains("did not take"), "{err}");
+    let e = b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!(e.body.data["restored"], serde_json::json!(false));
+}

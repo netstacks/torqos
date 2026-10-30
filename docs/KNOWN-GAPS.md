@@ -43,9 +43,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    every check "busy" and silent; drift is reported but not written into the ledger, so an outside
    switch followed by a broker apply leaves no trace in the audit trail (`repair` does ledger the
    drift it fixes); the warning reaches only interactive shells, not a desktop user (needs the
-   Quickshell UI). `repair` checks that the running system and next boot agree after its switch, but
-   an outside switch finishing just after it would set both alike; comparing against the exact
-   path it built would close that.
+   Quickshell UI). `repair` checks after its switch that the running system and next boot agree and
+   that no other switch is running, but an outside switch that both starts and finishes between
+   its own switch and that check would set both alike and pass; comparing against the exact path it
+   built would close that.
 6c. **`kestrel update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
    that store path without re-fetching. The ledgered rev may then not identify what was built.
