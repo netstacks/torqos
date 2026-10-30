@@ -105,12 +105,13 @@ pub fn explain_check_error(msg: &str) -> String {
 /// What a broker refusal while proposing or applying means. `what` is the change in words
 /// ("install htop"); whether the machine is as it was is decided by the caller from `status`.
 pub fn explain_apply_error(what: &str, msg: &str) -> String {
-    if msg.contains("rebuild") {
-        format!("Couldn't {what}: building the new system failed.")
+    // Specific phrases first: the interrupted-change message also mentions "rebuilds".
+    if msg.contains("interrupted and must be reconciled") {
+        format!("Couldn't {what}: an earlier change was interrupted. Finish it first: kestrel status")
     } else if msg.contains("does not apply cleanly") {
         format!("Couldn't {what}: the configuration changed in the meantime. Try again.")
-    } else if msg.contains("interrupted and must be reconciled") {
-        format!("Couldn't {what}: an earlier change was interrupted. Finish it first: kestrel status")
+    } else if msg.contains("rebuild") {
+        format!("Couldn't {what}: building the new system failed.")
     } else {
         format!("Couldn't {what}: {msg}")
     }
@@ -325,6 +326,8 @@ mod tests {
             "Couldn't install htop: building the new system failed."
         );
         assert!(explain_apply_error("x", "diff does not apply cleanly to the current config").contains("Try again"));
+        let interrupted = "the apply of #2 was interrupted and must be reconciled first: run `kestrel-broker reconcile --approved-by <name>` (it resets the config to the last ledgered commit and rebuilds)";
+        assert!(explain_apply_error("x", interrupted).contains("an earlier change was interrupted"));
     }
 
     #[test]

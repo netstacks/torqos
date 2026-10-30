@@ -137,7 +137,8 @@ fn main() {
         }
     };
     if let Err(e) = r {
-        eprintln!("{}", ui::Ui::detect().fail(&format!("{e:#}")));
+        // One clean line, whatever the error carried (paths, quoted config text, io errors).
+        eprintln!("{}", ui::Ui::detect().fail(&history::one_line(&format!("{e:#}"), 300)));
         std::process::exit(1);
     }
 }
@@ -275,9 +276,10 @@ struct Change<'a> {
 /// with its output in the log.
 fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result<()> {
     let ui = ui::Ui::detect();
+    let log = run::start_log()?;
     {
         let _p = run::Progress::start("Checking");
-        evaluate(c.copy, host)?;
+        evaluate(c.copy, host, &log)?;
     }
     let s = &c.summary;
     println!("\n{}", ui.heading(&s.title, s.system));
@@ -296,16 +298,30 @@ fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result
         println!("  Nothing changed.");
         return Ok(());
     }
+    // Ask for the administrator password (if sudo needs one) now, not under a spinner that would
+    // draw over the prompt.
+    sudo_ready(cli)?;
     let diff_file = scratch.join("change.diff");
     fs::write(&diff_file, &diff)?;
-    let log = run::start_log()?;
     let proposed = run::broker_json(
         broker(cli, &["propose", "--diff", &diff_file.to_string_lossy(), "--reason", &c.reason, "--actor", "user"]),
         &log,
     )?;
     let seq = match proposed {
-        run::Outcome::Done(v) => v["seq"].as_u64().context("the broker did not say which proposal it made")?,
-        other => return fail(cli, &ui, &s.what, other, &log),
+        run::Outcome::Done(v) => {
+            let seq = v["seq"].as_u64().context("the broker did not say which proposal it made")?;
+            // What was shown and asked must be what the broker will apply.
+            let shown = if s.system { "system" } else { "user" };
+            if v["tier"].as_str() != Some(shown) {
+                bail!(
+                    "The broker treats this as a {} change, not the {shown} change shown here, so it was \
+                     not applied (it is recorded as proposal {seq}).",
+                    history::one_line(v["tier"].as_str().unwrap_or("?"), 20)
+                );
+            }
+            seq
+        }
+        other => return fail(cli, &ui, &s.what, other, &log, None),
     };
     let applied = {
         let _p = run::Progress::start("Applying");
@@ -316,27 +332,59 @@ fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result
             println!("{}", ui.ok(&s.done, &ui::change_ref(v["seq"].as_u64().unwrap_or(seq))));
             Ok(())
         }
-        other => fail(cli, &ui, &s.what, other, &log),
+        other => fail(cli, &ui, &s.what, other, &log, Some(seq)),
     }
 }
 
-/// A change that did not happen: what went wrong, whether the machine is as it was — only claimed
-/// when the broker confirms it — and where the full log is. Exits 1.
-fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path) -> Result<()> {
-    let (msg, certain) = match outcome {
-        // Refused before taking the lock: nothing was even proposed.
-        run::Outcome::Busy => ("Another change is being applied right now. Try again when it is done.".to_string(), true),
-        run::Outcome::Refused(m) => (pkg::explain_apply_error(what, &history::one_line(&m, 200)), false),
-        run::Outcome::Broken(m) => (format!("Couldn't {what}: {m}"), false),
+/// When the broker runs through sudo, make sure sudo is ready (asking for the password, if it
+/// needs one, on a clean line) before anything else talks to the terminal.
+fn sudo_ready(cli: &Cli) -> Result<()> {
+    if cli.broker.split_whitespace().next().is_some_and(|w| w == "sudo" || w.ends_with("/sudo")) {
+        let ok = Command::new("sudo").arg("-v").status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            bail!("Couldn't get administrator rights (sudo), so nothing was changed.");
+        }
+    }
+    Ok(())
+}
+
+/// A change that did not go through: what went wrong, and — from the ledger, not assumed — what
+/// actually happened: applied after all, or nothing changed and the machine is as it was, or not
+/// sure. `proposal`: the proposal made for it, if it got that far. Exits 1.
+fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path, proposal: Option<u64>) -> Result<()> {
+    let msg = match outcome {
+        run::Outcome::Busy if proposal.is_none() => {
+            println!("{}", ui.fail("Another change is being applied right now. Try again when it is done."));
+            println!("    Nothing changed.");
+            std::process::exit(1);
+        }
+        run::Outcome::Busy => format!("Couldn't {what}: another change started first. Try again when it is done."),
+        run::Outcome::Refused(m) => pkg::explain_apply_error(what, &history::one_line(&m, 200)),
+        run::Outcome::Broken(m) => format!("Couldn't {what}: {m}."),
         run::Outcome::Done(_) => unreachable!("fail() is for outcomes that are not Done"),
     };
     println!("{}", ui.fail(&msg));
-    let as_it_was = certain
-        || matches!(run::broker_json(broker(cli, &["status"]), log), Ok(run::Outcome::Done(v)) if v["ok"] == true);
-    if as_it_was {
+    // The broker may have applied it before failing (killed after ledgering, a late error): the
+    // ledger says, so look rather than guess.
+    if let Some(p) = proposal {
+        let applied_as = read_ledger(cli)
+            .ok()
+            .and_then(|l| l.iter().find(|e| e.kind == "applied" && e.data["proposal"].as_u64() == Some(p)).map(|e| e.seq));
+        if let Some(a) = applied_as {
+            println!("{}", ui.warn(&format!("The change was applied anyway (change {a}), but something went wrong afterwards.")));
+            println!("    Check with: kestrel status");
+            println!("    {}", ui.dim(&format!("log: {}", log.display())));
+            std::process::exit(1);
+        }
+    }
+    let consistent = matches!(run::broker_json(broker(cli, &["status"]), log), Ok(run::Outcome::Done(v)) if v["ok"] == true);
+    if consistent {
         println!("    Nothing changed — your machine is as it was.");
     } else {
         println!("    Your machine may not be as it was: see kestrel status");
+    }
+    if let Some(p) = proposal {
+        println!("    {}", ui.dim(&format!("(Your request is recorded as proposal {p}, not applied.)")));
     }
     println!("    {}", ui.dim(&format!("log: {}", log.display())));
     std::process::exit(1);
@@ -414,7 +462,11 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
     fs::create_dir_all(file.parent().unwrap())?;
     fs::write(&file, &new_text)?;
     let sign = if how == Edit::Add { '+' } else { '-' };
-    let rows = package_facts(&copy, &host, &changed)
+    let facts = {
+        let _p = run::Progress::start("Checking");
+        package_facts(&copy, &host, &changed)
+    };
+    let rows = facts
         .into_iter()
         .zip(&changed)
         .map(|((version, description), name)| ui::change_row(&ui, sign, name, &version, &description))
@@ -505,7 +557,7 @@ fn service_list(cli: &Cli) -> Result<()> {
 /// /etc/ssh/authorized_keys.d/<owner> — taken from the config, not from what is running now).
 /// One description per key line, as `ssh-keygen -l` shows it, so the person approving sees exactly
 /// whose keys will get in.
-fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<String>> {
+fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, String, String)>> {
     if !pkg::valid_user(owner) {
         bail!("'{owner}' is not a valid user name");
     }
@@ -556,7 +608,7 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<String>> {
             let out = child.wait_with_output()?;
             if out.status.success() {
                 let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                keys.push(format!("{}{id} ({place})", pkg::key_options_note(line)));
+                keys.push((pkg::key_options_note(line), id, place.clone()));
             }
         }
     }
@@ -615,7 +667,15 @@ fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
             );
         }
         rows.push(format!("    · keys that will be able to log in as {}:", svc.owner));
-        rows.extend(keys.iter().map(|k| format!("        {}", ui.dim(&history::one_line(k, 70)))));
+        // Never truncated: approving SSH means approving exactly these keys. A warning (a
+        // certificate authority, options) gets its own line above the key it is about.
+        for (note, id, place) in &keys {
+            if !note.is_empty() {
+                rows.push(format!("        {}", ui.yellow(&history::clean(note.trim_end_matches(": ")))));
+            }
+            rows.push(format!("        {}", history::clean(id)));
+            rows.push(format!("          {}", ui.dim(&format!("from {}", history::clean(place)))));
+        }
     }
     let list = changed.join(", ");
     let summary = Summary {
@@ -666,11 +726,13 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
     );
     // --yes only for a change to exactly your own package list — not someone else's, not the system.
     let me = me()?;
-    if yes && files != [format!("users/{me}.packages.json").as_str()] {
+    let mine = files == [format!("users/{me}.packages.json").as_str()];
+    if yes && !mine {
         bail!("--yes only undoes changes to your own packages; this one changes something else: run again without --yes");
     }
     approval(false, yes)?; // there must be someone to ask
-    if !yes && !confirm(&ui::Ui::detect(), &format!("Undo \"{reason}\"?"), target.tier == "user")? {
+    // The answer defaults to Yes by the same rule: only for a change to your own packages.
+    if !yes && !confirm(&ui::Ui::detect(), &format!("Undo \"{reason}\"?"), mine)? {
         println!("not undone");
         return Ok(());
     }
@@ -781,13 +843,15 @@ fn config_name(repo: &Path) -> Result<String> {
 
 /// Evaluate the whole system from the changed scratch copy: the same modules that will build it
 /// report unknown, unfree or unsupported packages, or a broken update, before anything is proposed.
-fn evaluate(copy: &Path, host: &str) -> Result<()> {
+fn evaluate(copy: &Path, host: &str, log: &Path) -> Result<()> {
     let out = Command::new("nix")
         .args(["eval", "--raw"])
         .arg(format!("{}#nixosConfigurations.{host}.config.system.build.toplevel.drvPath", flake_ref(copy)))
         .output()
         .context("running nix eval")?;
     if !out.status.success() {
+        // The whole of nix's explanation goes to the log; the screen gets one clear sentence.
+        let _ = fs::OpenOptions::new().append(true).open(log).and_then(|mut f| f.write_all(&out.stderr));
         bail!("{}", pkg::explain_check_error(&history::one_line(&last_error(&out.stderr), 300)));
     }
     Ok(())
@@ -808,16 +872,18 @@ fn reads_package_lists(copy: &Path, host: &str) -> Result<bool> {
     Ok(serde_json::from_slice(&out.stdout)?)
 }
 
-/// The most useful line of a nix error: ours if there is one, else nix's last `error:`.
+/// The most useful line of a nix error — ours if there is one, else nix's last `error:` — as one
+/// clean line: it can quote text from the config repo, so it never reaches the terminal raw.
 fn last_error(stderr: &[u8]) -> String {
     let s = String::from_utf8_lossy(stderr);
     let lines: Vec<&str> = s.lines().map(str::trim).collect();
-    lines
+    let line = lines
         .iter()
         .find(|l| l.contains("kestrel.packages:"))
         .or_else(|| lines.iter().rev().find(|l| l.starts_with("error:")))
         .map(|l| l.trim_start_matches("error:").trim().to_string())
-        .unwrap_or_else(|| s.trim().to_string())
+        .unwrap_or_else(|| s.trim().to_string());
+    history::one_line(&line, 300)
 }
 
 /// `old` is the file's exact current text — not a re-rendering of it — or the diff would not apply
@@ -874,7 +940,11 @@ fn confirm(ui: &ui::Ui, question: &str, default_yes: bool) -> Result<bool> {
     print!("  {} {} ", ui.bold(question), if default_yes { "[Y/n]" } else { "[y/N]" });
     std::io::stdout().flush()?;
     let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer)?;
+    // End of input (Ctrl-D, a closed pipe) is not an answer: it never approves anything.
+    if std::io::stdin().lock().read_line(&mut answer)? == 0 {
+        println!();
+        return Ok(false);
+    }
     Ok(match answer.trim() {
         "" => default_yes,
         a => matches!(a, "y" | "Y" | "yes" | "Yes"),
