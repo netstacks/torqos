@@ -47,10 +47,13 @@ in
     # broker/src/config.rs for what each does and its placeholders.
     buildCommand = lib.mkOption {
       type = lib.types.str;
-      default = "nix build --no-link --print-out-paths {repo}#nixosConfigurations.${cfg.configName}.config.system.build.toplevel";
+      default = "nix build --out-link {link} --print-out-paths {repo}#nixosConfigurations.${cfg.configName}.config.system.build.toplevel";
       defaultText = lib.literalExpression
-        ''"nix build --no-link --print-out-paths {repo}#nixosConfigurations.''${config.torq.broker.configName}.config.system.build.toplevel"'';
-      description = "Build a commit confirmed's system without activating it; prints its store path.";
+        ''"nix build --out-link {link} --print-out-paths {repo}#nixosConfigurations.''${config.torq.broker.configName}.config.system.build.toplevel"'';
+      description = ''
+        Build a commit confirmed's system without activating it; prints its store path. `{link}` is
+        a GC root the broker removes once the change settles.
+      '';
     };
     activateCommand = lib.mkOption {
       type = lib.types.str;
@@ -68,8 +71,8 @@ in
       # bounded number of times while the broker is busy or the restore has not taken.
       default = lib.concatStringsSep " " [
         "systemd-run --quiet --collect --unit=torq-confirm-{seq} --on-calendar={deadline}"
-        "--timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=5"
-        "--property=StartLimitIntervalSec=900 --property=StartLimitBurst=60"
+        "--timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=15"
+        "--property=StartLimitIntervalSec=1200 --property=StartLimitBurst=60"
         "{broker} expire-confirm {seq}"
       ];
       description = "Schedule the rollback of an unconfirmed commit (a transient timer).";

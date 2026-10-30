@@ -95,6 +95,10 @@ fn pending_confirm(entries: &[Entry]) -> Option<PendingConfirm> {
 /// The longest `commit confirmed` wait, in minutes (a day).
 pub const MAX_CONFIRM_MINUTES: u32 = 24 * 60;
 
+/// How often the rollback of an unconfirmed commit may fail to take before it is ledgered as not
+/// restored (below the timer's 60 tries, so the timer's own runs reach it).
+pub const MAX_ROLLBACK_ATTEMPTS: u32 = 40;
+
 /// One shell word, for a placeholder's value.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -320,6 +324,9 @@ struct Pending {
     /// not by rebuilding the old config.
     #[serde(default)]
     anchor_system: Option<String>,
+    /// expire: how many times the restore has not taken.
+    #[serde(default)]
+    attempts: u32,
 }
 
 impl Pending {
@@ -1015,6 +1022,7 @@ impl Broker {
             tier: tier.to_string(),
             tainted: p.body.tainted,
             anchor_system: anchor_system.clone(),
+            attempts: 0,
         };
         self.write_pending(&pending)?;
         let commit = self.undo_failed_commit(&pending, self.repo.apply_and_commit(&tmp, &msg))?;
@@ -1065,6 +1073,7 @@ impl Broker {
                     data: self.with_system(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored })),
                 })?;
                 self.clear_pending()?;
+                self.drop_build_link();
                 let what = if anchor.is_some() { "commit confirmed failed" } else { "the rebuild failed" };
                 return Err(e.context(format!("apply undone because {what}")));
             }
@@ -1088,15 +1097,27 @@ impl Broker {
     }
 
     /// Build the committed config without activating it; returns the system's store path (the last
-    /// line the build command prints). It is not yet a GC root: it becomes one when it is activated,
-    /// moments later (`/run/current-system`).
+    /// line the build command prints). It stays a GC root (`state/confirm-system`) until the change
+    /// settles: a garbage collection between build and activation must not delete it.
     fn build_system(&self, lock: &Lock) -> Result<String> {
-        let out = self.run_command_output(lock, "build", &self.build_cmd, &[("repo", &self.repo.root().to_string_lossy())])?;
+        let link = self.build_link();
+        let vars = [("repo", &*self.repo.root().to_string_lossy()), ("link", &*link.to_string_lossy())];
+        let out = self.run_command_output(lock, "build", &self.build_cmd, &vars)?;
         let system = out.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string();
         if !system.starts_with('/') {
             bail!("the build printed no system path (got {:?})", out.trim());
         }
         Ok(system)
+    }
+
+    fn build_link(&self) -> PathBuf {
+        self.state_dir.join("confirm-system")
+    }
+
+    /// The change settled (confirmed, rolled back, or failed): its build no longer needs a root of
+    /// its own (a confirmed one is the boot default now).
+    fn drop_build_link(&self) {
+        let _ = fs::remove_file(self.build_link());
     }
 
     /// Start the timer that rolls back applied entry `seq` after `minutes`; returns the deadline.
@@ -1143,8 +1164,10 @@ impl Broker {
     fn restore_commands(&self, system: &str) -> (String, String, Option<String>) {
         if self.anchor_settings {
             let file = Path::new(system).join("etc/torq/broker.json");
-            if let Ok(Some(s)) = config::Settings::read(&file, true) {
-                return (s.activate, s.boot, Some(s.path));
+            match config::Settings::read(&file, true) {
+                Ok(Some(s)) => return (s.activate, s.boot, Some(s.path)),
+                Ok(None) => eprintln!("note: {} is missing; restoring with this system's commands", file.display()),
+                Err(e) => eprintln!("note: {e:#}; restoring with this system's commands"),
             }
         }
         (self.activate_cmd.clone(), self.boot_cmd.clone(), None)
@@ -1184,6 +1207,7 @@ impl Broker {
             reason: format!("Confirmed: {}", pc.reason),
             data: self.with_system(json!({ "applied": pc.applied })),
         })
+        .inspect(|_| self.drop_build_link())
     }
 
     /// Roll back the commit confirmed that is waiting (`seq`, if given, must be it): what its timer
@@ -1231,6 +1255,7 @@ impl Broker {
                 tier: pc.tier.clone(),
                 tainted: false,
                 anchor_system: Some(pc.anchor_system.clone()),
+                attempts: 0,
             },
         };
         // What the reset discards is kept (refs/torq/discarded/): the unconfirmed commit, and anything
@@ -1245,15 +1270,26 @@ impl Broker {
             self.repo.keep(s)?;
         }
         // Not done until the machine is back: the operation stays pending (and the change unsettled),
-        // so the timer's retries, the next operation, or the next boot finish it.
-        if !self.restore_anchor(lock, &pc.anchor_commit, &pc.anchor_system)? {
-            bail!(
-                "the rollback of change #{} did not take (running {}, next boot {}; want {}); it is retried",
-                pc.applied,
+        // so the timer's retries, the next operation, or the next boot finish it. But not for ever:
+        // while it is pending every other operation stops on it. After MAX_ROLLBACK_ATTEMPTS it is
+        // ledgered as not restored and settled; `status` reports it, `repair` (or a reboot) fixes it.
+        let restored = self.restore_anchor(lock, &pc.anchor_commit, &pc.anchor_system)?;
+        if !restored {
+            p.attempts += 1;
+            let found = format!(
+                "running {}, next boot {}; want {}",
                 self.running_system().as_deref().unwrap_or("?"),
                 self.next_boot().as_deref().unwrap_or("?"),
                 pc.anchor_system
             );
+            if p.attempts < MAX_ROLLBACK_ATTEMPTS {
+                self.write_pending(&p)?;
+                bail!(
+                    "the rollback of change #{} did not take ({found}); attempt {} of {MAX_ROLLBACK_ATTEMPTS}, it \
+                     is retried — a reboot also rolls it back",
+                    pc.applied, p.attempts
+                );
+            }
         }
         // Whatever ran it (a timer retry or reconcile can run after a restart too), a new boot ID
         // means the machine restarted while the change waited.
@@ -1265,7 +1301,15 @@ impl Broker {
             kind: "rolled_back".into(),
             tier: pc.tier.clone(),
             tainted: false,
-            reason: format!("Change #{} rolled back: {why}", pc.applied),
+            reason: if restored {
+                format!("Change #{} rolled back: {why}", pc.applied)
+            } else {
+                format!(
+                    "Change #{} rolled back ({why}), but after {} attempts the old system is still not running \
+                     and the boot default: reboot, or `torq-broker repair`",
+                    pc.applied, p.attempts
+                )
+            },
             data: self.with_system(json!({
                 "applied": pc.applied,
                 "unconfirmed": true,
@@ -1273,11 +1317,16 @@ impl Broker {
                 "commit": pc.anchor_commit,
                 "discarded_commit": p.commit,
                 "discarded_uncommitted": uncommitted,
-                "restored": true,
+                "restored": restored,
+                "attempts": p.attempts,
                 "found": { "running_system": running_before, "next_boot": next_before },
             })),
         })?;
         self.clear_pending()?;
+        self.drop_build_link();
+        if !restored {
+            bail!("{} (recorded as #{})", e.body.reason, e.body.seq);
+        }
         Ok(Some(e))
     }
 
@@ -1313,6 +1362,7 @@ impl Broker {
             tier: a.body.tier.clone(),
             tainted: false,
             anchor_system: None,
+            attempts: 0,
         };
         self.write_pending(&pending)?;
         let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg))?;

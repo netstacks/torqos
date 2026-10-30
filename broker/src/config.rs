@@ -8,13 +8,13 @@
 //! cannot change the system anyway), flags and defaults apply as given.
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const FIXED: &str = "/etc/torq/broker.json";
 
 /// Everything the broker is configured with.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
     pub repo: PathBuf,
@@ -60,7 +60,8 @@ pub struct Requested {
 /// In `rebuild`, `{repo}` is replaced as is; in the others every placeholder is replaced with a
 /// shell-quoted value (`'/var/lib/torq/config'#torq` is still one word): never quote them here.
 pub const REBUILD: &str = "nixos-rebuild switch --flake {repo}";
-pub const BUILD: &str = "nix build --no-link --print-out-paths {repo}#nixosConfigurations.torq.config.system.build.toplevel";
+/// `{link}`: a GC root for the built system until it settles (confirmed or rolled back).
+pub const BUILD: &str = "nix build --out-link {link} --print-out-paths {repo}#nixosConfigurations.torq.config.system.build.toplevel";
 pub const ACTIVATE: &str = "{system}/bin/switch-to-configuration test";
 pub const BOOT: &str = "nix-env -p {profile} --set {system} && {system}/bin/switch-to-configuration boot";
 /// A transient wall-clock timer: it fires at the deadline even if the machine slept through it
@@ -68,8 +69,8 @@ pub const BOOT: &str = "nix-env -p {profile} --set {system} && {system}/bin/swit
 /// none (the boot default is still the old system; the boot-time check ledgers the rollback).
 /// While the broker is busy, or the restore did not take, it retries — a bounded number of times.
 pub const SCHEDULE: &str = "systemd-run --quiet --collect --unit=torq-confirm-{seq} --on-calendar={deadline} \
-     --timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=5 \
-     --property=StartLimitIntervalSec=900 --property=StartLimitBurst=60 \
+     --timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=15 \
+     --property=StartLimitIntervalSec=1200 --property=StartLimitBurst=60 \
      {broker} expire-confirm {seq}";
 
 /// The fields of the fixed file, for the lenient reading below.
@@ -95,9 +96,10 @@ impl Settings {
         }
     }
 
-    /// Read a fixed file. Unknown fields are an error, except `lenient`: for the rollback of an
-    /// unconfirmed commit, which an older broker runs after the change it rolls back may have given
-    /// the file a field that broker does not know. A missing field is always an error.
+    /// Read a fixed file. Unknown and missing fields are an error, except `lenient`: for the
+    /// rollback of an unconfirmed commit, which an older broker runs after the change it rolls back
+    /// may have added, renamed or removed fields of the file. Then unknown fields are ignored and
+    /// missing ones take the defaults (a TorqOS machine's, for PATH and HOME).
     pub fn read(file: &Path, lenient: bool) -> Result<Option<Settings>> {
         let parse = |b: &[u8]| -> Result<Settings> {
             if !lenient {
@@ -105,6 +107,12 @@ impl Settings {
             }
             let mut v: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(b)?;
             v.retain(|k, _| FIELDS.contains(&k.as_str()));
+            let defaults = Settings::defaults("/run/current-system/sw/bin".into(), "/root".into());
+            if let serde_json::Value::Object(d) = serde_json::to_value(defaults)? {
+                for (k, val) in d {
+                    v.entry(k).or_insert(val);
+                }
+            }
             Ok(serde_json::from_value(v.into())?)
         };
         match std::fs::read(file) {
@@ -320,9 +328,10 @@ mod tests {
         // ...except for the rollback of an unconfirmed commit (a newer file, an older broker).
         assert_eq!(Settings::read(&f, true).unwrap().unwrap().state_dir, PathBuf::from("/s"));
         std::fs::write(&f, r#"{"repo":"/r","stateDir":"/s","rebuild":"x","currentSystem":"/c","systemProfile":"/p","path":"/b","home":"/root"}"#).unwrap();
-        for lenient in [false, true] {
-            assert!(Settings::read(&f, lenient).is_err(), "a missing field is an error, not a default");
-        }
+        assert!(Settings::read(&f, false).is_err(), "a missing field is an error, not a default");
+        // ...except for the rollback: a field the newer system renamed or removed takes the default.
+        let s = Settings::read(&f, true).unwrap().unwrap();
+        assert_eq!((s.state_dir.to_str(), s.activate.as_str()), (Some("/s"), ACTIVATE));
         assert!(Settings::read(&dir.path().join("missing.json"), false).unwrap().is_none());
     }
 }

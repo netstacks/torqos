@@ -1689,3 +1689,37 @@ fn activation_that_does_not_switch_is_a_failure() {
     assert!(format!("{err:#}").contains("the running system is not"), "{err:#}");
     m.assert_back(&anchor);
 }
+
+/// A rollback that never takes does not freeze the machine for ever: after MAX_ROLLBACK_ATTEMPTS it
+/// is ledgered as not restored, the freeze lifts, and `status` says what to do.
+#[test]
+fn a_rollback_that_never_takes_is_settled_as_not_restored() {
+    let m = Confirmable::new_with(BUILD, "test -e DIR/broken && exit 1; ln -sfn {system} CUR", SCHEDULE);
+    let seq = m.propose_theme();
+    let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    fs::write(m.dir.path().join("broken"), "").unwrap();
+    for _ in 1..torq_broker::MAX_ROLLBACK_ATTEMPTS {
+        let err = m.b.expire_confirm(Some(a.body.seq), false).unwrap_err();
+        assert!(format!("{err:#}").contains("is retried"), "{err:#}");
+    }
+    let err = m.b.expire_confirm(Some(a.body.seq), false).unwrap_err();
+    assert!(format!("{err:#}").contains("still not running"), "{err:#}");
+    let last = m.b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!((last.body.kind.as_str(), last.body.data["restored"].as_bool()), ("rolled_back", Some(false)));
+    let st = m.b.status().unwrap();
+    assert!(st.pending_confirm.is_none() && st.interrupted.is_none());
+    assert!(st.problems().iter().any(|p| p.contains("could not restore")), "{:?}", st.problems());
+}
+
+/// The build is a GC root until the change settles.
+#[test]
+fn the_build_is_a_gc_root_until_settled() {
+    let m = Confirmable::new_with("echo build {link} >> LOG && echo SYS2", ACTIVATE, SCHEDULE);
+    let link = m.dir.path().join("state/confirm-system");
+    let seq = m.propose_theme();
+    m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    assert!(m.log().contains(&format!("build {}", link.display())), "{}", m.log());
+    fs::write(&link, "").unwrap(); // what nix build --out-link would leave
+    m.b.confirm("casey").unwrap();
+    assert!(!link.exists(), "removed once confirmed");
+}

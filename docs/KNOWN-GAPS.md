@@ -73,11 +73,13 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 6h. **`commit confirmed` limits.** The timer's broker still takes its repo and state directory
    from the *new* system's `/etc/torq/broker.json` (read leniently); its restore commands and PATH
    are the anchor's own. A change that moves `torq.broker.configRepo` or `stateDir` would leave the
-   timed rollback looking in the wrong place; a reboot still rolls it back (the boot default is
-   never changed before `confirm`). The built system is not a GC root between the build and its
-   activation (seconds). `--confirm` builds the config again even if `commit check` just built it
-   (cached by nix, but evaluated twice). A restore that never takes stops retrying after 60 tries in
-   15 minutes; `status` then reports it (interrupted `expire`, overdue) and the next boot finishes it.
+   timed rollback looking in the wrong place (taking them from the anchor's file would mean trusting
+   a settings path from the caller); a reboot still rolls it back (the boot default is never
+   changed before `confirm`). `--confirm` builds the config again even if `commit check` just built
+   it (cached by nix, but evaluated twice). "Boot default" is the system profile, not the boot
+   loader's entry: a profile set while the boot-loader install failed counts as restored. The
+   activation is not run under `systemd-run` as `nixos-rebuild` does: a change that kills the
+   user's session kills the broker mid-switch (recovered by reconcile, but noisy).
 6c. **`torq update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
    that store path without re-fetching. The ledgered rev may then not identify what was built.
