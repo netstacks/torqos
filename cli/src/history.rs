@@ -146,11 +146,14 @@ pub fn parse_ts(ts: &str) -> Option<i64> {
     Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3600 + mm * 60 + ss)
 }
 
-/// Whether a proposal has a result (applied, or failed): then the log shows only the result.
+/// Whether a proposal has a result (applied, failed, or its apply interrupted): then the log shows
+/// only the result.
 fn settled(entries: &[Entry], proposal: u64) -> bool {
-    entries
-        .iter()
-        .any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed") && e.data["proposal"].as_u64() == Some(proposal))
+    entries.iter().any(|e| match e.kind.as_str() {
+        "applied" | "apply_failed" => e.data["proposal"].as_u64() == Some(proposal),
+        "interrupted" => e.data["op"] == "apply" && e.data["target"].as_u64() == Some(proposal),
+        _ => false,
+    })
 }
 
 fn reason_of(entries: &[Entry], seq: Option<u64>) -> Option<&str> {
@@ -166,10 +169,18 @@ pub fn later_conflicts(entries: &[Entry], applied: u64) -> Vec<u64> {
     };
     let Some(target) = entries.iter().find(|e| e.seq == applied) else { return vec![] };
     let mine = files(target);
+    let touches = |e: &Entry| files(e).iter().any(|f| mine.contains(f));
     entries
         .iter()
-        .filter(|e| e.kind == "applied" && e.seq > applied && undone_by(entries, e.seq).is_none())
-        .filter(|e| files(e).iter().any(|f| mine.contains(f)))
+        .filter(|e| e.seq > applied)
+        .filter(|e| match e.kind.as_str() {
+            // A later change still in effect.
+            "applied" => undone_by(entries, e.seq).is_none() && touches(e),
+            // A later undo of an earlier change edited the same files too (and cannot itself be
+            // undone). The undo of a later change cancels that change, so it is no obstacle.
+            "rolled_back" => e.data["applied"].as_u64().filter(|&a| a < applied).and_then(|a| entries.iter().find(|x| x.seq == a)).is_some_and(touches),
+            _ => false,
+        })
         .map(|e| e.seq)
         .collect()
 }
@@ -203,6 +214,19 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
     }
 }
 
+/// Who asked for a change. The broker writes failure and interruption entries itself, so for those
+/// it is whoever asked for what failed (the proposal, or the change being undone) — an agent's
+/// failed change must still say it was the agent's.
+pub fn asked_by<'a>(entries: &'a [Entry], e: &'a Entry) -> &'a str {
+    let pointed = match e.kind.as_str() {
+        "apply_failed" => e.data["proposal"].as_u64(),
+        "rollback_failed" => e.data["applied"].as_u64(),
+        "interrupted" => e.data["target"].as_u64(),
+        _ => None,
+    };
+    pointed.and_then(|s| entries.iter().find(|x| x.seq == s)).map_or(e.actor.as_str(), |x| x.actor.as_str())
+}
+
 /// The last `limit` changes, oldest first, grouped by day in local time (docs/CLI-DESIGN.md).
 /// A proposal that was applied (or failed) is folded into its result. Who made a change is shown
 /// whenever it was not the user — the agent, say — and a change from a session that read
@@ -232,10 +256,10 @@ pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock
             right.push_str("  (system)");
         }
         let mut who = String::new();
-        // Who asked for it, when that was not the user. The broker writes failure entries itself,
-        // so "by broker" would only be noise.
-        if !matches!(e.actor.as_str(), "user" | "broker" | "") {
-            who.push_str(&format!(" — by {}", one_line(&e.actor, 12)));
+        // Who asked for it, when that was not the user.
+        let actor = asked_by(entries, e);
+        if !matches!(actor, "user" | "broker" | "") {
+            who.push_str(&format!(" — by {}", one_line(actor, 12)));
         }
         if e.tainted {
             who.push_str(" ⚠ tainted");
@@ -269,7 +293,7 @@ pub fn render_one(entries: &[Entry], seq: u64, ui: &crate::ui::Ui, clock: &Clock
         .unwrap_or_else(|| clean(&e.ts));
     let mut out = format!("  {} {}\n", symbol, ui.bold(&format!("Change {seq} · {}", one_line(&text, 60))));
     out.push_str(&format!("    {:<10}{when}\n", "When"));
-    out.push_str(&format!("    {:<10}{}{}\n", "By", one_line(&e.actor, 20), if e.tainted { " ⚠ (from a session that read untrusted content)" } else { "" }));
+    out.push_str(&format!("    {:<10}{}{}\n", "By", one_line(asked_by(entries, e), 20), if e.tainted { " ⚠ (from a session that read untrusted content)" } else { "" }));
     out.push_str(&format!("    {:<10}{}\n", "Affects", if e.tier == "system" { "the whole machine (system change)" } else { "one user's apps" }));
     if let Some(files) = e.data["files"].as_array() {
         let f: Vec<String> = files.iter().filter_map(|f| f.as_str()).map(|f| one_line(f, 60)).collect();
@@ -402,8 +426,12 @@ mod tests {
             r#"{"seq":5,"ts":"2026-10-30T12:04:00Z","kind":"rolled_back","actor":"user","tier":"user","reason":"Undo: Install c","data":{"applied":4}}"#,
         ];
         let l = parse(&lines.join("\n")).unwrap();
-        assert_eq!(later_conflicts(&l, 1), vec![3], "same file, still in effect; not ssh, not the undone one");
+        assert_eq!(later_conflicts(&l, 1), vec![3], "same file, in effect; not ssh, not 4 (applied and undone)");
         assert!(later_conflicts(&l, 3).is_empty());
+        let mut more = lines.to_vec();
+        more.push(r#"{"seq":6,"ts":"2026-10-30T12:05:00Z","kind":"rolled_back","actor":"user","tier":"user","reason":"Undo: Install a","data":{"applied":1}}"#);
+        let l = parse(&more.join("\n")).unwrap();
+        assert_eq!(later_conflicts(&l, 3), vec![6], "a later undo of an earlier change is in the way");
     }
 
     #[test]
@@ -412,8 +440,14 @@ mod tests {
         lines.push(r#"{"seq":8,"ts":"2026-10-30T12:05:00Z","kind":"proposal","actor":"agent","tier":"user","reason":"Install x","data":{}}"#.into());
         lines.push(r#"{"seq":9,"ts":"2026-10-30T12:05:05Z","kind":"apply_failed","actor":"broker","tier":"user","reason":"Rebuild failed; ...","data":{"proposal":8,"restored":true}}"#.into());
         let out = render(&parse(&lines.join("\n")).unwrap(), 10, &Ui::plain(), &clock());
-        assert!(out.contains("✗ Failed: Install x (nothing changed)"), "{out}");
+        assert!(out.contains("✗ Failed: Install x (nothing changed) — by agent"), "an agent's failure stays the agent's:\n{out}");
         assert!(!out.contains("by broker"), "{out}");
+        let one = render_one(&parse(&lines.join("\n")).unwrap(), 9, &Ui::plain(), &clock()).unwrap();
+        lines.push(r#"{"seq":10,"ts":"2026-10-30T12:06:00Z","kind":"proposal","actor":"agent","tier":"user","reason":"Install y","data":{}}"#.into());
+        lines.push(r#"{"seq":11,"ts":"2026-10-30T12:07:00Z","kind":"interrupted","actor":"broker","tier":"user","reason":"...","data":{"op":"apply","target":10}}"#.into());
+        let out = render(&parse(&lines.join("\n")).unwrap(), 10, &Ui::plain(), &clock());
+        assert!(out.contains("⚠ Interrupted: Install y — by agent") && !out.contains("Proposed, not applied"), "{out}");
+        assert!(one.contains("By        agent"), "{one}");
     }
 
     #[test]

@@ -23,7 +23,8 @@ pub struct Report {
 }
 
 /// `v`: the broker's `status --json`. `last`: the latest change, for the all-well line.
-pub fn render(v: &Value, last: Option<&str>, ui: &Ui) -> Report {
+/// `repo`: the config repo, where a person would look.
+pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
     if v["busy"].is_string() {
         return Report {
             text: format!("  {} A change is being applied right now. Check again when it is done.\n", ui.dim("⋯")),
@@ -41,13 +42,17 @@ pub fn render(v: &Value, last: Option<&str>, ui: &Ui) -> Report {
         let target = i.get("target").and_then(|t| t.as_u64()).map(|t| t.to_string()).unwrap_or_else(|| "?".into());
         found.push((format!("A change was interrupted (the {op} of change {target})."), Fix::Repair));
     }
-    match (s("head"), s("ledgered_commit")) {
-        (None, Some(_)) => found.push(("The configuration can't be read.".into(), Fix::Person)),
-        (Some(h), Some(l)) if h != l => found.push(("The configuration was changed outside Kestrel.".into(), Fix::Person)),
-        _ => {}
-    }
-    if v["dirty"] == true {
-        found.push(("The configuration has edits made outside Kestrel.".into(), Fix::Person));
+    // An interrupted change leaves its own commit or half-written edits behind; finishing it
+    // (what --repair does first) deals with those, so they are not separate findings then.
+    if v["interrupted"].is_null() {
+        match (s("head"), s("ledgered_commit")) {
+            (None, Some(_)) => found.push(("The configuration can't be read.".into(), Fix::Person)),
+            (Some(h), Some(l)) if h != l => found.push(("The configuration was changed outside Kestrel.".into(), Fix::Person)),
+            _ => {}
+        }
+        if v["dirty"] == true {
+            found.push(("The configuration has edits made outside Kestrel.".into(), Fix::Person));
+        }
     }
     if v["unrestored"].is_string() {
         found.push(("A change failed, and the machine couldn't be put back exactly as it was.".into(), Fix::Repair));
@@ -61,6 +66,10 @@ pub fn render(v: &Value, last: Option<&str>, ui: &Ui) -> Report {
         }
     }
 
+    // The broker knows of a problem this command cannot name (a newer broker, say): never all-well.
+    if found.is_empty() && v["ok"] != true {
+        found.push(("Kestrel found a problem this command can't describe (see: kestrel-broker status).".into(), Fix::Person));
+    }
     if found.is_empty() {
         let text = if v["checked_running_system"] == true {
             let last = last.map(|l| format!("    {}\n", ui.dim(&format!("Last change: {}", one_line(l, 60))))).unwrap_or_default();
@@ -81,7 +90,7 @@ pub fn render(v: &Value, last: Option<&str>, ui: &Ui) -> Report {
     }
     text.push_str(&match fix {
         Fix::Repair => format!("    To return it to its history:  kestrel status --repair   {}\n", ui.dim("(asks first)")),
-        _ => "    This needs a person: look at /var/lib/kestrel/config (--repair won't touch it).\n".to_string(),
+        _ => format!("    This needs a person: look at {} (--repair won't touch it).\n", one_line(repo, 40)),
     });
     Report { text, exit: 1, fix }
 }
@@ -99,7 +108,7 @@ mod tests {
 
     #[test]
     fn all_well() {
-        let r = render(&ok(), Some("Install htop for viper"), &Ui::plain());
+        let r = render(&ok(), Some("Install htop for viper"), "/var/lib/kestrel/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (0, Fix::Nothing));
         assert_eq!(r.text, "  ✓ This machine is exactly as its history says.\n    Last change: Install htop for viper\n");
     }
@@ -109,7 +118,7 @@ mod tests {
         let mut v = ok();
         v["running_system"] = json!("/nix/store/stock-nixos");
         v["next_boot"] = json!("/nix/store/stock-nixos");
-        let r = render(&v, None, &Ui::plain());
+        let r = render(&v, None, "/var/lib/kestrel/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (1, Fix::Repair));
         let expected = "  ⚠ This machine is not as its history says.\n    · It is running a system Kestrel didn't build (switched outside Kestrel).\n    · The next boot would start a system Kestrel didn't build.\n    To return it to its history:  kestrel status --repair   (asks first)\n";
         assert_eq!(r.text, expected);
@@ -120,26 +129,49 @@ mod tests {
         let mut v = ok();
         v["dirty"] = json!(true);
         v["running_system"] = json!("/nix/store/other");
-        let r = render(&v, None, &Ui::plain());
+        let r = render(&v, None, "/var/lib/kestrel/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (1, Fix::Person), "repair would build the edit: a person decides");
         assert!(r.text.contains("needs a person"), "{}", r.text);
     }
 
     #[test]
     fn busy_and_unrecorded() {
-        let r = render(&json!({ "ok": false, "busy": "123 (nixos-rebuild)", "problems": [] }), None, &Ui::plain());
+        let r = render(&json!({ "ok": false, "busy": "123 (nixos-rebuild)", "problems": [] }), None, "/var/lib/kestrel/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (75, Fix::Nothing));
         let mut v = ok();
         v["checked_running_system"] = json!(false);
         v["ledgered_system"] = json!(null);
-        assert!(render(&v, None, &Ui::plain()).text.contains("as far as recorded"));
+        assert!(render(&v, None, "/var/lib/kestrel/config", &Ui::plain()).text.contains("as far as recorded"));
+    }
+
+    #[test]
+    fn an_apply_interrupted_after_its_commit_is_still_repairable() {
+        // The broker died after committing the change and before ledgering it: HEAD has moved and
+        // the tree may be half-written, but repair reconciles that first.
+        let mut v = ok();
+        v["ok"] = json!(false);
+        v["interrupted"] = json!({ "op": "apply", "target": 12 });
+        v["head"] = json!("c2");
+        v["dirty"] = json!(true);
+        let r = render(&v, None, "/var/lib/kestrel/config", &Ui::plain());
+        assert_eq!(r.fix, Fix::Repair, "{}", r.text);
+        assert!(!r.text.contains("outside Kestrel"), "{}", r.text);
+    }
+
+    #[test]
+    fn a_problem_it_cannot_name_is_not_all_well() {
+        let mut v = ok();
+        v["ok"] = json!(false);
+        let r = render(&v, None, "/srv/cfg", &Ui::plain());
+        assert_eq!((r.exit, r.fix), (1, Fix::Person));
+        assert!(r.text.contains("look at /srv/cfg"), "the repo it was given:\n{}", r.text);
     }
 
     #[test]
     fn interrupted_is_repairable() {
         let mut v = ok();
         v["interrupted"] = json!({ "op": "apply", "target": 12 });
-        let r = render(&v, None, &Ui::plain());
+        let r = render(&v, None, "/var/lib/kestrel/config", &Ui::plain());
         assert_eq!(r.fix, Fix::Repair);
         assert!(r.text.contains("A change was interrupted (the apply of change 12)."), "{}", r.text);
     }

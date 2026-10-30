@@ -787,7 +787,7 @@ fn status_cmd(cli: &Cli, repair: bool) -> Result<()> {
         Err(why) => bail!("Couldn't check this machine: {why}."),
     };
     let last = read_ledger(cli).ok().and_then(|l| history::last_change(&l));
-    let report = status::render(&v, last.as_deref(), &ui);
+    let report = status::render(&v, last.as_deref(), &cli.repo.display().to_string(), &ui);
     print!("{}", report.text);
     if !repair {
         std::process::exit(report.exit);
@@ -900,7 +900,12 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
                     history::one_line(&files.join(", "), 40)
                 ))
             );
-            println!("    Undo those first (newest first), or make the opposite change yourself.");
+            // An undo cannot be undone, so then only the opposite change helps.
+            if later.iter().any(|s| entries.iter().any(|e| e.seq == *s && e.kind == "rolled_back")) {
+                println!("    Make the opposite change yourself (for packages: kestrel pkg add / remove).");
+            } else {
+                println!("    Undo those first (newest first), or make the opposite change yourself.");
+            }
             println!("    Nothing changed.");
             std::process::exit(1);
         }
