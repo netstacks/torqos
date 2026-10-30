@@ -29,18 +29,28 @@ pub struct Broker {
     rebuild_cmd: String,
     /// The link to the running system (`/run/current-system`), recorded after every rebuild.
     current_system: PathBuf,
+    /// The system profile (`/nix/var/nix/profiles/system`): what the next boot starts.
+    system_profile: PathBuf,
 }
 
 /// How the machine compares with its ledger. See `Broker::status`.
 #[derive(Debug)]
 pub struct Status {
     pub ledger: std::result::Result<usize, String>,
+    /// The config repo's HEAD; None if git cannot read it.
     pub head: Option<String>,
+    /// Uncommitted changes in the config repo (only the broker writes it).
+    pub dirty: bool,
     /// The commit the ledger says the config repo is at.
     pub ledgered_commit: Option<String>,
     pub running_system: Option<String>,
-    /// The system the ledger says is running: recorded by the last rebuild (None before any).
+    /// What the next boot starts (the system profile), if there is one.
+    pub next_boot: Option<String>,
+    /// The system the ledger says is running: recorded by init and after every rebuild (None if
+    /// the last record has none, e.g. written by an older broker).
     pub ledgered_system: Option<String>,
+    /// The last rebuild failed and could not restore the previous system (its ledger entry).
+    pub unrestored: Option<String>,
     /// An apply or rollback that was interrupted and not yet reconciled.
     pub interrupted: Option<String>,
     /// A broker operation is running (who holds the lock): mid-switch, the running system has
@@ -62,19 +72,37 @@ impl Status {
         if let Some(i) = &self.interrupted {
             p.push(format!("{i} was interrupted: run `kestrel-broker reconcile --approved-by <name>`"));
         }
-        if self.head.is_some() && self.head != self.ledgered_commit {
+        if let Some(e) = &self.unrestored {
             p.push(format!(
-                "config repo is at {}, not the last ledgered commit {}: it was changed outside the broker",
-                self.head.as_deref().unwrap_or("?"),
-                self.ledgered_commit.as_deref().unwrap_or("(none)")
+                "the last rebuild ({e}) failed and could not restore the previous system: the running system \
+                 may not match the config; fix the cause, then apply a change or reconcile"
             ));
+        }
+        match &self.head {
+            None if self.ledgered_commit.is_some() => {
+                p.push("config repo cannot be read (git rev-parse HEAD failed)".to_string())
+            }
+            Some(head) if Some(head) != self.ledgered_commit.as_ref() => p.push(format!(
+                "config repo is at {head}, not the last ledgered commit {}: it was changed outside the broker",
+                self.ledgered_commit.as_deref().unwrap_or("(none)")
+            )),
+            _ => {}
+        }
+        if self.dirty {
+            p.push("config repo has uncommitted changes, made outside the broker".to_string());
         }
         if let Some(want) = &self.ledgered_system {
             if self.running_system.as_ref() != Some(want) {
                 p.push(format!(
                     "running system is {}, not the last ledgered build {want}: it was switched outside the \
-                     broker (e.g. nixos-rebuild against another configuration)",
+                     broker (e.g. nixos-rebuild against another configuration, or an old boot entry)",
                     self.running_system.as_deref().unwrap_or("(unknown)")
+                ));
+            }
+            if let Some(next) = self.next_boot.as_ref().filter(|n| *n != want) {
+                p.push(format!(
+                    "the next boot would start {next}, not the last ledgered build {want}: the boot default \
+                     was changed outside the broker"
                 ));
             }
         }
@@ -86,10 +114,19 @@ impl Status {
 /// kernel releases it when the last process holding it dies: a dead broker cannot wedge later ones.
 struct Lock(fs::File);
 impl Lock {
+    /// Wait briefly for the lock: a status check holds it for milliseconds, and an operation that
+    /// collides with one must not fail for it. A real operation holds it for minutes; after a few
+    /// seconds, refuse and say who has it.
     fn acquire(dir: &Path) -> Result<Self> {
-        match Self::try_acquire(dir)? {
-            Some(l) => Ok(l),
-            None => bail!("another broker operation is running ({})", Self::busy(dir)),
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if let Some(l) = Self::try_acquire(dir)? {
+                return Ok(l);
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!("another broker operation is running ({})", Self::busy(dir));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
@@ -206,6 +243,7 @@ impl Broker {
             state_dir,
             rebuild_cmd: rebuild_cmd.into(),
             current_system: PathBuf::from("/run/current-system"),
+            system_profile: PathBuf::from("/nix/var/nix/profiles/system"),
         }
     }
 
@@ -214,8 +252,27 @@ impl Broker {
         self
     }
 
+    pub fn with_system_profile(mut self, link: impl Into<PathBuf>) -> Self {
+        self.system_profile = link.into();
+        self
+    }
+
     fn running_system(&self) -> Option<String> {
         fs::read_link(&self.current_system).ok().map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// The system the next boot starts: the profile's chain of links (`system` → `system-N-link`
+    /// → store path), followed without requiring the store path itself to exist.
+    fn next_boot(&self) -> Option<String> {
+        let mut p = self.system_profile.clone();
+        for _ in 0..8 {
+            match fs::read_link(&p) {
+                Ok(t) if t.is_absolute() => p = t,
+                Ok(t) => p = p.parent()?.join(t),
+                Err(_) => break,
+            }
+        }
+        (p != self.system_profile).then(|| p.to_string_lossy().into_owned())
     }
 
     /// Add the system the last rebuild switched to, so `status` can tell when the machine is later
@@ -243,13 +300,22 @@ impl Broker {
             Some(p) if !self.outcome_recorded(&p)? => Some(format!("the {} of #{}", p.op, p.target)),
             _ => None,
         };
+        // The latest entry that recorded a system (init, or any rebuild). A null there (the link
+        // could not be read) means unknown — not "fall back to an older one".
+        let last_record = entries.iter().rev().find(|e| e.body.data.get("system").is_some());
+        let unrestored = last_record
+            .filter(|e| e.body.data.get("restored") == Some(&json!(false)))
+            .map(|e| format!("#{} {}", e.body.seq, e.body.kind));
         Ok(Status {
             ledger,
             head: self.repo.head().ok(),
+            dirty: self.repo.ensure_clean().is_err() && self.repo.head().is_ok(),
             // apply_failed / rollback_failed carry no commit: the config is back at the previous one.
             ledgered_commit: last("commit", &["init", "applied", "rolled_back", "interrupted"]),
             running_system: self.running_system(),
-            ledgered_system: last("system", &[]),
+            next_boot: self.next_boot(),
+            ledgered_system: last_record.and_then(|e| e.body.data["system"].as_str().map(String::from)),
+            unrestored,
             interrupted,
             busy,
         })
@@ -267,7 +333,7 @@ impl Broker {
                 tier: Tier::System.to_string(),
                 tainted: false,
                 reason: "Config repository initialised".into(),
-                data: json!({ "commit": self.repo.head()? }),
+                data: self.with_system(json!({ "commit": self.repo.head()? })), // the baseline for `status`
             })?;
         }
         Ok(())

@@ -95,3 +95,21 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** A package change is a one-line JSON diff anyone can review, ledgered and
   undoable like any other. A user-tier change can only add nixpkgs packages to that user's profile
   (nothing is linked system-wide). GUI apps via Flatpak (ARCHITECTURE.md) remain a later layer.
+
+## ADR-012 — Drift from the ledger is detected and reported, never silently corrected
+- **Context:** Another tool switched the dev VM to a stock NixOS config outside the broker, and
+  nothing noticed until things broke. The ledger said one system was running; another was.
+- **Decision:** Every rebuild — and `init` — records the system it leaves running.
+  `kestrel-broker status` compares the machine with its ledger: running system and next boot vs the
+  last record, config repo HEAD and cleanliness vs the last ledgered commit, failed restores,
+  interrupted operations, the chain. It runs under the broker lock (try-lock: mid-switch it reports
+  `busy`, exit 75, and compares nothing); operations wait up to 3 s for the lock, so a check never
+  fails them. A `kestrel-status` unit runs it at boot and every 15 minutes, writes problems to
+  `/run/kestrel/drift` (printed by every new interactive shell) and to the journal at warning
+  priority, and **never fails**: it can run during a switch, and a failed unit would fail the switch,
+  which the broker treats as a failed rebuild and rolls back (ADR-008).
+- **Consequences:** Drift is visible within 15 minutes, at boot and in every new shell, but nothing
+  is changed automatically: the person decides (apply, rollback or reconcile). Garbage collection
+  (`nix.gc`, weekly, generations older than 30 days; `min-free` during builds) is safe for the same
+  reason undo works: a broker rollback reverts the commit and *rebuilds*, it never needs an old
+  generation on disk.

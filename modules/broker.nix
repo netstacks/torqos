@@ -93,20 +93,24 @@ in
         KESTREL_STATE_DIR = cfg.stateDir;
       };
       serviceConfig.Type = "oneshot";
+      # Never exits non-zero (see above), whatever happens in here.
       script = ''
-        out=$(${lib.getExe cfg.package} status 2>&1) && ok=1 || ok=0
-        case "$out" in
-          *"not checked"*)  # an operation is running: keep any earlier finding as it is
-            printf '%s\n' "$out"
-            exit 0 ;;
+        set +e
+        out=$(${lib.getExe cfg.package} status 2>&1)
+        code=$?
+        mkdir -p /run/kestrel
+        case $code in
+          0)
+            rm -f /run/kestrel/drift
+            printf '%s\n' "$out" ;;
+          75)  # an operation is running, nothing compared: keep any earlier finding as it is
+            printf '%s\n' "$out" ;;
+          *)
+            { printf '%s\n' "$out" | grep '^PROBLEM' || printf 'PROBLEM: %s\n' "$out"; } > /run/kestrel/drift.new
+            mv -f /run/kestrel/drift.new /run/kestrel/drift  # atomic: a shell never sees half of it
+            printf '%s\n' "$out" | sed 's/^/<4>/' ;;  # journal priority: warning
         esac
-        if [ $ok = 1 ]; then
-          rm -f /run/kestrel/drift
-          printf '%s\n' "$out"
-        else
-          printf '%s\n' "$out" | grep '^PROBLEM' > /run/kestrel/drift || printf 'PROBLEM: %s\n' "$out" > /run/kestrel/drift
-          printf '%s\n' "$out" | sed 's/^/<4>/'  # journal priority: warning
-        fi
+        exit 0
       '';
     };
     systemd.timers.kestrel-status = {

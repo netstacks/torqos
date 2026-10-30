@@ -5,7 +5,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-fn setup(rebuild: &str) -> (tempfile::TempDir, Broker) {
+/// A config repo with a few files, not yet initialised.
+fn config_dir() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("config");
     fs::create_dir_all(repo.join("users")).unwrap();
@@ -13,6 +14,11 @@ fn setup(rebuild: &str) -> (tempfile::TempDir, Broker) {
     fs::write(repo.join("desktop.nix"), "{ nightLight = false; }\n").unwrap();
     fs::write(repo.join("users/casey.nix"), "{ theme = \"dark\"; }\n").unwrap();
     fs::write(repo.join("policy/tiers.toml"), "agent_can_do_anything = false\n").unwrap();
+    (dir, repo)
+}
+
+fn setup(rebuild: &str) -> (tempfile::TempDir, Broker) {
+    let (dir, repo) = config_dir();
     let b = Broker::new(&repo, dir.path().join("state"), rebuild);
     b.init().unwrap();
     (dir, b)
@@ -649,10 +655,13 @@ fn live_index_lock_is_refused_stale_one_removed() {
 
 /// A broker whose "running system" is a symlink the test controls, like /run/current-system.
 fn setup_with_system() -> (tempfile::TempDir, Broker, std::path::PathBuf) {
-    let (dir, _) = setup("true");
+    let (dir, repo) = config_dir();
     let link = dir.path().join("current-system");
     std::os::unix::fs::symlink("/nix/store/aaa-system-1", &link).unwrap();
-    let b = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_current_system(&link);
+    let b = Broker::new(&repo, dir.path().join("state"), "true")
+        .with_current_system(&link)
+        .with_system_profile(dir.path().join("no-profile")); // not this machine's real one
+    b.init().unwrap(); // records the fake system as the baseline, as on a real machine
     (dir, b, link)
 }
 
@@ -729,4 +738,89 @@ fn status_does_not_compare_during_an_operation() {
     assert!(s.problems().is_empty(), "{:?}", s.problems());
     drop(held);
     assert!(!b.status().unwrap().problems().is_empty(), "once the lock is free, the drift is reported");
+}
+
+/// A rebuild that failed and could not restore leaves the machine in an unknown state; status must
+/// say so even though it records whatever is running then.
+#[test]
+fn status_reports_a_failed_restore() {
+    let (dir, _, link) = setup_with_system();
+    let b = Broker::new(dir.path().join("config"), dir.path().join("state"), "false")
+        .with_current_system(&link)
+        .with_system_profile(dir.path().join("no-profile"));
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    assert!(b.apply(p.body.seq, "casey", false).is_err());
+    let problems = b.status().unwrap().problems().join("\n");
+    assert!(problems.contains("could not restore"), "{problems}");
+}
+
+/// init records the running system, so drift is detectable from the first boot, not only after
+/// the first change.
+#[test]
+fn init_records_the_running_system() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("config");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("flake.nix"), "{ }\n").unwrap();
+    let link = dir.path().join("current-system");
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", &link).unwrap();
+    let b = Broker::new(&repo, dir.path().join("state"), "true")
+        .with_current_system(&link)
+        .with_system_profile(dir.path().join("no-profile"));
+    b.init().unwrap();
+    assert_eq!(b.ledger.read_all().unwrap()[0].body.data["system"], "/nix/store/aaa-system-1");
+    switch_to(&link, "/nix/store/zzz-elsewhere");
+    assert!(b.status().unwrap().problems().join("\n").contains("running system"));
+}
+
+#[test]
+fn status_reports_an_unreadable_or_dirty_repo() {
+    let (_dir, b, _) = setup_with_system();
+    fs::write(b.repo.root().join("stray.nix"), "{ }\n").unwrap();
+    assert!(b.status().unwrap().problems().join("\n").contains("uncommitted"));
+    fs::remove_dir_all(b.repo.root().join(".git")).unwrap();
+    assert!(b.status().unwrap().problems().join("\n").contains("cannot be read"));
+}
+
+/// `nixos-rebuild boot` / `nix-env --set` outside the broker change only the next boot.
+#[test]
+fn status_reports_a_next_boot_changed_outside_the_broker() {
+    let (dir, b, _) = setup_with_system();
+    let profiles = dir.path().join("profiles");
+    fs::create_dir_all(&profiles).unwrap();
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", profiles.join("system-1-link")).unwrap();
+    std::os::unix::fs::symlink("system-1-link", profiles.join("system")).unwrap(); // relative, like NixOS
+    let b = b.with_system_profile(profiles.join("system"));
+    assert!(b.status().unwrap().problems().is_empty(), "{:?}", b.status().unwrap().problems());
+    std::os::unix::fs::symlink("/nix/store/bbb-stock-nixos", profiles.join("system-2-link")).unwrap();
+    switch_to(&profiles.join("system"), "system-2-link");
+    let problems = b.status().unwrap().problems().join("\n");
+    assert!(problems.contains("next boot") && problems.contains("bbb-stock-nixos"), "{problems}");
+}
+
+/// A status check holds the lock for milliseconds; an operation that collides with it must wait,
+/// not fail.
+#[test]
+fn operation_waits_briefly_for_the_lock() {
+    let (dir, b) = setup("true");
+    let held = fs::OpenOptions::new().write(true).open(dir.path().join("state/broker.lock")).unwrap();
+    held.lock().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        drop(held);
+    });
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    b.propose(&d, "waited", Actor::User, false).unwrap();
+    release.join().unwrap();
+}
+
+/// The CLI signals "busy, not checked" with its own exit code (75), not just text.
+#[test]
+fn status_cli_exits_75_while_busy() {
+    let (dir, _b) = setup("true");
+    let held = fs::OpenOptions::new().write(true).open(dir.path().join("state/broker.lock")).unwrap();
+    held.lock().unwrap();
+    let out = run_cli(dir.path(), "true", &["status"]);
+    assert_eq!(out.status.code(), Some(75), "{out:?}");
 }

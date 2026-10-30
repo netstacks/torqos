@@ -28,7 +28,21 @@ in
       trusted-users = [ "root" ];
       allowed-users = [ "root" "@wheel" ];
       auto-optimise-store = true;
+      # During a build, collect garbage when less than 1 GiB is free, until 5 GiB is.
+      min-free = lib.mkDefault (1024 * 1024 * 1024);
+      max-free = lib.mkDefault (5 * 1024 * 1024 * 1024);
     };
+
+    # The store must not fill the disk. Collecting old generations does not weaken undo: a broker
+    # rollback reverts the commit and rebuilds it (from the binary cache), it never needs an old
+    # generation on disk (ADR-012). The running system is never collected.
+    nix.gc = {
+      automatic = lib.mkDefault true;
+      dates = lib.mkDefault "weekly";
+      options = lib.mkDefault "--delete-older-than 30d";
+      persistent = lib.mkDefault true; # catch up after the machine was off
+    };
+    boot.loader.systemd-boot.configurationLimit = lib.mkDefault 20;
 
     users.users.${cfg.user} = {
       isNormalUser = true;

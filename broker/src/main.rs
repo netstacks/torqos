@@ -19,6 +19,9 @@ struct Cli {
     /// Link to the running system, recorded after every rebuild and compared by `status`.
     #[arg(long, env = "KESTREL_CURRENT_SYSTEM", default_value = "/run/current-system")]
     current_system: PathBuf,
+    /// The system profile: what the next boot starts. Compared by `status`.
+    #[arg(long, env = "KESTREL_SYSTEM_PROFILE", default_value = "/nix/var/nix/profiles/system")]
+    system_profile: PathBuf,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -75,7 +78,8 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let b = Broker::new(&cli.repo, &cli.state_dir, &cli.rebuild_cmd).with_current_system(&cli.current_system);
+    let b = Broker::new(&cli.repo, &cli.state_dir, &cli.rebuild_cmd).with_current_system(&cli.current_system)
+        .with_system_profile(&cli.system_profile);
     match cli.cmd {
         Cmd::Init => {
             b.init()?;
@@ -130,7 +134,7 @@ fn main() -> Result<()> {
             let s = b.status()?;
             if let Some(who) = &s.busy {
                 println!("a broker operation is running ({who}); not checked — try again when it is done");
-                return Ok(());
+                std::process::exit(75); // EX_TEMPFAIL: "busy" without parsing the text
             }
             let or = |v: &Option<String>, none: &str| v.clone().unwrap_or_else(|| none.to_string());
             println!("ledger          {}", match &s.ledger { Ok(n) => format!("OK, {n} entries"), Err(e) => e.clone() });

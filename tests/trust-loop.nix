@@ -10,6 +10,9 @@ pkgs.testers.runNixOSTest {
     kestrel.user = "dev";
     kestrel.desktop.enable = false;
     specialisation.noguard.configuration.kestrel.broker.guardEtcNixos = false;
+    # The test VM's disk is tiny: min-free would garbage-collect mid-test, deleting the unrooted
+    # nixpkgs source the stray-rebuild check uses.
+    nix.settings.min-free = 0;
 
     environment.etc."kestrel-test/desktop.nix".text = ''
       { nightLight = false; }
@@ -33,8 +36,10 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     env = "KESTREL_REBUILD_CMD=true "
     repo = "/var/lib/kestrel/config"
-    # The boot-time drift check ran, and passed on a machine with nothing ledgered yet.
-    machine.succeed("systemctl show -p Result --value kestrel-status | grep -qx success")
+    # The boot-time drift check ran (a unit that never ran also reports Result=success, so check
+    # that it started and what it said), and passed on a machine with nothing ledgered yet.
+    machine.succeed("test -n \"$(systemctl show -p ExecMainStartTimestamp --value kestrel-status)\"")
+    machine.succeed("journalctl -b -u kestrel-status | grep -q 'OK as far as recorded'")
     machine.succeed("test ! -e /run/kestrel/drift")
 
     machine.succeed(f"mkdir -p {repo} && cp /etc/kestrel-test/desktop.nix {repo}/ && touch {repo}/flake.nix")

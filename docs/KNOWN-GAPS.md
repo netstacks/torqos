@@ -39,6 +39,15 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    from #4 (M3 socket). A user's packages also act in that user's *session*: autostart entries,
    D-Bus session services and systemd user units from their profile (never system-wide).
 
+6b. **Drift detection has blind spots** (ADR-012): a lock that never frees (a leaked holder) makes
+   every check "busy" and silent; drift is reported but not written into the ledger, so an outside
+   switch followed by a broker apply leaves no trace in the audit trail; the warning reaches only
+   interactive shells, not a desktop user (needs the Quickshell UI).
+6c. **`kestrel update` trusts the user's fetch:** `nix flake update` runs as the user, so their
+   environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
+   that store path without re-fetching. The ledgered rev may then not identify what was built.
+   Fix: the broker re-fetches changed locked inputs as root and compares narHashes.
+
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing
