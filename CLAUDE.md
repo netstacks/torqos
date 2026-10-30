@@ -71,11 +71,11 @@ sudo kestrel-broker rollback <applied-seq> --approved-by casey
 sudo kestrel-broker log && sudo kestrel-broker verify
 ```
 
-## Current milestone (M1) — "the trust loop"
+## Current milestone (M2) — "the agent sees" (M1, the trust loop, is done)
 
-In an ARM NixOS VM on the M4 Mac: a change is proposed → shown as a diff → approved →
-the broker commits it (signed, with ledger entry) → rebuilds → the change appears in the
-ledger → one command rolls it back. See `docs/ROADMAP.md` for acceptance criteria.
+A local model is reachable (llama.cpp on the Mac host during dev); `kestrel-agent` runs with
+read-only MCP tools (logs, hardware, `config.read`); "Doctor" mode diagnoses and explains but
+proposes nothing. See `docs/ROADMAP.md`.
 
 ## Engineering principles
 
@@ -104,8 +104,8 @@ ledger → one command rolls it back. See `docs/ROADMAP.md` for acceptance crite
 - **M1 trust loop works in the UTM VM** with a real `nixos-rebuild`: propose → apply → rebuild →
   ledger → one-command rollback; broken changes are reset *and rebuilt* (ADR-008); agent refused
   on forbidden paths; ledger tampering detected. Broker: 19 tests green (`cargo test`).
-- **Still open in M1:** `tests/trust-loop.nix` has never *run* — it needs KVM, and the UTM VM has
-  no `/dev/kvm`. Run on Linux/x86 or a linux-builder.
+- **M1 is complete.** `tests/trust-loop.nix` passes inside the UTM VM: there is no `/dev/kvm`, but
+  QEMU falls back to TCG and the test still finishes in about 75 s. Next: M2 (`docs/ROADMAP.md`).
 - Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
 ### You are probably running inside the dev VM

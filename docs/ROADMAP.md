@@ -2,7 +2,7 @@
 
 ## Stage 1 — Virtual machines (M4 Mac + optional x86 server)
 
-### M1 — The trust loop  ← current
+### M1 — The trust loop  ✓ done
 In an ARM NixOS VM (UTM on the M4 Mac):
 
 - [x] `broker/Cargo.lock` generated; `cargo test` green.
@@ -12,10 +12,10 @@ In an ARM NixOS VM (UTM on the M4 Mac):
 - [x] `kestrel-broker apply` commits (with `Ledger-Entry` trailer), rebuilds, appends ledger.
 - [x] `kestrel-broker rollback` reverts, rebuilds, appends ledger.
 - [x] `kestrel-broker verify` detects any edit to the ledger.
-- [ ] NixOS VM test `tests/trust-loop.nix` proves propose → apply → rollback.
-  (Needs KVM: the UTM VM has no `/dev/kvm`, so run it on Linux/x86 or a linux-builder.)
+- [x] NixOS VM test `tests/trust-loop.nix` proves propose → apply → rollback.
+  (Runs inside the UTM VM without `/dev/kvm`: QEMU falls back to TCG; ~75 s of test time.)
 
-### M2 — The agent sees
+### M2 — The agent sees  ← current
 - Local model reachable (llama.cpp on the Mac host during dev).
 - `kestrel-agent` with read-only MCP tools (logs, hardware, config.read).
 - "Doctor" mode: diagnose and explain, propose nothing.
