@@ -47,6 +47,15 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    that no other switch is running, but an outside switch that both starts and finishes between
    its own switch and that check would set both alike and pass; comparing against the exact path it
    built would close that.
+6e. **OPEN (high): an outside commit made while a change is interrupted is discarded untraced.**
+   If HEAD has moved past the interrupted operation's own commit (someone committed on top of it),
+   `kestrel status` shows only "a change was interrupted" (the CLI hides head findings while
+   interrupted) and `--repair` → `reconcile_locked` keeps and ledgers only `pending.commit`, then
+   resets: the outside commit survives only in the reflog. Fix: broker `keep(head)` and ledger it
+   (`discarded_head`) when `head != pending.commit`, with a test; expose `interrupted.commit` in
+   `status --json`; the CLI hides the head finding only when HEAD is `before` or that commit.
+   Also low: `history::asked_by` credits a failed/interrupted *undo* to the original change's
+   actor; undo is user-only, so rollbacks should show "user". (Found by review of f2da8b7.)
 6c. **`kestrel update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
    that store path without re-fetching. The ledgered rev may then not identify what was built.
