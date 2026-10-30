@@ -146,7 +146,10 @@ fn settings(cli: &mut Cli) -> Result<Settings> {
         current_system: cli.current_system.clone(),
         system_profile: cli.system_profile.clone(),
     };
-    let s = config::resolve(root, Settings::read(Path::new(config::FIXED))?, asked, Settings::defaults(path, home))?;
+    // Only a root broker uses the file, so only it reads it: a malformed or newer one must not
+    // break a test broker.
+    let fixed = if root { Settings::read(Path::new(config::FIXED))? } else { None };
+    let s = config::resolve(root, fixed, asked, Settings::defaults(path, home))?;
     let inherited = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
     config::take_over_process(&config::environment(&s, inherited))?;
     Ok(s)
