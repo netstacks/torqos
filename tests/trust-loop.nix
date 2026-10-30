@@ -65,5 +65,30 @@ pkgs.testers.runNixOSTest {
         machine.succeed(env + "kestrel-broker verify")
         machine.succeed("sed -i 's/Night light/Nothing here/' /var/lib/kestrel/state/ledger.jsonl")
         machine.fail(env + "kestrel-broker verify")
+
+    with subtest("a stray nixos-rebuild cannot switch away from the ledgered config"):
+        # Someone's own files survive activation, moved aside: a file, and a symlink (kept as a link).
+        machine.succeed("rm -f /etc/nixos/configuration.nix /etc/nixos/flake.nix /etc/nixos/*.pre-kestrel*")
+        machine.succeed("echo '{ mine = true; }' > /etc/nixos/configuration.nix")
+        machine.succeed("ln -s /etc/hostname /etc/nixos/flake.nix")
+        machine.succeed("/run/current-system/activate")
+        machine.succeed("grep -qx '{ mine = true; }' /etc/nixos/configuration.nix.pre-kestrel")
+        machine.succeed("test \"$(readlink /etc/nixos/flake.nix.pre-kestrel)\" = /etc/hostname")
+        # The stubs are real files, and re-activating keeps them without making more copies.
+        machine.succeed("/run/current-system/activate")
+        machine.succeed("test ! -L /etc/nixos/flake.nix && grep -q guardEtcNixos /etc/nixos/flake.nix")
+        machine.succeed("test ! -L /etc/nixos/configuration.nix && grep -q guardEtcNixos /etc/nixos/configuration.nix")
+        machine.fail("ls /etc/nixos/*.pre-kestrel.*")
+        # Building /etc/nixos refuses, every common way, with the message pointing at the broker.
+        for cmd in [
+            "nixos-rebuild dry-build -I nixos-config=/etc/nixos/configuration.nix",  # what went wrong
+            "nixos-rebuild dry-build",
+            "nix-instantiate --eval /etc/nixos/configuration.nix",
+            "nix --extra-experimental-features 'nix-command flakes' eval "
+            "path:/etc/nixos#nixosConfigurations.machine.config.system.build.toplevel",
+        ]:
+            out = machine.fail(cmd + " 2>&1")
+            assert "managed by Kestrel" in out, f"{cmd}: {out}"
+
   '';
 }

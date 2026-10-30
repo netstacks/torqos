@@ -623,20 +623,21 @@ fn live_index_lock_is_refused_stale_one_removed() {
     let (_dir, b, _) = crashed_apply();
     let index_lock = b.repo.index_lock();
     fs::write(&index_lock, "").unwrap();
+    let ready = b.repo.root().parent().unwrap().join("holder-ready");
+    // Open the lock, say so, then become `sleep` (exec: one process, so killing it releases the fd).
     let mut holder = Command::new("sh")
         .arg("-c")
-        .arg("exec 3<\"$0\"; sleep 30")
+        .arg("exec 3<\"$0\"; : > \"$1\"; exec sleep 30")
         .arg(&index_lock)
+        .arg(&ready)
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let err = loop {
-        let err = format!("{:#}", b.reconcile("casey").unwrap_err());
-        if err.contains("git is still running") || std::time::Instant::now() > deadline {
-            break err;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50)); // until the shell has opened it
-    };
+    while !ready.exists() {
+        assert!(std::time::Instant::now() < deadline, "holder never opened the lock");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let err = format!("{:#}", b.reconcile("casey").unwrap_err());
     holder.kill().unwrap();
     holder.wait().unwrap();
     assert!(err.contains("git is still running") && err.contains("(sleep)"), "{err}");
