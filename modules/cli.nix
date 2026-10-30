@@ -15,6 +15,8 @@ let
   dir = config.torq.packages.configDir;
   styles = [ "juniper" "cisco" ];
 
+  # The option's enum type refuses an unknown style too; this gives the message, and is what refuses
+  # an extra key (tests/tree.nix, cli-bad-extra).
   readStyle = where: file:
     let v = lib.importJSON file; in
     if builtins.isAttrs v && lib.attrNames v == [ "style" ] && builtins.elem v.style styles then
