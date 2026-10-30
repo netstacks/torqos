@@ -96,7 +96,8 @@ impl Status {
         if let Some(e) = &self.unrestored {
             p.push(format!(
                 "the last rebuild ({e}) failed and could not restore the previous system: the running system \
-                 may not match the config; fix the cause, then apply a change or reconcile"
+                 may not match the config; fix the cause, then apply any change (or undo the last one) so the \
+                 system is rebuilt"
             ));
         }
         match &self.head {

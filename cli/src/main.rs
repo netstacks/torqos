@@ -3,6 +3,8 @@
 
 mod history;
 mod pkg;
+mod run;
+mod ui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,6 +27,9 @@ struct Cli {
     /// How to run the broker (it needs root).
     #[arg(long, env = "KESTREL_BROKER", default_value = BROKER)]
     broker: String,
+    /// Also show the raw change: the diff the broker records in the ledger.
+    #[arg(long, global = true)]
+    diff: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -132,7 +137,7 @@ fn main() {
         }
     };
     if let Err(e) = r {
-        eprintln!("kestrel: {e:#}");
+        eprintln!("{}", ui::Ui::detect().fail(&format!("{e:#}")));
         std::process::exit(1);
     }
 }
@@ -235,6 +240,23 @@ fn scratch_dir() -> Result<tempfile::TempDir> {
     tempfile::Builder::new().prefix("kestrel-").tempdir_in(base).context("creating a scratch directory")
 }
 
+/// What a change looks like to the person approving it (docs/CLI-DESIGN.md): in their terms, not
+/// the diff the broker records (that is behind --diff).
+struct Summary {
+    /// "Install for you", "Turn on ssh", "Update this machine".
+    title: String,
+    /// The change, one row each: packages with version and description, what a service implies.
+    rows: Vec<String>,
+    /// A system change: marked in the heading, and the question defaults to No.
+    system: bool,
+    /// "Install?"
+    question: String,
+    /// The result line: "Installed htop".
+    done: String,
+    /// The change in words, for errors: "install htop".
+    what: String,
+}
+
 /// One change to one file of the config repo, already made in a scratch copy of it (`copy`).
 struct Change<'a> {
     copy: &'a Path,
@@ -243,42 +265,108 @@ struct Change<'a> {
     /// Its exact current text (None: the file is new) — a diff must start from that.
     old: Option<&'a str>,
     new: &'a str,
+    /// The ledger's reason (what `kestrel log` shows).
     reason: String,
+    summary: Summary,
 }
 
-/// Evaluate the changed copy, then propose the diff, ask (unless `yes`) and apply it.
+/// Check the changed copy, show the change, ask (unless `yes`) — before anything is proposed, so
+/// saying no leaves nothing in the ledger — then propose and apply it through the broker, quietly,
+/// with its output in the log.
 fn submit(cli: &Cli, scratch: &Path, host: &str, c: Change, yes: bool) -> Result<()> {
-    eprintln!("checking the change against this machine's configuration ({host})...");
-    evaluate(c.copy, host)?;
+    let ui = ui::Ui::detect();
+    {
+        let _p = run::Progress::start("Checking");
+        evaluate(c.copy, host)?;
+    }
+    let s = &c.summary;
+    println!("\n{}", ui.heading(&s.title, s.system));
+    for row in &s.rows {
+        println!("{row}");
+    }
     let diff = make_diff(scratch, c.path, c.old, c.new)?;
-    let diff_file = scratch.join("change.diff");
-    fs::write(&diff_file, &diff)?;
-
-    let out = broker(cli, &["propose", "--diff", &diff_file.to_string_lossy(), "--reason", &c.reason, "--actor", "user"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit()) // the broker's (or sudo's) own reason, if it refuses
-        .output()
-        .context("running the broker")?;
-    let shown = String::from_utf8_lossy(&out.stdout);
-    if !out.status.success() {
-        bail!("the broker refused the proposal (see above)");
+    if cli.diff {
+        println!();
+        for line in diff.lines() {
+            println!("    {}", ui.dim(&history::clean(line)));
+        }
     }
-    let seq = pkg::proposal_seq(&shown).context("could not read the proposal number from the broker")?;
-    // The broker's own "approve with: ..." hint does not apply: we ask, then apply.
-    for line in shown.lines().filter(|l| !l.starts_with("approve with:")) {
-        println!("{line}");
-    }
-    if !yes && !confirm(&format!("{}?", c.reason))? {
-        println!("not applied; proposal #{seq} stays in the ledger unapplied.");
+    println!();
+    if !yes && !confirm(&ui, &s.question, !s.system)? {
+        println!("  Nothing changed.");
         return Ok(());
     }
-    let st = broker(cli, &["apply", &seq.to_string(), "--approved-by", &me()?])
-        .status()
-        .context("running the broker")?;
-    if !st.success() {
-        bail!("apply of proposal #{seq} failed (see above; nothing was left half-applied)");
+    let diff_file = scratch.join("change.diff");
+    fs::write(&diff_file, &diff)?;
+    let log = run::start_log()?;
+    let proposed = run::broker_json(
+        broker(cli, &["propose", "--diff", &diff_file.to_string_lossy(), "--reason", &c.reason, "--actor", "user"]),
+        &log,
+    )?;
+    let seq = match proposed {
+        run::Outcome::Done(v) => v["seq"].as_u64().context("the broker did not say which proposal it made")?,
+        other => return fail(cli, &ui, &s.what, other, &log),
+    };
+    let applied = {
+        let _p = run::Progress::start("Applying");
+        run::broker_json(broker(cli, &["apply", &seq.to_string(), "--approved-by", &me()?]), &log)?
+    };
+    match applied {
+        run::Outcome::Done(v) => {
+            println!("{}", ui.ok(&s.done, &ui::change_ref(v["seq"].as_u64().unwrap_or(seq))));
+            Ok(())
+        }
+        other => fail(cli, &ui, &s.what, other, &log),
     }
-    Ok(())
+}
+
+/// A change that did not happen: what went wrong, whether the machine is as it was — only claimed
+/// when the broker confirms it — and where the full log is. Exits 1.
+fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path) -> Result<()> {
+    let (msg, certain) = match outcome {
+        // Refused before taking the lock: nothing was even proposed.
+        run::Outcome::Busy => ("Another change is being applied right now. Try again when it is done.".to_string(), true),
+        run::Outcome::Refused(m) => (pkg::explain_apply_error(what, &history::one_line(&m, 200)), false),
+        run::Outcome::Broken(m) => (format!("Couldn't {what}: {m}"), false),
+        run::Outcome::Done(_) => unreachable!("fail() is for outcomes that are not Done"),
+    };
+    println!("{}", ui.fail(&msg));
+    let as_it_was = certain
+        || matches!(run::broker_json(broker(cli, &["status"]), log), Ok(run::Outcome::Done(v)) if v["ok"] == true);
+    if as_it_was {
+        println!("    Nothing changed — your machine is as it was.");
+    } else {
+        println!("    Your machine may not be as it was: see kestrel status");
+    }
+    println!("    {}", ui.dim(&format!("log: {}", log.display())));
+    std::process::exit(1);
+}
+
+/// Version and description of packages in this machine's nixpkgs, for showing a change. Unknown
+/// facts are empty: they are decoration, the evaluation has already checked the names.
+fn package_facts(copy: &Path, host: &str, names: &[String]) -> Vec<(String, String)> {
+    // Names passed pkg::valid_package (attribute characters only), so they are safe in a string.
+    let list: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+    let out = Command::new("nix")
+        .args(["eval", "--json"])
+        .arg(format!("{}#nixosConfigurations.{host}.pkgs", flake_ref(copy)))
+        .arg("--apply")
+        .arg(format!(
+            "p: map (n: let a = p.lib.attrByPath (p.lib.splitString \".\" n) null p; in \
+             {{ version = a.version or \"\"; description = a.meta.description or \"\"; }}) [ {} ]",
+            list.join(" ")
+        ))
+        .output();
+    let facts: Vec<serde_json::Value> = out.ok().and_then(|o| serde_json::from_slice(&o.stdout).ok()).unwrap_or_default();
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let f = facts.get(i);
+            let s = |k: &str| f.and_then(|f| f[k].as_str()).map(|v| history::one_line(v, 60)).unwrap_or_default();
+            (s("version"), s("description"))
+        })
+        .collect()
 }
 
 fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Result<()> {
@@ -301,8 +389,11 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
     let old = read_list(&cli.repo, &target.path())?;
     let (new, changed) = pkg::edit(old.as_ref().map(|f| f.names.as_slice()).unwrap_or_default(), names, how);
     let verb = if how == Edit::Add { "Install" } else { "Remove" };
+    let ui = ui::Ui::detect();
+    let whom = if system { " for everyone" } else { "" };
     if changed.is_empty() {
-        println!("nothing to do: {} {}", if how == Edit::Add { "already installed" } else { "not installed" }, target.describe());
+        let state = if how == Edit::Add { "already installed" } else { "not installed" };
+        println!("{}", ui.ok(&format!("{} {} {state}{whom}", names.join(", "), if names.len() == 1 { "is" } else { "are" }), ""));
         return Ok(());
     }
 
@@ -322,12 +413,33 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
     let file = copy.join(&path);
     fs::create_dir_all(file.parent().unwrap())?;
     fs::write(&file, &new_text)?;
+    let sign = if how == Edit::Add { '+' } else { '-' };
+    let rows = package_facts(&copy, &host, &changed)
+        .into_iter()
+        .zip(&changed)
+        .map(|((version, description), name)| ui::change_row(&ui, sign, name, &version, &description))
+        .collect();
+    let list = changed.join(", ");
+    let summary = Summary {
+        title: match (how, system) {
+            (Edit::Add, false) => "Install for you".into(),
+            (Edit::Add, true) => "Install for everyone on this machine".into(),
+            (Edit::Remove, false) => "Remove from your apps".into(),
+            (Edit::Remove, true) => "Remove for everyone on this machine".into(),
+        },
+        rows,
+        system,
+        question: format!("{verb}?"),
+        done: format!("{} {list}{whom}", if how == Edit::Add { "Installed" } else { "Removed" }),
+        what: format!("{} {list}", verb.to_lowercase()),
+    };
     let change = Change {
         copy: &copy,
         path: &path,
         old: old.as_ref().map(|f| f.text.as_str()),
         new: &new_text,
-        reason: format!("{verb} {} {}", changed.join(", "), target.describe()),
+        reason: format!("{verb} {list} {}", target.describe()),
+        summary,
     };
     submit(cli, scratch, &host, change, yes)
 }
@@ -455,24 +567,20 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<String>> {
 fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
     check_repo(cli)?;
     approval(true, false)?;
+    let ui = ui::Ui::detect();
     let host = config_name(&cli.repo)?;
     let svc = services(&cli.repo, &host)?;
     for n in names {
         if !svc.catalog.iter().any(|(c, _)| c == n) {
             let all: Vec<_> = svc.catalog.iter().map(|(c, _)| c.as_str()).collect();
-            bail!("'{n}' is not in the service catalog ({})", all.join(", "));
-        }
-    }
-    if how == Edit::Add {
-        // What a bare `+ "name"` in the diff means.
-        for (name, what) in svc.catalog.iter().filter(|(c, _)| names.contains(c)) {
-            println!("{name}: {what}");
+            bail!("\"{n}\" isn't a Kestrel service. There are: {}", all.join(", "));
         }
     }
     let old = read_list(&cli.repo, SERVICES)?;
     let (new, changed) = pkg::edit(old.as_ref().map(|f| f.names.as_slice()).unwrap_or_default(), names, how);
+    let on = how == Edit::Add;
     if changed.is_empty() {
-        println!("nothing to do: {}", if how == Edit::Add { "already on" } else { "already off" });
+        println!("{}", ui.ok(&format!("{} {} already {}", names.join(", "), if names.len() == 1 { "is" } else { "are" }, if on { "on" } else { "off" }), ""));
         return Ok(());
     }
     let scratch = scratch_dir()?;
@@ -487,26 +595,44 @@ fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
     }
     let new_text = pkg::render(&new);
     fs::write(copy.join(SERVICES), &new_text)?;
+    // What a bare `+ "name"` in the diff means, one row per service.
+    let mut rows: Vec<String> = svc
+        .catalog
+        .iter()
+        .filter(|(c, _)| changed.contains(c))
+        .map(|(name, what)| format!("    · {name}: {}", ui.dim(what)))
+        .collect();
     // The catalog's SSH is keys only, for the owner only: without one of their keys it would lock
     // everyone out; with them, approving it means approving exactly these keys — as the changed
     // configuration will have it.
-    if how == Edit::Add && names.iter().any(|n| n == "ssh") {
+    if on && changed.iter().any(|n| n == "ssh") {
         let keys = owner_keys(&copy, &host, &svc.owner)?;
         if keys.is_empty() {
-            bail!("ssh allows {}'s keys only, and they have none: everyone would be locked out", svc.owner);
+            bail!(
+                "SSH here lets in {}'s keys only, and they have none: nobody could log in. Add a public \
+                 key to ~/.ssh/authorized_keys first.",
+                svc.owner
+            );
         }
-        println!("keys that will be able to log in as {}:", svc.owner);
-        for k in keys {
-            println!("  {}", history::clean(&k));
-        }
+        rows.push(format!("    · keys that will be able to log in as {}:", svc.owner));
+        rows.extend(keys.iter().map(|k| format!("        {}", ui.dim(&history::one_line(k, 70)))));
     }
-    let verb = if how == Edit::Add { "Enable" } else { "Disable" };
+    let list = changed.join(", ");
+    let summary = Summary {
+        title: format!("Turn {} {list}", if on { "on" } else { "off" }),
+        rows,
+        system: true,
+        question: format!("Turn {}?", if on { "on" } else { "off" }),
+        done: format!("{list} {} {}", if changed.len() == 1 { "is" } else { "are" }, if on { "on" } else { "off" }),
+        what: format!("turn {} {list}", if on { "on" } else { "off" }),
+    };
     let change = Change {
         copy: &copy,
         path: SERVICES,
         old: old.as_ref().map(|f| f.text.as_str()),
         new: &new_text,
-        reason: format!("{verb} {}", changed.join(", ")),
+        reason: format!("{} {list}", if on { "Enable" } else { "Disable" }),
+        summary,
     };
     submit(cli, scratch, &host, change, false)
 }
@@ -544,7 +670,7 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
         bail!("--yes only undoes changes to your own packages; this one changes something else: run again without --yes");
     }
     approval(false, yes)?; // there must be someone to ask
-    if !yes && !confirm(&format!("Undo \"{reason}\"?"))? {
+    if !yes && !confirm(&ui::Ui::detect(), &format!("Undo \"{reason}\"?"), target.tier == "user")? {
         println!("not undone");
         return Ok(());
     }
@@ -562,35 +688,50 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
 fn update(cli: &Cli, all: bool) -> Result<()> {
     check_repo(cli)?;
     approval(true, false)?;
+    let ui = ui::Ui::detect();
     let scratch = scratch_dir()?;
     let scratch = scratch.path();
     let host = config_name(&cli.repo)?;
     let copy = scratch.join("config");
     copy_tree(&cli.repo, &copy)?;
     let old = fs::read_to_string(copy.join("flake.lock")).context("reading flake.lock")?;
-    eprintln!("fetching the newest inputs...");
-    let mut cmd = Command::new("nix");
-    cmd.args(["flake", "update", "--flake"]).arg(flake_ref(&copy));
-    if !all {
-        cmd.arg("kestrel");
-    }
-    let out = cmd.output().context("running nix flake update")?;
+    let out = {
+        let _p = run::Progress::start("Looking for updates");
+        let mut cmd = Command::new("nix");
+        cmd.args(["flake", "update", "--flake"]).arg(flake_ref(&copy));
+        if !all {
+            cmd.arg("kestrel");
+        }
+        cmd.output().context("running nix flake update")?
+    };
     if !out.status.success() {
-        bail!("nix flake update failed: {}", last_error(&out.stderr));
+        bail!("Couldn't look for updates: {}", history::one_line(&last_error(&out.stderr), 200));
     }
     let new = fs::read_to_string(copy.join("flake.lock")).context("reading the updated flake.lock")?;
     if new == old {
-        println!("already up to date");
+        println!("{}", ui.ok("This machine is up to date", ""));
         return Ok(());
     }
+    let changes = pkg::lock_changes(&old, &new);
+    let rows = changes
+        .iter()
+        .map(|(name, before, after)| format!("    {:<12} {before} → {after}", history::one_line(name, 12)))
+        .collect();
     let moved = pkg::moved_inputs(&String::from_utf8_lossy(&out.stderr));
-    eprint!("{}", String::from_utf8_lossy(&out.stderr));
     let change = Change {
         copy: &copy,
         path: "flake.lock",
         old: Some(&old),
         new: &new,
         reason: if moved.is_empty() { "Update".to_string() } else { format!("Update {}", moved.join(", ")) },
+        summary: Summary {
+            title: "Update this machine".into(),
+            rows,
+            system: true,
+            question: "Update?".into(),
+            done: "Updated".into(),
+            what: "update".into(),
+        },
     };
     submit(cli, scratch, &host, change, false)
 }
@@ -647,7 +788,7 @@ fn evaluate(copy: &Path, host: &str) -> Result<()> {
         .output()
         .context("running nix eval")?;
     if !out.status.success() {
-        bail!("this change would not build: {}", last_error(&out.stderr));
+        bail!("{}", pkg::explain_check_error(&history::one_line(&last_error(&out.stderr), 300)));
     }
     Ok(())
 }
@@ -729,10 +870,13 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// Ask on the terminal (`change` has already refused when there is none).
-fn confirm(question: &str) -> Result<bool> {
-    print!("{question} [y/N] ");
+fn confirm(ui: &ui::Ui, question: &str, default_yes: bool) -> Result<bool> {
+    print!("  {} {} ", ui.bold(question), if default_yes { "[Y/n]" } else { "[y/N]" });
     std::io::stdout().flush()?;
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
+    Ok(match answer.trim() {
+        "" => default_yes,
+        a => matches!(a, "y" | "Y" | "yes" | "Yes"),
+    })
 }

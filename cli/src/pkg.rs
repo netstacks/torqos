@@ -87,10 +87,33 @@ pub fn edit(current: &[String], names: &[String], how: Edit) -> (Vec<String>, Ve
     (list, changed)
 }
 
-/// Pull the proposal number out of `kestrel-broker propose` output ("proposal #12 · tier: ...").
-pub fn proposal_seq(broker_output: &str) -> Option<u64> {
-    let rest = broker_output.split("proposal #").nth(1)?;
-    rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+/// A failed pre-check (the Nix evaluation of the changed configuration), as a person needs it:
+/// what is wrong and what to do. Nothing has been proposed at this point.
+pub fn explain_check_error(msg: &str) -> String {
+    let name = msg.split('\'').nth(1).unwrap_or_default();
+    if msg.contains("is not a package in nixpkgs") {
+        format!("\"{name}\" isn't a package. Find the right name: kestrel pkg search {name}")
+    } else if msg.contains("is not available here") {
+        format!("{name} can't be installed here: it is unfree, broken, insecure, or not built for this machine.")
+    } else if msg.contains("is not a package name") {
+        format!("\"{name}\" isn't a package name. Find one: kestrel pkg search <words>")
+    } else {
+        format!("This change wouldn't work, so nothing was changed: {msg}")
+    }
+}
+
+/// What a broker refusal while proposing or applying means. `what` is the change in words
+/// ("install htop"); whether the machine is as it was is decided by the caller from `status`.
+pub fn explain_apply_error(what: &str, msg: &str) -> String {
+    if msg.contains("rebuild") {
+        format!("Couldn't {what}: building the new system failed.")
+    } else if msg.contains("does not apply cleanly") {
+        format!("Couldn't {what}: the configuration changed in the meantime. Try again.")
+    } else if msg.contains("interrupted and must be reconciled") {
+        format!("Couldn't {what}: an earlier change was interrupted. Finish it first: kestrel status")
+    } else {
+        format!("Couldn't {what}: {msg}")
+    }
 }
 
 /// An AuthorizedKeysFile pattern as sshd expands it for one user: `%%`, `%h` (home), `%u` (name)
@@ -154,6 +177,46 @@ pub fn key_options_note(line: &str) -> String {
     } else {
         format!("with options ({opts}): ")
     }
+}
+
+/// What an update moves, from the old and new flake.lock: each changed input with its date before
+/// and after ("kestrel", "2026-10-29", "2026-11-04"). Unknown dates are "?".
+pub fn lock_changes(old: &str, new: &str) -> Vec<(String, String, String)> {
+    let parse = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap_or_default();
+    let (old, new) = (parse(old), parse(new));
+    let secs = |v: &serde_json::Value| v["locked"]["lastModified"].as_u64();
+    // Same day before and after (a path input during development): the time tells them apart.
+    let when = |v: Option<u64>, same_day: bool| match v {
+        Some(s) if same_day => format!("{} {:02}:{:02}", ymd(s), s % 86_400 / 3_600, s % 3_600 / 60),
+        Some(s) => ymd(s),
+        None => "?".into(),
+    };
+    let mut out = Vec::new();
+    if let Some(nodes) = new["nodes"].as_object() {
+        for (name, node) in nodes {
+            let before = &old["nodes"][name];
+            if name != "root" && node["locked"] != before["locked"] {
+                let (a, b) = (secs(before), secs(node));
+                let same_day = matches!((a, b), (Some(a), Some(b)) if ymd(a) == ymd(b));
+                out.push((name.clone(), when(a, same_day), when(b, same_day)));
+            }
+        }
+    }
+    out
+}
+
+/// A Unix time as a UTC date, "2026-10-30" (civil-from-days, no time-zone database needed).
+pub fn ymd(secs: u64) -> String {
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// The inputs `nix flake update` reports ("• Updated|Added|Removed input 'x': ..." plus detail
@@ -234,6 +297,37 @@ mod tests {
     }
 
     #[test]
+    fn dates_and_lock_changes() {
+        assert_eq!(ymd(0), "1970-01-01");
+        assert_eq!(ymd(1_793_386_952), "2026-10-30");
+        assert_eq!(ymd(951_782_400), "2000-02-29");
+        let lock = |kt: u64, nt: u64| {
+            format!(r#"{{"nodes":{{"kestrel":{{"locked":{{"lastModified":{kt},"narHash":"a{kt}"}}}},"nixpkgs":{{"locked":{{"lastModified":{nt}}}}},"root":{{}}}}}}"#)
+        };
+        let moved = lock_changes(&lock(1_793_000_000, 1_790_000_000), &lock(1_793_386_952, 1_790_000_000));
+        assert_eq!(moved, vec![("kestrel".to_string(), "2026-10-26".to_string(), "2026-10-30".to_string())]);
+        let same = lock_changes(&lock(1_793_380_000, 1), &lock(1_793_386_952, 1));
+        assert_eq!(same[0].1, "2026-10-30 17:06"); // date -u -d @1793380000
+        assert_eq!(same[0].2, "2026-10-30 19:02");
+    }
+
+    #[test]
+    fn errors_say_what_to_do() {
+        assert_eq!(
+            explain_check_error("kestrel.packages: 'htpo' (user viper) is not a package in nixpkgs"),
+            "\"htpo\" isn't a package. Find the right name: kestrel pkg search htpo"
+        );
+        assert!(explain_check_error("kestrel.packages: 'vscode' (user viper) is not available here: unfree, ...")
+            .starts_with("vscode can't be installed here"));
+        assert!(explain_check_error("something else").starts_with("This change wouldn't work"));
+        assert_eq!(
+            explain_apply_error("install htop", "apply rolled back because the rebuild failed: rebuild command failed"),
+            "Couldn't install htop: building the new system failed."
+        );
+        assert!(explain_apply_error("x", "diff does not apply cleanly to the current config").contains("Try again"));
+    }
+
+    #[test]
     fn keys_patterns_expand_like_sshd() {
         let e = |p| expand_keys_pattern(p, "/home/viper", "viper", "1000");
         assert_eq!(e("%h/.ssh/authorized_keys").unwrap(), "/home/viper/.ssh/authorized_keys");
@@ -273,11 +367,5 @@ mod tests {
                    warning: something\n";
         assert_eq!(moved_inputs(out), v(&["kestrel", "kestrel/hw (added)", "old (removed)"]));
         assert!(moved_inputs("nothing to see").is_empty());
-    }
-
-    #[test]
-    fn finds_the_proposal_number() {
-        assert_eq!(proposal_seq("proposal #12 · tier: user · actor: user\nfiles: []"), Some(12));
-        assert_eq!(proposal_seq("no proposal here"), None);
     }
 }
