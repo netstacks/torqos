@@ -93,6 +93,28 @@ pub fn proposal_seq(broker_output: &str) -> Option<u64> {
     rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
 }
 
+/// An AuthorizedKeysFile pattern as sshd expands it for one user: `%%`, `%h` (home), `%u` (name)
+/// and `%U` (uid), in one left-to-right pass; a relative result is relative to the home directory.
+/// Any other token is refused rather than guessed at.
+pub fn expand_keys_pattern(pattern: &str, home: &str, user: &str, uid: &str) -> Result<String> {
+    let mut out = String::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('%') => out.push('%'),
+            Some('h') => out.push_str(home),
+            Some('u') => out.push_str(user),
+            Some('U') => out.push_str(uid),
+            other => anyhow::bail!("AuthorizedKeysFile pattern '{pattern}' uses %{} — not understood here", other.map(String::from).unwrap_or_default()),
+        }
+    }
+    Ok(if out.starts_with('/') { out } else { format!("{}/{out}", home.trim_end_matches('/')) })
+}
+
 /// What an authorized_keys line's options mean for who gets in, as a prefix for its description:
 /// a `cert-authority` line is not one key but everyone holding a certificate that CA signed.
 pub fn key_options_note(line: &str) -> String {
@@ -101,17 +123,36 @@ pub fn key_options_note(line: &str) -> String {
     if line.split_whitespace().next().is_some_and(is_key_type) {
         return String::new();
     }
-    // Options come before the key type; they may contain quoted spaces (command="...").
-    let opts = line
-        .match_indices(' ')
-        .map(|(i, _)| i)
-        .find(|&i| is_key_type(&line[i + 1..]))
-        .map(|i| &line[..i])
-        .unwrap_or(line);
-    if opts.split(',').any(|o| o.trim() == "cert-authority") {
+    // Read the options as sshd does: they end at the first space or tab outside double quotes, and
+    // are separated by commas outside quotes; names are case-insensitive.
+    let mut names = Vec::new();
+    let (mut current, mut quoted, mut end) = (String::new(), false, line.len());
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ' ' | '\t' if !quoted => {
+                end = i;
+                break;
+            }
+            ',' if !quoted => {
+                names.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        if !quoted && c != '"' {
+            current.push(c);
+        }
+    }
+    names.push(current);
+    let names: Vec<String> = names.iter().map(|o| o.split('=').next().unwrap_or("").trim().to_ascii_lowercase()).collect();
+    let opts: String = line[..end].chars().take(60).collect();
+    if names.iter().any(|n| n == "cert-authority") {
         "CERTIFICATE AUTHORITY — admits anyone with a certificate it signed: ".into()
+    } else if names.iter().any(|n| n == "no-touch-required") {
+        format!("no touch needed on the hardware key ({opts}): ")
     } else {
-        format!("restricted ({}): ", opts.chars().take(60).collect::<String>())
+        format!("with options ({opts}): ")
     }
 }
 
@@ -193,12 +234,34 @@ mod tests {
     }
 
     #[test]
+    fn keys_patterns_expand_like_sshd() {
+        let e = |p| expand_keys_pattern(p, "/home/viper", "viper", "1000");
+        assert_eq!(e("%h/.ssh/authorized_keys").unwrap(), "/home/viper/.ssh/authorized_keys");
+        assert_eq!(e("/etc/ssh/authorized_keys.d/%u").unwrap(), "/etc/ssh/authorized_keys.d/viper");
+        assert_eq!(e("/keys/%U").unwrap(), "/keys/1000");
+        assert_eq!(e("/odd/%%h").unwrap(), "/odd/%h", "one pass: %% is a literal %");
+        assert_eq!(e(".ssh/authorized_keys2").unwrap(), "/home/viper/.ssh/authorized_keys2", "relative to home");
+        assert!(e("/keys/%i").is_err() && e("/keys/%").is_err());
+    }
+
+    #[test]
     fn key_option_notes() {
         assert_eq!(key_options_note("ssh-ed25519 AAAA me@mac"), "");
         assert!(key_options_note("cert-authority ssh-ed25519 AAAA ca").starts_with("CERTIFICATE AUTHORITY"));
         assert!(key_options_note("cert-authority,principals=\"a b\" ecdsa-sha2-nistp256 AAAA").starts_with("CERTIFICATE"));
         let r = key_options_note("command=\"echo hi there\",from=\"10.0.0.1\" ssh-rsa AAAA x");
-        assert!(r.starts_with("restricted (command=\"echo hi there\",from=\"10.0.0.1\")"), "{r}");
+        assert!(r.starts_with("with options (command=\"echo hi there\",from=\"10.0.0.1\")"), "{r}");
+        // The reviewer's ways to make a CA look like a restricted key — sshd accepts all three.
+        for ca in [
+            "cert-authority\tssh-ed25519 AAAA ca",
+            "command=\"x ssh-\",cert-authority ssh-ed25519 AAAA ca",
+            "CERT-AUTHORITY ssh-ed25519 AAAA ca",
+        ] {
+            assert!(key_options_note(ca).starts_with("CERTIFICATE AUTHORITY"), "{ca:?}");
+        }
+        // ...and a CA mentioned only inside a quoted command is not one.
+        assert!(key_options_note("command=\"a,cert-authority,b\" ssh-ed25519 AAAA").starts_with("with options"));
+        assert!(key_options_note("no-touch-required sk-ssh-ed25519@openssh.com AAAA").starts_with("no touch"));
     }
 
     #[test]

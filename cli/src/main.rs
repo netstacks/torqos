@@ -402,7 +402,7 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<String>> {
         .arg(format!("{}#nixosConfigurations.{host}.config", flake_ref(copy)))
         .arg("--apply")
         .arg(format!(
-            "c: let k = c.users.users.{owner}.openssh.authorizedKeys; in \
+            "c: let k = c.users.users.\"{owner}\".openssh.authorizedKeys; in \
              {{ files = c.services.openssh.authorizedKeysFiles; declared = k.keys ++ map builtins.readFile k.keyFiles; }}"
         ))
         .output()
@@ -413,16 +413,21 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<String>> {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let out = Command::new("getent").args(["passwd", owner]).output().context("running getent")?;
     let entry = String::from_utf8_lossy(&out.stdout);
-    let home = entry.split(':').nth(5).filter(|h| !h.is_empty()).with_context(|| format!("no user '{owner}' on this machine"))?;
+    let fields: Vec<&str> = entry.trim().split(':').collect();
+    let (uid, home) = match fields.as_slice() {
+        [_, _, uid, _, _, home, ..] if !home.is_empty() => (*uid, *home),
+        _ => bail!("no user '{owner}' on this machine"),
+    };
 
     let mut sources: Vec<(String, String)> = Vec::new(); // (where, text)
     for pattern in v["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()) {
-        if pattern.starts_with("/etc/ssh/authorized_keys.d/") {
+        // Exactly the file NixOS writes the declared keys to: take those from the config instead.
+        if pattern == "/etc/ssh/authorized_keys.d/%u" {
             let declared = v["declared"].as_array().into_iter().flatten().filter_map(|k| k.as_str());
             sources.push(("declared in the config".into(), declared.collect::<Vec<_>>().join("\n")));
             continue;
         }
-        let file = pattern.replace("%h", home).replace("%u", owner).replace("%%", "%");
+        let file = pkg::expand_keys_pattern(pattern, home, owner, uid)?;
         match fs::read_to_string(&file) {
             Ok(t) => sources.push((file, t)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

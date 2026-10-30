@@ -54,7 +54,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    possible. Tailscale keeps its own settings (Tailscale SSH, exit node) in `/var/lib/tailscale`,
    outside the ledger, and re-enabling it rejoins with the old identity. Firmware updates (fwupd)
    are not offered until they can go through the broker (SECURITY-MODEL.md). The terminal-safe
-   printing is duplicated in the broker and the CLI (`printable` / `history::clean`).
+   printing is duplicated in the broker and the CLI (`printable` / `history::clean`). The SSH key
+   listing shows authorized_keys files and declared keys only, not other ways sshd can admit
+   someone (`AuthorizedKeysCommand`, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile`), which the
+   catalog does not pin either.
 
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is
