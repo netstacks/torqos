@@ -860,3 +860,39 @@ fn show_and_propose_neutralise_hidden_characters_in_diffs() {
     assert!(!shown.contains('\u{202e}') && !shown.contains('\u{1b}') && shown.contains('\n'), "{shown:?}");
     let _ = b;
 }
+
+/// ADR-014: the CLI reads the broker's results as data, never its human text.
+#[test]
+fn json_output_for_every_command_the_cli_uses() {
+    let (dir, _b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let json = |args: &[&str]| -> (Option<i32>, serde_json::Value) {
+        let mut all = vec!["--json"];
+        all.extend_from_slice(args);
+        let out = run_cli(dir.path(), "true", &all);
+        let v = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {out:?}"));
+        (out.status.code(), v)
+    };
+
+    let (code, p) = json(&["propose", "--diff", d.to_str().unwrap(), "--reason", "Night light"]);
+    assert_eq!(code, Some(0));
+    assert_eq!((p["seq"].as_u64(), p["kind"].as_str(), p["tier"].as_str()), (Some(2), Some("proposal"), Some("system")));
+    assert_eq!(p["data"]["files"], serde_json::json!(["desktop.nix"]));
+
+    let (_, a) = json(&["apply", "2", "--approved-by", "casey"]);
+    assert_eq!((a["seq"].as_u64(), a["kind"].as_str(), a["data"]["proposal"].as_u64()), (Some(3), Some("applied"), Some(2)));
+
+    let (code, s) = json(&["status"]);
+    assert_eq!(code, Some(0), "{s}");
+    assert_eq!(s["ok"], true);
+    assert_eq!(s["problems"], serde_json::json!([]));
+    assert_eq!(s["ledger_entries"].as_u64(), Some(3));
+
+    let (_, r) = json(&["rollback", "3", "--approved-by", "casey"]);
+    assert_eq!((r["kind"].as_str(), r["data"]["applied"].as_u64()), (Some("rolled_back"), Some(3)));
+
+    // Refusals are data too, with a non-zero exit.
+    let (code, e) = json(&["rollback", "3", "--approved-by", "casey"]);
+    assert_eq!(code, Some(1));
+    assert!(e["error"].as_str().unwrap().contains("already rolled back"), "{e}");
+}
