@@ -646,3 +646,68 @@ fn live_index_lock_is_refused_stale_one_removed() {
     b.reconcile("casey").unwrap().expect("stale lock removed, reconciled");
     assert!(!index_lock.exists());
 }
+
+/// A broker whose "running system" is a symlink the test controls, like /run/current-system.
+fn setup_with_system() -> (tempfile::TempDir, Broker, std::path::PathBuf) {
+    let (dir, _) = setup("true");
+    let link = dir.path().join("current-system");
+    std::os::unix::fs::symlink("/nix/store/aaa-system-1", &link).unwrap();
+    let b = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_current_system(&link);
+    (dir, b, link)
+}
+
+fn switch_to(link: &Path, target: &str) {
+    fs::remove_file(link).unwrap();
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+/// Every change records the system it switched to, so drift from the ledger can be detected.
+#[test]
+fn changes_record_the_running_system() {
+    let (dir, b, link) = setup_with_system();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+    assert_eq!(a.body.data["system"], "/nix/store/aaa-system-1");
+    switch_to(&link, "/nix/store/bbb-system-2");
+    let r = b.rollback(a.body.seq, "casey").unwrap();
+    assert_eq!(r.body.data["system"], "/nix/store/bbb-system-2");
+}
+
+/// Something switched the machine outside the broker (today's incident): status says so.
+#[test]
+fn status_detects_a_system_switched_outside_the_broker() {
+    let (dir, b, link) = setup_with_system();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    let s = b.status().unwrap();
+    assert!(s.problems().is_empty(), "{:?}", s.problems());
+
+    switch_to(&link, "/nix/store/zzz-nixos-system-nixos");
+    let s = b.status().unwrap();
+    let problems = s.problems().join("\n");
+    assert!(problems.contains("running system") && problems.contains("zzz-nixos-system-nixos"), "{problems}");
+}
+
+/// A commit in the config repo that the ledger does not know about.
+#[test]
+fn status_detects_an_unledgered_commit() {
+    let (dir, b, _) = setup_with_system();
+    fs::write(b.repo.root().join("desktop.nix"), "{ nightLight = true; }\n").unwrap();
+    git(&b, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "edited behind the broker's back"]);
+    let problems = b.status().unwrap().problems().join("\n");
+    assert!(problems.contains("config repo"), "{problems}");
+    let _ = dir;
+}
+
+#[test]
+fn status_reports_an_interrupted_operation_and_a_broken_ledger() {
+    let (dir, b, _) = crashed_apply();
+    let problems = b.status().unwrap().problems().join("\n");
+    assert!(problems.contains("interrupted"), "{problems}");
+    let ledger = dir.path().join("state/ledger.jsonl");
+    fs::write(&ledger, fs::read_to_string(&ledger).unwrap().replace("Night light", "Day light")).unwrap();
+    let problems = b.status().unwrap().problems().join("\n");
+    assert!(problems.contains("ledger"), "{problems}");
+}

@@ -16,6 +16,9 @@ struct Cli {
     /// Command run after each commit; `{repo}` is replaced with the repo path.
     #[arg(long, env = "KESTREL_REBUILD_CMD", default_value = "nixos-rebuild switch --flake {repo}")]
     rebuild_cmd: String,
+    /// Link to the running system, recorded after every rebuild and compared by `status`.
+    #[arg(long, env = "KESTREL_CURRENT_SYSTEM", default_value = "/run/current-system")]
+    current_system: PathBuf,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -65,11 +68,14 @@ enum Cmd {
     },
     /// Verify the ledger hash chain.
     Verify,
+    /// Compare the machine with its ledger: running system, config repo, interrupted operations,
+    /// ledger chain. Exits non-zero if anything is not as ledgered.
+    Status,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let b = Broker::new(&cli.repo, &cli.state_dir, &cli.rebuild_cmd);
+    let b = Broker::new(&cli.repo, &cli.state_dir, &cli.rebuild_cmd).with_current_system(&cli.current_system);
     match cli.cmd {
         Cmd::Init => {
             b.init()?;
@@ -119,6 +125,28 @@ fn main() -> Result<()> {
         Cmd::Verify => {
             let n = b.ledger.verify()?;
             println!("ledger OK: {n} entries, chain intact");
+        }
+        Cmd::Status => {
+            let s = b.status()?;
+            let or = |v: &Option<String>, none: &str| v.clone().unwrap_or_else(|| none.to_string());
+            println!("ledger          {}", match &s.ledger { Ok(n) => format!("OK, {n} entries"), Err(e) => e.clone() });
+            println!("config repo     {}  (ledgered: {})", or(&s.head, "?"), or(&s.ledgered_commit, "none"));
+            println!(
+                "running system  {}  (ledgered: {})",
+                or(&s.running_system, "?"),
+                or(&s.ledgered_system, "not recorded yet: from the next change on")
+            );
+            let problems = s.problems();
+            if problems.is_empty() && s.ledgered_system.is_none() {
+                println!("OK as far as recorded: the running system cannot be checked until a change records it");
+            } else if problems.is_empty() {
+                println!("OK: the machine is as the ledger says");
+            } else {
+                for p in &problems {
+                    println!("PROBLEM: {p}");
+                }
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

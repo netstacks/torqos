@@ -27,6 +27,52 @@ pub struct Broker {
     state_dir: PathBuf,
     /// Shell command run after each commit. `{repo}` is replaced with the repo path.
     rebuild_cmd: String,
+    /// The link to the running system (`/run/current-system`), recorded after every rebuild.
+    current_system: PathBuf,
+}
+
+/// How the machine compares with its ledger. See `Broker::status`.
+#[derive(Debug)]
+pub struct Status {
+    pub ledger: std::result::Result<usize, String>,
+    pub head: Option<String>,
+    /// The commit the ledger says the config repo is at.
+    pub ledgered_commit: Option<String>,
+    pub running_system: Option<String>,
+    /// The system the ledger says is running: recorded by the last rebuild (None before any).
+    pub ledgered_system: Option<String>,
+    /// An apply or rollback that was interrupted and not yet reconciled.
+    pub interrupted: Option<String>,
+}
+
+impl Status {
+    /// Everything that is not as the ledger says, worded for a person. Empty means all is well.
+    pub fn problems(&self) -> Vec<String> {
+        let mut p = Vec::new();
+        if let Err(e) = &self.ledger {
+            p.push(format!("ledger: {e}"));
+        }
+        if let Some(i) = &self.interrupted {
+            p.push(format!("{i} was interrupted: run `kestrel-broker reconcile --approved-by <name>`"));
+        }
+        if self.head.is_some() && self.head != self.ledgered_commit {
+            p.push(format!(
+                "config repo is at {}, not the last ledgered commit {}: it was changed outside the broker",
+                self.head.as_deref().unwrap_or("?"),
+                self.ledgered_commit.as_deref().unwrap_or("(none)")
+            ));
+        }
+        if let Some(want) = &self.ledgered_system {
+            if self.running_system.as_ref() != Some(want) {
+                p.push(format!(
+                    "running system is {}, not the last ledgered build {want}: it was switched outside the \
+                     broker (e.g. nixos-rebuild against another configuration)",
+                    self.running_system.as_deref().unwrap_or("(unknown)")
+                ));
+            }
+        }
+        p
+    }
 }
 
 /// Exclusive lock so only one broker operation runs at a time. An OS file lock (flock), so the
@@ -138,7 +184,50 @@ impl Broker {
             ledger: Ledger::open(state_dir.join("ledger.jsonl")),
             state_dir,
             rebuild_cmd: rebuild_cmd.into(),
+            current_system: PathBuf::from("/run/current-system"),
         }
+    }
+
+    pub fn with_current_system(mut self, link: impl Into<PathBuf>) -> Self {
+        self.current_system = link.into();
+        self
+    }
+
+    fn running_system(&self) -> Option<String> {
+        fs::read_link(&self.current_system).ok().map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Add the system the last rebuild switched to, so `status` can tell when the machine is later
+    /// switched to something else outside the broker.
+    fn with_system(&self, mut data: serde_json::Value) -> serde_json::Value {
+        data["system"] = self.running_system().into();
+        data
+    }
+
+    /// Compare the machine with its ledger. Read-only; takes no lock.
+    pub fn status(&self) -> Result<Status> {
+        let ledger = self.ledger.verify().map_err(|e| format!("{e:#}"));
+        let entries = self.ledger.read_all().unwrap_or_default();
+        let last = |key: &str, kinds: &[&str]| {
+            entries
+                .iter()
+                .rev()
+                .filter(|e| kinds.is_empty() || kinds.contains(&e.body.kind.as_str()))
+                .find_map(|e| e.body.data.get(key).and_then(|v| v.as_str()).map(String::from))
+        };
+        let interrupted = match self.read_pending()? {
+            Some(p) if !self.outcome_recorded(&p)? => Some(format!("the {} of #{}", p.op, p.target)),
+            _ => None,
+        };
+        Ok(Status {
+            ledger,
+            head: self.repo.head().ok(),
+            // apply_failed / rollback_failed carry no commit: the config is back at the previous one.
+            ledgered_commit: last("commit", &["init", "applied", "rolled_back", "interrupted"]),
+            running_system: self.running_system(),
+            ledgered_system: last("system", &[]),
+            interrupted,
+        })
     }
 
     pub fn init(&self) -> Result<()> {
@@ -317,7 +406,7 @@ impl Broker {
                     p.op, p.target, p.before
                 )
             },
-            data: json!({
+            data: self.with_system(json!({
                 "op": p.op,
                 "target": p.target,
                 "discarded_commit": p.commit,
@@ -325,7 +414,7 @@ impl Broker {
                 "commit": p.before,
                 "restored": restored,
                 "reconciled_by": by,
-            }),
+            })),
         })?;
         self.clear_pending()?;
         if !restored {
@@ -437,7 +526,7 @@ impl Broker {
                 tier: tier.to_string(),
                 tainted: p.body.tainted,
                 reason: Self::failure_reason("Rebuild", &before, restored),
-                data: json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored }),
+                data: self.with_system(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored })),
             })?;
             self.clear_pending()?;
             return Err(e.context("apply rolled back because the rebuild failed"));
@@ -450,7 +539,7 @@ impl Broker {
             tier: tier.to_string(),
             tainted: p.body.tainted,
             reason: p.body.reason.clone(),
-            data: json!({ "proposal": proposal_seq, "commit": commit, "files": files }),
+            data: self.with_system(json!({ "proposal": proposal_seq, "commit": commit, "files": files })),
         })?;
         self.clear_pending()?;
         Ok(e)
@@ -497,7 +586,7 @@ impl Broker {
                 tier: a.body.tier.clone(),
                 tainted: false,
                 reason: Self::failure_reason("Rollback rebuild", &before, restored),
-                data: json!({ "applied": applied_seq, "error": e.to_string(), "restored": restored }),
+                data: self.with_system(json!({ "applied": applied_seq, "error": e.to_string(), "restored": restored })),
             })?;
             self.clear_pending()?;
             return Err(e.context("rollback aborted because the rebuild failed"));
@@ -509,7 +598,7 @@ impl Broker {
             tier: a.body.tier.clone(),
             tainted: false,
             reason: format!("Undo: {}", a.body.reason),
-            data: json!({ "applied": applied_seq, "reverted_commit": commit, "commit": new_commit }),
+            data: self.with_system(json!({ "applied": applied_seq, "reverted_commit": commit, "commit": new_commit })),
         })?;
         self.clear_pending()?;
         Ok(e)
