@@ -30,8 +30,6 @@ git clone <your GitHub repo URL> ~/kestrel
 sudo nix flake new -t ~/kestrel#config /var/lib/kestrel/config
 sudo cp /etc/nixos/hardware-configuration.nix /var/lib/kestrel/config/
 sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/kestrel/config/system.nix          # the one place a user name is set
-# SSH on Kestrel is keys only (services.json): from the Mac, before the first switch:
-#   ssh-copy-id <user>@<vm-address>
 sudo sed -i "s|github:netstacks/kestrel|path:$HOME/kestrel|" /var/lib/kestrel/config/flake.nix  # dev: your checkout
 
 # d) First switch into Kestrel (explicit host name the first time)
@@ -76,6 +74,10 @@ kestrel service list               # what there is, and what is on
 kestrel service enable podman      # rootless containers, with a `docker` command
 kestrel service disable podman
 ```
+SSH is off on a new machine (it would only be listening: nobody has a key yet). To SSH in from the
+Mac, put your public key in `~/.ssh/authorized_keys` in the VM (paste it in the UTM console, or
+`ssh-copy-id` if you enabled SSH in the installer), then `kestrel service enable ssh`: it shows
+exactly which keys will be able to log in.
 To move the machine to the newest Kestrel (and so nixpkgs) — one ledgered, undoable `flake.lock`
 change: `kestrel update`. `sudo kestrel-broker status` says whether the machine is as its ledger
 says; it is also checked at boot and every 15 minutes, and a new shell warns if not.

@@ -3,7 +3,7 @@
 # through the broker. Each catalog entry is a service *with Kestrel's defaults* — "SSH, safely",
 # not every option the NixOS module has — and says what enabling it implies, because the diff a
 # person approves is just `+ "name"`. Anything beyond the catalog is a system-tier .nix change.
-{ config, lib, options, ... }:
+{ config, lib, ... }:
 
 let
   cfg = config.kestrel.services;
@@ -27,7 +27,8 @@ let
       # otherwise silently undo it while `kestrel service list` still says "keys only".
       holds = ssh.settings.PasswordAuthentication == false
         && ssh.settings.KbdInteractiveAuthentication == false
-        && ssh.settings.PermitRootLogin == "no";
+        && ssh.settings.PermitRootLogin == "no"
+        && ssh.settings.AllowUsers == [ owner ];
     };
     podman = {
       description = "Containers: rootless Podman for each user, with a `docker` command (no root API socket)";
@@ -51,13 +52,14 @@ let
     printing = {
       description = "Printing (CUPS, on localhost only)";
       config.services.printing.enable = true;
-      holds = true;
+      holds = config.services.printing.listenAddresses == [ "localhost:631" ];
     };
     # Not here yet: fwupd. Firmware updates must go through the broker (SECURITY-MODEL.md), and
     # fwupd applies them itself via polkit (KNOWN-GAPS).
   };
 
   file = dir + "/services.json";
+  fromFile = if dir != null && builtins.pathExists file then lib.importJSON file else [ ];
 in
 {
   options.kestrel.services = {
@@ -77,14 +79,15 @@ in
   config = lib.mkMerge (
     [
       {
-        kestrel.services.enabled = lib.mkIf (dir != null && builtins.pathExists file) (lib.importJSON file);
+        kestrel.services.enabled = lib.mkIf (dir != null && builtins.pathExists file) fromFile;
 
         assertions =
           [
             {
-              # One source of truth: a second definition would make `kestrel service` disagree
-              # with what is running.
-              assertion = lib.length options.kestrel.services.enabled.definitions <= 1;
+              # One source of truth: any other definition (added to the list, replacing it with
+              # mkForce, or set where there is no file) would make `kestrel service` disagree with
+              # what is running. Compare the result, not the number of definitions.
+              assertion = cfg.enabled == fromFile;
               message = "kestrel.services.enabled is set from services.json only (`kestrel service enable`), not in Nix.";
             }
           ]

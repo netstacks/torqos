@@ -6,5 +6,7 @@
   # setup: sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/kestrel/config/system.nix
   kestrel.user = "CHANGE-ME";
 
-  # Services (SSH included) are in services.json: `kestrel service list`. SSH there is keys only.
+  # Services are in services.json: `kestrel service list`. All off by default — SSH included: a new
+  # machine has no keys yet, so it would only be listening. Install your key, then
+  # `kestrel service enable ssh` (keys only, only you).
 }
