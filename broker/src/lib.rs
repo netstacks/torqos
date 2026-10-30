@@ -34,20 +34,43 @@ impl Lock {
     fn acquire(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir)?;
         let p = dir.join("broker.lock");
-        let f = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&p)?;
-        f.try_lock()
-            .with_context(|| format!("another broker operation is running ({})", p.display()))?;
+        OpenOptions::new().write(true).create(true).truncate(false).open(&p)?;
+        // Read-only: the fd is handed to the rebuild as stdin, and nothing should write into it.
+        let f = fs::File::open(&p)?;
+        f.try_lock().with_context(|| {
+            format!("another broker operation is running ({}; held by: {})", p.display(), holders(&p))
+        })?;
         Ok(Lock(f))
     }
 
     /// The lock as a child's stdin, so the rebuild's whole process tree holds it too. Killing the
     /// broker does not stop `nixos-rebuild`, which may still switch the system; the next operation
     /// must wait for it rather than race it. A dup shares the open file description, which is what
-    /// flock locks belong to, so the lock lasts until the last holder exits. (Read as stdin, the
-    /// empty lock file is just EOF.)
+    /// flock locks belong to, so the lock lasts until the last holder exits. The rebuild
+    /// therefore has no terminal: anything that prompts (nix flake config, sudo, ssh host keys)
+    /// reads EOF and fails, which is what a broker wants.
     fn for_child(&self) -> Result<Stdio> {
         Ok(Stdio::from(self.0.try_clone()?))
     }
+}
+
+/// Processes with the lock file open, for the "operation is running" error: a process that
+/// inherited the lock from a rebuild and outlived it would otherwise wedge the broker silently.
+fn holders(lock: &Path) -> String {
+    let lock = fs::canonicalize(lock).unwrap_or_else(|_| lock.to_path_buf());
+    let me = std::process::id().to_string();
+    let mut found = Vec::new();
+    for proc in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        if proc.file_name() == me.as_str() {
+            continue; // we have it open too, having just failed to lock it
+        }
+        let Ok(fds) = fs::read_dir(proc.path().join("fd")) else { continue };
+        if fds.flatten().any(|fd| fs::read_link(fd.path()).is_ok_and(|t| t == lock)) {
+            let comm = fs::read_to_string(proc.path().join("comm")).unwrap_or_default();
+            found.push(format!("{} ({})", proc.file_name().to_string_lossy(), comm.trim()));
+        }
+    }
+    if found.is_empty() { "unknown".into() } else { found.join(", ") }
 }
 
 impl Broker {

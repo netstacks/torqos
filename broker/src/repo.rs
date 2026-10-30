@@ -54,6 +54,18 @@ impl Repo {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
+    /// Flush the repo's whole filesystem (`syncfs`): working tree, objects, refs and directory
+    /// renames. `core.fsync` covers only git's own files, but the rebuild builds the working tree
+    /// and the ledger is fsynced on every append, so after a power loss the repo must not be behind
+    /// either. Called after every write, before the rebuild and the ledger append.
+    fn sync(&self) -> Result<()> {
+        let st = Command::new("sync").arg("--file-system").arg(&self.root).status().context("running sync")?;
+        if !st.success() {
+            bail!("sync --file-system {} failed ({st})", self.root.display());
+        }
+        Ok(())
+    }
+
     pub fn is_initialised(&self) -> bool {
         self.root.join(".git").exists()
     }
@@ -69,6 +81,7 @@ impl Repo {
             return Ok(());
         }
         self.git(&["commit", "-q", "--allow-empty", "-m", "Baseline configuration\n\nLedger-Entry: init"])?;
+        self.sync()?;
         Ok(())
     }
 
@@ -109,6 +122,7 @@ impl Repo {
         let p = path::absolute(diff_path)?.to_string_lossy().into_owned();
         self.git(&["apply", "--index", p.as_str()])?;
         self.git(&["commit", "-q", "-m", message])?;
+        self.sync()?;
         self.head()
     }
 
@@ -119,14 +133,17 @@ impl Repo {
             // block every later broker operation. Put the repo back exactly as it was.
             let _ = self.git(&["revert", "--abort"]);
             self.git(&["reset", "-q", "--hard", "HEAD"])?;
+            self.sync()?;
             return Err(e.context(format!("cannot undo {commit} cleanly: later changes conflict with it")));
         }
         self.git(&["commit", "-q", "-m", message])?;
+        self.sync()?;
         self.head()
     }
 
     pub fn hard_reset(&self, commit: &str) -> Result<()> {
         self.git(&["reset", "-q", "--hard", commit])?;
+        self.sync()?;
         Ok(())
     }
 

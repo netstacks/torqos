@@ -317,12 +317,17 @@ fn crash_mid_rollback_is_reconciled_by_next_operation() {
 fn rebuild_outliving_a_killed_broker_keeps_the_lock() {
     use std::os::unix::process::ExitStatusExt;
     let (dir, b) = setup("true");
+    let go = dir.path().join("go");
     let done = dir.path().join("late-rebuild-finished");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
 
-    // Kill the broker, then keep "rebuilding" for a while (this shell survives its parent).
-    let rebuild = format!("kill -KILL $PPID; sleep 2; touch {}", done.display());
+    // Kill the broker, then keep "rebuilding" (this shell survives its parent) until told to stop.
+    let rebuild = format!(
+        "kill -KILL $PPID; while [ ! -e {go} ]; do sleep 0.05; done; touch {done}",
+        go = go.display(),
+        done = done.display()
+    );
     let status = Command::new(env!("CARGO_BIN_EXE_kestrel-broker"))
         .arg("--repo").arg(dir.path().join("config"))
         .arg("--state-dir").arg(dir.path().join("state"))
@@ -335,11 +340,13 @@ fn rebuild_outliving_a_killed_broker_keeps_the_lock() {
     assert_eq!(status.signal(), Some(9));
     assert!(!done.exists(), "the rebuild should still be running");
 
-    let locked = |b: &Broker| match b.apply(p.body.seq, "casey", false) {
-        Err(e) => format!("{e:#}").contains("another broker operation is running"),
-        Ok(_) => false,
-    };
-    assert!(locked(&b), "the surviving rebuild must still hold the broker lock");
+    // propose takes the lock but never rebuilds, so the probe is about the lock only.
+    let lock_error = |b: &Broker| b.propose(&d, "probe", Actor::User, false).err().map(|e| format!("{e:#}"));
+    let locked = |b: &Broker| lock_error(b).is_some_and(|e| e.contains("another broker operation is running"));
+    let err = lock_error(&b).unwrap();
+    assert!(err.contains("another broker operation is running"), "the surviving rebuild must still hold the broker lock: {err}");
+    assert!(!err.contains("held by: unknown"), "the error must name the process holding the lock: {err}");
+    fs::write(&go, "").unwrap();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while locked(&b) {
