@@ -253,7 +253,13 @@ impl Broker {
         self.refuse_if_interrupted()?;
         let diff = fs::read_to_string(diff_path)
             .with_context(|| format!("reading diff {}", diff_path.display()))?;
-        let files = self.repo.diff_files(diff_path)?;
+        // Classify exactly the bytes that go into the ledger: the caller's file is read once and
+        // could change between two reads.
+        let copy = self.state_dir.join("proposing.diff");
+        fs::write(&copy, &diff)?;
+        let files = self.repo.diff_files(&copy);
+        let _ = fs::remove_file(&copy);
+        let files = files?;
         if files.is_empty() {
             bail!("diff changes no files");
         }

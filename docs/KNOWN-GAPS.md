@@ -19,8 +19,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    `kestrel.security.lockdown = "none"`, or swapping `kestrel.url` in `flake.nix`. Today only
    human review of the diff catches these. Needs a design (evaluate the old and new config and
    diff protected options?).
-4. **Caller-supplied identity:** `--actor`, `--tainted`, `--approved-by` and
-   `KESTREL_REBUILD_CMD` are trusted as given. Fine under sudo in M1; the M3 socket must take
+4. **Caller-supplied identity and configuration:** `--actor`, `--tainted`, `--approved-by`,
+   `--repo`, `--state-dir` and `KESTREL_REBUILD_CMD` are trusted as given (under sudo, the
+   last three let a wheel user point a root broker anywhere; they must come from fixed config
+   before any narrow sudoers rule or the socket). Fine under sudo in M1; the M3 socket must take
    identity from `SO_PEERCRED` and the rebuild command from fixed config. `kestrel pkg` inherits
    this: it passes `--actor user --approved-by $(id -un)` itself, so anything running as the user
    (a script, an AI tool in their terminal) can approve a user-tier change with `--yes`; it does

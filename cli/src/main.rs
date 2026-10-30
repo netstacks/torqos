@@ -11,14 +11,18 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+const REPO: &str = "/var/lib/kestrel/config";
+const BROKER: &str = "sudo kestrel-broker";
+
 #[derive(Parser)]
 #[command(name = "kestrel", version, about = "Kestrel: change this machine through the broker")]
 struct Cli {
-    /// The machine's config repo.
-    #[arg(long, env = "KESTREL_CONFIG_REPO", default_value = "/var/lib/kestrel/config")]
+    /// The machine's config repo. Only for testing, together with --broker: the real broker
+    /// manages /var/lib/kestrel/config and nothing else.
+    #[arg(long, env = "KESTREL_CONFIG_REPO", default_value = REPO)]
     repo: PathBuf,
     /// How to run the broker (it needs root).
-    #[arg(long, env = "KESTREL_BROKER", default_value = "sudo kestrel-broker")]
+    #[arg(long, env = "KESTREL_BROKER", default_value = BROKER)]
     broker: String,
     #[command(subcommand)]
     cmd: Cmd,
@@ -154,6 +158,7 @@ fn flake_ref(dir: &Path) -> String {
 }
 
 fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Result<()> {
+    check_repo(cli)?;
     let user = me()?;
     // Decide how approval happens before proposing anything, so a refusal leaves no proposal
     // behind. The CLI cannot enforce who approves (anything running as you can run it; KNOWN-GAPS
@@ -186,7 +191,12 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
     }
 
     // Private (0700) and unpredictable: the broker, as root, reads the diff from here.
-    let scratch = tempfile::Builder::new().prefix("kestrel-pkg-").tempdir().context("creating a scratch directory")?;
+    // In XDG_RUNTIME_DIR (the user's own) if there is one, else /tmp; TMPDIR is not consulted.
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
+    let scratch = tempfile::Builder::new()
+        .prefix("kestrel-pkg-")
+        .tempdir_in(base)
+        .context("creating a scratch directory")?;
     let scratch = scratch.path();
     let new_text = pkg::render(&new);
     let host = config_name(&cli.repo)?;
@@ -226,13 +236,26 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
     Ok(())
 }
 
-/// The broker, told explicitly which repo: the one this CLI read and evaluated (sudo drops
-/// KESTREL_CONFIG_REPO from the environment).
+/// The broker. Its repo is never passed: the real broker (as root) manages the machine's config
+/// repo and nothing else, and `change` has refused to read a different one with it.
 fn broker(cli: &Cli, args: &[&str]) -> Command {
     let mut words = cli.broker.split_whitespace();
     let mut c = Command::new(words.next().unwrap_or("kestrel-broker"));
-    c.args(words).arg("--repo").arg(&cli.repo).args(args);
+    c.args(words).args(args);
     c
+}
+
+/// A repo override only makes sense with a broker override (tests): with the real broker, a stray
+/// KESTREL_CONFIG_REPO would mean evaluating one repo while root changes another.
+fn check_repo(cli: &Cli) -> Result<()> {
+    if cli.broker == BROKER && cli.repo != Path::new(REPO) {
+        bail!(
+            "the config repo is set to {} (KESTREL_CONFIG_REPO?), but the broker only manages {REPO}; \
+             unset it",
+            cli.repo.display()
+        );
+    }
+    Ok(())
 }
 
 /// The single nixosConfiguration in the config repo. (Not the hostname: a machine whose config was
