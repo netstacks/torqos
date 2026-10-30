@@ -97,7 +97,25 @@ impl Schema {
         if s.version != 1 {
             bail!("this torqcli reads schema version 1, not {}", s.version);
         }
+        // Each file is one kind of thing: a leaf-list's alone, or leaves' (an object). No two file
+        // patterns may match the same file unless they are the same pattern for leaves.
+        let files: Vec<(&String, &Node)> = s.nodes.iter().filter(|(_, n)| n.file.is_some()).collect();
+        for (i, (ka, a)) in files.iter().enumerate() {
+            for (kb, b) in &files[i + 1..] {
+                let (pa, pb) = (a.file.as_deref().unwrap(), b.file.as_deref().unwrap());
+                let overlap = matches_file(pa, &pb.replace("<name>", "x")).is_some() || matches_file(pb, &pa.replace("<name>", "x")).is_some();
+                let both_leaves = a.kind == Kind::Leaf && b.kind == Kind::Leaf && pa == pb;
+                if overlap && !both_leaves {
+                    bail!("schema: {ka} and {kb} would share a file ({pa}, {pb})");
+                }
+            }
+        }
         Ok(s)
+    }
+
+    /// Whether `path` is one of the tree's files.
+    pub fn describes(&self, path: &str) -> bool {
+        self.nodes.values().any(|n| n.file.as_deref().is_some_and(|p| matches_file(p, path).is_some()))
     }
 
     fn node(&self, key: &str) -> &Node {
@@ -320,26 +338,57 @@ impl Schema {
     pub fn load<'a>(&self, files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<Config> {
         let mut cfg = Config::default();
         for (path, bytes) in files {
-            let nodes: Vec<&Node> = self.nodes.values().filter(|n| n.file.as_deref().is_some_and(|p| matches_file(p, path).is_some())).collect();
-            let Some(first) = nodes.first() else { continue };
+            let nodes: Vec<(&String, &Node)> =
+                self.nodes.iter().filter(|(_, n)| n.file.as_deref().is_some_and(|p| matches_file(p, path).is_some())).collect();
+            let Some((first_key, first)) = nodes.first() else { continue };
             let bad = |why: String| anyhow::anyhow!("{path}: {why}; torqcli cannot show it — fix the file (as raw JSON) first");
+            // The list entry it belongs to must have a valid name (an existing one: it has settings).
+            if let Some(name) = matches_file(first.file.as_deref().unwrap_or_default(), path).flatten() {
+                let list = first_key.split(" <name>").next().unwrap_or_default();
+                check_name(list, self.node(list), &name, true).map_err(|e| bad(e.to_string()))?;
+            }
+            // Values as the shell would accept them in form: never whitespace or control characters.
+            // (Not membership of a closed set: a zone a newer tzdata dropped must not make an older
+            // configuration unreadable; evaluation decides.)
+            let value_ok = |key: &str, v: &str| -> Result<()> {
+                let n = self.node(key);
+                let shaped = match n.ty.as_deref() {
+                    Some("package") => package_name_ok(v),
+                    Some("host-name") => host_name_ok(v),
+                    Some("user-name") => user_name_ok(v),
+                    _ => !v.is_empty() && !v.chars().any(|c| c.is_whitespace() || c.is_control()),
+                };
+                if !shaped {
+                    bail!(bad(format!("{} is not a valid {}", serde_json::to_string(v)?, key.replace("<name>", "…"))));
+                }
+                Ok(())
+            };
             let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| bad(format!("not JSON ({e})")))?;
             let data = if first.kind == Kind::LeafList {
                 let list = v.as_array().ok_or_else(|| bad("must be a JSON list".into()))?;
-                Data::List(list.iter().map(|x| x.as_str().map(String::from).ok_or_else(|| bad(format!("{x} is not a string")))).collect::<Result<_>>()?)
+                let items: Vec<String> = list.iter().map(|x| x.as_str().map(String::from).ok_or_else(|| bad(format!("{x} is not a string")))).collect::<Result<_>>()?;
+                for i in &items {
+                    value_ok(first_key, i)?;
+                }
+                Data::List(items)
             } else {
                 let obj = v.as_object().ok_or_else(|| bad("must be a JSON object".into()))?;
-                let keys: BTreeSet<&str> = nodes.iter().filter_map(|n| n.key.as_deref()).collect();
                 let mut o = BTreeMap::new();
                 for (k, x) in obj {
-                    if !keys.contains(k.as_str()) {
+                    let Some((key, _)) = nodes.iter().find(|(_, n)| n.key.as_deref() == Some(k.as_str())) else {
                         bail!(bad(format!("\"{k}\" is not a setting")));
-                    }
-                    o.insert(k.clone(), x.as_str().map(String::from).ok_or_else(|| bad(format!("\"{k}\" is not a string")))?);
+                    };
+                    let x = x.as_str().ok_or_else(|| bad(format!("\"{k}\" is not a string")))?;
+                    value_ok(key, x)?;
+                    o.insert(k.clone(), x.to_string());
                 }
                 Data::Object(o)
             };
-            cfg.files.insert(path.to_string(), data);
+            // An empty file is no setting: the same as no file.
+            let empty = matches!(&data, Data::List(l) if l.is_empty()) || matches!(&data, Data::Object(o) if o.is_empty());
+            if !empty {
+                cfg.files.insert(path.to_string(), data);
+            }
         }
         Ok(cfg)
     }
@@ -761,9 +810,46 @@ mod tests {
         assert!(err(s.set(&mut c, &w("users old packages htop"))).contains("not one of the users"));
         s.delete(&mut c, &w("users old")).unwrap();
         assert!(c.files.is_empty());
-        // Still only well-formed names.
-        let c = s.load([("users/Old/packages.json", br#"["vim"]"#.as_slice())]).unwrap();
-        assert!(format!("{:#}", s.show(&c, &w("users Old")).unwrap_err()).contains("not a valid name"));
+        // Still only well-formed names: a file under a malformed one does not even load.
+        let e = format!("{:#}", s.load([("users/Old/packages.json", br#"["vim"]"#.as_slice())]).unwrap_err());
+        assert!(e.contains("users/Old/packages.json") && e.contains("not a valid name"), "{e}");
+    }
+
+    /// Loading checks the form of names and values (review of ef8d7f8): nothing the shell could not
+    /// show plainly, or read back from `display set`, gets in. Empty files are no settings.
+    #[test]
+    fn load_checks_names_and_values() {
+        let s = schema();
+        for (path, body, why) in [
+            ("users/a b/cli.json", r#"{"style":"cisco"}"#, "not a valid name"),
+            ("users/dev/cli.json", "{\"style\":\"x\\ny\"}", "is not a valid users … cli style"),
+            ("system/packages.json", r#"["a.b.c"]"#, "is not a valid system packages"),
+            ("system/host.json", r#"{"host-name":"my_laptop"}"#, "is not a valid system host-name"),
+        ] {
+            let e = format!("{:#}", s.load([(path, body.as_bytes())]).unwrap_err());
+            assert!(e.contains(path) && e.contains(why), "{path}: {e}");
+        }
+        // A closed set is checked in form only: a zone tzdata no longer lists still loads.
+        let c = s.load([("system/host.json", br#"{"time-zone":"Asia/Old_Zone"}"#.as_slice())]).unwrap();
+        assert_eq!(s.show(&c, &w("system time-zone")).unwrap(), "time-zone Asia/Old_Zone;\n");
+        let c = s.load([("system/host.json", b"{}".as_slice()), ("services.json", b"[]".as_slice())]).unwrap();
+        assert!(c.files.is_empty());
+    }
+
+    /// The schema itself: two nodes may only share a file as leaves of one object (review of ef8d7f8).
+    #[test]
+    fn schema_files_do_not_overlap() {
+        let base: serde_json::Value = serde_json::from_str(include_str!("schema-fixture.json")).unwrap();
+        for (path, node) in [
+            ("system packages2", r#"{"kind":"leaf","help":"x","file":"system/packages.json","key":"k"}"#),
+            ("users <name> other", r#"{"kind":"leaf-list","help":"x","file":"users/<name>/packages.json"}"#),
+            ("system special", r#"{"kind":"leaf-list","help":"x","file":"users/dev/packages.json"}"#),
+        ] {
+            let mut v = base.clone();
+            v["nodes"][path] = serde_json::from_str(node).unwrap();
+            let e = format!("{:#}", Schema::parse(&v.to_string()).unwrap_err());
+            assert!(e.contains("would share a file"), "{path}: {e}");
+        }
     }
 
     /// Loading refuses what the tree cannot show, naming the file; it skips files outside the tree.
