@@ -47,9 +47,10 @@ let
 
   # Same shape and leaves the broker treats as user tier (broker/src/policy.rs, is_user_data).
   isUserName = s: builtins.match "[a-z_][a-z0-9_-]*" s != null;
-  # A leaf is added only together with the typed setting that reads it, here and in the broker's
-  # USER_LEAVES at the same time: packages.json (this module), cli.json (modules/cli.nix).
-  userLeaves = [ "packages.json" "cli.json" ];
+  # A leaf is added only together with the typed setting that reads it: packages.json (this module),
+  # cli.json (modules/cli.nix). One list for the broker and the modules: broker/user-leaves.json
+  # (the broker's own test checks its USER_LEAVES against it).
+  userLeaves = lib.importJSON ../broker/user-leaves.json;
   usersDir = dir + "/users";
   entries = if dir != null && builtins.pathExists usersDir then builtins.readDir usersDir else { };
 
@@ -131,6 +132,17 @@ in
       }) links;
 
     torq.schema = {
+      users = {
+        kind = "list";
+        help = "People with an account on this machine";
+        type = "user-name";
+        # The machine's normal users whose names the broker treats as user tier (isUserName): the
+        # only names `users <name>` may take. Names only — not their descriptions (full names).
+        values = lib.genAttrs
+          (lib.filter isUserName (lib.attrNames (lib.filterAttrs (_: u: u.isNormalUser) config.users.users)))
+          (_: "");
+      };
+      "users <name>" = { kind = "container"; help = "One person's own settings"; tier = "user"; };
       "system packages" = {
         kind = "leaf-list";
         help = "Software installed for everyone (nixpkgs names)";

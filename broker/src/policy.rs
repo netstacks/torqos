@@ -57,9 +57,9 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
 /// a directory: a leaf a later release starts reading (say `ssh-keys.json`) must not become user
 /// tier by accident, and a file planted today must not become active then. Any `.nix` file is a
 /// full NixOS module (sudo rules, services, ...) wherever it lives, so it is system tier. Keep in
-/// step with `userLeaves` in modules/packages.nix. A leaf is added only together with the typed
-/// module that reads it, and with its shape in `user_leaf_ok`: `packages.json` (modules/packages.nix),
-/// `cli.json` (modules/cli.nix).
+/// step with broker/user-leaves.json, which modules/packages.nix reads (tested below). A leaf is
+/// added only together with the typed module that reads it, and with its shape in `user_leaf_ok`:
+/// `packages.json` (modules/packages.nix), `cli.json` (modules/cli.nix).
 pub const USER_LEAVES: &[&str] = &["packages.json", "cli.json"];
 
 /// The CLI styles `torqcli` speaks (`cli.json`'s "style"; modules/cli.nix).
@@ -190,6 +190,9 @@ mod tests {
             assert_eq!(tier_for_path(p), Tier::User, "{p}");
         }
         assert_eq!(USER_LEAVES, ["packages.json", "cli.json"]);
+        // The modules read the same list (modules/packages.nix): the two cannot drift apart.
+        let shared: Vec<String> = serde_json::from_str(include_str!("../user-leaves.json")).unwrap();
+        assert_eq!(USER_LEAVES, shared, "broker/user-leaves.json");
     }
 
     /// Each user leaf has exactly one shape; anything else is refused at propose rather than failing

@@ -87,7 +87,32 @@ let
     ++ lib.optional (builtins.elem n.kind [ "container" "list" ] && (has "file" || has "key")) "schema ${path}: a ${n.kind} has no file"
     ++ lib.optional ((n.tier == "user") != underUser path) "schema ${path}: tier ${n.tier}"
     ++ lib.optional (has "file" && underUser path && !(lib.hasPrefix "users/<name>/" n.file)) "schema ${path}: file outside users/<name>/"
+    ++ lib.optional (has "file" && !(underUser path) && lib.hasPrefix "users/" n.file) "schema ${path}: system tier inside users/"
   ) nodes)
+  # Each setting is in exactly one place: no two nodes share a (file, key), and a leaf-list's file is
+  # its own (a leaf-list is the whole file).
+  ++ (let
+    withFile = lib.filter (n: n ? file) (lib.attrValues nodes);
+    places = map (n: "${n.file}#${n.key or "*"}") withFile;
+    listFiles = map (n: n.file) (lib.filter (n: n.kind == "leaf-list") withFile);
+    sharedLists = lib.filter (f: lib.count (n: n.file == f) withFile > 1) listFiles;
+  in lib.optional (lib.length (lib.unique places) != lib.length places) "schema: two nodes share a file and key"
+    ++ lib.optional (sharedLists != [ ]) "schema: a leaf-list's file is also used elsewhere: ${toString sharedLists}")
+  # `users` offers only names the broker treats as user tier, and no descriptions (full names).
+  ++ (let
+    withOdd = (self.lib.mkSystem {
+      system = pkgs.stdenv.hostPlatform.system;
+      configDir = ./tree/cli-good;
+      modules = [ {
+        torq.user = "dev";
+        users.users.dev.description = "Secret Person"; # a listed user's full name must not be copied
+        users.users."Bad.Name".isNormalUser = true;
+      } ];
+    }).config;
+    users = (builtins.fromJSON withOdd.environment.etc."torq/schema.json".text).nodes.users;
+  in lib.optional (users.values ? "Bad.Name" || !(users.values ? dev)) "schema: users ${builtins.toJSON users.values}"
+    ++ lib.optional (lib.hasInfix "Secret" (builtins.toJSON users)) "schema: users carries descriptions"
+    ++ lib.optional ((users.type or null) != "user-name") "schema: users has no name type")
   ++ (let
     described = lib.unique (map (n: lib.removePrefix "users/<name>/" n.file)
       (lib.filter (n: n ? file && n.tier == "user") (lib.attrValues nodes)));
