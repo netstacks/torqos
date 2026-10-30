@@ -1,4 +1,4 @@
-//! `kestrel log` and `kestrel undo`: the ledger, as the broker prints it (`log --json`; the ledger
+//! `torq log` and `torq undo`: the ledger, as the broker prints it (`log --json`; the ledger
 //! itself is root-only). Pure parts here; main.rs talks to the broker.
 
 use anyhow::{bail, Context, Result};
@@ -46,7 +46,7 @@ pub fn one_line(s: &str, max: usize) -> String {
     if s.chars().count() <= max { s } else { format!("{}…", s.chars().take(max - 1).collect::<String>()) }
 }
 
-/// One JSON object per line, as `kestrel-broker log --json` prints them.
+/// One JSON object per line, as `torq-broker log --json` prints them.
 pub fn parse(json_lines: &str) -> Result<Vec<Entry>> {
     json_lines
         .lines()
@@ -206,7 +206,7 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
             ("✗", format!("Undo failed: {what}"))
         }
         "interrupted" => ("⚠", format!("Interrupted: {}", reason_of(entries, e.data["target"].as_u64()).unwrap_or("a change"))),
-        "init" => ("·", "Kestrel set up".to_string()),
+        "init" => ("·", "TorqOS set up".to_string()),
         "repaired" if e.data["restored"] == false => ("✗", "Tried to return the machine to its history".to_string()),
         "repaired" => ("✓", "Returned the machine to its history".to_string()),
         "proposal" => ("·", format!("Proposed, not applied: {}", e.reason)),
@@ -277,12 +277,12 @@ pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock
     if shown.is_empty() {
         out.push_str("  Nothing has changed yet.\n");
     } else {
-        out.push_str(&format!("{}\n", ui.dim("\n  undo the latest: kestrel undo · one change in detail: kestrel log <number>")));
+        out.push_str(&format!("{}\n", ui.dim("\n  undo the latest: torq undo · one change in detail: torq log <number>")));
     }
     out
 }
 
-/// One change in detail (`kestrel log 25`): what, when, by whom, its tier, the files, and whether it
+/// One change in detail (`torq log 25`): what, when, by whom, its tier, the files, and whether it
 /// is still in effect.
 pub fn render_one(entries: &[Entry], seq: u64, ui: &crate::ui::Ui, clock: &Clock) -> anyhow::Result<String> {
     let e = entries.iter().find(|e| e.seq == seq).with_context(|| format!("there is no change {seq}"))?;
@@ -302,7 +302,7 @@ pub fn render_one(entries: &[Entry], seq: u64, ui: &crate::ui::Ui, clock: &Clock
     if e.kind == "applied" {
         let state = match undone_by(entries, e.seq) {
             Some(by) => format!("undone by change {by}"),
-            None => format!("in effect · undo: kestrel undo {}", e.seq),
+            None => format!("in effect · undo: torq undo {}", e.seq),
         };
         out.push_str(&format!("    {:<10}{state}\n", "Status"));
     }
@@ -395,20 +395,20 @@ mod tests {
         assert_eq!(parse_offset("UTC"), None);
     }
 
-    /// Snapshot of `kestrel log`: proposals folded into their results, undos named, local times,
+    /// Snapshot of `torq log`: proposals folded into their results, undos named, local times,
     /// system changes tagged, a proposal never applied shown as such.
     #[test]
     fn log_snapshot() {
         let out = render(&ledger(), 100, &Ui::plain(), &clock());
         let expected = [
             "  Today",
-            "    08:00   · Kestrel set up                                         1  (system)",
+            "    08:00   · TorqOS set up                                          1  (system)",
             "    08:01   ✓ Install htop for viper                                           3",
             "    08:02   ✓ Install jq system-wide                                 5  (system)",
             "    08:03   ↶ Undid \"Install jq system-wide\"                         6  (system)",
             "    08:04   · Proposed, not applied: Install vim for viper                     7",
             "",
-            "  undo the latest: kestrel undo · one change in detail: kestrel log <number>",
+            "  undo the latest: torq undo · one change in detail: torq log <number>",
         ]
         .join("\n");
         assert_eq!(out.trim_end(), expected, "\n{out}");

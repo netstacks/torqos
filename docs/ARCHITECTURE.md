@@ -29,8 +29,8 @@ Six layers, bottom up. Each lists what we **reuse** and what we **build**.
 
 ## Layer 1 — Base
 
-- The **system config lives in a local git repo** at `/var/lib/kestrel/config`
-  (a flake that imports the Kestrel modules plus per-machine settings).
+- The **system config lives in a local git repo** at `/var/lib/torq/config`
+  (a flake that imports the TorqOS modules plus per-machine settings).
 - Every rebuild = a NixOS generation, listed in the boot menu.
 - `/home` on btrfs with snapper snapshots (covers user files, which Nix does not).
 - Optional later: impermanence (root wiped each boot; only declared state persists).

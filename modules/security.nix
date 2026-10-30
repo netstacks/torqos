@@ -1,10 +1,10 @@
 { config, lib, ... }:
 
 let
-  cfg = config.kestrel.security;
+  cfg = config.torq.security;
 in
 {
-  options.kestrel.security = {
+  options.torq.security = {
     hardening.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -31,7 +31,7 @@ in
     {
       assertions = [{
         assertion = !cfg.secureBoot.enable;
-        message = "kestrel.security.secureBoot is not implemented yet (TODO(M4): wire up lanzaboote).";
+        message = "torq.security.secureBoot is not implemented yet (TODO(M4): wire up lanzaboote).";
       }];
 
       networking.firewall.enable = true;

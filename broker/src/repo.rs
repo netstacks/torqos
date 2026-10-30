@@ -9,8 +9,8 @@ pub struct Repo {
     root: PathBuf,
 }
 
-const NAME: &str = "kestrel-broker";
-const EMAIL: &str = "broker@kestrel.local";
+const NAME: &str = "torq-broker";
+const EMAIL: &str = "broker@torq.local";
 
 impl Repo {
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -107,7 +107,7 @@ impl Repo {
     /// path (numstat reports only the new one), and names are raw (`-z`), not C-quoted.
     pub fn diff_files(&self, diff_path: &Path) -> Result<Vec<String>> {
         let p = path::absolute(diff_path)?.to_string_lossy().into_owned();
-        let index = path::absolute(self.root.join(".git/kestrel-proposal.index"))?;
+        let index = path::absolute(self.root.join(".git/torq-proposal.index"))?;
         let env = [("GIT_INDEX_FILE", index.as_os_str())];
         let files = (|| {
             self.git_env(&env, &["read-tree", "HEAD"])?;
@@ -153,7 +153,7 @@ impl Repo {
 
     /// Keep a commit reachable after a reset: the reflog alone expires, and `git gc` would drop it.
     pub fn keep(&self, commit: &str) -> Result<()> {
-        self.git(&["update-ref", &format!("refs/kestrel/discarded/{commit}"), commit])?;
+        self.git(&["update-ref", &format!("refs/torq/discarded/{commit}"), commit])?;
         self.sync()
     }
 

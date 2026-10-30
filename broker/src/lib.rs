@@ -1,4 +1,4 @@
-//! kestrel-broker: the only writer of the Kestrel config repo.
+//! torq-broker: the only writer of the TorqOS config repo.
 //!
 //! Lifecycle: propose (validated + ledgered, diff stored in the ledger) → apply (approved,
 //! committed, rebuilt, ledgered) → rollback (reverted, rebuilt, ledgered).
@@ -91,12 +91,12 @@ impl Status {
             p.push(format!("ledger: {e}"));
         }
         if let Some(i) = &self.interrupted {
-            p.push(format!("the {} of #{} was interrupted: run `kestrel-broker reconcile --approved-by <name>`", i.op, i.target));
+            p.push(format!("the {} of #{} was interrupted: run `torq-broker reconcile --approved-by <name>`", i.op, i.target));
         }
         if let Some(e) = &self.unrestored {
             p.push(format!(
                 "the last rebuild ({e}) failed and could not restore the previous system: the running system \
-                 may not match the config; fix the cause, then `kestrel-broker repair --approved-by <name>`"
+                 may not match the config; fix the cause, then `torq-broker repair --approved-by <name>`"
             ));
         }
         match &self.head {
@@ -363,7 +363,7 @@ impl Broker {
         let head = self.repo.head()?;
         let entries = self.ledger.read_all()?;
         let Some(ledgered) = ledgered_commit(&entries) else {
-            bail!("this machine's ledger has no configuration yet: initialise it first (kestrel-broker init)");
+            bail!("this machine's ledger has no configuration yet: initialise it first (torq-broker init)");
         };
         if ledgered != head || self.repo.ensure_clean().is_err() {
             bail!(
@@ -520,7 +520,7 @@ impl Broker {
             self.ledger.verify().context("cannot settle an interrupted operation on a broken ledger")?;
             if !self.outcome_recorded(&p)? {
                 bail!(
-                    "the {} of #{} was interrupted and must be reconciled first: run `kestrel-broker \
+                    "the {} of #{} was interrupted and must be reconciled first: run `torq-broker \
                      reconcile --approved-by <name>` (it resets the config to the last ledgered commit \
                      and rebuilds)",
                     p.op, p.target
@@ -532,7 +532,7 @@ impl Broker {
     }
 
     /// Finish an apply or rollback whose broker died: discard its unledgered commit (kept under
-    /// `refs/kestrel/discarded/`), reset to the last ledgered commit, rebuild, and ledger it.
+    /// `refs/torq/discarded/`), reset to the last ledgered commit, rebuild, and ledger it.
     /// `by` is who ran it (the approver of the operation that triggered it, or of `reconcile`).
     pub fn reconcile(&self, by: &str) -> Result<Option<Entry>> {
         let lock = Lock::acquire(&self.state_dir)?;

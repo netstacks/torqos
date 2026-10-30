@@ -1,4 +1,4 @@
-# Kestrel
+# TorqOS
 
 A laptop OS built on NixOS: **owner-rooted security**, **deep AI that is auditable and
 reversible**, and **Omarchy-level taste** — touchpad-first.

@@ -22,7 +22,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** Every change is a commit + generation + ledger entry. No raw root shell for AI.
 
 ## ADR-004 — Local config git repo, never pushed by default
-- **Decision:** `/var/lib/kestrel/config` is a local repo. Optional user-chosen encrypted backup.
+- **Decision:** `/var/lib/torq/config` is a local repo. Optional user-chosen encrypted backup.
 - **Consequences:** Network is download-only (packages, updates). Updates are `flake.lock` commits.
 
 ## ADR-005 — Local models by default
@@ -41,21 +41,21 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   repo but the running system kept the change, so system and config diverged.
 - **Decision:** On a failed apply or rollback, the broker resets the repo to the previous commit
   *and rebuilds it*, then ledgers `apply_failed` / `rollback_failed` with `restored: true|false`.
-  `kestrel-broker-init` runs only once (`ConditionPathExists=!…/.git`), never during a switch.
+  `torq-broker-init` runs only once (`ConditionPathExists=!…/.git`), never during a switch.
 - **Consequences:** A failed change costs a second (usually cached) switch. If the restore also
   fails, the ledger says so explicitly rather than claiming the system is unchanged.
 
 ## ADR-009 — Development mode: Claude Code with full access, behind one switch
-- **Context:** While Kestrel is being built, the fastest loop is Claude Code running *inside*
-  the dev VM with root — editing `~/kestrel`, building with Nix, applying via the broker.
+- **Context:** While TorqOS is being built, the fastest loop is Claude Code running *inside*
+  the dev VM with root — editing `~/torq`, building with Nix, applying via the broker.
   Security during development is explicitly not a goal; being able to shut it off later is.
-- **Decision:** `kestrel.dev.enable` (default **false**, `modules/dev.nix`): passwordless sudo
+- **Decision:** `torq.dev.enable` (default **false**, `modules/dev.nix`): passwordless sudo
   for wheel, `claude-code` + `gh`, owner as trusted Nix user. Enabled only in the dev VM's
   config repo. This is a cloud agent with root, so it is a deliberate, temporary exception to
-  ADR-003 (agent only proposes) and ADR-005 (local models by default) — for *building* Kestrel,
-  not for the Kestrel agent itself.
+  ADR-003 (agent only proposes) and ADR-005 (local models by default) — for *building* TorqOS,
+  not for the TorqOS agent itself.
 - **Consequences:** Every rebuild prints a warning while it is on. Shutting AI access off is
-  a single broker commit (`kestrel.dev.enable = false`), itself ledgered and undoable. The
+  a single broker commit (`torq.dev.enable = false`), itself ledgered and undoable. The
   shipped product and all tests run with it off.
 
 ## ADR-010 — A broker that dies mid-operation is reconciled, never left half-done
@@ -70,9 +70,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     fsynced (`core.fsync=all`, then `sync --file-system` on the repo).
   - apply/rollback record themselves in `state/pending.json` before committing, add the commit as
     soon as it exists, and remove the record once the outcome is ledgered.
-  - The next apply/rollback, or `kestrel-broker reconcile --approved-by <name>`, finishes an
+  - The next apply/rollback, or `torq-broker reconcile --approved-by <name>`, finishes an
     interrupted operation: it keeps the unledgered commit (and any uncommitted changes) under
-    `refs/kestrel/discarded/`, resets to the last ledgered commit, **always** rebuilds, and ledgers
+    `refs/torq/discarded/`, resets to the last ledgered commit, **always** rebuilds, and ledgers
     an `interrupted` entry. `propose` (the agent's entry point) and `init` never rebuild: they
     refuse until reconciled.
 - **Consequences:** An interrupted change is never silently kept; it is discarded, recorded and
@@ -87,10 +87,10 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   user tier even though it is a full NixOS module (sudo rules, services: an escalation path).
 - **Decision:** `packages.json` (system tier) and `users/<name>.packages.json` (user tier) are JSON
   lists of nixpkgs attribute paths, read by `modules/packages.nix` when the config flake passes
-  `kestrel.lib.mkSystem { configDir = ./.; }`. User tier is that exact data-file shape and
+  `torq.lib.mkSystem { configDir = ./.; }`. User tier is that exact data-file shape and
   nothing else: any `.nix` file is system tier wherever it lives (`broker/src/policy.rs`). Names
   are a top-level attribute or one level under a known package set; unfree/broken/unsupported
-  packages are refused at evaluation with a clear message. `kestrel pkg` (unprivileged) and later
+  packages are refused at evaluation with a clear message. `torq pkg` (unprivileged) and later
   the agent's packages MCP server change them by proposing a diff through the broker.
 - **Consequences:** A package change is a one-line JSON diff anyone can review, ledgered and
   undoable like any other. A user-tier change can only add nixpkgs packages to that user's profile
@@ -100,16 +100,16 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Context:** Another tool switched the dev VM to a stock NixOS config outside the broker, and
   nothing noticed until things broke. The ledger said one system was running; another was.
 - **Decision:** Every rebuild — and `init` — records the system it leaves running.
-  `kestrel-broker status` compares the machine with its ledger: running system and next boot vs the
+  `torq-broker status` compares the machine with its ledger: running system and next boot vs the
   last record, config repo HEAD and cleanliness vs the last ledgered commit, failed restores,
   interrupted operations, the chain. It runs under the broker lock (try-lock: mid-switch it reports
   `busy`, exit 75, and compares nothing); operations wait up to 3 s for the lock, so a check never
-  fails them. A `kestrel-status` unit runs it at boot and every 15 minutes, writes problems to
-  `/run/kestrel/drift` (printed by every new interactive shell) and to the journal at warning
+  fails them. A `torq-status` unit runs it at boot and every 15 minutes, writes problems to
+  `/run/torq/drift` (printed by every new interactive shell) and to the journal at warning
   priority, and **never fails**: it can run during a switch, and a failed unit would fail the switch,
   which the broker treats as a failed rebuild and rolls back (ADR-008).
 - **Consequences:** Drift is visible within 15 minutes, at boot and in every new shell, but nothing
-  is changed automatically: the person decides — `kestrel status --repair` (the broker's `repair`:
+  is changed automatically: the person decides — `torq status --repair` (the broker's `repair`:
   rebuild the last ledgered configuration, refuse if the config repo itself was changed, record what
   had drifted, and say so if the switch did not take), or apply, rollback, reconcile. Garbage collection
   (`nix.gc`, weekly, generations older than 30 days; `min-free` during builds) is safe for the same
@@ -119,14 +119,14 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 ## ADR-013 — Services are a curated catalog, enabled as data
 - **Context:** After software, the most common change is turning a service on or off (SSH,
   containers, VPN). Doing that meant hand-writing a NixOS diff, and the stock NixOS defaults are
-  not always Kestrel's (SSH allows passwords and root by default).
+  not always TorqOS's (SSH allows passwords and root by default).
 - **Decision:** `services.json` in the config repo (system tier) lists names from a catalog in
-  `modules/services.nix`; each entry is a service *with Kestrel's defaults* (SSH: keys only, no root
+  `modules/services.nix`; each entry is a service *with TorqOS's defaults* (SSH: keys only, no root
   login, only the owner; Podman: rootless, a `docker` command, no root API socket) and says what
   enabling it implies, because the approved diff is only `+ "name"`. The catalog's settings are
   asserted (a `mkForce` elsewhere fails the build), and SSH enabled outside the catalog with
-  passwords is a build warning and is reported by `kestrel service list`. No `fwupd` yet: firmware
-  must go through the broker. `kestrel service list|enable|disable` changes
+  passwords is a build warning and is reported by `torq service list`. No `fwupd` yet: firmware
+  must go through the broker. `torq service list|enable|disable` changes
   it through the broker like packages (ADR-011). Unknown names are a type error listing the
   catalog. Enabling SSH lists the owner's keys (both `~/.ssh/authorized_keys` and
   `/etc/ssh/authorized_keys.d`) for the person approving, and refuses when there are none.
@@ -140,6 +140,15 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   would grow the privileged code the project wants small and auditable.
 - **Decision:** The broker keeps its plain text for people who run it directly and gains `--json`
   output for every command the CLI uses. All formatting, colour, progress, wording and help live in
-  the unprivileged `kestrel` CLI (`docs/CLI-DESIGN.md`).
+  the unprivileged `torq` CLI (`docs/CLI-DESIGN.md`).
 - **Consequences:** Polishing the experience never touches privileged code. The JSON shapes become
   an interface: changes to them are deliberate and tested on both sides.
+
+## ADR-015 — The project is named TorqOS (code: `torq`); renamed from the placeholder "Kestrel"
+- **Context:** "Kestrel" was a placeholder codename (and an existing nixpkgs package name).
+- **Decision:** TorqOS in prose, `torq` for commands, code, options, paths and units, `TORQ_*` for
+  environment variables; GitHub `netstacks/torqos`; the dev VM's host is `torq-utm`. A clean
+  replace, no compatibility aliases: the dev VM was the only install.
+- **Consequences:** The dev VM is cut over with a fresh config repo and a fresh ledger under
+  `/var/lib/torq`; its old history is not migrated. Anything still saying Kestrel is either history
+  (old ledger, git log) or a miss.

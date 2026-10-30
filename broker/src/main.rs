@@ -1,30 +1,30 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use kestrel_broker::{ledger::Entry, policy::Actor, Broker, Busy};
+use torq_broker::{ledger::Entry, policy::Actor, Broker, Busy};
 use serde_json::json;
 use std::path::PathBuf;
 
-/// Kestrel change broker — the only writer of the system config repo.
+/// TorqOS change broker — the only writer of the system config repo.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
     /// Path to the config git repository.
-    #[arg(long, env = "KESTREL_CONFIG_REPO", default_value = "/var/lib/kestrel/config")]
+    #[arg(long, env = "TORQ_CONFIG_REPO", default_value = "/var/lib/torq/config")]
     repo: PathBuf,
     /// Directory for the ledger and broker state.
-    #[arg(long, env = "KESTREL_STATE_DIR", default_value = "/var/lib/kestrel/state")]
+    #[arg(long, env = "TORQ_STATE_DIR", default_value = "/var/lib/torq/state")]
     state_dir: PathBuf,
     /// Command run after each commit; `{repo}` is replaced with the repo path.
-    #[arg(long, env = "KESTREL_REBUILD_CMD", default_value = "nixos-rebuild switch --flake {repo}")]
+    #[arg(long, env = "TORQ_REBUILD_CMD", default_value = "nixos-rebuild switch --flake {repo}")]
     rebuild_cmd: String,
     /// Link to the running system, recorded after every rebuild and compared by `status`.
-    #[arg(long, env = "KESTREL_CURRENT_SYSTEM", default_value = "/run/current-system")]
+    #[arg(long, env = "TORQ_CURRENT_SYSTEM", default_value = "/run/current-system")]
     current_system: PathBuf,
     /// The system profile: what the next boot starts. Compared by `status`.
-    #[arg(long, env = "KESTREL_SYSTEM_PROFILE", default_value = "/nix/var/nix/profiles/system")]
+    #[arg(long, env = "TORQ_SYSTEM_PROFILE", default_value = "/nix/var/nix/profiles/system")]
     system_profile: PathBuf,
     /// Machine-readable output: one JSON value per command (a ledger entry, or the status), and
-    /// `{"error": "..."}` on failure. For the `kestrel` CLI (ADR-014); people get plain text.
+    /// `{"error": "..."}` on failure. For the `torq` CLI (ADR-014); people get plain text.
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -132,7 +132,7 @@ fn run(cli: Cli) -> Result<()> {
                 if tainted { " · TAINTED" } else { "" });
             println!("files: {}", e.body.data["files"]);
             println!("\n{}", printable_text(e.body.data["diff"].as_str().unwrap_or_default()));
-            println!("approve with: kestrel-broker apply {} --approved-by <name>", e.body.seq);
+            println!("approve with: torq-broker apply {} --approved-by <name>", e.body.seq);
         }
         Cmd::Show { seq } => {
             let e = b.ledger.get(seq)?;
@@ -150,7 +150,7 @@ fn run(cli: Cli) -> Result<()> {
                 return print_entry(&e);
             }
             println!("applied #{} as commit {} (ledger #{})", seq, e.body.data["commit"], e.body.seq);
-            println!("undo with: kestrel-broker rollback {} --approved-by <name>", e.body.seq);
+            println!("undo with: torq-broker rollback {} --approved-by <name>", e.body.seq);
         }
         Cmd::Rollback { seq, approved_by } => {
             let e = b.rollback(seq, &approved_by)?;

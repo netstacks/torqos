@@ -6,23 +6,23 @@
 In an ARM NixOS VM (UTM on the M4 Mac):
 
 - [x] `broker/Cargo.lock` generated; `cargo test` green.
-- [x] UTM VM switches to `/var/lib/kestrel/config#kestrel-utm` (from `templates/config`).
-- [x] `kestrel-broker-init` turns the config dir into a git repo + ledger on boot.
-- [x] `kestrel-broker propose` accepts a diff + reason, shows it.
-- [x] `kestrel-broker apply` commits (with `Ledger-Entry` trailer), rebuilds, appends ledger.
-- [x] `kestrel-broker rollback` reverts, rebuilds, appends ledger.
-- [x] `kestrel-broker verify` detects any edit to the ledger.
+- [x] UTM VM switches to `/var/lib/torq/config#torq-utm` (from `templates/config`).
+- [x] `torq-broker-init` turns the config dir into a git repo + ledger on boot.
+- [x] `torq-broker propose` accepts a diff + reason, shows it.
+- [x] `torq-broker apply` commits (with `Ledger-Entry` trailer), rebuilds, appends ledger.
+- [x] `torq-broker rollback` reverts, rebuilds, appends ledger.
+- [x] `torq-broker verify` detects any edit to the ledger.
 - [x] NixOS VM test `tests/trust-loop.nix` proves propose → apply → rollback.
   (Runs inside the UTM VM without `/dev/kvm`: QEMU falls back to TCG; ~75 s of test time.)
 
 ### M1.5 — CLI polish: the everyday commands feel finished  ← current
-The commands work (`kestrel pkg`, `service`, `update`, `log`, `undo`, `status`), but they print
+The commands work (`torq pkg`, `service`, `update`, `log`, `undo`, `status`), but they print
 the broker's plumbing. Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [x] Broker `--json` for every command (shapes and exit codes in `CLI-DESIGN.md`).
 - [x] The CLI uses it and stops parsing broker text (ADR-014).
 - [x] Human output for every command: changes shown as packages/services with versions and
       descriptions, not diffs; one result line with the change number and how to undo it.
-- [x] Quiet progress: phase + elapsed time; full log to `~/.local/state/kestrel/last.log`, shown
+- [x] Quiet progress: phase + elapsed time; full log to `~/.local/state/torq/last.log`, shown
       on failure.
 - [ ] Errors say what, why and what to do; no `Caused by:`, git hints, hashes or store paths by
       default — done; still to add: CLI `--verbose` and `--json` (only `--diff` exists).
@@ -30,14 +30,14 @@ the broker's plumbing. Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [x] Colour with meaning; plain text for `NO_COLOR` and non-terminals; fits 80 columns.
 - [ ] Snapshot tests of every command's output — done for log, status, rows and errors; still to
       do: whole-command snapshots of pkg/service/update/undo (success, refusal, failure).
-- [x] New, small: "did you mean" for misspelled packages; `kestrel status --repair` to return a
+- [x] New, small: "did you mean" for misspelled packages; `torq status --repair` to return a
       drifted machine to its ledgered system (asks first; ADR-012 still: never automatic).
 - [ ] Terminal look to match (prompt, palette, font) — with the desktop work, soon after.
-- [ ] Usability check: someone new to Kestrel installs, removes, undoes and reads the log unaided.
+- [ ] Usability check: someone new to TorqOS installs, removes, undoes and reads the log unaided.
 
 ### M2 — The agent sees
 - Local model reachable (llama.cpp on the Mac host during dev).
-- `kestrel-agent` with read-only MCP tools (logs, hardware, config.read).
+- `torq-agent` with read-only MCP tools (logs, hardware, config.read).
 - "Doctor" mode: diagnose and explain, propose nothing.
 
 ### M3 — The agent acts

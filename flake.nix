@@ -1,5 +1,5 @@
 {
-  description = "Kestrel — a secure, AI-native, reversible laptop OS built on NixOS";
+  description = "TorqOS — a secure, AI-native, reversible laptop OS built on NixOS";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -20,17 +20,17 @@
     {
       # ── Packages ─────────────────────────────────────────────────────────────
       packages = forSystems allSystems (pkgs: {
-        kestrel-broker = pkgs.callPackage ./broker/package.nix { };
-        kestrel = pkgs.callPackage ./cli/package.nix { };
-        default = self.packages.${pkgs.stdenv.hostPlatform.system}.kestrel-broker;
+        torq-broker = pkgs.callPackage ./broker/package.nix { };
+        torq = pkgs.callPackage ./cli/package.nix { };
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
       });
 
       # ── The distribution, as one NixOS module ────────────────────────────────
       nixosModules.default = { pkgs, lib, ... }: {
         imports = [ ./modules ];
-        kestrel.broker.package =
-          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.kestrel-broker;
-        kestrel.cli.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.kestrel;
+        torq.broker.package =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
+        torq.cli.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq;
       };
 
       # Helper used by per-machine config repos (see templates/config).
@@ -40,7 +40,7 @@
         nixpkgs.lib.nixosSystem {
           modules = [
             self.nixosModules.default
-            { nixpkgs.hostPlatform = system; kestrel.packages.configDir = configDir; }
+            { nixpkgs.hostPlatform = system; torq.packages.configDir = configDir; }
           ] ++ modules;
         };
 
@@ -54,12 +54,12 @@
       # ── Template for the per-machine config repo the broker manages ─────────
       templates.config = {
         path = ./templates/config;
-        description = "Kestrel per-machine config repo (lives at /var/lib/kestrel/config)";
+        description = "TorqOS per-machine config repo (lives at /var/lib/torq/config)";
       };
 
       # ── Tests ────────────────────────────────────────────────────────────────
       checks = forSystems linuxSystems (pkgs: {
-        broker = self.packages.${pkgs.stdenv.hostPlatform.system}.kestrel-broker;
+        broker = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         trust-loop = import ./tests/trust-loop.nix { inherit pkgs self; };
       });
 

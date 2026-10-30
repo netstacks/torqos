@@ -4,9 +4,9 @@
 
 | Component | Privilege | Language | Role |
 |---|---|---|---|
-| `kestrel-agent` | unprivileged, sandboxed | Rust (or Python early) | Talks to the model, plans, calls MCP tools, *proposes* changes |
+| `torq-agent` | unprivileged, sandboxed | Rust (or Python early) | Talks to the model, plans, calls MCP tools, *proposes* changes |
 | MCP tool servers | unprivileged, read-mostly | Rust | Typed access per subsystem |
-| `kestrel-broker` | privileged (root, minimal) | Rust | Only writer of the config repo; tiers, commits, rebuild, rollback, ledger |
+| `torq-broker` | privileged (root, minimal) | Rust | Only writer of the config repo; tiers, commits, rebuild, rollback, ledger |
 | Model runtime | unprivileged | llama.cpp | Local inference (Vulkan/ROCm on Strix Halo) |
 | Activity UI | user session | QML | Timeline, approvals, diffs, undo |
 
@@ -28,7 +28,7 @@ with the taint source displayed.
 
 ## Ledger format (v0)
 
-Append-only JSON Lines at `/var/lib/kestrel/state/ledger.jsonl`, owned by the broker.
+Append-only JSON Lines at `/var/lib/torq/state/ledger.jsonl`, owned by the broker.
 Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `rolled_back`, `rollback_failed`
 (failures carry `restored: true|false` — see ADR-008).
 
@@ -42,7 +42,7 @@ Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `rolled_back`, `roll
 
 - `hash = sha256(prev_hash || canonical_json(entry_without_hash))`
 - Genesis entry has `prev_hash` = 64 zeros.
-- `kestrel-broker verify` recomputes the chain and reports the first broken link.
+- `torq-broker verify` recomputes the chain and reports the first broken link.
 - Git commits carry a `Ledger-Entry: <seq>` trailer; the ledger stores the commit id → each
   checks the other. TODO(M3): `verify` does not cross-check trailers yet, and cannot detect
   truncation of the newest entries until the head hash is anchored.

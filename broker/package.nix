@@ -1,7 +1,7 @@
 { lib, rustPlatform, git }:
 
 rustPlatform.buildRustPackage {
-  pname = "kestrel-broker";
+  pname = "torq-broker";
   version = "0.1.0";
   src = lib.cleanSource ./.;
 
@@ -13,8 +13,8 @@ rustPlatform.buildRustPackage {
   dontUseCargoParallelTests = true;
 
   meta = {
-    description = "Kestrel privileged change broker";
-    mainProgram = "kestrel-broker";
+    description = "TorqOS privileged change broker";
+    mainProgram = "torq-broker";
     license = with lib.licenses; [ mit asl20 ];
   };
 }

@@ -1,4 +1,4 @@
-//! `kestrel pkg`: installed software is JSON in the config repo (ADR-011). The pure parts live
+//! `torq pkg`: installed software is JSON in the config repo (ADR-011). The pure parts live
 //! here; `main.rs` does the I/O (reading the repo, evaluating, talking to the broker).
 
 use anyhow::{Context, Result};
@@ -92,11 +92,11 @@ pub fn edit(current: &[String], names: &[String], how: Edit) -> (Vec<String>, Ve
 pub fn explain_check_error(msg: &str) -> String {
     let name = msg.split('\'').nth(1).unwrap_or_default();
     if msg.contains("is not a package in nixpkgs") {
-        format!("\"{name}\" isn't a package. Find the right name: kestrel pkg search {name}")
+        format!("\"{name}\" isn't a package. Find the right name: torq pkg search {name}")
     } else if msg.contains("is not available here") {
         format!("{name} can't be installed here: it is unfree, broken, insecure, or not built for this machine.")
     } else if msg.contains("is not a package name") {
-        format!("\"{name}\" isn't a package name. Find one: kestrel pkg search <words>")
+        format!("\"{name}\" isn't a package name. Find one: torq pkg search <words>")
     } else {
         format!("This change wouldn't work, so nothing was changed: {msg}")
     }
@@ -146,7 +146,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 pub fn explain_apply_error(what: &str, msg: &str) -> String {
     // Specific phrases first: the interrupted-change message also mentions "rebuilds".
     if msg.contains("interrupted and must be reconciled") {
-        format!("Couldn't {what}: an earlier change was interrupted. Finish it first: kestrel status")
+        format!("Couldn't {what}: an earlier change was interrupted. Finish it first: torq status")
     } else if msg.contains("does not apply cleanly") {
         format!("Couldn't {what}: the configuration changed in the meantime. Try again.")
     } else if msg.contains("rebuild") {
@@ -220,7 +220,7 @@ pub fn key_options_note(line: &str) -> String {
 }
 
 /// What an update moves, from the old and new flake.lock: each changed input with its date before
-/// and after ("kestrel", "2026-10-29", "2026-11-04"). Unknown dates are "?".
+/// and after ("torq", "2026-10-29", "2026-11-04"). Unknown dates are "?".
 pub fn lock_changes(old: &str, new: &str) -> Vec<(String, String, String)> {
     let parse = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap_or_default();
     let (old, new) = (parse(old), parse(new));
@@ -342,10 +342,10 @@ mod tests {
         assert_eq!(ymd(1_793_386_952), "2026-10-30");
         assert_eq!(ymd(951_782_400), "2000-02-29");
         let lock = |kt: u64, nt: u64| {
-            format!(r#"{{"nodes":{{"kestrel":{{"locked":{{"lastModified":{kt},"narHash":"a{kt}"}}}},"nixpkgs":{{"locked":{{"lastModified":{nt}}}}},"root":{{}}}}}}"#)
+            format!(r#"{{"nodes":{{"torq":{{"locked":{{"lastModified":{kt},"narHash":"a{kt}"}}}},"nixpkgs":{{"locked":{{"lastModified":{nt}}}}},"root":{{}}}}}}"#)
         };
         let moved = lock_changes(&lock(1_793_000_000, 1_790_000_000), &lock(1_793_386_952, 1_790_000_000));
-        assert_eq!(moved, vec![("kestrel".to_string(), "2026-10-26".to_string(), "2026-10-30".to_string())]);
+        assert_eq!(moved, vec![("torq".to_string(), "2026-10-26".to_string(), "2026-10-30".to_string())]);
         let same = lock_changes(&lock(1_793_380_000, 1), &lock(1_793_386_952, 1));
         assert_eq!(same[0].1, "2026-10-30 17:06"); // date -u -d @1793380000
         assert_eq!(same[0].2, "2026-10-30 19:02");
@@ -366,10 +366,10 @@ mod tests {
     #[test]
     fn errors_say_what_to_do() {
         assert_eq!(
-            explain_check_error("kestrel.packages: 'htpo' (user viper) is not a package in nixpkgs"),
-            "\"htpo\" isn't a package. Find the right name: kestrel pkg search htpo"
+            explain_check_error("torq.packages: 'htpo' (user viper) is not a package in nixpkgs"),
+            "\"htpo\" isn't a package. Find the right name: torq pkg search htpo"
         );
-        assert!(explain_check_error("kestrel.packages: 'vscode' (user viper) is not available here: unfree, ...")
+        assert!(explain_check_error("torq.packages: 'vscode' (user viper) is not available here: unfree, ...")
             .starts_with("vscode can't be installed here"));
         assert!(explain_check_error("something else").starts_with("This change wouldn't work"));
         assert_eq!(
@@ -377,7 +377,7 @@ mod tests {
             "Couldn't install htop: building the new system failed."
         );
         assert!(explain_apply_error("x", "diff does not apply cleanly to the current config").contains("Try again"));
-        let interrupted = "the apply of #2 was interrupted and must be reconciled first: run `kestrel-broker reconcile --approved-by <name>` (it resets the config to the last ledgered commit and rebuilds)";
+        let interrupted = "the apply of #2 was interrupted and must be reconciled first: run `torq-broker reconcile --approved-by <name>` (it resets the config to the last ledgered commit and rebuilds)";
         assert!(explain_apply_error("x", interrupted).contains("an earlier change was interrupted"));
     }
 
@@ -415,11 +415,11 @@ mod tests {
     #[test]
     fn summarises_moved_inputs() {
         let out = "fetching...\n\
-                   • Updated input 'kestrel':\n    'path:/a?narHash=x' (2026-10-30)\n  → 'path:/a?narHash=y'\n\
-                   • Added input 'kestrel/hw':\n    'github:x/y'\n\
+                   • Updated input 'torq':\n    'path:/a?narHash=x' (2026-10-30)\n  → 'path:/a?narHash=y'\n\
+                   • Added input 'torq/hw':\n    'github:x/y'\n\
                    • Removed input 'old'\n\
                    warning: something\n";
-        assert_eq!(moved_inputs(out), v(&["kestrel", "kestrel/hw (added)", "old (removed)"]));
+        assert_eq!(moved_inputs(out), v(&["torq", "torq/hw (added)", "old (removed)"]));
         assert!(moved_inputs("nothing to see").is_empty());
     }
 }

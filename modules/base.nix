@@ -1,10 +1,10 @@
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.kestrel;
+  cfg = config.torq;
 in
 {
-  options.kestrel.user = lib.mkOption {
+  options.torq.user = lib.mkOption {
     type = lib.types.str;
     description = "Primary (owner) user account of this laptop.";
   };
@@ -13,12 +13,12 @@ in
     assertions = [
       {
         assertion = cfg.user != "CHANGE-ME";
-        message = "Set kestrel.user to your login name in the config repo's system.nix.";
+        message = "Set torq.user to your login name in the config repo's system.nix.";
       }
       {
         # The same shape the broker accepts for users/<name>.packages.json (user tier).
         assertion = builtins.match "[a-z_][a-z0-9_-]*" cfg.user != null;
-        message = "kestrel.user '${cfg.user}' must be a lowercase login name ([a-z_][a-z0-9_-]*).";
+        message = "torq.user '${cfg.user}' must be a lowercase login name ([a-z_][a-z0-9_-]*).";
       }
     ];
 

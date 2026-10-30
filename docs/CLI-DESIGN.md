@@ -1,4 +1,4 @@
-# CLI design — how `kestrel` should look and feel
+# CLI design — how `torq` should look and feel
 
 Status: **plan** (milestone "CLI polish" in `ROADMAP.md`). Today's output is the broker's plumbing
 (git diffs, JSON, store paths, commit hashes, Nix build logs). It is correct and auditable, and it
@@ -13,7 +13,7 @@ is not what a person should have to read. This document is the target.
    and the elapsed time. The full Nix/broker log goes to a file; it is shown only on failure.
 4. **One line per outcome.** `✓` / `✗`, what happened, the change number and how to undo it.
 5. **No internals unless asked.** Hashes, store paths, ledger kinds and broker commands appear only
-   with `--verbose` (or `kestrel log --details`).
+   with `--verbose` (or `torq log --details`).
 6. **Make the tier visible.** A system change is marked as affecting the whole machine and always
    asks with a `[y/N]` default; a change to your own apps asks `[Y/n]`.
 7. **Errors say what, why and what to do** — in one or two sentences. Never `Caused by:` chains,
@@ -24,33 +24,33 @@ is not what a person should have to read. This document is the target.
 
 ## Target output
 
-### `kestrel pkg add htop`
+### `torq pkg add htop`
 ```
   Install for you
     + htop 3.4.1          Interactive process viewer
 
   Install? [Y/n] y
   ⠋ Downloading 1 package (412 KB)…  3s
-  ✓ Installed htop                                   change 23 · undo: kestrel undo 23
+  ✓ Installed htop                                   change 23 · undo: torq undo 23
 ```
 
-### `kestrel pkg add --system docker` (system tier)
+### `torq pkg add --system docker` (system tier)
 ```
   Install for everyone on this machine                          system change
     + docker 28.1.1       Pack, ship and run any application as a container
 
   Install? [y/N] y
-  ✓ Installed docker for everyone                    change 27 · undo: kestrel undo 27
+  ✓ Installed docker for everyone                    change 27 · undo: torq undo 27
 ```
 
 ### Refused before anything happens
 ```
   ✗ vscode can't be installed: it is unfree software, and this machine only installs free
     software. (Allowing unfree packages is a system setting.)
-  ✗ "htpo" isn't a package. Did you mean htop?          kestrel pkg search htpo
+  ✗ "htpo" isn't a package. Did you mean htop?          torq pkg search htpo
 ```
 
-### `kestrel pkg list`
+### `torq pkg list`
 ```
   Yours
     htop        3.4.1     Interactive process viewer
@@ -60,69 +60,69 @@ is not what a person should have to read. This document is the target.
     (nothing extra)
 ```
 
-### `kestrel service enable ssh`
+### `torq service enable ssh`
 ```
   Turn on SSH for this machine                                  system change
     · Lets you log in from other computers as viper, with a key only
     · Opens port 22
 
   Turn on? [y/N] y
-  ✓ SSH is on                                        change 28 · undo: kestrel undo 28
+  ✓ SSH is on                                        change 28 · undo: torq undo 28
 ```
 
-### `kestrel update`
+### `torq update`
 ```
   Update this machine                                           system change
-    Kestrel   2026-10-29 → 2026-11-04
+    TorqOS   2026-10-29 → 2026-11-04
     nixpkgs   26.05 (6f06d20) → 26.05 (9a1c3e2)      312 packages updated
 
   Update? [y/N] y
   ⠋ Downloading 312 packages (1.2 GB)…  1m 12s
-  ✓ Updated                                          change 30 · undo: kestrel undo 30
+  ✓ Updated                                          change 30 · undo: torq undo 30
 ```
 
-### `kestrel log`
+### `torq log`
 ```
   Today
     14:29   ✓ Install ripgrep for you                      23
-    15:02   ✓ Update Kestrel                               25   (system)
+    15:02   ✓ Update TorqOS                               25   (system)
     15:06   ↶ Undid "Install cowsay for you"               27
   Yesterday
     …
-                                       undo the latest: kestrel undo · details: kestrel log 25
+                                       undo the latest: torq undo · details: torq log 25
 ```
 Proposals that were applied are folded into their result; failed and interrupted changes show
 `✗` with a one-line reason.
 
-### `kestrel undo`
+### `torq undo`
 ```
   Undo "Install ripgrep for you" (change 23, today 14:29)
     − ripgrep 15.1.0
 
   Undo? [Y/n] y
-  ✓ Undone                                           change 29 · redo: kestrel pkg add ripgrep
+  ✓ Undone                                           change 29 · redo: torq pkg add ripgrep
 ```
 When an old change can't be undone because later changes touched the same thing:
 ```
   ✗ Can't undo change 12 on its own: later changes (19, 23) also changed your package list.
-    To remove just htop:  kestrel pkg remove htop
+    To remove just htop:  torq pkg remove htop
 ```
 
-### `kestrel status`
+### `torq status`
 ```
-  ✓ This machine is exactly as its history says.    25 changes · last: Update Kestrel, 15:02
+  ✓ This machine is exactly as its history says.    25 changes · last: Update TorqOS, 15:02
 ```
 or
 ```
-  ⚠ This machine was changed outside Kestrel.
+  ⚠ This machine was changed outside TorqOS.
     Running system: not the one change 25 built (switched at 13:36).
-    To return to it:  kestrel status --repair      (asks first)
+    To return to it:  torq status --repair      (asks first)
 ```
 
 ### Failure while applying
 ```
   ✗ Couldn't install htop: the download from cache.nixos.org failed (network unreachable).
-    Nothing changed — your machine is as it was.            log: ~/.local/state/kestrel/last.log
+    Nothing changed — your machine is as it was.            log: ~/.local/state/torq/last.log
 ```
 
 ## How it is built
@@ -132,7 +132,7 @@ or
   `proposal #N`). All presentation lives in the unprivileged CLI.
 - **Facts come from the evaluation the CLI already does**: package version and description
   (`meta.description`), what a service opens, and the size to download (`nix path-info`/dry-run).
-- **Progress**: run the broker with its output captured to `~/.local/state/kestrel/last.log`;
+- **Progress**: run the broker with its output captured to `~/.local/state/torq/last.log`;
   show phase + elapsed time; on failure print the summary line and the log path.
 - **Dependencies**: reuse `anstream`/`anstyle` (already pulled in by clap) for colour and terminal
   detection; a hand-rolled spinner; no TUI framework.
@@ -141,7 +141,7 @@ or
 
 ## The broker's JSON interface (ADR-014)
 
-`kestrel-broker --json <command>` prints exactly one JSON value on stdout (the rebuild's own
+`torq-broker --json <command>` prints exactly one JSON value on stdout (the rebuild's own
 output goes to stderr); `log --json` prints one per line. These shapes are an interface: change
 them deliberately, with tests on both sides.
 
@@ -181,10 +181,10 @@ JSON line to a terminal.
 - Every error message names what to do next.
 - Output fits 80 columns; nothing depends on colour to be understood.
 - `--json` output is stable and documented; the CLI itself uses the broker's `--json`.
-- Reviewed by someone new to Kestrel: can they install, remove, undo and read the log without help?
+- Reviewed by someone new to TorqOS: can they install, remove, undo and read the log without help?
 
 ## Related: the terminal itself
 
-The prompt, colours and font around the CLI are stock NixOS today. A Kestrel terminal look (prompt,
+The prompt, colours and font around the CLI are stock NixOS today. A TorqOS terminal look (prompt,
 palette, font, `foot` config) belongs with the desktop work, but should ship with or soon after
 this milestone so the CLI doesn't sit inside an unstyled shell.

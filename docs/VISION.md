@@ -30,7 +30,7 @@ own keys, not Microsoft's or Apple's.
 ## Relationship to Omarchy
 
 Omarchy 4 ("Quattro") is already agent-first: pre-wired coding-agent CLIs, a crash watcher that
-briefs the agent, an experimental system-customization skill, agent usage tracking. Kestrel's
+briefs the agent, an experimental system-customization skill, agent usage tracking. TorqOS's
 difference is **trust and control**:
 
 - Omarchy's recovery for a bad agent edit is "reinstall configs"; ours is per-change undo.

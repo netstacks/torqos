@@ -1,26 +1,26 @@
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.kestrel.broker;
+  cfg = config.torq.broker;
 in
 {
-  options.kestrel.broker = {
+  options.torq.broker = {
     enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "The Kestrel change broker (sole writer of the config repo).";
+      description = "The TorqOS change broker (sole writer of the config repo).";
     };
     package = lib.mkOption {
       type = lib.types.package;
-      description = "kestrel-broker package (set by the Kestrel flake).";
+      description = "torq-broker package (set by the TorqOS flake).";
     };
     configRepo = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/kestrel/config";
+      default = "/var/lib/torq/config";
     };
     stateDir = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/kestrel/state";
+      default = "/var/lib/torq/state";
     };
     configName = lib.mkOption {
       type = lib.types.str;
@@ -40,7 +40,7 @@ in
         Replace /etc/nixos/configuration.nix and /etc/nixos/flake.nix with stubs that refuse to
         build. A plain `nixos-rebuild switch` would otherwise build them and replace the whole
         system with a stock NixOS one, outside the broker and the ledger. Files already there
-        (or symlinks) are moved aside to `<name>.pre-kestrel` first, never overwritten. Turning
+        (or symlinks) are moved aside to `<name>.pre-torq` first, never overwritten. Turning
         this off, or rolling back past it, deletes whatever is at those two paths (NixOS cleans up
         the files it installed) and does not move the old files back: while the guard is on, keep
         nothing of your own there.
@@ -50,47 +50,47 @@ in
 
   config = lib.mkIf cfg.enable {
     # The broker with this machine's rebuild command baked in (a default, so it survives sudo's
-    # environment reset; KESTREL_REBUILD_CMD still overrides it, see KNOWN-GAPS #4).
+    # environment reset; TORQ_REBUILD_CMD still overrides it, see KNOWN-GAPS #4).
     environment.systemPackages = [
       (pkgs.symlinkJoin {
-        name = "kestrel-broker-${cfg.configName}";
+        name = "torq-broker-${cfg.configName}";
         paths = [ cfg.package ];
         nativeBuildInputs = [ pkgs.makeWrapper ];
         postBuild = ''
-          wrapProgram $out/bin/kestrel-broker \
-            --set-default KESTREL_REBUILD_CMD ${lib.escapeShellArg "nixos-rebuild switch --flake {repo}#${cfg.configName}"}
+          wrapProgram $out/bin/torq-broker \
+            --set-default TORQ_REBUILD_CMD ${lib.escapeShellArg "nixos-rebuild switch --flake {repo}#${cfg.configName}"}
         '';
-        meta.mainProgram = "kestrel-broker";
+        meta.mainProgram = "torq-broker";
       })
     ];
 
     environment.variables = {
-      KESTREL_CONFIG_REPO = cfg.configRepo;
-      KESTREL_STATE_DIR = cfg.stateDir;
+      TORQ_CONFIG_REPO = cfg.configRepo;
+      TORQ_STATE_DIR = cfg.stateDir;
     };
 
     systemd.tmpfiles.rules = [
-      "d /var/lib/kestrel 0755 root root -"
+      "d /var/lib/torq 0755 root root -"
       "d ${cfg.stateDir} 0700 root root -"
-      "d /run/kestrel 0755 root root -"
+      "d /run/torq 0755 root root -"
     ];
 
     # Drift from the ledger (the machine switched to another configuration, the config repo
     # changed behind the broker's back, an interrupted operation, a broken ledger) must not go
-    # unnoticed: check at boot and every 15 minutes; problems go to /run/kestrel/drift (shown by
+    # unnoticed: check at boot and every 15 minutes; problems go to /run/torq/drift (shown by
     # every new interactive shell) and to the journal at warning priority.
     # The unit never fails: it can run *during* a switch (the timer fires then), and a failed unit
     # fails the switch, which the broker treats as a failed rebuild and rolls back (ADR-008).
     # A monitor must not be able to undo the changes it watches.
-    systemd.services.kestrel-status = {
-      description = "Check that this machine is as its Kestrel ledger says";
-      after = [ "kestrel-broker-init.service" ];
+    systemd.services.torq-status = {
+      description = "Check that this machine is as its TorqOS ledger says";
+      after = [ "torq-broker-init.service" ];
       wantedBy = [ "multi-user.target" ];
       restartIfChanged = false;
       path = [ pkgs.git ];
       environment = {
-        KESTREL_CONFIG_REPO = cfg.configRepo;
-        KESTREL_STATE_DIR = cfg.stateDir;
+        TORQ_CONFIG_REPO = cfg.configRepo;
+        TORQ_STATE_DIR = cfg.stateDir;
       };
       serviceConfig.Type = "oneshot";
       # Never exits non-zero (see above), whatever happens in here.
@@ -98,22 +98,22 @@ in
         set +e
         out=$(${lib.getExe cfg.package} status 2>&1)
         code=$?
-        mkdir -p /run/kestrel
+        mkdir -p /run/torq
         case $code in
           0)
-            rm -f /run/kestrel/drift
+            rm -f /run/torq/drift
             printf '%s\n' "$out" ;;
           75)  # an operation is running, nothing compared: keep any earlier finding as it is
             printf '%s\n' "$out" ;;
           *)
-            { printf '%s\n' "$out" | grep '^PROBLEM' || printf 'PROBLEM: %s\n' "$out"; } > /run/kestrel/drift.new
-            mv -f /run/kestrel/drift.new /run/kestrel/drift  # atomic: a shell never sees half of it
+            { printf '%s\n' "$out" | grep '^PROBLEM' || printf 'PROBLEM: %s\n' "$out"; } > /run/torq/drift.new
+            mv -f /run/torq/drift.new /run/torq/drift  # atomic: a shell never sees half of it
             printf '%s\n' "$out" | sed 's/^/<4>/' ;;  # journal priority: warning
         esac
         exit 0
       '';
     };
-    systemd.timers.kestrel-status = {
+    systemd.timers.torq-status = {
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnBootSec = "2min";
@@ -121,9 +121,9 @@ in
       };
     };
     environment.interactiveShellInit = ''
-      if [ -s /run/kestrel/drift ]; then
-        echo "Kestrel: this machine is not as its ledger says (details: sudo kestrel-broker status):" >&2
-        sed 's/^PROBLEM: /  - /' /run/kestrel/drift >&2
+      if [ -s /run/torq/drift ]; then
+        echo "TorqOS: this machine is not as its ledger says (details: sudo torq-broker status):" >&2
+        sed 's/^PROBLEM: /  - /' /run/torq/drift >&2
       fi
     '';
 
@@ -134,10 +134,10 @@ in
         # Deliberately does not name the moved-aside files: building any other config is the same
         # mistake.
         message = ''
-          This machine is managed by Kestrel. Its configuration is ${cfg.configRepo}, and only
-          kestrel-broker changes it, so that every change is ledgered and can be undone:
-            kestrel pkg add <package>      (software)
-            sudo kestrel-broker propose --diff change.diff --reason "..."   (anything else)
+          This machine is managed by TorqOS. Its configuration is ${cfg.configRepo}, and only
+          torq-broker changes it, so that every change is ledgered and can be undone:
+            torq pkg add <package>      (software)
+            sudo torq-broker propose --diff change.diff --reason "..."   (anything else)
           Do not build /etc/nixos or any other configuration with nixos-rebuild: it would replace
           this whole system with a stock NixOS one, outside the ledger.
         '';
@@ -148,12 +148,12 @@ in
       in
       {
         "nixos/configuration.nix" = stub ''
-          # Managed by Kestrel (kestrel.broker.guardEtcNixos). See the message below.
+          # Managed by TorqOS (torq.broker.guardEtcNixos). See the message below.
           throw '''
           ${message}'''
         '';
         "nixos/flake.nix" = stub ''
-          # Managed by Kestrel (kestrel.broker.guardEtcNixos). See the message below.
+          # Managed by TorqOS (torq.broker.guardEtcNixos). See the message below.
           {
             outputs = _: throw '''
           ${message}''';
@@ -165,7 +165,7 @@ in
     # A symlink is moved as a link, never opened (it could point at a FIFO or a hung mount, and this
     # runs at boot). A regular file is left in place only if it is byte-identical to our stub in the
     # running or the new generation; anything else — even a stub someone edited — is moved aside.
-    system.activationScripts.kestrel-guard-etc-nixos = lib.mkIf cfg.guardEtcNixos ''
+    system.activationScripts.torq-guard-etc-nixos = lib.mkIf cfg.guardEtcNixos ''
       for f in configuration.nix flake.nix; do
         p=/etc/nixos/$f
         [ -e "$p" ] || [ -L "$p" ] || continue
@@ -174,24 +174,24 @@ in
             [ -f "$stub" ] && ${pkgs.diffutils}/bin/cmp -s "$p" "$stub" && continue 2
           done
         fi
-        keep=$p.pre-kestrel
+        keep=$p.pre-torq
         { [ -e "$keep" ] || [ -L "$keep" ]; } && keep="$keep.$(date +%Y%m%d-%H%M%S)"
         mv "$p" "$keep"
       done
     '';
-    system.activationScripts.etc.deps = lib.mkIf cfg.guardEtcNixos [ "kestrel-guard-etc-nixos" ];
+    system.activationScripts.etc.deps = lib.mkIf cfg.guardEtcNixos [ "torq-guard-etc-nixos" ];
     assertions = lib.mkIf cfg.guardEtcNixos [{
       # With a mutable /etc overlay, moving the old file aside leaves a whiteout that hides the stub.
       assertion = !(config.system.etc.overlay.enable or false);
-      message = "kestrel.broker.guardEtcNixos does not support system.etc.overlay yet.";
+      message = "torq.broker.guardEtcNixos does not support system.etc.overlay yet.";
     }];
 
     # Initialise repo + ledger once a config flake has been placed in the repo directory.
     # Runs exactly once: after that, only the broker writes to the repo. Re-running it on every
     # boot or switch would commit out-of-band edits as "baseline" with no ledger entry, and
     # during a broker apply it collides with the broker lock and fails the switch.
-    systemd.services.kestrel-broker-init = {
-      description = "Initialise Kestrel config repo and ledger";
+    systemd.services.torq-broker-init = {
+      description = "Initialise TorqOS config repo and ledger";
       wantedBy = [ "multi-user.target" ];
       restartIfChanged = false;
       unitConfig.ConditionPathExists = [
@@ -200,8 +200,8 @@ in
       ];
       path = [ pkgs.git ];
       environment = {
-        KESTREL_CONFIG_REPO = cfg.configRepo;
-        KESTREL_STATE_DIR = cfg.stateDir;
+        TORQ_CONFIG_REPO = cfg.configRepo;
+        TORQ_STATE_DIR = cfg.stateDir;
       };
       serviceConfig = {
         Type = "oneshot";

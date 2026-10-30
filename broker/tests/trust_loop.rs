@@ -1,6 +1,6 @@
 //! End-to-end: propose → apply → rollback against a real git repo, with rebuild stubbed.
 
-use kestrel_broker::{policy::Actor, Broker};
+use torq_broker::{policy::Actor, Broker};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -246,7 +246,7 @@ fn concurrent_operation_is_refused() {
 
 /// Run the real binary, so a crash is a real crash: the rebuild command SIGKILLs the broker.
 fn run_cli(dir: &Path, rebuild: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_kestrel-broker"))
+    Command::new(env!("CARGO_BIN_EXE_torq-broker"))
         .arg("--repo").arg(dir.join("config"))
         .arg("--state-dir").arg(dir.join("state"))
         .arg("--rebuild-cmd").arg(rebuild)
@@ -296,7 +296,7 @@ fn crash_mid_apply_is_reconciled_by_next_operation() {
     // The orphan's trailer named the entry that now explains it, and it is kept, not lost to gc.
     assert_eq!(i.body.seq, 3);
     assert!(git(&b, &["log", "-1", "--format=%B", &orphan]).contains("Ledger-Entry: 3"));
-    assert_eq!(git(&b, &["rev-parse", &format!("refs/kestrel/discarded/{orphan}")]).trim(), orphan);
+    assert_eq!(git(&b, &["rev-parse", &format!("refs/torq/discarded/{orphan}")]).trim(), orphan);
     assert_eq!(
         fs::read_to_string(&calls).unwrap(),
         "{ nightLight = false; }\n{ nightLight = true; }\n",
@@ -328,7 +328,7 @@ fn crash_mid_rollback_is_reconciled_by_next_operation() {
     let i = &b.ledger.read_all().unwrap()[3];
     assert_eq!(i.body.data["discarded_commit"], orphan.as_str());
     assert_eq!(i.body.data["commit"], applied_head.as_str());
-    assert_eq!(git(&b, &["rev-parse", &format!("refs/kestrel/discarded/{orphan}")]).trim(), orphan);
+    assert_eq!(git(&b, &["rev-parse", &format!("refs/torq/discarded/{orphan}")]).trim(), orphan);
     assert_eq!(i.body.data["restored"], true);
     assert_eq!(
         fs::read_to_string(&calls).unwrap(),
@@ -357,7 +357,7 @@ fn rebuild_outliving_a_killed_broker_keeps_the_lock() {
         go = go.display(),
         done = done.display()
     );
-    let status = Command::new(env!("CARGO_BIN_EXE_kestrel-broker"))
+    let status = Command::new(env!("CARGO_BIN_EXE_torq-broker"))
         .arg("--repo").arg(dir.path().join("config"))
         .arg("--state-dir").arg(dir.path().join("state"))
         .arg("--rebuild-cmd").arg(&rebuild)
@@ -408,7 +408,7 @@ fn propose_refuses_until_reconcile_runs() {
 
     let t = write_diff(dir.path(), "theme.diff", THEME);
     let err = format!("{:#}", b.propose(&t, "Light theme", Actor::Agent, false).unwrap_err());
-    assert!(err.contains("kestrel-broker reconcile"), "{err}");
+    assert!(err.contains("torq-broker reconcile"), "{err}");
 
     let out = run_cli(dir.path(), "true", &["reconcile", "--approved-by", "casey"]);
     assert!(out.status.success(), "{out:?}");
@@ -544,7 +544,7 @@ fn unrecorded_commit_is_still_kept() {
 
     let i = b.reconcile("casey").unwrap().expect("reconciled");
     assert_eq!(i.body.data["discarded_commit"], orphan.as_str());
-    assert_eq!(git(&b, &["rev-parse", &format!("refs/kestrel/discarded/{orphan}")]).trim(), orphan);
+    assert_eq!(git(&b, &["rev-parse", &format!("refs/torq/discarded/{orphan}")]).trim(), orphan);
     assert_eq!(b.repo.head().unwrap(), before);
 }
 
@@ -571,7 +571,7 @@ fn reconcile_refuses_when_before_is_not_an_ancestor() {
 fn init_refuses_until_reconciled() {
     let (_dir, b, _) = crashed_apply();
     let err = format!("{:#}", b.init().unwrap_err());
-    assert!(err.contains("kestrel-broker reconcile"), "{err}");
+    assert!(err.contains("torq-broker reconcile"), "{err}");
 }
 
 #[test]
@@ -601,7 +601,7 @@ fn reconcile_keeps_uncommitted_changes() {
     let i = b.reconcile("casey").unwrap().expect("reconciled");
     let kept = i.body.data["discarded_uncommitted"].as_str().expect("snapshot recorded").to_string();
     assert_eq!(git(&b, &["show", &format!("{kept}:stray.nix")]), "{ edited = \"by hand\"; }\n");
-    assert_eq!(git(&b, &["rev-parse", &format!("refs/kestrel/discarded/{kept}")]).trim(), kept);
+    assert_eq!(git(&b, &["rev-parse", &format!("refs/torq/discarded/{kept}")]).trim(), kept);
     assert_eq!(i.body.data["reconciled_by"], "casey");
     b.repo.ensure_clean().unwrap();
 }

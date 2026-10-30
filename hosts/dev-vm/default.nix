@@ -1,12 +1,12 @@
 # Throwaway VM for fast iteration:
 #   nix build .#nixosConfigurations.dev-vm-aarch64.config.system.build.vm
-#   ./result/bin/run-kestrel-dev-vm
-# Login: dev / kestrel
+#   ./result/bin/run-torq-dev-vm
+# Login: dev / torq
 { lib, ... }:
 {
-  networking.hostName = "kestrel-dev";
-  kestrel.user = "dev";
-  users.users.dev.initialPassword = "kestrel";
+  networking.hostName = "torq-dev";
+  torq.user = "dev";
+  users.users.dev.initialPassword = "torq";
 
   services.openssh.enable = true;
 

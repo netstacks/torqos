@@ -1,5 +1,5 @@
 # Installed software, as data. The package lists live in the machine's config repo as JSON so that
-# tools (the `kestrel pkg` CLI, later the agent's MCP packages server) can change them by proposing
+# tools (the `torq pkg` CLI, later the agent's MCP packages server) can change them by proposing
 # a plain diff through the broker, instead of editing Nix code:
 #
 #   packages.json                 system-wide packages     (system tier: explicit approval)
@@ -9,7 +9,7 @@
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.kestrel.packages;
+  cfg = config.torq.packages;
   dir = cfg.configDir;
 
   # A package is a top-level nixpkgs attribute, or one level under one of these sets of ordinary
@@ -29,7 +29,7 @@ let
       shaped = lib.all isAttrName path
         && (builtins.length path == 1 || (builtins.length path == 2 && builtins.elem (builtins.head path) packageSets));
       pkg = lib.attrByPath path null pkgs;
-      what = "kestrel.packages: '${name}' (${owner})";
+      what = "torq.packages: '${name}' (${owner})";
     in
     if !shaped then
       throw "${what} is not a package name: use a top-level nixpkgs attribute, or one level under ${lib.concatStringsSep ", " packageSets}"
@@ -49,24 +49,24 @@ let
     if dir != null && builtins.pathExists usersDir then
       lib.mapAttrs (n: _:
         let user = lib.removeSuffix ".packages.json" n;
-        in if isUserName user then user else throw "kestrel.packages: users/${n} does not name a valid user"
+        in if isUserName user then user else throw "torq.packages: users/${n} does not name a valid user"
       ) (lib.filterAttrs (n: t: t == "regular" && lib.hasSuffix ".packages.json" n) (builtins.readDir usersDir))
     else
       { };
 in
 {
-  options.kestrel.cli.package = lib.mkOption {
+  options.torq.cli.package = lib.mkOption {
     type = lib.types.package;
-    description = "The `kestrel` command line (set by the Kestrel flake).";
+    description = "The `torq` command line (set by the TorqOS flake).";
   };
 
-  options.kestrel.packages = {
+  options.torq.packages = {
     configDir = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = ''
         The machine's config repo. When set, `packages.json` and `users/<name>.packages.json` in it
-        are read into `system` and `user`. Set by `kestrel.lib.mkSystem { configDir = ./.; }`.
+        are read into `system` and `user`. Set by `torq.lib.mkSystem { configDir = ./.; }`.
       '';
     };
     system = lib.mkOption {
@@ -82,17 +82,17 @@ in
   };
 
   config = {
-    kestrel.packages.system = lib.mkIf (dir != null) (readList (dir + "/packages.json"));
-    kestrel.packages.user = lib.mkIf (dir != null) (
+    torq.packages.system = lib.mkIf (dir != null) (readList (dir + "/packages.json"));
+    torq.packages.user = lib.mkIf (dir != null) (
       lib.mapAttrs' (n: user: lib.nameValuePair user (lib.importJSON (usersDir + "/${n}"))) userFiles
     );
 
     assertions = lib.mapAttrsToList (user: _: {
       assertion = config.users.users.${user}.isNormalUser or false;
-      message = "kestrel.packages: users/${user}.packages.json names '${user}', which is not a normal user on this machine.";
+      message = "torq.packages: users/${user}.packages.json names '${user}', which is not a normal user on this machine.";
     }) cfg.user;
 
-    environment.systemPackages = [ config.kestrel.cli.package ] ++ map (resolve "system") cfg.system;
+    environment.systemPackages = [ config.torq.cli.package ] ++ map (resolve "system") cfg.system;
     users.users = lib.mapAttrs (user: names: { packages = map (resolve "user ${user}") names; }) cfg.user;
   };
 }

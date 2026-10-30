@@ -1,4 +1,4 @@
-//! How `kestrel` looks (docs/CLI-DESIGN.md): plain language, one visual language, colour with
+//! How `torq` looks (docs/CLI-DESIGN.md): plain language, one visual language, colour with
 //! meaning only — and plain text when colour is off (NO_COLOR, not a terminal), so nothing depends
 //! on colour to be understood. Everything here is a pure function of its input, for snapshot tests.
 
@@ -104,9 +104,9 @@ pub fn package_row(ui: &Ui, name: &str, version: &str, description: &str) -> Str
     format!("    {left:<22} {}", ui.dim(&desc)).trim_end().to_string()
 }
 
-/// "change 23 · undo: kestrel undo 23"
+/// "change 23 · undo: torq undo 23"
 pub fn change_ref(seq: u64) -> String {
-    format!("change {seq} · undo: kestrel undo {seq}")
+    format!("change {seq} · undo: torq undo {seq}")
 }
 
 /// Elapsed time as people say it: "3s", "1m 12s".
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn plain_has_no_escapes_colour_has() {
         let p = Ui::plain();
-        assert_eq!(p.ok("Installed htop", &change_ref(23)), format!("  ✓ Installed htop{}change 23 · undo: kestrel undo 23", " ".repeat(80 - 4 - 14 - 33)));
+        assert_eq!(p.ok("Installed htop", &change_ref(23)), format!("  ✓ Installed htop{}change 23 · undo: torq undo 23", " ".repeat(80 - 4 - 14 - 30)));
         assert!(!p.fail("x").contains('\x1b'));
         assert!(Ui { color: true }.ok("x", "").contains("\x1b[32m"));
     }

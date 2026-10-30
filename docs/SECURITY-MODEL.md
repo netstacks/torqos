@@ -54,7 +54,7 @@ Hardware guidance: integrated-graphics machines are lowest risk for removing Mic
 
 - Kernel lockdown (integrity), signed modules only.
 - Wayland only, no X11 server.
-- Minimal enabled services; all Kestrel services use systemd sandboxing.
+- Minimal enabled services; all TorqOS services use systemd sandboxing.
 - `nix.settings.allowed-users` restricted; only the broker may trigger system rebuilds.
 
 ## Apple Silicon note

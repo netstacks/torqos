@@ -1,18 +1,18 @@
-//! `kestrel status`: is this machine as its history says — in words (docs/CLI-DESIGN.md), from the
+//! `torq status`: is this machine as its history says — in words (docs/CLI-DESIGN.md), from the
 //! broker's `status --json` facts, never its problem text. Pure, for snapshot tests.
 
 use crate::history::one_line;
 use crate::ui::Ui;
 use serde_json::Value;
 
-/// What `kestrel status --repair` can do about what was found.
+/// What `torq status --repair` can do about what was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fix {
     /// Nothing to do.
     Nothing,
     /// `--repair` returns the machine to its ledgered system (the broker's `repair`).
     Repair,
-    /// A person has to look: the configuration was edited outside Kestrel, or the history is damaged.
+    /// A person has to look: the configuration was edited outside TorqOS, or the history is damaged.
     Person,
 }
 
@@ -47,11 +47,11 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
     if v["interrupted"].is_null() {
         match (s("head"), s("ledgered_commit")) {
             (None, Some(_)) => found.push(("The configuration can't be read.".into(), Fix::Person)),
-            (Some(h), Some(l)) if h != l => found.push(("The configuration was changed outside Kestrel.".into(), Fix::Person)),
+            (Some(h), Some(l)) if h != l => found.push(("The configuration was changed outside TorqOS.".into(), Fix::Person)),
             _ => {}
         }
         if v["dirty"] == true {
-            found.push(("The configuration has edits made outside Kestrel.".into(), Fix::Person));
+            found.push(("The configuration has edits made outside TorqOS.".into(), Fix::Person));
         }
     }
     if v["unrestored"].is_string() {
@@ -59,16 +59,16 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
     }
     if let Some(want) = s("ledgered_system") {
         if s("running_system") != Some(want) {
-            found.push(("It is running a system Kestrel didn't build (switched outside Kestrel).".into(), Fix::Repair));
+            found.push(("It is running a system TorqOS didn't build (switched outside TorqOS).".into(), Fix::Repair));
         }
         if s("next_boot").is_some_and(|n| n != want) {
-            found.push(("The next boot would start a system Kestrel didn't build.".into(), Fix::Repair));
+            found.push(("The next boot would start a system TorqOS didn't build.".into(), Fix::Repair));
         }
     }
 
     // The broker knows of a problem this command cannot name (a newer broker, say): never all-well.
     if found.is_empty() && v["ok"] != true {
-        found.push(("Kestrel found a problem this command can't describe (see: kestrel-broker status).".into(), Fix::Person));
+        found.push(("TorqOS found a problem this command can't describe (see: torq-broker status).".into(), Fix::Person));
     }
     if found.is_empty() {
         let text = if v["checked_running_system"] == true {
@@ -89,7 +89,7 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
         text.push_str(&format!("    · {what}\n"));
     }
     text.push_str(&match fix {
-        Fix::Repair => format!("    To return it to its history:  kestrel status --repair   {}\n", ui.dim("(asks first)")),
+        Fix::Repair => format!("    To return it to its history:  torq status --repair   {}\n", ui.dim("(asks first)")),
         _ => format!("    This needs a person: look at {} (--repair won't touch it).\n", one_line(repo, 40)),
     });
     Report { text, exit: 1, fix }
@@ -108,19 +108,19 @@ mod tests {
 
     #[test]
     fn all_well() {
-        let r = render(&ok(), Some("Install htop for viper"), "/var/lib/kestrel/config", &Ui::plain());
+        let r = render(&ok(), Some("Install htop for viper"), "/var/lib/torq/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (0, Fix::Nothing));
         assert_eq!(r.text, "  ✓ This machine is exactly as its history says.\n    Last change: Install htop for viper\n");
     }
 
     #[test]
-    fn switched_outside_kestrel_is_repairable() {
+    fn switched_outside_torq_is_repairable() {
         let mut v = ok();
         v["running_system"] = json!("/nix/store/stock-nixos");
         v["next_boot"] = json!("/nix/store/stock-nixos");
-        let r = render(&v, None, "/var/lib/kestrel/config", &Ui::plain());
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (1, Fix::Repair));
-        let expected = "  ⚠ This machine is not as its history says.\n    · It is running a system Kestrel didn't build (switched outside Kestrel).\n    · The next boot would start a system Kestrel didn't build.\n    To return it to its history:  kestrel status --repair   (asks first)\n";
+        let expected = "  ⚠ This machine is not as its history says.\n    · It is running a system TorqOS didn't build (switched outside TorqOS).\n    · The next boot would start a system TorqOS didn't build.\n    To return it to its history:  torq status --repair   (asks first)\n";
         assert_eq!(r.text, expected);
     }
 
@@ -129,19 +129,19 @@ mod tests {
         let mut v = ok();
         v["dirty"] = json!(true);
         v["running_system"] = json!("/nix/store/other");
-        let r = render(&v, None, "/var/lib/kestrel/config", &Ui::plain());
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (1, Fix::Person), "repair would build the edit: a person decides");
         assert!(r.text.contains("needs a person"), "{}", r.text);
     }
 
     #[test]
     fn busy_and_unrecorded() {
-        let r = render(&json!({ "ok": false, "busy": "123 (nixos-rebuild)", "problems": [] }), None, "/var/lib/kestrel/config", &Ui::plain());
+        let r = render(&json!({ "ok": false, "busy": "123 (nixos-rebuild)", "problems": [] }), None, "/var/lib/torq/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (75, Fix::Nothing));
         let mut v = ok();
         v["checked_running_system"] = json!(false);
         v["ledgered_system"] = json!(null);
-        assert!(render(&v, None, "/var/lib/kestrel/config", &Ui::plain()).text.contains("as far as recorded"));
+        assert!(render(&v, None, "/var/lib/torq/config", &Ui::plain()).text.contains("as far as recorded"));
     }
 
     #[test]
@@ -153,9 +153,9 @@ mod tests {
         v["interrupted"] = json!({ "op": "apply", "target": 12 });
         v["head"] = json!("c2");
         v["dirty"] = json!(true);
-        let r = render(&v, None, "/var/lib/kestrel/config", &Ui::plain());
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
         assert_eq!(r.fix, Fix::Repair, "{}", r.text);
-        assert!(!r.text.contains("outside Kestrel"), "{}", r.text);
+        assert!(!r.text.contains("outside TorqOS"), "{}", r.text);
     }
 
     #[test]
@@ -171,7 +171,7 @@ mod tests {
     fn interrupted_is_repairable() {
         let mut v = ok();
         v["interrupted"] = json!({ "op": "apply", "target": 12 });
-        let r = render(&v, None, "/var/lib/kestrel/config", &Ui::plain());
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
         assert_eq!(r.fix, Fix::Repair);
         assert!(r.text.contains("A change was interrupted (the apply of change 12)."), "{}", r.text);
     }

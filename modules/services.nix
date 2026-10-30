@@ -1,14 +1,14 @@
 # Services, as data. Like packages (ADR-011): the config repo holds `services.json`, a JSON list
-# of names from the catalog below (system tier), and `kestrel service enable|disable` changes it
-# through the broker. Each catalog entry is a service *with Kestrel's defaults* — "SSH, safely",
+# of names from the catalog below (system tier), and `torq service enable|disable` changes it
+# through the broker. Each catalog entry is a service *with TorqOS's defaults* — "SSH, safely",
 # not every option the NixOS module has — and says what enabling it implies, because the diff a
 # person approves is just `+ "name"`. Anything beyond the catalog is a system-tier .nix change.
 { config, lib, ... }:
 
 let
-  cfg = config.kestrel.services;
-  dir = config.kestrel.packages.configDir;
-  owner = config.kestrel.user;
+  cfg = config.torq.services;
+  dir = config.torq.packages.configDir;
+  owner = config.torq.user;
   ssh = config.services.openssh;
 
   catalog = {
@@ -24,7 +24,7 @@ let
         };
       };
       # The catalog's promise must hold: a stronger definition elsewhere (lib.mkForce) would
-      # otherwise silently undo it while `kestrel service list` still says "keys only".
+      # otherwise silently undo it while `torq service list` still says "keys only".
       holds = ssh.settings.PasswordAuthentication == false
         && ssh.settings.KbdInteractiveAuthentication == false
         && ssh.settings.PermitRootLogin == "no"
@@ -62,7 +62,7 @@ let
   fromFile = if dir != null && builtins.pathExists file then lib.importJSON file else [ ];
 in
 {
-  options.kestrel.services = {
+  options.torq.services = {
     enabled = lib.mkOption {
       type = lib.types.listOf (lib.types.enum (lib.attrNames catalog));
       default = [ ];
@@ -72,32 +72,32 @@ in
       type = lib.types.attrsOf lib.types.str;
       readOnly = true;
       default = lib.mapAttrs (_: s: s.description) catalog;
-      description = "The services `kestrel service` offers, with what each implies (read-only).";
+      description = "The services `torq service` offers, with what each implies (read-only).";
     };
   };
 
   config = lib.mkMerge (
     [
       {
-        kestrel.services.enabled = lib.mkIf (dir != null && builtins.pathExists file) fromFile;
+        torq.services.enabled = lib.mkIf (dir != null && builtins.pathExists file) fromFile;
 
         assertions =
           [
             {
               # One source of truth: any other definition (added to the list, replacing it with
-              # mkForce, or set where there is no file) would make `kestrel service` disagree with
+              # mkForce, or set where there is no file) would make `torq service` disagree with
               # what is running. Compare the result, not the number of definitions.
               assertion = cfg.enabled == fromFile;
-              message = "kestrel.services.enabled is set from services.json only (`kestrel service enable`), not in Nix.";
+              message = "torq.services.enabled is set from services.json only (`torq service enable`), not in Nix.";
             }
           ]
           ++ lib.mapAttrsToList (name: s: {
             assertion = !(lib.elem name cfg.enabled) || s.holds;
-            message = "kestrel service '${name}' is enabled, but another definition overrides its Kestrel defaults.";
+            message = "torq service '${name}' is enabled, but another definition overrides its TorqOS defaults.";
           }) catalog;
 
         warnings = lib.optional (ssh.enable && !(lib.elem "ssh" cfg.enabled) && ssh.settings.PasswordAuthentication != false)
-          "SSH is enabled outside Kestrel's service catalog, with password logins allowed. Use `kestrel service enable ssh` (keys only) instead of services.openssh.enable.";
+          "SSH is enabled outside TorqOS's service catalog, with password logins allowed. Use `torq service enable ssh` (keys only) instead of services.openssh.enable.";
       }
     ]
     ++ lib.mapAttrsToList (name: s: lib.mkIf (lib.elem name cfg.enabled) s.config) catalog

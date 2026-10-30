@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// `$XDG_STATE_HOME/kestrel/last.log` (default `~/.local/state/kestrel/last.log`): the full output
+/// `$XDG_STATE_HOME/torq/last.log` (default `~/.local/state/torq/last.log`): the full output
 /// of the last change, shown only when something fails.
 /// Never a shared directory: without a home there is no log (it would be readable, and replaceable,
 /// by others in /tmp).
@@ -22,7 +22,7 @@ pub fn log_path() -> Result<PathBuf> {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .context("neither XDG_STATE_HOME nor HOME is set, so there is nowhere private to keep the log")?;
-    Ok(state.join("kestrel/last.log"))
+    Ok(state.join("torq/last.log"))
 }
 
 /// Start a fresh log for this command: private to the user (0600), and never written through a
@@ -115,7 +115,7 @@ fn call(mut broker: Command, log: &std::path::Path) -> Result<(Option<i32>, Opti
         .context("running the broker")?;
     if out.status.code() != Some(0) {
         let mut f = fs::OpenOptions::new().append(true).open(log).context("opening the log")?;
-        writeln!(f, "\nkestrel-broker {:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stdout).trim())?;
+        writeln!(f, "\ntorq-broker {:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stdout).trim())?;
     }
     Ok((out.status.code(), serde_json::from_slice(&out.stdout).ok()))
 }
@@ -123,7 +123,7 @@ fn call(mut broker: Command, log: &std::path::Path) -> Result<(Option<i32>, Opti
 fn broken(code: Option<i32>) -> String {
     match code {
         // 2: it did not understand the request — an installed broker older than this command.
-        Some(2) => "the installed broker is older than this kestrel command (update the machine first)".into(),
+        Some(2) => "the installed broker is older than this torq command (update the machine first)".into(),
         Some(code) => format!("the broker stopped unexpectedly (exit code {code})"),
         None => "the broker was stopped before it finished".into(),
     }

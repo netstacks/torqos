@@ -1,14 +1,14 @@
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.kestrel.desktop;
+  cfg = config.torq.desktop;
   tuigreet = pkgs.tuigreet or pkgs.greetd.tuigreet;
 in
 {
-  options.kestrel.desktop.enable = lib.mkOption {
+  options.torq.desktop.enable = lib.mkOption {
     type = lib.types.bool;
     default = true;
-    description = "Kestrel desktop: niri (Wayland) + Quickshell shell.";
+    description = "TorqOS desktop: niri (Wayland) + Quickshell shell.";
   };
 
   config = lib.mkIf cfg.enable {
@@ -35,7 +35,7 @@ in
     fonts.packages = with pkgs; [ inter jetbrains-mono noto-fonts noto-fonts-color-emoji ];
 
     environment.systemPackages = with pkgs; [
-      quickshell # TODO(M3): ship the Kestrel shell (shell/) instead of the bare toolkit
+      quickshell # TODO(M3): ship the TorqOS shell (shell/) instead of the bare toolkit
       foot
       fuzzel
       firefox

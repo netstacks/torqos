@@ -6,7 +6,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 1. ~~**Crash between commit and ledger append.**~~ Fixed (ADR-010): reconciled on the next
    operation. Still manual: leftover git locks other than `index.lock` (`refs/heads/main.lock`,
    `HEAD.lock`, `packed-refs.lock`) after power loss, and HEAD not descending from the recorded
-   commit — both refuse loudly; inspect `/var/lib/kestrel/config`, fix, rerun `reconcile`. A
+   commit — both refuse loudly; inspect `/var/lib/torq/config`, fix, rerun `reconcile`. A
    process that inherits the broker lock and never exits blocks the broker until it is killed
    (the error names it). Not yet: reconcile at boot; recording who triggered a reconcile beyond
    `reconciled_by`; edits made in the repo *during* a rebuild are still reset by a failed
@@ -15,20 +15,20 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 2. **`verify` cannot detect truncation of the newest entries** and does not cross-check git
    `Ledger-Entry` trailers against the ledger. Planned: anchor the head hash (M3).
 3. **Path-based tiers cannot see semantic escalation inside system-tier files** — e.g.
-   `kestrel.broker.enable = false`, a new `kestrel.broker.stateDir` (fresh empty ledger),
-   `kestrel.security.lockdown = "none"`, or swapping `kestrel.url` in `flake.nix`. Today only
+   `torq.broker.enable = false`, a new `torq.broker.stateDir` (fresh empty ledger),
+   `torq.security.lockdown = "none"`, or swapping `torq.url` in `flake.nix`. Today only
    human review of the diff catches these. Needs a design (evaluate the old and new config and
    diff protected options?).
 4. **Caller-supplied identity and configuration:** `--actor`, `--tainted`, `--approved-by`,
-   `--repo`, `--state-dir` and `KESTREL_REBUILD_CMD` are trusted as given (under sudo, the
+   `--repo`, `--state-dir` and `TORQ_REBUILD_CMD` are trusted as given (under sudo, the
    last three let a wheel user point a root broker anywhere; they must come from fixed config
    before any narrow sudoers rule or the socket). Fine under sudo in M1; the M3 socket must take
-   identity from `SO_PEERCRED` and the rebuild command from fixed config. `kestrel pkg` inherits
+   identity from `SO_PEERCRED` and the rebuild command from fixed config. `torq pkg` inherits
    this: it passes `--actor user --approved-by $(id -un)` itself, so anything running as the user
    (a script, an AI tool in their terminal) can approve a user-tier change with `--yes`; it does
    refuse `--yes` for system tier and asks first, but that prompt is in the same process. It also
    needs `sudo` for the broker, so only wheel users can use it until the socket exists.
-5. **`kestrel.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
+5. **`torq.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
    is copied into the store on every evaluation. Prefer `git+file://`. Related: the rebuild
    builds the config repo's *working tree*; building the exact ledgered commit
    (`git+file://…?rev=<commit>`) would make "running system = ledgered commit" hold by
@@ -49,14 +49,14 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    built would close that.
 6e. **OPEN (high): an outside commit made while a change is interrupted is discarded untraced.**
    If HEAD has moved past the interrupted operation's own commit (someone committed on top of it),
-   `kestrel status` shows only "a change was interrupted" (the CLI hides head findings while
+   `torq status` shows only "a change was interrupted" (the CLI hides head findings while
    interrupted) and `--repair` → `reconcile_locked` keeps and ledgers only `pending.commit`, then
    resets: the outside commit survives only in the reflog. Fix: broker `keep(head)` and ledger it
    (`discarded_head`) when `head != pending.commit`, with a test; expose `interrupted.commit` in
    `status --json`; the CLI hides the head finding only when HEAD is `before` or that commit.
    Also low: `history::asked_by` credits a failed/interrupted *undo* to the original change's
    actor; undo is user-only, so rollbacks should show "user". (Found by review of f2da8b7.)
-6c. **`kestrel update` trusts the user's fetch:** `nix flake update` runs as the user, so their
+6c. **`torq update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
    that store path without re-fetching. The ledgered rev may then not identify what was built.
    Fix: the broker re-fetches changed locked inputs as root and compares narHashes.
@@ -79,18 +79,18 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 
 ## Desktop
 7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
-   `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a Kestrel niri config.
-8. ~~Template hard-codes user `casey`.~~ Fixed: `kestrel.user` in `system.nix` is the one place
+   `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a TorqOS niri config.
+8. ~~Template hard-codes user `casey`.~~ Fixed: `torq.user` in `system.nix` is the one place
    (asserted set and well-formed); per-user apps are `users/<name>.packages.json`.
 
-## UTM VM quirks (not Kestrel bugs)
+## UTM VM quirks (not TorqOS bugs)
 - niri needs 3D: UTM display card must be `virtio-gpu-gl-pci` with GPU acceleration on
   (renderer ANGLE/Metal). Without it: black screen, "software EGL renderers are skipped".
 - Firefox's GPU WebRender drops most text on virgl. Workaround: `LIBGL_ALWAYS_SOFTWARE=1 firefox`.
 - On a Mac keyboard, niri's Mod is ⌘: ⌘⇧Q logs out of macOS and ⌘Q quits UTM. Use UTM's
   "Capture input" before using niri shortcuts.
 
-## Dev mode (`kestrel.dev.enable`)
+## Dev mode (`torq.dev.enable`)
 - **Claude Code's own installer and `claude update` do not work on NixOS.** The native binary is
   a plain dynamically-linked ELF (dies with the `stub-ld` error) and the installer edits
   `~/.bashrc` to put it first on `PATH`, which breaks `claude` in every new terminal. Instead,

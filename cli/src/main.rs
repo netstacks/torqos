@@ -1,5 +1,5 @@
-//! `kestrel`: the unprivileged command line. It never changes the system itself: it writes a
-//! proposed change as a diff and hands it to `kestrel-broker`, which ledgers, applies and can undo it.
+//! `torq`: the unprivileged command line. It never changes the system itself: it writes a
+//! proposed change as a diff and hands it to `torq-broker`, which ledgers, applies and can undo it.
 
 mod history;
 mod pkg;
@@ -15,18 +15,18 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const REPO: &str = "/var/lib/kestrel/config";
-const BROKER: &str = "sudo kestrel-broker";
+const REPO: &str = "/var/lib/torq/config";
+const BROKER: &str = "sudo torq-broker";
 
 #[derive(Parser)]
-#[command(name = "kestrel", version, about = "Kestrel: change this machine through the broker")]
+#[command(name = "torq", version, about = "TorqOS: change this machine through the broker")]
 struct Cli {
     /// The machine's config repo. Only for testing, together with --broker: the real broker
-    /// manages /var/lib/kestrel/config and nothing else.
-    #[arg(long, env = "KESTREL_CONFIG_REPO", default_value = REPO)]
+    /// manages /var/lib/torq/config and nothing else.
+    #[arg(long, env = "TORQ_CONFIG_REPO", default_value = REPO)]
     repo: PathBuf,
     /// How to run the broker (it needs root).
-    #[arg(long, env = "KESTREL_BROKER", default_value = BROKER)]
+    #[arg(long, env = "TORQ_BROKER", default_value = BROKER)]
     broker: String,
     /// Also show the raw change: the diff the broker records in the ledger.
     #[arg(long, global = true)]
@@ -40,12 +40,12 @@ enum Cmd {
     /// Installed software.
     #[command(subcommand)]
     Pkg(PkgCmd),
-    /// Services (SSH, containers, VPN, ...) from Kestrel's catalog; always system changes.
+    /// Services (SSH, containers, VPN, ...) from TorqOS's catalog; always system changes.
     #[command(subcommand)]
     Service(ServiceCmd),
-    /// Move this machine to the newest Kestrel, and so its nixpkgs (a system change: always asks).
+    /// Move this machine to the newest TorqOS, and so its nixpkgs (a system change: always asks).
     Update {
-        /// Update every input of the machine's config flake, not just Kestrel.
+        /// Update every input of the machine's config flake, not just TorqOS.
         #[arg(long)]
         all: bool,
     },
@@ -57,7 +57,7 @@ enum Cmd {
         #[arg(long, short, default_value_t = 20)]
         n: usize,
     },
-    /// Undo a change (the number `kestrel log` shows); without one, the latest change not yet
+    /// Undo a change (the number `torq log` shows); without one, the latest change not yet
     /// undone. Undo is not redo: undoing again goes further back; to redo, make the change again.
     Undo {
         seq: Option<u64>,
@@ -179,7 +179,7 @@ fn read_list(repo: &Path, path: &str) -> Result<Option<ListFile>> {
     }
 }
 
-/// `kestrel pkg list`: your apps and everyone's, with versions and descriptions.
+/// `torq pkg list`: your apps and everyone's, with versions and descriptions.
 fn list(repo: &Path) -> Result<()> {
     let ui = ui::Ui::detect();
     let user = me()?;
@@ -257,7 +257,7 @@ fn approval(system: bool, yes: bool) -> Result<()> {
 /// In XDG_RUNTIME_DIR (the user's own) if there is one, else /tmp; TMPDIR is not consulted.
 fn scratch_dir() -> Result<tempfile::TempDir> {
     let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    tempfile::Builder::new().prefix("kestrel-").tempdir_in(base).context("creating a scratch directory")
+    tempfile::Builder::new().prefix("torq-").tempdir_in(base).context("creating a scratch directory")
 }
 
 /// What a change looks like to the person approving it (docs/CLI-DESIGN.md): in their terms, not
@@ -285,7 +285,7 @@ struct Change<'a> {
     /// Its exact current text (None: the file is new) — a diff must start from that.
     old: Option<&'a str>,
     new: &'a str,
-    /// The ledger's reason (what `kestrel log` shows).
+    /// The ledger's reason (what `torq log` shows).
     reason: String,
     summary: Summary,
 }
@@ -408,14 +408,14 @@ fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path, a
             Ok(l) => {
                 if let Some(a) = landed(&l) {
                     println!("{}", ui.warn(&format!("Done, but something went wrong afterwards ({what}: change {a}).")));
-                    println!("    Check with: kestrel status");
+                    println!("    Check with: torq status");
                     log_line();
                     std::process::exit(1);
                 }
             }
             Err(_) => {
                 println!("{}", ui.fail(&format!("Couldn't tell whether this worked ({what}).")));
-                println!("    Your machine may not be as it was: see kestrel status");
+                println!("    Your machine may not be as it was: see torq status");
                 log_line();
                 std::process::exit(1);
             }
@@ -432,7 +432,7 @@ fn fail(cli: &Cli, ui: &ui::Ui, what: &str, outcome: run::Outcome, log: &Path, a
     if consistent {
         println!("    Nothing changed — your machine is as it was.");
     } else {
-        println!("    Your machine may not be as it was: see kestrel status");
+        println!("    Your machine may not be as it was: see torq status");
     }
     if let Attempt::Proposal(p) = attempt {
         println!("    {}", ui.dim(&format!("(Your request is recorded as proposal {p}, not applied.)")));
@@ -476,7 +476,7 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
         Target::System
     } else {
         if !pkg::valid_user(&user) {
-            bail!("'{user}' is not a user name Kestrel can keep a package list for");
+            bail!("'{user}' is not a user name TorqOS can keep a package list for");
         }
         Target::User(user.clone())
     };
@@ -504,7 +504,7 @@ fn change(cli: &Cli, names: &[String], system: bool, yes: bool, how: Edit) -> Re
     if !reads_package_lists(&copy, &host)? {
         bail!(
             "this machine's config does not read package lists yet: its flake.nix must call \
-             kestrel.lib.mkSystem with `configDir = ./.;` (a system change)"
+             torq.lib.mkSystem with `configDir = ./.;` (a system change)"
         );
     }
     let path = target.path();
@@ -571,7 +571,7 @@ fn did_you_mean(copy: &Path, host: &str, names: &[String]) -> Option<String> {
         let close = pkg::suggest(n, &all);
         (!close.is_empty()).then(|| {
             let close: Vec<String> = close.iter().map(|c| history::one_line(c, 40)).collect();
-            format!("\"{n}\" isn't a package. Did you mean {}? (or: kestrel pkg search {n})", close.join(", "))
+            format!("\"{n}\" isn't a package. Did you mean {}? (or: torq pkg search {n})", close.join(", "))
         })
     })
 }
@@ -585,7 +585,7 @@ struct Services {
     enabled: Vec<String>,
     /// sshd is on outside the catalog (stock settings), e.g. `services.openssh.enable` in a .nix file.
     ssh_outside: bool,
-    /// The machine's owner (`kestrel.user`): the one user the catalog's SSH admits.
+    /// The machine's owner (`torq.user`): the one user the catalog's SSH admits.
     owner: String,
 }
 
@@ -595,8 +595,8 @@ fn services(repo: &Path, host: &str) -> Result<Services> {
         .arg(format!("{}#nixosConfigurations.{host}.config", flake_ref(repo)))
         .args([
             "--apply",
-            "c: { inherit (c.kestrel.services) catalog enabled; owner = c.kestrel.user; \
-             ssh_outside = c.services.openssh.enable && !(builtins.elem \"ssh\" c.kestrel.services.enabled) \
+            "c: { inherit (c.torq.services) catalog enabled; owner = c.torq.user; \
+             ssh_outside = c.services.openssh.enable && !(builtins.elem \"ssh\" c.torq.services.enabled) \
              && c.services.openssh.settings.PasswordAuthentication != false; }",
         ])
         .output()
@@ -625,7 +625,7 @@ fn service_list(cli: &Cli) -> Result<()> {
     if s.ssh_outside {
         println!(
             "\nSSH is ON outside this catalog, with stock settings (password logins allowed).\n\
-             `kestrel service enable ssh` replaces them with keys only."
+             `torq service enable ssh` replaces them with keys only."
         );
     }
     Ok(())
@@ -695,7 +695,7 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, Strin
     Ok(keys)
 }
 
-/// `kestrel service enable|disable`: a system change to services.json, always asked.
+/// `torq service enable|disable`: a system change to services.json, always asked.
 fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
     check_repo(cli)?;
     approval(true, false)?;
@@ -705,7 +705,7 @@ fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
     for n in names {
         if !svc.catalog.iter().any(|(c, _)| c == n) {
             let all: Vec<_> = svc.catalog.iter().map(|(c, _)| c.as_str()).collect();
-            bail!("\"{n}\" isn't a Kestrel service. There are: {}", all.join(", "));
+            bail!("\"{n}\" isn't a TorqOS service. There are: {}", all.join(", "));
         }
     }
     let old = read_list(&cli.repo, SERVICES)?;
@@ -722,7 +722,7 @@ fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
     if !reads_package_lists(&copy, &host)? {
         bail!(
             "this machine's config does not read services.json yet: its flake.nix must call \
-             kestrel.lib.mkSystem with `configDir = ./.;` (a system change)"
+             torq.lib.mkSystem with `configDir = ./.;` (a system change)"
         );
     }
     let new_text = pkg::render(&new);
@@ -777,7 +777,7 @@ fn service_change(cli: &Cli, names: &[String], how: Edit) -> Result<()> {
     submit(cli, scratch, &host, change, false)
 }
 
-/// `kestrel status [--repair]`: the machine against its history, in words; with --repair, and only
+/// `torq status [--repair]`: the machine against its history, in words; with --repair, and only
 /// for what a rebuild can fix, ask and then return it to its history (the broker's `repair`).
 fn status_cmd(cli: &Cli, repair: bool) -> Result<()> {
     let ui = ui::Ui::detect();
@@ -820,7 +820,7 @@ fn status_cmd(cli: &Cli, repair: bool) -> Result<()> {
         run::Outcome::Busy => bail!("Another change is being applied right now. Try again when it is done."),
         run::Outcome::Refused(m) => {
             println!("{}", ui.fail(&format!("Couldn't repair: {}", history::one_line(&m, 200))));
-            println!("    See: kestrel status");
+            println!("    See: torq status");
             println!("    {}", ui.dim(&format!("log: {}", log.display())));
             std::process::exit(1);
         }
@@ -840,7 +840,7 @@ fn read_ledger(cli: &Cli) -> Result<Vec<history::Entry>> {
     history::parse(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// `kestrel undo [n]`: roll back an applied change through the broker, after saying what it was.
+/// `torq undo [n]`: roll back an applied change through the broker, after saying what it was.
 fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
     let ui = ui::Ui::detect();
     let entries = read_ledger(cli)?;
@@ -902,7 +902,7 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
             );
             // An undo cannot be undone, so then only the opposite change helps.
             if later.iter().any(|s| entries.iter().any(|e| e.seq == *s && e.kind == "rolled_back")) {
-                println!("    Make the opposite change yourself (for packages: kestrel pkg add / remove).");
+                println!("    Make the opposite change yourself (for packages: torq pkg add / remove).");
             } else {
                 println!("    Undo those first (newest first), or make the opposite change yourself.");
             }
@@ -913,7 +913,7 @@ fn undo(cli: &Cli, seq: Option<u64>, yes: bool) -> Result<()> {
     }
 }
 
-/// `kestrel update`: move this machine to the newest Kestrel (and so nixpkgs, which follows it), as
+/// `torq update`: move this machine to the newest TorqOS (and so nixpkgs, which follows it), as
 /// one ledgered, undoable change to flake.lock (ADR-004). `all`: every input of the config flake.
 fn update(cli: &Cli, all: bool) -> Result<()> {
     check_repo(cli)?;
@@ -930,7 +930,7 @@ fn update(cli: &Cli, all: bool) -> Result<()> {
         let mut cmd = Command::new("nix");
         cmd.args(["flake", "update", "--flake"]).arg(flake_ref(&copy));
         if !all {
-            cmd.arg("kestrel");
+            cmd.arg("torq");
         }
         cmd.output().context("running nix flake update")?
     };
@@ -970,19 +970,19 @@ fn update(cli: &Cli, all: bool) -> Result<()> {
 /// repo and nothing else, and `change` has refused to read a different one with it.
 fn broker(cli: &Cli, args: &[&str]) -> Command {
     let mut words = cli.broker.split_whitespace();
-    let mut c = Command::new(words.next().unwrap_or("kestrel-broker"));
+    let mut c = Command::new(words.next().unwrap_or("torq-broker"));
     c.args(words).args(args);
     c
 }
 
 /// A repo override only makes sense with a test broker: with the real one (anything run through
-/// sudo, however it is spelled), a stray KESTREL_CONFIG_REPO would mean evaluating one repo while
+/// sudo, however it is spelled), a stray TORQ_CONFIG_REPO would mean evaluating one repo while
 /// root changes another.
 fn check_repo(cli: &Cli) -> Result<()> {
     let real_broker = cli.broker == BROKER || cli.broker.split_whitespace().any(|w| w == "sudo" || w.ends_with("/sudo"));
     if real_broker && cli.repo != Path::new(REPO) {
         bail!(
-            "the config repo is set to {} (KESTREL_CONFIG_REPO?), but the broker only manages {REPO}; \
+            "the config repo is set to {} (TORQ_CONFIG_REPO?), but the broker only manages {REPO}; \
              unset it",
             cli.repo.display()
         );
@@ -991,7 +991,7 @@ fn check_repo(cli: &Cli) -> Result<()> {
 }
 
 /// The single nixosConfiguration in the config repo. (Not the hostname: a machine whose config was
-/// switched away from Kestrel may have another one.)
+/// switched away from TorqOS may have another one.)
 fn config_name(repo: &Path) -> Result<String> {
     let out = Command::new("nix")
         .args(["eval", "--json"])
@@ -1030,7 +1030,7 @@ fn evaluate(copy: &Path, host: &str, log: &Path) -> Result<()> {
 fn reads_package_lists(copy: &Path, host: &str) -> Result<bool> {
     let out = Command::new("nix")
         .args(["eval", "--json"])
-        .arg(format!("{}#nixosConfigurations.{host}.config.kestrel", flake_ref(copy)))
+        .arg(format!("{}#nixosConfigurations.{host}.config.torq", flake_ref(copy)))
         .args(["--apply", "k: (k.packages.configDir or null) != null"])
         .output()
         .context("running nix eval")?;
@@ -1047,7 +1047,7 @@ fn last_error(stderr: &[u8]) -> String {
     let lines: Vec<&str> = s.lines().map(str::trim).collect();
     let line = lines
         .iter()
-        .find(|l| l.contains("kestrel.packages:"))
+        .find(|l| l.contains("torq.packages:"))
         .or_else(|| lines.iter().rev().find(|l| l.starts_with("error:")))
         .map(|l| l.trim_start_matches("error:").trim().to_string())
         .unwrap_or_else(|| s.trim().to_string());
