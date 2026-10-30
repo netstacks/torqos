@@ -55,6 +55,11 @@ let
       { };
 in
 {
+  options.kestrel.cli.package = lib.mkOption {
+    type = lib.types.package;
+    description = "The `kestrel` command line (set by the Kestrel flake).";
+  };
+
   options.kestrel.packages = {
     configDir = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
@@ -87,7 +92,7 @@ in
       message = "kestrel.packages: users/${user}.packages.json names '${user}', which is not a normal user on this machine.";
     }) cfg.user;
 
-    environment.systemPackages = map (resolve "system") cfg.system;
+    environment.systemPackages = [ config.kestrel.cli.package ] ++ map (resolve "system") cfg.system;
     users.users = lib.mapAttrs (user: names: { packages = map (resolve "user ${user}") names; }) cfg.user;
   };
 }

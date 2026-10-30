@@ -21,6 +21,7 @@
       # ── Packages ─────────────────────────────────────────────────────────────
       packages = forSystems allSystems (pkgs: {
         kestrel-broker = pkgs.callPackage ./broker/package.nix { };
+        kestrel = pkgs.callPackage ./cli/package.nix { };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.kestrel-broker;
       });
 
@@ -29,6 +30,7 @@
         imports = [ ./modules ];
         kestrel.broker.package =
           lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.kestrel-broker;
+        kestrel.cli.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.kestrel;
       };
 
       # Helper used by per-machine config repos (see templates/config).
