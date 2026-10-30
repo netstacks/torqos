@@ -24,13 +24,13 @@ in
     };
     configName = lib.mkOption {
       type = lib.types.str;
-      default = config.networking.hostName;
-      defaultText = lib.literalExpression "config.networking.hostName";
+      default = "torq";
       description = ''
-        The `nixosConfigurations.<name>` in the config repo that this machine is built from. The
-        broker rebuilds `--flake <repo>#<name>` explicitly: without a name, nixos-rebuild picks one
-        by the *running* hostname, which is not always this machine's configured one (after a
-        switch from another configuration it stays the old one until reboot).
+        The `nixosConfigurations.<name>` in the config repo that this machine is built from; the
+        template's flake always exposes `torq`. The broker rebuilds `--flake <repo>#<name>`
+        explicitly, and the name is fixed rather than the host name: without a name, nixos-rebuild
+        picks one by the *running* host name, and if the name followed the host name, changing the
+        host name would leave the next rebuild looking for a configuration that does not exist.
       '';
     };
     guardEtcNixos = lib.mkOption {

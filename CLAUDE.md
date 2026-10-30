@@ -65,18 +65,19 @@ nix build .#nixosConfigurations.dev-vm-aarch64.config.system.build.vm
 nix build .#checks.aarch64-linux.trust-loop       # run the trust-loop VM test
 
 # Inside the UTM VM, against the machine's config repo
-sudo nixos-rebuild switch --flake /var/lib/torq/config#torq-utm   # first time only
+sudo nixos-rebuild switch --flake /var/lib/torq/config#torq   # first time only
 sudo torq-broker propose --diff change.diff --reason "..." --actor user
 sudo torq-broker apply <seq> --approved-by $USER
 sudo torq-broker rollback <applied-seq> --approved-by $USER
 sudo torq-broker log && sudo torq-broker verify
 ```
 
-## Current milestone (M2) — "the agent sees" (M1, the trust loop, is done)
+## Current milestone (M1.5) — `torqcli`: TorqOS driven like a network device
 
-A local model is reachable (llama.cpp on the Mac host during dev); `torq-agent` runs with
-read-only MCP tools (logs, hardware, `config.read`); "Doctor" mode diagnoses and explains but
-proposes nothing. See `docs/ROADMAP.md`.
+A shell with operational and configuration modes, Juniper and Cisco syntax (`switch cli`), a
+candidate configuration, `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`, and a
+configuration tree that is the config repo's files (ADR-016, `docs/CLI-DESIGN.md`). Built in small,
+reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
 
 ## Engineering principles
 

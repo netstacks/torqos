@@ -33,7 +33,7 @@ sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/torq/config/system.nix          # the 
 sudo sed -i "s|github:netstacks/torqos|path:$HOME/torq|" /var/lib/torq/config/flake.nix  # dev: your checkout
 
 # d) First switch into TorqOS (explicit host name the first time)
-sudo nixos-rebuild switch --flake /var/lib/torq/config#torq-utm
+sudo nixos-rebuild switch --flake /var/lib/torq/config#torq
 sudo reboot
 ```
 

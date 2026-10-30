@@ -41,6 +41,9 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test -n \"$(systemctl show -p ExecMainStartTimestamp --value torq-status)\"")
     machine.succeed("journalctl -b -u torq-status | grep -q 'OK as far as recorded'")
     machine.succeed("test ! -e /run/torq/drift")
+    # The broker builds the fixed configuration `torq`, not one named after the host (this host is
+    # "machine"): changing the host name must never leave rebuilds looking for a missing config.
+    machine.succeed("grep -q \"flake {repo}#torq'\" \"$(readlink -f \"$(command -v torq-broker)\")\"")
 
     machine.succeed(f"mkdir -p {repo} && cp /etc/torq-test/desktop.nix {repo}/ && touch {repo}/flake.nix")
     machine.succeed(env + "torq-broker init")
