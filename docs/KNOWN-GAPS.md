@@ -65,6 +65,11 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    file and a user name), so a template that stopped exposing `nixosConfigurations.torq` would
    only show at the next install. A config repo made from an older template (output `torq-utm`)
    must be renamed to `torq` before its broker is updated; only the dev VM ever had one.
+6g. **`propose --base` is optional.** Without it a diff applies wherever it applies, so a stale
+   change can still mix with a newer commit. `torqcli` will always pass it; once the agent exists,
+   the broker should require a base for `--actor agent` (and for anything approved from a shown
+   diff). The base must be a 40-hex SHA-1 id: a config repo created with git's SHA-256 object
+   format could not use it.
 6c. **`torq update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
    that store path without re-fetching. The ledgered rev may then not identify what was built.

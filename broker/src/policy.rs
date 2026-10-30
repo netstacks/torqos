@@ -72,11 +72,24 @@ pub const MAX_USER_PACKAGES: usize = 256;
 pub fn user_leaf_ok(leaf: &str, value: &serde_json::Value) -> bool {
     match leaf {
         // A list of nixpkgs attribute names.
-        "packages.json" => value
-            .as_array()
-            .is_some_and(|names| names.len() <= MAX_USER_PACKAGES && names.iter().all(|n| n.is_string())),
+        "packages.json" => value.as_array().is_some_and(|names| {
+            names.len() <= MAX_USER_PACKAGES && names.iter().all(|n| n.as_str().is_some_and(package_name_ok))
+        }),
         _ => false,
     }
+}
+
+/// The form of a package name, mirroring modules/packages.nix (`isAttrName`, depth): a top-level
+/// nixpkgs attribute or one level under a package set. Which sets are allowed, and whether the
+/// package exists and is available, is the module's call at evaluation.
+fn package_name_ok(name: &str) -> bool {
+    let attr = |s: &str| {
+        let mut c = s.chars();
+        matches!(c.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            && c.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '\'' | '+' | '-'))
+    };
+    let parts: Vec<&str> = name.split('.').collect();
+    parts.len() <= 2 && parts.iter().all(|p| attr(p))
 }
 
 /// User tier: exactly `users/<name>/<leaf>` with an allow-listed leaf. The broker also checks the
@@ -176,9 +189,13 @@ mod tests {
     #[test]
     fn user_leaf_shapes() {
         let ok = |leaf: &str, json: &str| user_leaf_ok(leaf, &serde_json::from_str(json).unwrap());
-        assert!(ok("packages.json", r#"["htop", "python3Packages.requests"]"#));
+        assert!(ok("packages.json", r#"["htop", "python3Packages.requests", "g++", "vim_configurable", "xorg'"]"#));
         assert!(ok("packages.json", "[]"));
         for bad in ["{}", "[1]", "[{}]", "[null]", "\"htop\"", "42"] {
+            assert!(!ok("packages.json", bad), "{bad}");
+        }
+        // Names the module would reject anyway: not an attribute name, or deeper than one set.
+        for bad in [r#"["../x"]"#, r#"["a.b.c"]"#, r#"[""]"#, r#"[".htop"]"#, r#"["htop."]"#, r#"["1password"]"#, r#"["a b"]"#, r#"["${x}"]"#] {
             assert!(!ok("packages.json", bad), "{bad}");
         }
         let at_most = |n: usize| format!("[{}]", vec!["\"p\""; n].join(","));
