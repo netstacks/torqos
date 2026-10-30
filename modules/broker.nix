@@ -22,6 +22,17 @@ in
       type = lib.types.str;
       default = "/var/lib/kestrel/state";
     };
+    configName = lib.mkOption {
+      type = lib.types.str;
+      default = config.networking.hostName;
+      defaultText = lib.literalExpression "config.networking.hostName";
+      description = ''
+        The `nixosConfigurations.<name>` in the config repo that this machine is built from. The
+        broker rebuilds `--flake <repo>#<name>` explicitly: without a name, nixos-rebuild picks one
+        by the *running* hostname, which is not always this machine's configured one (after a
+        switch from another configuration it stays the old one until reboot).
+      '';
+    };
     guardEtcNixos = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -38,7 +49,20 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ cfg.package ];
+    # The broker with this machine's rebuild command baked in (a default, so it survives sudo's
+    # environment reset; KESTREL_REBUILD_CMD still overrides it, see KNOWN-GAPS #4).
+    environment.systemPackages = [
+      (pkgs.symlinkJoin {
+        name = "kestrel-broker-${cfg.configName}";
+        paths = [ cfg.package ];
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+        postBuild = ''
+          wrapProgram $out/bin/kestrel-broker \
+            --set-default KESTREL_REBUILD_CMD ${lib.escapeShellArg "nixos-rebuild switch --flake {repo}#${cfg.configName}"}
+        '';
+        meta.mainProgram = "kestrel-broker";
+      })
+    ];
 
     environment.variables = {
       KESTREL_CONFIG_REPO = cfg.configRepo;
