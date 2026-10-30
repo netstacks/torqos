@@ -135,10 +135,20 @@ fn user_tier_detected() {
     let d = write_diff(
         dir.path(),
         "t.diff",
-        "--- a/users/casey.nix\n+++ b/users/casey.nix\n@@ -1 +1 @@\n-{ theme = \"dark\"; }\n+{ theme = \"light\"; }\n",
+        "--- /dev/null\n+++ b/users/casey.packages.json\n@@ -0,0 +1,3 @@\n+[\n+  \"htop\"\n+]\n",
     );
-    let p = b.propose(&d, "light theme", Actor::Agent, false).unwrap();
+    let p = b.propose(&d, "install htop", Actor::Agent, false).unwrap();
     assert_eq!(p.body.tier, "user");
+}
+
+/// `users/*.nix` is a full NixOS module (sudo rules, services, ...): changing it must never be
+/// mistaken for a user-tier change just because it lives under `users/`.
+#[test]
+fn user_module_is_system_tier() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "t.diff", THEME);
+    let p = b.propose(&d, "light theme", Actor::Agent, false).unwrap();
+    assert_eq!(p.body.tier, "system");
 }
 
 fn assert_agent_refused(b: &Broker, diff: &Path) {
