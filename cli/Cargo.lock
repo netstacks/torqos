@@ -397,6 +397,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "rustyline",
  "serde",
  "serde_json",

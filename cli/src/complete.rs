@@ -25,6 +25,7 @@ impl Choice {
 
 const OPERATIONAL: &[(&str, &str)] = &[
     ("configure", "Edit the configuration (a candidate, until you commit it)"),
+    ("request", "Ask the machine to do something"),
     ("show", "Show information about the machine"),
     ("exit", "Leave torqcli"),
 ];
@@ -47,6 +48,11 @@ pub fn choices(schema: &Schema, mode: Mode, words: &[String], partial: &str) -> 
         (Mode::Operational, None) => table(OPERATIONAL),
         (Mode::Configuration, None) => table(CONFIGURATION),
         (Mode::Operational, Some("show")) => operational_show(schema, &words[1..]),
+        (Mode::Operational, Some("request")) => match words.len() {
+            1 => table(&[("system", "This machine")]),
+            2 => table(&[("repair", "Return a machine changed outside TorqOS to its last configuration")]),
+            _ => vec![],
+        },
         (Mode::Configuration, Some("run")) => choices(schema, Mode::Operational, &words[1..], partial),
         (Mode::Configuration, Some(cmd @ ("set" | "delete" | "show"))) => {
             let rest = &words[1..];
@@ -80,8 +86,22 @@ fn table(t: &[(&str, &str)]) -> Vec<Choice> {
 
 fn operational_show(_schema: &Schema, rest: &[String]) -> Vec<Choice> {
     match rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        [] => table(&[("configuration", "The configuration in effect"), ("system", "This machine")]),
-        ["system"] => table(&[("commit", "The configurations so far, newest first")]),
+        [] => table(&[
+            ("configuration", "The configuration in effect"),
+            ("packages", "Software you can install"),
+            ("services", "The services TorqOS offers, and which are on"),
+            ("system", "This machine"),
+        ]),
+        ["system"] => table(&[
+            ("alarms", "Is this machine as its history says?"),
+            ("commit", "The configurations so far, newest first"),
+            ("rollback", "An earlier configuration, or how two differ"),
+        ]),
+        ["system", "rollback"] => vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")],
+        ["system", "rollback", _] => table(&[("compare", "How it differs from another one")]),
+        ["system", "rollback", _, "compare"] => vec![Choice::new("<number>", "The configuration to compare with")],
+        ["packages"] => table(&[("available", "Search nixpkgs")]),
+        ["packages", "available", ..] => vec![Choice::new("<term>", "Words to search for")],
         ["configuration", .., "|"] => table(&[("display", "Show it differently")]),
         ["configuration", .., "|", "display"] => table(&[("set", "As set commands")]),
         _ => vec![],
@@ -179,9 +199,13 @@ mod tests {
     #[test]
     fn commands_of_each_mode() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "show", "exit"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "request", "show", "exit"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "rollback"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["compare"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["set", "show"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "show", "exit"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
     }
 

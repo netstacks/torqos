@@ -31,15 +31,17 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       an evaluation test (`tests/tree.nix`).
 - [ ] Environment variables: their own design first (allow-list, per-user delivery, escaping,
       never reaching root or the broker, secrets check) — review N2/N3.
-- [ ] `torqcli` shell: operational + configuration modes, Juniper style, pipes, `?`, Tab, history.
+- [x] `torqcli` shell: operational + configuration modes, Juniper style, pipes, `?`, Tab, history
+      (3a–3d; a pasted block runs line by line).
 - [ ] Cisco style and `switch cli`.
-- [ ] Candidate per user with its base commit; `set` / `delete` on the tree; `rollback 0`.
-- [ ] `show configuration`, `show | compare`, `show system commit`, `show system rollback <n>
-      [compare <m>]`, `show packages available`, `show services`, `show system alarms`.
-- [ ] `commit check` (evaluate + build, no switch); `commit [comment]`; `commit confirmed
-      [<minutes>]`; system-tier commits print the change and need a terminal.
-- [ ] `rollback <n>` (configuration, never `flake.lock`); `request system software rollback <n>`;
-      `request system update [all]`; `request system repair`.
+- [x] Candidate per user with its base commit; `set` / `delete` on the tree; `rollback 0`.
+- [x] `show configuration`, `show | compare`, `show system commit`, `show system rollback <n>
+      [compare <m>]`, `show packages available`, `show services`, `show system alarms` (3e).
+- [x] `commit check` (evaluates the committed base; building is left to the commit); `commit
+      [comment]`; `commit confirmed [<minutes>]`; system-tier commits (and others' folders) print
+      the change and need a terminal. Not yet run end to end against a real broker: the cutover.
+- [ ] `rollback <n>` and `request system repair` are done; `request system software rollback <n>`
+      and `request system update [all]` wait for `flake.lock` in the candidate (`torq update` now).
 - [ ] Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 
 **First round** (done with the earlier command names; carried over):

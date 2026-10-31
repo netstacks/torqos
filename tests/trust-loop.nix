@@ -159,6 +159,15 @@ pkgs.testers.runNixOSTest {
         as_dev("tmux send-keys -t t C-u 'set system ti' Tab")
         # (capture-pane drops trailing spaces, so the space Tab adds is not seen here.)
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"set system time-zone\"')}", timeout=30)
+        # A pasted block stops at its first error: nothing after a refused line runs.
+        as_dev("tmux send-keys -t t C-u")
+        as_dev("printf 'set system host-name my_laptop\\nset users dev packages vim\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")
+        as_dev("tmux send-keys -t t Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"pasted lines after it were not run\"')}", timeout=30)
+        as_dev("tmux send-keys -t t 'show | compare' Enter")
+        machine.sleep(3)
+        after = as_dev(screen).split("were not run")[-1]
+        assert "show | compare" in after and "vim" not in after, after
         # A pasted block of commands (bracketed paste) runs line by line.
         as_dev("tmux send-keys -t t C-u")
         as_dev("printf 'set users dev packages htop\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")

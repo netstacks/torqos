@@ -203,6 +203,11 @@ line by line.
 
 Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 
+As built (3e): all of the above except `request system update` and `request system software
+rollback` (they change `flake.lock`, which the candidate does not hold yet — `torq update` does it
+for now) and `switch cli` (with the Cisco syntax). `show system commit` lists the config repo's
+history (KNOWN-GAPS 6k); `show packages available` is `nix search` on this machine's nixpkgs.
+
 ## How it is built
 
 - **`torqcli` is unprivileged** (ADR-014): the shell, the candidate, `show`, `commit check` and

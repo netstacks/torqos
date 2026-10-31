@@ -21,6 +21,17 @@ pub trait Machine {
     fn confirm(&self) -> Result<u64>;
     /// Ask a person (a system-tier commit); false when there is no one to ask.
     fn ask(&self, question: &str) -> bool;
+    /// `show system alarms`: what is not as the ledger says (and a commit confirmed waiting).
+    fn alarms(&self) -> Result<String>;
+    /// `show packages available <term>…`.
+    fn search(&self, terms: &[String]) -> Result<String>;
+    /// `request system repair`: return the machine to its last ledgered configuration.
+    fn repair(&self) -> Result<String>;
+}
+
+/// A number for `rollback` / `show system rollback`.
+fn rollback_number(n: &str) -> Result<usize> {
+    n.parse().with_context(|| format!("'{n}' is not a number"))
 }
 
 /// A commit confirmed waiting for its author.
@@ -162,7 +173,8 @@ impl<'a> Session<'a> {
         let Some(first) = w.first().map(String::as_str) else { return Ok(String::new()) };
         let rest = &w[1..];
         match (self.mode, first) {
-            (Mode::Operational, "configure") => self.configure(),
+            (Mode::Operational, "configure" | "config") => self.configure(),
+            (Mode::Operational, "request") => self.request(rest),
             (Mode::Operational, "show") => self.show_operational(rest),
             (Mode::Operational, "exit" | "quit") => {
                 self.done = true;
@@ -242,7 +254,56 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            _ => bail!("show: one of: configuration, system commit"),
+            Some("system") if w.get(1).map(String::as_str) == Some("rollback") => {
+                let ws: Vec<&str> = w[2..].iter().map(String::as_str).collect();
+                let (n, m) = match ws.as_slice() {
+                    [n] => (rollback_number(n)?, None),
+                    [n, "compare", m] => (rollback_number(n)?, Some(rollback_number(m)?)),
+                    _ => bail!("show system rollback <n> [compare <m>]"),
+                };
+                let n_cfg = self.configuration_at(n)?;
+                Ok(match m {
+                    None => self.schema.show(&n_cfg, &[])?,
+                    // What going from configuration m to configuration n changes.
+                    Some(m) => self.schema.compare(&self.configuration_at(m)?, &n_cfg),
+                })
+            }
+            Some("system") if w.get(1).map(String::as_str) == Some("alarms") => self.machine.alarms(),
+            Some("services") if w.len() == 1 => {
+                let active = self.active()?;
+                let on: Vec<String> = match active.files.get("services.json") {
+                    Some(crate::tree::Data::List(l)) => l.clone(),
+                    _ => vec![],
+                };
+                let catalog = self.schema.nodes.get("services").and_then(|n| n.values.clone()).unwrap_or_default();
+                let width = catalog.keys().map(|k| k.len()).max().unwrap_or(0);
+                Ok(catalog
+                    .iter()
+                    .map(|(name, what)| format!("{} {name:<width$}  {what}\n", if on.contains(name) { "on " } else { "off" }))
+                    .collect())
+            }
+            Some("packages") if w.get(1).map(String::as_str) == Some("available") && w.len() > 2 => {
+                self.machine.search(&w[2..])
+            }
+            _ => bail!("show: one of: configuration, system commit, system rollback <n>, system alarms, services, packages available <term>"),
+        }
+    }
+
+    /// The configuration n changes back (`rollback <n>`'s numbering: 0 is the current one).
+    fn configuration_at(&self, n: usize) -> Result<Config> {
+        let history = self.repo.history(n + 1)?;
+        let c = history.get(n).with_context(|| format!("there are only {} configurations", history.len()))?;
+        let files = self.repo.tree_files(&self.schema, &c.id)?;
+        self.schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))
+    }
+
+    fn request(&mut self, w: &[String]) -> Result<String> {
+        match w.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            ["system", "repair"] => self.machine.repair(),
+            ["system", "update", ..] | ["system", "software", "rollback", ..] => bail!(
+                "not in torqcli yet: the software (flake.lock) is not part of the candidate — use `torq update` for now"
+            ),
+            _ => bail!("request: one of: system repair"),
         }
     }
 
@@ -398,7 +459,7 @@ fn parse_commit(w: &[String]) -> Result<CommitOptions> {
         match w[i].as_str() {
             "confirmed" if confirm.is_none() => {
                 let mut m = 10;
-                if let Some(n) = w.get(i + 1).filter(|n| n.bytes().all(|b| b.is_ascii_digit())) {
+                if let Some(n) = w.get(i + 1).filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
                     m = n.parse().map_err(|_| anyhow::anyhow!("commit confirmed: '{n}' minutes is too many"))?;
                     i += 1;
                 }
@@ -473,6 +534,15 @@ mod tests {
         fn ask(&self, q: &str) -> bool {
             self.asked.borrow_mut().push(q.into());
             self.answer
+        }
+        fn alarms(&self) -> Result<String> {
+            Ok("all well\n".into())
+        }
+        fn search(&self, terms: &[String]) -> Result<String> {
+            Ok(format!("searched {}\n", terms.join(" ")))
+        }
+        fn repair(&self) -> Result<String> {
+            Ok("repaired\n".into())
         }
     }
 
@@ -679,6 +749,30 @@ mod tests {
 
     fn fs_has(dir: &Path, needle: &str) -> bool {
         std::fs::read_dir(dir).unwrap().flatten().any(|e| std::fs::read_to_string(e.path()).unwrap_or_default().contains(needle))
+    }
+
+    #[test]
+    fn earlier_configurations_and_their_differences() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("show system rollback 1").unwrap(), "system {\n    host-name one;\n}\n");
+        assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "[edit system]\n-   host-name one;\n+   host-name two;\n");
+        assert!(format!("{:#}", s.exec("show system rollback 5").unwrap_err()).contains("only 2 configurations"));
+        assert!(format!("{:#}", s.exec("show system rollback x").unwrap_err()).contains("not a number"));
+    }
+
+    #[test]
+    fn services_alarms_packages_and_requests() {
+        let (d, m) = (repo(), Fake::default());
+        sh(d.path(), "echo '[\"ssh\"]' > services.json && git add -A && git commit -qm ssh");
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("show services").unwrap();
+        assert!(out.lines().any(|l| l.starts_with("on  ssh ")) && out.lines().any(|l| l.starts_with("off podman")), "{out}");
+        assert_eq!(s.exec("show system alarms").unwrap(), "all well\n");
+        assert_eq!(s.exec("show packages available ripgrep").unwrap(), "searched ripgrep\n");
+        assert_eq!(s.exec("request system repair").unwrap(), "repaired\n");
+        assert!(format!("{:#}", s.exec("request system update").unwrap_err()).contains("use `torq update`"));
+        assert_eq!(s.exec("config").unwrap().lines().next(), Some("Entering configuration mode"));
     }
 
     #[test]

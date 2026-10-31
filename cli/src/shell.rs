@@ -9,7 +9,7 @@ use crate::{broker, check_repo, config_name, evaluate, history, me, run, scratch
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The schema of the running system (modules/schema.nix).
 const SCHEMA: &str = "/etc/torq/schema.json";
@@ -37,6 +37,7 @@ impl Machine for Real<'_> {
         // repo's working copy.
         Repo::new(&self.cli.repo).archive(base, &copy)?;
         for (path, content) in files {
+            no_link_on_the_way(&copy, path)?;
             let f = copy.join(path);
             match content {
                 Some(c) => {
@@ -115,15 +116,79 @@ impl Machine for Real<'_> {
         v["seq"].as_u64().context("the broker did not say what it recorded")
     }
 
+    fn alarms(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = match run::broker_status(broker(self.cli, &["status"]), &log)? {
+            Ok(v) => v,
+            Err(why) => bail!("couldn't check this machine: {why}"),
+        };
+        let last = crate::read_ledger(self.cli).ok().and_then(|l| history::last_change(&l));
+        let mut out = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &crate::ui::Ui::detect()).text;
+        if let Some(seq) = v["pending_confirm"]["applied"].as_u64() {
+            out.push_str(&format!(
+                "  change #{seq} (commit confirmed) rolls back at {} unless confirmed\n",
+                history::one_line(v["pending_confirm"]["deadline"].as_str().unwrap_or("?"), 40)
+            ));
+        }
+        Ok(out)
+    }
+
+    fn search(&self, terms: &[String]) -> Result<String> {
+        crate::search(&self.cli.repo, terms)?; // prints as it goes (nix search)
+        Ok(String::new())
+    }
+
+    fn repair(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = {
+            let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Repairing")) };
+            done(run::broker_json(broker(self.cli, &["repair", "--approved-by", &me()?]), &log)?, "repair")?
+        };
+        Ok(format!("repaired: the machine is back at its last ledgered configuration (#{})\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
     fn ask(&self, question: &str) -> bool {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             return false;
+        }
+        // Only an answer typed after the question counts: anything already waiting (typed or pasted
+        // ahead, e.g. a "y" after "commit") is thrown away.
+        // SAFETY: tcflush on fd 0, a terminal (checked above); no memory is involved.
+        unsafe {
+            libc::tcflush(0, libc::TCIFLUSH);
         }
         print!("{question}[y/N] ");
         let _ = std::io::stdout().flush();
         let mut answer = String::new();
         std::io::stdin().lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
     }
+}
+
+/// Refuse to write `path` under `root` if any folder on the way is a link (or the file itself is):
+/// a committed `users/dev -> /home/dev/x` must not make the check write outside its scratch copy.
+fn no_link_on_the_way(root: &Path, path: &str) -> Result<()> {
+    let mut at = root.to_path_buf();
+    for part in Path::new(path).components() {
+        at.push(part);
+        if fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            bail!("{} is a link in the configuration; torqcli does not write through it", at.strip_prefix(root).unwrap_or(&at).display());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn writes_never_go_through_a_link() {
+    let d = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir_all(d.path().join("users")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), d.path().join("users/dev")).unwrap();
+    let e = format!("{:#}", no_link_on_the_way(d.path(), "users/dev/cli.json").unwrap_err());
+    assert!(e.contains("users/dev is a link"), "{e}");
+    std::os::unix::fs::symlink("/etc/passwd", d.path().join("services.json")).unwrap();
+    assert!(no_link_on_the_way(d.path(), "services.json").is_err(), "the file itself too");
+    assert!(no_link_on_the_way(d.path(), "system/host.json").is_ok());
 }
 
 /// `propose`'s arguments. Every value given as `--name=value`: a reason or comment that starts with
@@ -263,10 +328,17 @@ fn interactive(s: &mut Session) -> Result<i32> {
     }
 }
 
-fn run_line(s: &mut Session, line: &str) {
+/// Run one line; false if it failed (the error is printed).
+fn run_line(s: &mut Session, line: &str) -> bool {
     match s.exec(line) {
-        Ok(out) => print_clean(&out),
-        Err(e) => println!("error: {}", history::one_line(&format!("{e:#}"), 300)),
+        Ok(out) => {
+            print_clean(&out);
+            true
+        }
+        Err(e) => {
+            println!("error: {}", history::one_line(&format!("{e:#}"), 300));
+            false
+        }
     }
 }
 
@@ -330,7 +402,7 @@ mod editor {
     impl ConditionalEventHandler for Question {
         fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
             let (choices, _) = self.0.choices(&ctx.line()[..ctx.pos()])?; // in quotes: a plain '?'
-            let text = complete::render(&choices);
+            let text: String = complete::render(&choices).lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
             print!("?\r\n{}", text.replace('\n', "\r\n"));
             Some(Cmd::Repaint)
         }
@@ -363,8 +435,16 @@ mod editor {
                 // A paste of several lines (bracketed paste) arrives as one: run each, in order, as
                 // if typed — pasting a block of `set` commands is how configurations travel.
                 Ok(text) => {
-                    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                        run_line(s, line);
+                    // Stop at the first error, as `-c` does: a later `commit` must not commit part
+                    // of what was pasted.
+                    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+                    for (i, line) in lines.iter().enumerate() {
+                        if !run_line(s, line) {
+                            if i + 1 < lines.len() {
+                                println!("(the {} pasted lines after it were not run)", lines.len() - i - 1);
+                            }
+                            break;
+                        }
                         if s.done {
                             break;
                         }
