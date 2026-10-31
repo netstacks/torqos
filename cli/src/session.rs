@@ -3,7 +3,8 @@
 //! through `Machine`, so the whole command layer is testable without either.
 
 use crate::candidate::{self, Candidate, Repo};
-use crate::tree::{Config, Schema};
+use crate::syntax::{self, CommitOptions, Op, Pipes, Style};
+use crate::tree::{Config, Kind, Schema};
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
@@ -29,17 +30,6 @@ pub trait Machine {
     fn repair(&self) -> Result<String>;
 }
 
-/// A number for `rollback` / `show system rollback`.
-fn rollback_number(n: &str) -> Result<usize> {
-    let n: usize = n.parse().with_context(|| format!("'{n}' is not a number"))?;
-    if n > MAX_ROLLBACK {
-        bail!("rollback numbers go up to {MAX_ROLLBACK}");
-    }
-    Ok(n)
-}
-
-/// How far back `rollback` and `show system rollback` reach.
-const MAX_ROLLBACK: usize = 10_000;
 
 /// A commit confirmed waiting for its author.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +54,10 @@ pub struct Session<'a> {
     /// at the end.
     pub saved: Option<PathBuf>,
     pub mode: Mode,
+    /// The syntax spoken (`switch cli` changes it for the session).
+    pub style: Style,
+    /// Where configuration mode is (`edit system`; Cisco: the submode).
+    edit: Vec<String>,
     candidate: Option<Candidate>,
     machine: &'a dyn Machine,
     /// Who is at the shell (their login name): their own folder needs no question.
@@ -112,30 +106,9 @@ pub fn words(line: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// The pipes after a `show`: `| compare`, `| display set`.
-#[derive(Debug, Default, PartialEq)]
-struct Pipes {
-    compare: bool,
-    display_set: bool,
-}
-
-fn split_pipes(w: &[String]) -> Result<(Vec<String>, Pipes)> {
-    let mut parts = w.split(|x| x == "|");
-    let head = parts.next().unwrap_or_default().to_vec();
-    let mut p = Pipes::default();
-    for part in parts {
-        match part.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-            ["compare"] => p.compare = true,
-            ["display", "set"] => p.display_set = true,
-            other => bail!("unknown pipe: | {}; one of: compare, display set", other.join(" ")),
-        }
-    }
-    Ok((head, p))
-}
-
 impl<'a> Session<'a> {
-    pub fn new(schema: Schema, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str) -> Self {
-        Session { schema, repo, saved, mode: Mode::Operational, candidate: None, machine, me: me.into(), done: false }
+    pub fn new(schema: Schema, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str, style: Style) -> Self {
+        Session { schema, repo, saved, mode: Mode::Operational, style, edit: Vec::new(), candidate: None, machine, me: me.into(), done: false }
     }
 
     /// The configuration that is committed now.
@@ -177,54 +150,150 @@ impl<'a> Session<'a> {
     /// Run one command line; returns what to print.
     pub fn exec(&mut self, line: &str) -> Result<String> {
         let w = words(line)?;
-        let Some(first) = w.first().map(String::as_str) else { return Ok(String::new()) };
-        let rest = &w[1..];
-        match (self.mode, first) {
-            (Mode::Operational, "configure" | "config") => self.configure(),
-            (Mode::Operational, "request") => self.request(rest),
-            (Mode::Operational, "show") => self.show_operational(rest),
-            (Mode::Operational, "exit" | "quit") => {
+        if w.is_empty() {
+            return Ok(String::new());
+        }
+        let op = syntax::parse(self.style, self.mode, &w, &|ws| self.is_place(ws))?;
+        self.run(op)
+    }
+
+    /// Whether `words`, from where configuration mode is, name a container or list entry.
+    fn is_place(&self, words: &[String]) -> bool {
+        let full: Vec<String> = self.edit.iter().chain(words).cloned().collect();
+        let cfg = self.candidate.as_ref().map(|c| &c.config);
+        self.schema.resolve_in(&full, cfg).is_ok_and(|t| {
+            t.values.is_empty() && !t.node.is_empty() && matches!(self.schema.nodes[&t.node].kind, Kind::Container | Kind::List)
+        })
+    }
+
+    /// Where configuration mode is (`edit system`): its words, for the prompt.
+    pub fn edit_path(&self) -> &[String] {
+        &self.edit
+    }
+
+    /// `words` from where configuration mode is.
+    fn here(&self, words: &[String]) -> Vec<String> {
+        self.edit.iter().chain(words).cloned().collect()
+    }
+
+    fn run(&mut self, op: Op) -> Result<String> {
+        match op {
+            Op::Configure => self.configure(),
+            Op::ShowActive { path, pipes } => {
+                let active = self.active()?;
+                Ok(if pipes.display_set { self.display_set(&active, &path)? } else { self.schema.show(&active, &path)? })
+            }
+            Op::ShowCommits | Op::ShowRollback { .. } | Op::ShowAlarms | Op::ShowServices | Op::ShowPackages { .. } => {
+                self.show_operational(op)
+            }
+            Op::Request { words } => self.request(&words),
+            Op::SwitchCli => {
+                self.style = match self.style {
+                    Style::Juniper => Style::Cisco,
+                    Style::Cisco => Style::Juniper,
+                };
+                Ok(format!("Switched to the {} style (for this session)\n", self.style.name()))
+            }
+            Op::Exit if self.mode == Mode::Operational => {
                 self.done = true;
                 Ok(String::new())
             }
-            (Mode::Configuration, "set") => {
+            Op::Exit if !self.edit.is_empty() => {
+                self.up();
+                Ok(String::new())
+            }
+            Op::Exit | Op::End => self.leave(),
+            Op::Up => {
+                if self.edit.is_empty() {
+                    bail!("already at the top of the configuration");
+                }
+                self.up();
+                Ok(String::new())
+            }
+            Op::Top => {
+                self.edit.clear();
+                Ok(String::new())
+            }
+            Op::Edit { words } => {
+                let full = self.here(&words);
+                let cfg = self.candidate()?.config.clone();
+                let t = self.schema.resolve_in(&full, Some(&cfg))?;
+                let kind = (!t.node.is_empty()).then(|| self.schema.nodes[&t.node].kind);
+                if !t.values.is_empty() || !matches!(kind, Some(Kind::Container | Kind::List)) {
+                    bail!("{}: not somewhere to go (a setting takes a value)", full.join(" "));
+                }
+                self.edit = t.words;
+                Ok(String::new())
+            }
+            Op::Set { words } => {
                 let s = self.schema.clone();
-                s.set(&mut self.candidate()?.config, rest)?;
+                let full = self.here(&words);
+                s.set(&mut self.candidate()?.config, &full)?;
                 self.save()?;
                 Ok(String::new())
             }
-            (Mode::Configuration, "delete") => {
+            Op::Delete { words, all } => {
                 let s = self.schema.clone();
-                s.delete(&mut self.candidate()?.config, rest)?;
+                let full = self.here(&words);
+                let cfg = self.candidate()?.config.clone();
+                let t = s.resolve_in(&full, Some(&cfg))?;
+                let whole = t.node.is_empty() || matches!(s.nodes[&t.node].kind, Kind::Container | Kind::List);
+                let (del, no) = match self.style {
+                    Style::Juniper => ("delete", "delete"),
+                    Style::Cisco => ("no", "no"),
+                };
+                if whole && !all {
+                    bail!("{del} {}: deletes everything below it — say `{no} {} all`", full.join(" "), full.join(" "));
+                }
+                if all && !whole {
+                    bail!("{del} {}: `all` is for a whole container", full.join(" "));
+                }
+                s.delete(&mut self.candidate()?.config, &full)?;
                 self.save()?;
                 Ok(String::new())
             }
-            (Mode::Configuration, "show") => self.show_candidate(rest),
-            (Mode::Configuration, "rollback") => self.rollback(rest),
-            (Mode::Configuration, "commit") => self.commit(rest),
-            (Mode::Configuration, "run") => {
+            Op::ShowCandidate { path, pipes } => self.show_candidate(&self.here(&path), &pipes),
+            Op::Compare => self.compare(),
+            Op::Rollback { n } => self.rollback(n),
+            Op::Commit(o) => self.commit(o),
+            Op::Run(op) => {
                 let was = self.mode;
                 self.mode = Mode::Operational;
-                let r = self.exec(&rest.iter().map(|x| quote_word(x)).collect::<Vec<_>>().join(" "));
+                let r = self.run(*op);
                 self.mode = was;
                 self.done = false;
                 r
             }
-            (Mode::Configuration, "exit" | "quit" | "top") => {
-                // Leave first: a candidate that cannot be read must not keep anyone in here.
-                self.mode = Mode::Operational;
-                let changed = self.uncommitted().unwrap_or(true);
-                Ok(match (changed, self.saved.is_some()) {
-                    (false, _) => String::new(),
-                    (true, true) => "The configuration has been changed but not committed (it is kept: `configure` returns to it).\n".into(),
-                    (true, false) => "The configuration has been changed but not committed.\n".into(),
-                })
-            }
-            (Mode::Operational, other) => bail!("unknown command: {other}; one of: configure, show, exit"),
-            (Mode::Configuration, other) => {
-                bail!("unknown command: {other}; one of: set, delete, show, commit, rollback, run, exit")
-            }
         }
+    }
+
+    /// Up one level: out of a list entry (its name and the list), else one word.
+    fn up(&mut self) {
+        self.edit.pop();
+    }
+
+    /// Out of configuration mode, saying if the candidate holds changes.
+    fn leave(&mut self) -> Result<String> {
+        // Leave first: a candidate that cannot be read must not keep anyone in here.
+        self.mode = Mode::Operational;
+        self.edit.clear();
+        let changed = self.uncommitted().unwrap_or(true);
+        Ok(match (changed, self.saved.is_some()) {
+            (false, _) => String::new(),
+            (true, true) => "The configuration has been changed but not committed (it is kept: `configure` returns to it).\n".into(),
+            (true, false) => "The configuration has been changed but not committed.\n".into(),
+        })
+    }
+
+    /// `| display set`, of the whole configuration or the part below `path`.
+    fn display_set(&self, cfg: &Config, path: &[String]) -> Result<String> {
+        let all = self.schema.display_set(cfg);
+        if path.is_empty() {
+            return Ok(all);
+        }
+        let t = self.schema.resolve_in(path, Some(cfg))?;
+        let prefix = format!("set {}", t.words.iter().map(|w| syntax::quote(w)).collect::<Vec<_>>().join(" "));
+        Ok(all.lines().filter(|l| *l == prefix || l.starts_with(&format!("{prefix} "))).map(|l| format!("{l}\n")).collect())
     }
 
     fn configure(&mut self) -> Result<String> {
@@ -244,39 +313,25 @@ impl<'a> Session<'a> {
         Ok(out)
     }
 
-    fn show_operational(&mut self, w: &[String]) -> Result<String> {
-        match w.first().map(String::as_str) {
-            Some("configuration") => {
-                let (path, pipes) = split_pipes(&w[1..])?;
-                if pipes.compare {
-                    bail!("| compare is for the candidate, in configuration mode");
-                }
-                let active = self.active()?;
-                Ok(if pipes.display_set { self.schema.display_set(&active) } else { self.schema.show(&active, &path)? })
-            }
-            Some("system") if w.get(1).map(String::as_str) == Some("commit") => {
+    fn show_operational(&mut self, op: Op) -> Result<String> {
+        match op {
+            Op::ShowCommits => {
                 let mut out = String::new();
                 for (n, c) in self.repo.history(50)?.iter().enumerate() {
                     out.push_str(&format!("{n:<3} {}  {}\n", c.date, c.subject));
                 }
                 Ok(out)
             }
-            Some("system") if w.get(1).map(String::as_str) == Some("rollback") => {
-                let ws: Vec<&str> = w[2..].iter().map(String::as_str).collect();
-                let (n, m) = match ws.as_slice() {
-                    [n] => (rollback_number(n)?, None),
-                    [n, "compare", m] => (rollback_number(n)?, Some(rollback_number(m)?)),
-                    _ => bail!("show system rollback <n> [compare <m>]"),
-                };
+            Op::ShowRollback { n, compare } => {
                 let n_cfg = self.configuration_at(n)?;
-                Ok(match m {
+                Ok(match compare {
                     None => self.schema.show(&n_cfg, &[])?,
                     // What going from configuration m to configuration n changes.
                     Some(m) => self.schema.compare(&self.configuration_at(m)?, &n_cfg),
                 })
             }
-            Some("system") if w.get(1).map(String::as_str) == Some("alarms") => self.machine.alarms(),
-            Some("services") if w.len() == 1 => {
+            Op::ShowAlarms => self.machine.alarms(),
+            Op::ShowServices => {
                 let active = self.active()?;
                 let on: Vec<String> = match active.files.get("services.json") {
                     Some(crate::tree::Data::List(l)) => l.clone(),
@@ -289,10 +344,8 @@ impl<'a> Session<'a> {
                     .map(|(name, what)| format!("{} {name:<width$}  {what}\n", if on.contains(name) { "on " } else { "off" }))
                     .collect())
             }
-            Some("packages") if w.get(1).map(String::as_str) == Some("available") && w.len() > 2 => {
-                self.machine.search(&w[2..])
-            }
-            _ => bail!("show: one of: configuration, system commit, system rollback <n>, system alarms, services, packages available <term>"),
+            Op::ShowPackages { terms } => self.machine.search(&terms),
+            other => bail!("not an operational show: {other:?}"),
         }
     }
 
@@ -314,27 +367,21 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn show_candidate(&mut self, w: &[String]) -> Result<String> {
-        let (path, pipes) = split_pipes(w)?;
-        let s = self.schema.clone();
-        let base_files = {
-            let base = self.candidate()?.base.clone();
-            self.repo.tree_files(&s, &base)?
-        };
-        let c = self.candidate()?;
-        if pipes.compare {
-            let base = s.load(base_files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-            return Ok(s.compare(&base, &c.config));
-        }
-        Ok(if pipes.display_set { s.display_set(&c.config) } else { s.show(&c.config, &path)? })
+    fn show_candidate(&mut self, path: &[String], pipes: &Pipes) -> Result<String> {
+        let cfg = self.candidate()?.config.clone();
+        Ok(if pipes.display_set { self.display_set(&cfg, path)? } else { self.schema.show(&cfg, path)? })
     }
 
-    fn rollback(&mut self, w: &[String]) -> Result<String> {
-        let n: usize = match w {
-            [] => 0,
-            [n] => rollback_number(n).context("rollback")?,
-            _ => bail!("rollback: takes one number"),
-        };
+    /// What the candidate changes from its base.
+    fn compare(&mut self) -> Result<String> {
+        let s = self.schema.clone();
+        let base = self.candidate()?.base.clone();
+        let base_files = self.repo.tree_files(&s, &base)?;
+        let before = s.load(base_files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
+        Ok(s.compare(&before, &self.candidate()?.config))
+    }
+
+    fn rollback(&mut self, n: usize) -> Result<String> {
         let history = self.repo.history(n + 1)?;
         let commit = history.get(n).with_context(|| format!("rollback {n}: there are only {} configurations", history.len()))?;
         self.candidate = Some(Candidate::from_repo(&self.repo, &self.schema, &commit.id)?);
@@ -353,8 +400,7 @@ impl<'a> Session<'a> {
         Ok(!candidate::changes(&s, &base_files, &self.candidate()?.config)?.is_empty())
     }
 
-    fn commit(&mut self, w: &[String]) -> Result<String> {
-        let o = parse_commit(w)?;
+    fn commit(&mut self, o: CommitOptions) -> Result<String> {
         let s = self.schema.clone();
         let head = self.repo.head()?;
         let (base, config) = {
@@ -449,43 +495,6 @@ impl<'a> Session<'a> {
     }
 }
 
-/// `commit` options: `check` alone, or any of `confirmed [<minutes>]` and `comment "<text>"`.
-struct CommitOptions {
-    check: bool,
-    confirm: Option<u32>,
-    comment: Option<String>,
-}
-
-fn parse_commit(w: &[String]) -> Result<CommitOptions> {
-    let usage = || anyhow::anyhow!("commit: one of: commit, commit check, commit [confirmed [<minutes>]] [comment \"…\"]");
-    if w.len() == 1 && w[0] == "check" {
-        return Ok(CommitOptions { check: true, confirm: None, comment: None });
-    }
-    let (mut confirm, mut comment, mut i) = (None, None, 0);
-    while i < w.len() {
-        match w[i].as_str() {
-            "confirmed" if confirm.is_none() => {
-                let mut m = 10;
-                if let Some(n) = w.get(i + 1).filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
-                    m = n.parse().map_err(|_| anyhow::anyhow!("commit confirmed: '{n}' minutes is too many"))?;
-                    i += 1;
-                }
-                if !(1..=1440).contains(&m) {
-                    bail!("commit confirmed takes 1 to 1440 minutes, not {m}");
-                }
-                confirm = Some(m);
-            }
-            "comment" if comment.is_none() => {
-                comment = Some(w.get(i + 1).ok_or_else(usage)?.clone());
-                i += 1;
-            }
-            _ => return Err(usage()),
-        }
-        i += 1;
-    }
-    Ok(CommitOptions { check: false, confirm, comment })
-}
-
 /// A ledger reason from the comparison: its `+`/`-` lines, short.
 fn summary(compare: &str) -> String {
     let lines: Vec<&str> = compare.lines().filter(|l| !l.starts_with('[')).map(|l| l.trim()).collect();
@@ -495,10 +504,6 @@ fn summary(compare: &str) -> String {
 
 fn short(id: &str) -> &str {
     &id[..id.len().min(12)]
-}
-
-fn quote_word(w: &str) -> String {
-    if w.contains([' ', '"', '|']) { format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\"")) } else { w.to_string() }
 }
 
 #[cfg(test)]
@@ -565,7 +570,7 @@ mod tests {
         d
     }
     fn session<'a>(d: &Path, saved: Option<PathBuf>, m: &'a Fake) -> Session<'a> {
-        Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), Repo::new(d), saved, m, "dev")
+        Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), Repo::new(d), saved, m, "dev", Style::Juniper)
     }
     fn waiting(by: &str) -> Option<Waiting> {
         Some(Waiting { seq: 42, deadline: "soon".into(), by: Some(by.into()) })
@@ -759,6 +764,72 @@ mod tests {
 
     fn fs_has(dir: &Path, needle: &str) -> bool {
         std::fs::read_dir(dir).unwrap().flatten().any(|e| std::fs::read_to_string(e.path()).unwrap_or_default().contains(needle))
+    }
+
+    /// `edit` / `up` / `top` move through the tree; commands are relative to where you are.
+    #[test]
+    fn moving_through_the_tree() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "edit users dev", "set cli style cisco", "edit cli"]);
+        assert_eq!(s.edit_path(), ["users", "dev", "cli"]);
+        assert_eq!(s.exec("show").unwrap(), "style cisco;\n");
+        run(&mut s, &["up"]);
+        assert_eq!(s.edit_path(), ["users", "dev"]);
+        assert!(format!("{:#}", s.exec("edit cli style").unwrap_err()).contains("not somewhere to go"));
+        run(&mut s, &["top", "set system time-zone UTC"]);
+        assert!(s.edit_path().is_empty());
+        assert!(format!("{:#}", s.exec("up").unwrap_err()).contains("already at the top"));
+        // `exit` goes up a level, and out of configuration mode at the top.
+        run(&mut s, &["edit system", "exit"]);
+        assert_eq!((s.mode, s.edit_path().is_empty()), (Mode::Configuration, true));
+        run(&mut s, &["edit system", "exit configuration-mode"]);
+        assert_eq!(s.mode, Mode::Operational);
+    }
+
+    /// Deleting a whole container or list entry takes `all`, so a slip cannot take everything below.
+    #[test]
+    fn delete_of_a_container_needs_all() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set users dev cli style cisco"]);
+        for (bad, why) in [("delete users dev", "say `delete users dev all`"), ("delete system", "say `delete system all`"), ("delete system host-name all", "`all` is for a whole container")] {
+            assert!(format!("{:#}", s.exec(bad).unwrap_err()).contains(why), "{bad}");
+        }
+        run(&mut s, &["delete users dev all"]);
+        assert!(!s.exec("show | compare").unwrap().contains("style"));
+    }
+
+    /// The same session in Cisco style: bare paths set, a container path is a submode, `no`
+    /// deletes, `show configuration diff` compares, `end` leaves.
+    #[test]
+    fn a_session_in_cisco_style() {
+        let (d, m) = (repo(), Fake { answer: true, ..Fake::default() });
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), Repo::new(d.path()), None, &m, "dev", Style::Cisco);
+        run(&mut s, &["config", "system host-name three", "users dev", "cli style juniper", "exit", "exit"]);
+        assert!(s.edit_path().is_empty());
+        assert_eq!(
+            s.exec("show configuration diff").unwrap(),
+            "[edit system]\n-   host-name two;\n+   host-name three;\n[edit users dev cli]\n+   style juniper;\n"
+        );
+        run(&mut s, &["no users dev cli style", "do show system alarms"]);
+        assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("in Cisco style"));
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
+        assert_eq!(s.exec("end").unwrap(), "");
+        assert_eq!(s.mode, Mode::Operational);
+        assert_eq!(s.exec("show running-config").unwrap(), "system {\n    host-name two;\n}\n", "the fake commits nothing");
+    }
+
+    /// `switch cli` changes the syntax for the session, wherever you are.
+    #[test]
+    fn switch_cli_changes_the_syntax() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "edit system"]);
+        assert_eq!(s.exec("switch cli").unwrap(), "Switched to the cisco style (for this session)\n");
+        run(&mut s, &["time-zone UTC", "no time-zone"]);
+        run(&mut s, &["switch cli", "set time-zone UTC"]);
+        assert!(s.exec("show | compare").unwrap().contains("+   time-zone UTC;"));
     }
 
     #[test]

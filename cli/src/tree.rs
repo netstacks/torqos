@@ -98,6 +98,10 @@ impl Schema {
         if s.version != 1 {
             bail!("this torqcli reads schema version 1, not {}", s.version);
         }
+        // No setting may be named like a command (a Cisco-style bare path would be ambiguous).
+        if let Some(key) = s.nodes.keys().find(|k| k.split(' ').any(|w| crate::syntax::RESERVED.contains(&w))) {
+            bail!("schema: '{key}' uses a word torqcli keeps for commands");
+        }
         // Each file is one kind of thing: a leaf-list's alone, or leaves' (an object). No two file
         // patterns may match the same file unless they are the same pattern for leaves.
         let files: Vec<(&String, &Node)> = s.nodes.iter().filter(|(_, n)| n.file.is_some()).collect();
@@ -846,6 +850,14 @@ mod tests {
         assert_eq!(s.show(&c, &w("system time-zone")).unwrap(), "time-zone Asia/Old_Zone;\n");
         let c = s.load([("system/host.json", b"{}".as_slice()), ("services.json", b"[]".as_slice())]).unwrap();
         assert!(c.files.is_empty());
+    }
+
+    #[test]
+    fn no_setting_is_named_like_a_command() {
+        let mut v: serde_json::Value = serde_json::from_str(include_str!("schema-fixture.json")).unwrap();
+        v["nodes"]["system commit"] = serde_json::json!({"kind":"container","help":"x"});
+        let e = format!("{:#}", Schema::parse(&v.to_string()).unwrap_err());
+        assert!(e.contains("'system commit' uses a word torqcli keeps for commands"), "{e}");
     }
 
     /// The schema itself: two nodes may only share a file as leaves of one object (review of ef8d7f8).

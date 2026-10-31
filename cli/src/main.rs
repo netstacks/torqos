@@ -7,6 +7,7 @@ mod candidate;
 mod session;
 mod shell;
 mod complete;
+mod syntax;
 mod pkg;
 mod run;
 mod status;

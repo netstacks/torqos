@@ -3,6 +3,7 @@
 //! asks, this answers.
 
 use crate::session::Mode;
+use crate::syntax::Style;
 use crate::tree::{Kind, Schema};
 
 /// One possible next word: the word, or a `<placeholder>` for a value of a type (not insertable),
@@ -32,66 +33,155 @@ const OPERATIONAL: &[(&str, &str)] = &[
 const CONFIGURATION: &[(&str, &str)] = &[
     ("commit", "Make the candidate the machine's configuration"),
     ("delete", "Remove a setting"),
-    ("exit", "Leave configuration mode (an uncommitted candidate is kept)"),
-    ("quit", "Leave configuration mode (an uncommitted candidate is kept)"),
+    ("edit", "Go down to a part of the configuration"),
+    ("exit", "Up one level (out of configuration mode at the top; the candidate is kept)"),
+    ("quit", "Up one level (out of configuration mode at the top; the candidate is kept)"),
     ("rollback", "Load an earlier configuration into the candidate"),
     ("run", "Run an operational-mode command"),
     ("set", "Set a value"),
     ("show", "Show the candidate configuration"),
-    ("top", "Leave configuration mode (an uncommitted candidate is kept)"),
+    ("switch", "Switch to the Cisco style"),
+    ("top", "Back to the top of the configuration"),
+    ("up", "Up one level"),
 ];
 
 /// What may follow `words` (the complete words before the cursor), each starting with `partial`
 /// (the word being typed, possibly empty).
+#[cfg(test)]
 pub fn choices(schema: &Schema, mode: Mode, words: &[String], partial: &str) -> Vec<Choice> {
-    let all = match (mode, words.first().map(String::as_str)) {
+    choices_at(schema, &At { mode, style: Style::Juniper, edit: vec![] }, words, partial)
+}
+
+/// Where the line is typed: the mode, the style, and where configuration mode is.
+#[derive(Debug, Clone)]
+pub struct At {
+    pub mode: Mode,
+    pub style: Style,
+    pub edit: Vec<String>,
+}
+
+const CISCO_CONFIGURATION: &[(&str, &str)] = &[
+    ("commit", "Make the candidate the machine's configuration"),
+    ("do", "Run an operational-mode command"),
+    ("end", "Leave configuration mode (an uncommitted candidate is kept)"),
+    ("exit", "Up one level (out of configuration mode at the top)"),
+    ("no", "Remove a setting"),
+    ("rollback", "Load an earlier configuration into the candidate"),
+    ("show", "Show the candidate, or what it changes"),
+    ("switch", "Switch to the Juniper style"),
+    ("top", "Back to the top of the configuration"),
+];
+
+/// What may follow `words` at `at`.
+pub fn choices_at(schema: &Schema, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
+    let here = |rest: &[String]| -> Vec<String> { at.edit.iter().chain(rest).cloned().collect() };
+    let first = words.first().map(String::as_str);
+    let all = match (at.mode, at.style, first) {
+        (Mode::Configuration, Style::Cisco, None) => {
+            // A path from here, or a command.
+            let mut c = tree_choices(schema, &at.edit, "set");
+            c.retain(|x| x.word != "|");
+            c.extend(table(CISCO_CONFIGURATION));
+            c
+        }
+        (Mode::Configuration, Style::Cisco, Some("no")) => tree_choices(schema, &here(&words[1..]), "delete"),
+        (Mode::Configuration, Style::Cisco, Some("do")) => {
+            choices_at(schema, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial)
+        }
+        (Mode::Configuration, Style::Cisco, Some("show")) => match &words[1..] {
+            [] => table(&[("configuration", "The candidate")]),
+            [w] if w == "configuration" => table(&[("diff", "What the candidate changes")]),
+            _ => vec![],
+        },
+        (Mode::Configuration, Style::Cisco, Some("rollback")) => match &words[1..] {
+            [] => table(&[("configuration", "Load an earlier configuration into the candidate")]),
+            [w] if w == "configuration" => vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")],
+            _ => vec![],
+        },
+        (Mode::Configuration, Style::Cisco, Some("switch")) if words.len() == 1 => table(&[("cli", "Switch to the Juniper style")]),
+        (Mode::Configuration, Style::Cisco, Some("commit")) => commit_choices(&words[1..]),
+        (Mode::Configuration, Style::Cisco, Some(_)) if CISCO_CONFIGURATION.iter().any(|(w, _)| Some(*w) == first) => vec![],
+        // A bare path.
+        (Mode::Configuration, Style::Cisco, Some(_)) => tree_choices(schema, &here(words), "set"),
+        (Mode::Configuration, Style::Juniper, Some(cmd @ ("set" | "delete" | "show" | "edit"))) => {
+            let rest = &words[1..];
+            if let Some(p) = pipe_choices(cmd, rest) {
+                p
+            } else {
+                let mut c = tree_choices(schema, &here(rest), if cmd == "edit" { "show" } else { cmd });
+                if cmd == "edit" {
+                    c.retain(|x| x.word != "|");
+                }
+                c
+            }
+        }
+        _ => choices_juniper(schema, at, words, partial),
+    };
+    all.into_iter().filter(|c| c.is_placeholder() || c.word.starts_with(partial)).collect()
+}
+
+fn commit_choices(rest: &[String]) -> Vec<Choice> {
+    match rest {
+        [] => table(&[
+            ("check", "Check the candidate evaluates, without committing"),
+            ("comment", "Commit, with a comment for the log"),
+            ("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)"),
+        ]),
+        [w] if w == "comment" => vec![Choice::new("<\"text\">", "What the change is for")],
+        [w] if w == "confirmed" => vec![Choice::new("<minutes>", "1 to 1440: confirm by committing again")],
+        _ => vec![],
+    }
+}
+
+fn choices_juniper(schema: &Schema, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
+    let mode = at.mode;
+    match (mode, words.first().map(String::as_str)) {
         (Mode::Operational, None) => table(OPERATIONAL),
         (Mode::Configuration, None) => table(CONFIGURATION),
-        (Mode::Operational, Some("show")) => operational_show(schema, &words[1..]),
+        (Mode::Operational, Some("show")) => operational_show(at.style, &words[1..]),
         (Mode::Operational, Some("request")) => match words.len() {
             1 => table(&[("system", "This machine")]),
             2 => table(&[("repair", "Return a machine changed outside TorqOS to its last configuration")]),
             _ => vec![],
         },
-        (Mode::Configuration, Some("run")) => choices(schema, Mode::Operational, &words[1..], partial),
-        (Mode::Configuration, Some(cmd @ ("set" | "delete" | "show"))) => {
-            let rest = &words[1..];
-            if let Some(p) = pipe_choices(cmd, rest) {
-                p
-            } else {
-                tree_choices(schema, rest, cmd)
-            }
-        }
-        (Mode::Configuration, Some("commit")) => match &words[1..] {
-            [] => table(&[
-                ("check", "Check the candidate evaluates, without committing"),
-                ("comment", "Commit, with a comment for the log"),
-                ("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)"),
-            ]),
-            [w] if w == "comment" => vec![Choice::new("<\"text\">", "What the change is for")],
-            [w] if w == "confirmed" => vec![Choice::new("<minutes>", "1 to 1440: confirm by committing again")],
-            _ => vec![],
-        },
+        (Mode::Configuration, Some("run")) => choices_at(schema, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial),
+        (Mode::Configuration, Some("commit")) => commit_choices(&words[1..]),
         (Mode::Configuration, Some("rollback")) if words.len() == 1 => {
             vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")]
         }
+        (Mode::Configuration, Some("exit")) if words.len() == 1 => {
+            table(&[("configuration-mode", "Leave configuration mode from anywhere")])
+        }
+        (_, Some("switch")) if words.len() == 1 => table(&[("cli", "Switch between the Juniper and Cisco styles")]),
         _ => vec![],
-    };
-    all.into_iter().filter(|c| c.is_placeholder() || c.word.starts_with(partial)).collect()
+    }
 }
 
 fn table(t: &[(&str, &str)]) -> Vec<Choice> {
     t.iter().map(|(w, h)| Choice::new(w, h)).collect()
 }
 
-fn operational_show(_schema: &Schema, rest: &[String]) -> Vec<Choice> {
-    match rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        [] => table(&[
-            ("configuration", "The configuration in effect"),
-            ("packages", "Software you can install"),
-            ("services", "The services TorqOS offers, and which are on"),
-            ("system", "This machine"),
-        ]),
+fn operational_show(style: Style, rest: &[String]) -> Vec<Choice> {
+    let configuration = match style {
+        Style::Juniper => "configuration",
+        Style::Cisco => "running-config",
+    };
+    let mut words: Vec<&str> = rest.iter().map(String::as_str).collect();
+    if words.first() == Some(&configuration) {
+        words[0] = "configuration";
+    } else if words.first() == Some(&"configuration") {
+        words[0] = "(not in this style)";
+    }
+    match words.as_slice() {
+        [] => {
+            let mut c = table(&[
+                ("packages", "Software you can install"),
+                ("services", "The services TorqOS offers, and which are on"),
+                ("system", "This machine"),
+            ]);
+            c.insert(0, Choice::new(configuration, "The configuration in effect"));
+            c
+        }
         ["system"] => table(&[
             ("alarms", "Is this machine as its history says?"),
             ("commit", "The configurations so far, newest first"),
@@ -204,7 +294,7 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["compare"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["set", "show"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["set", "show", "switch"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
     }
@@ -245,6 +335,24 @@ mod tests {
         assert_eq!(berlin.len(), 3);
         assert!(berlin.iter().all(|(shown, inserted)| shown == inserted), "several: no space yet");
         assert!(t("set system host-name", "").is_empty(), "a placeholder is not inserted");
+    }
+
+    /// Cisco style: in configuration mode the first word is a path from where you are, or a
+    /// command; `no` takes a path; operational `show running-config`.
+    #[test]
+    fn cisco_style_and_where_you_are() {
+        let s = schema();
+        let at = |mode, edit: &str| At { mode, style: Style::Cisco, edit: w(edit) };
+        let top = choices_at(&s, &at(Mode::Configuration, ""), &[], "");
+        let words = words_of(&top);
+        assert!(words.contains(&"system") && words.contains(&"no") && words.contains(&"end") && !words.contains(&"set"), "{words:?}");
+        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, "system"), &[], "h")), ["host-name"], "from where you are");
+        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("no system"), "t")), ["time-zone"]);
+        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("users dev cli style"), "")), ["cisco", "juniper"]);
+        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("show configuration"), "")), ["diff"]);
+        assert_eq!(words_of(&choices_at(&s, &at(Mode::Operational, ""), &w("show"), "r")), ["running-config"]);
+        let j = At { mode: Mode::Configuration, style: Style::Juniper, edit: w("users dev") };
+        assert_eq!(words_of(&choices_at(&s, &j, &w("set"), "")), ["cli", "packages"], "Juniper, from where you are");
     }
 
     #[test]

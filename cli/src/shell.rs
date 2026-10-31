@@ -4,6 +4,7 @@
 
 use crate::candidate::{Candidate, Repo};
 use crate::session::{Machine, Mode, Session, Waiting};
+use crate::syntax::Style;
 use crate::tree::Schema;
 use crate::{broker, check_repo, config_name, evaluate, history, me, run, scratch_dir, Cli, Cmd, BROKER, REPO};
 use anyhow::{bail, Context, Result};
@@ -285,13 +286,26 @@ fn run_shell(args: &[String]) -> Result<i32> {
     check_repo(&cli)?;
     let schema = Schema::parse(&fs::read_to_string(SCHEMA).with_context(|| format!("reading {SCHEMA} (is this TorqOS?)"))?)?;
     let machine = Real { cli: &cli };
-    let script = match args {
-        [] => None,
-        [flag, s] if flag == "-c" => Some(s.clone()),
-        _ => bail!("usage: torqcli [-c \"<command>; <command>…\"]"),
+    let usage = || anyhow::anyhow!("usage: torqcli [--style juniper|cisco] [-c \"<command>; <command>…\"]");
+    let (mut script, mut style) = (None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-c" if script.is_none() => script = Some(it.next().ok_or_else(usage)?.clone()),
+            "--style" if style.is_none() => style = Some(Style::parse(it.next().ok_or_else(usage)?).ok_or_else(usage)?),
+            _ => return Err(usage()),
+        }
+    }
+    let who = me()?;
+    // Scripts speak Juniper unless told otherwise (a script must not change meaning with a setting);
+    // the interactive shell speaks your style (users <you> cli style, else system cli style).
+    let style = match (style, &script) {
+        (Some(s), _) => s,
+        (None, Some(_)) => Style::Juniper,
+        (None, None) => configured_style(&who),
     };
     let saved = if script.is_some() { None } else { Some(Candidate::default_path()?) };
-    let mut s = Session::new(schema, Repo::new(&cli.repo), saved, &machine, &me()?);
+    let mut s = Session::new(schema, Repo::new(&cli.repo), saved, &machine, &who, style);
     match script {
         Some(script) => {
             for line in script_lines(&script) {
@@ -319,10 +333,28 @@ fn print_clean(out: &str) {
 }
 
 /// The prompt: `user@host> ` in operational mode, `[edit]` then `user@host# ` in configuration mode.
-fn prompt(mode: Mode, user: &str, host: &str) -> (Option<&'static str>, String) {
-    match mode {
-        Mode::Operational => (None, format!("{user}@{host}> ")),
-        Mode::Configuration => (Some("\n[edit]"), format!("{user}@{host}# ")),
+/// The style this machine's configuration gives `user` (/etc/torq/cli.json, modules/cli.nix).
+fn configured_style(user: &str) -> Style {
+    let v: serde_json::Value = fs::read(CLI_STYLES).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    v["users"][user].as_str().or(v["style"].as_str()).and_then(Style::parse).unwrap_or(Style::Juniper)
+}
+
+const CLI_STYLES: &str = "/etc/torq/cli.json";
+
+/// The prompt, and a line above it: Juniper `[edit system]` then `user@host# `; Cisco
+/// `user@host(config-system)# `. Operational mode: `user@host> ` in both.
+fn prompt(s: &Session, user: &str, host: &str) -> (Option<String>, String) {
+    let path: Vec<String> = s.edit_path().iter().map(|w| history::clean(w)).collect();
+    match (s.mode, s.style) {
+        (Mode::Operational, _) => (None, format!("{user}@{host}> ")),
+        (Mode::Configuration, Style::Juniper) => {
+            let at = if path.is_empty() { "[edit]".to_string() } else { format!("[edit {}]", path.join(" ")) };
+            (Some(format!("\n{at}")), format!("{user}@{host}# "))
+        }
+        (Mode::Configuration, Style::Cisco) => {
+            let at = if path.is_empty() { "config".to_string() } else { format!("config-{}", path.join("-")) };
+            (None, format!("{user}@{host}({at})# "))
+        }
     }
 }
 
@@ -336,7 +368,7 @@ fn interactive(s: &mut Session) -> Result<i32> {
     }
     let stdin = std::io::stdin();
     loop {
-        let (above, p) = prompt(s.mode, &user, &host);
+        let (above, p) = prompt(s, &user, &host);
         if let Some(a) = above {
             println!("{a}");
         }
@@ -372,7 +404,7 @@ fn run_line(s: &mut Session, line: &str) -> bool {
 mod editor {
     use super::{prompt, run_line};
     use crate::complete;
-    use crate::session::{words, Mode, Session};
+    use crate::session::{words, Session};
     use crate::tree::Schema;
     use anyhow::Result;
     use rustyline::completion::{Completer, Pair};
@@ -387,7 +419,8 @@ mod editor {
     #[derive(Clone)]
     struct Help {
         schema: Arc<Schema>,
-        mode: Arc<Mutex<Mode>>,
+        /// Where the session is: mode, style, edit path (updated before each line is read).
+        at: Arc<Mutex<complete::At>>,
     }
 
     /// The complete words before the cursor, and the one being typed. None inside a quoted string.
@@ -403,8 +436,8 @@ mod editor {
     impl Help {
         fn choices(&self, before: &str) -> Option<(Vec<complete::Choice>, String)> {
             let (w, partial) = at_cursor(before)?;
-            let mode = *self.mode.lock().unwrap();
-            Some((complete::choices(&self.schema, mode, &w, &partial), partial))
+            let at = self.at.lock().unwrap().clone();
+            Some((complete::choices_at(&self.schema, &at, &w, &partial), partial))
         }
     }
 
@@ -446,14 +479,15 @@ mod editor {
     }
 
     pub fn run(s: &mut Session, user: &str, host: &str) -> Result<i32> {
-        let help = Help { schema: Arc::new(s.schema.clone()), mode: Arc::new(Mutex::new(s.mode)) };
+        let at = |s: &Session| complete::At { mode: s.mode, style: s.style, edit: s.edit_path().to_vec() };
+        let help = Help { schema: Arc::new(s.schema.clone()), at: Arc::new(Mutex::new(at(s))) };
         let config = rustyline::Config::builder().completion_type(rustyline::CompletionType::List).auto_add_history(true).build();
         let mut ed: rustyline::Editor<Help, rustyline::history::DefaultHistory> = rustyline::Editor::with_config(config)?;
         ed.set_helper(Some(help.clone()));
         ed.bind_sequence(KeyEvent::from('?'), EventHandler::Conditional(Box::new(Question(help.clone()))));
         loop {
-            *help.mode.lock().unwrap() = s.mode;
-            let (above, p) = prompt(s.mode, user, host);
+            *help.at.lock().unwrap() = at(s);
+            let (above, p) = prompt(s, user, host);
             if let Some(a) = above {
                 println!("{a}");
             }

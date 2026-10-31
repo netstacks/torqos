@@ -139,6 +139,9 @@ pkgs.testers.runNixOSTest {
         assert " host" in out.splitlines()[0], out
         out = machine.fail("su - dev -c 'torqcli -c \"configure; set system host-name my_laptop\"' 2>&1")
         assert "is not a valid system host-name" in out, out
+        # The Cisco style says the same: a bare path sets, `show configuration diff` compares.
+        out = machine.succeed("su - dev -c 'torqcli --style cisco -c \"config; system; time-zone UTC; end; config; show configuration diff\"'")
+        assert "[edit system]\n+   time-zone UTC;" in out, out
 
     with subtest("torqcli on a terminal: ? lists what may come next, Tab completes"):
         import shlex
@@ -159,6 +162,15 @@ pkgs.testers.runNixOSTest {
         as_dev("tmux send-keys -t t C-u 'set system ti' Tab")
         # (capture-pane drops trailing spaces, so the space Tab adds is not seen here.)
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"set system time-zone\"')}", timeout=30)
+        # `switch cli` changes the syntax for the session, and the prompt with it.
+        as_dev("tmux send-keys -t t C-u 'edit system' Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"[edit system]\"')}", timeout=30)
+        as_dev("tmux send-keys -t t 'switch cli' Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"dev@machine(config-system)#\"')}", timeout=30)
+        as_dev("tmux send-keys -t t top Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -v \"^$\" | tail -n 1 | grep -qF \"dev@machine(config)#\"')}", timeout=30)
+        as_dev("tmux send-keys -t t 'switch cli' Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -c \"Switched to the juniper style\" | grep -q 1')}", timeout=30)
         # A pasted block stops at its first error: nothing after a refused line runs.
         as_dev("tmux send-keys -t t C-u")
         as_dev("printf 'set system host-name my_laptop\\nset users dev packages vim\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")

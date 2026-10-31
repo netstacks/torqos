@@ -47,10 +47,10 @@ $ torqcli -c "configure; set users viper packages htop; commit"
 | configuration prompt | `[edit system]` line, then `viper@torq-utm#` | `viper@torq-utm(config-system)#` |
 | add / change | `set system packages jq` | `system packages jq` |
 | remove | `delete system packages jq` | `no system packages jq` |
-| go down / up / to the top | `edit system` · `up` · `top` | `system` · `exit` · `end` |
+| go down / up / to the top | `edit system` · `up` (or `exit`) · `top` | `system` · `exit` · `top` |
 | compare with the active configuration | `show \| compare` | `show configuration diff` |
-| show the configuration | `show` / `show configuration` | `show running-config` |
-| leave configuration | `exit` | `end` / `exit` |
+| show the configuration | `show` (candidate) / `show configuration` (operational) | `show configuration` (candidate) / `show running-config` (operational) |
+| leave configuration | `exit` at the top, or `exit configuration-mode` | `exit` at the top, or `end` |
 
 The same in both: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`,
 `rollback <n>`, `show system commit`, `switch cli`, `?` help, Tab completion, history (↑).
@@ -64,6 +64,12 @@ with are reserved and can never name a container (`no`, `do`, `exit`, `end`, `to
 `commit`, `rollback`, `set`, `delete`, `edit`, `configure`, `config`, `run`, `switch`). Deleting a
 whole container needs `delete <container> all` / `no <container> all`. In Cisco configuration mode
 `do <command>` runs an operational command; rollback is `rollback configuration <n>` there.
+
+As built (4a, cli/src/syntax.rs): both styles parse to one `Op`; a test renders every `Op` in each
+style and parses it back. A Cisco bare path to a container or list entry is a submode (the prompt
+shows `(config-system)`), any other bare path sets. The interactive shell starts in your style
+(`users <you> cli style`, else `system cli style`, from /etc/torq/cli.json); `switch cli` changes it
+for the session. `?` and Tab follow the style and where you are.
 
 **Scripts (`torqcli -c`)** use a private candidate that exists only for that invocation — never your
 interactive candidate, so a script cannot commit your half-done edits or leave edits behind. They
