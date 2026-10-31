@@ -222,5 +222,6 @@ torq.desktop.enable = true;       →  torq desktop enable true
    root, to something nobody saw (proven on a scratch copy). Now a lock never outlives its source
    (`rollback <n>` drops it), and the broker builds, and `commit check` evaluates, with
    `--no-update-lock-file`: a flake.lock that does not match flake.nix fails, never re-locked. A
-   folder as the source (`path:`) is said in the commit question.
+   folder as the source (`path:`) is said in the commit question. Live as change #48; the broker's
+   first build with the flag was the next update.
 6. `save` / `load override|merge|set`: a saved configuration recreates a device.
