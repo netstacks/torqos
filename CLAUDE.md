@@ -137,14 +137,13 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
 - `/var/lib/torq/config` = the machine's config repo; its `torq` input is
   `path:/home/viper/torq`.
 - **Ship a distribution change to the running VM through the broker**, so it is ledgered. Commit
-  in `~/torq` first (the config repo's `torq` input is that working tree), then in `torqcli` (needs
-  a terminal: use tmux):
+  in `~/torq` first (the config repo's `torq` input is that working tree), then, in a terminal (tmux),
+  with a **private candidate** (`-c`) — never the interactive one, which every interactive session of
+  the user shares, and may hold a person's uncommitted edits:
+  ```bash
+  torqcli -c "request system update; configure; show | compare; commit comment \"…\""   # asks y/N
   ```
-  request system update     # loads the new flake.lock into the candidate
-  configure
-  show | compare            # [edit system software]
-  commit                    # shows it, asks y/N, applies
-  ```
+  Read the prompt before answering: it must show only `[edit system software]`.
   To change the machine's config repo itself (not just bump inputs), do it by hand:
   ```bash
   rm -rf /tmp/cfg && cp -r /var/lib/torq/config /tmp/cfg && cd /tmp/cfg   # edit, then:
