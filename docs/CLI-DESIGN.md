@@ -142,13 +142,15 @@ them, a whole leaf-list as one `-`/`+` pair, a new container as its leaves (`[ed
   a raw diff, flagged. `rollback 0` discards the candidate.
 - **`request system software rollback <n>`** is the separate, explicit way to go back to commit
   <n>'s software (its `flake.lock`), marked as a downgrade.
-- **`commit confirmed <minutes>`** (2–60, default 10) is for changes that could cut you off:
+- **`commit confirmed <minutes>`** (1–1440, default 10; with `comment "…"` in either order) is for
+  changes that could cut you off:
   - the new system is *activated but not made the boot default* (`switch-to-configuration test`);
   - the window starts when the switch has finished;
   - a plain `commit` with an empty candidate confirms it: the broker makes the running system
     the boot default (no rebuild). With edits in the candidate, `commit` refuses — confirm first,
     then commit them. Only the person who made the confirmed commit confirms it (others are told
-    whose it is);
+    whose it is; the broker refuses them too). As built (3c), torqcli says all this before
+    evaluating, asking or proposing anything;
   - confirming is accepted until the broker has *started* the rollback (checked under its lock),
     not by comparing clocks, so a clock jump or a suspended laptop can never leave a commit that
     can be neither confirmed nor rolled back;
@@ -174,6 +176,14 @@ viper@torq-utm# commit confirmed 5 comment "ssh, keys only"
 viper@torq-utm# commit
   ✓ commit confirmed
 ```
+
+As built (3c/3d): `commit check` evaluates the candidate on the committed base (`git archive`, as
+the broker builds it). A system change, or a change to another user's folder, shows the
+comparison and needs a person's yes at a terminal; a change to your own folder does not (as
+`torq pkg --yes`; KNOWN-GAPS #4). Every value reaches the broker as `--name=value`. If the broker's
+answer to a commit is lost, the ledger decides whether it was made (the candidate is discarded
+only if it was). On a terminal the shell has history, Tab and `?`; a pasted block of commands runs
+line by line.
 
 ## Operational commands
 

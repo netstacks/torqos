@@ -62,6 +62,8 @@ pub struct PendingConfirm {
     pub anchor_system: String,
     /// The system the commit activated.
     pub system: Option<String>,
+    /// Who approved it: the one who may confirm it.
+    pub approved_by: Option<String>,
     /// The kernel's boot ID when it was applied: a rollback "by reboot" needs a different one.
     pub boot_id: Option<String>,
     #[serde(skip)]
@@ -87,6 +89,7 @@ fn pending_confirm(entries: &[Entry]) -> Option<PendingConfirm> {
         anchor_system: c["anchor_system"].as_str()?.into(),
         system: a.body.data["system"].as_str().map(String::from),
         boot_id: c["boot_id"].as_str().map(String::from),
+        approved_by: a.body.approved_by.clone(),
         tier: a.body.tier.clone(),
         reason: a.body.reason.clone(),
     })
@@ -1184,6 +1187,16 @@ impl Broker {
         let Some(pc) = pending_confirm(&self.ledger.read_all()?) else {
             bail!("nothing is waiting for confirmation");
         };
+        // Only the one who made it keeps it: someone else must not decide a change is fine before
+        // its author has checked it. (Who is calling is still the caller's word: KNOWN-GAPS #4.)
+        if pc.approved_by.as_deref().is_some_and(|who| who != by) {
+            bail!(
+                "change #{} is waiting for {} to confirm it; it rolls back at {} unless they do",
+                pc.applied,
+                pc.approved_by.as_deref().unwrap_or("?"),
+                pc.deadline
+            );
+        }
         if pc.boot_id.is_some() && pc.boot_id != self.boot_id() {
             bail!("change #{} cannot be confirmed: the machine has restarted since it was applied; it will be rolled back", pc.applied);
         }
@@ -1426,6 +1439,7 @@ mod tests {
             anchor_system: "/nix/store/old".into(),
             system: Some("/nix/store/new".into()),
             boot_id: Some("b".into()),
+            approved_by: Some("casey".into()),
             tier: "system".into(),
             reason: "r".into(),
         }

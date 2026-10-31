@@ -79,6 +79,26 @@ impl Repo {
             .collect()
     }
 
+    /// The whole configuration at commit `id`, written into `dest` (an empty folder): what the broker
+    /// builds is the committed tree, not the repo's working copy.
+    pub fn archive(&self, id: &str, dest: &Path) -> Result<()> {
+        if !(id.len() == 40 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
+            bail!("not a commit id: {id:?}");
+        }
+        let tar = self.git(&["archive", "--format=tar", "--end-of-options", &format!("{id}^{{tree}}")])?;
+        let mut child = Command::new("tar")
+            .args(["-x", "--no-same-owner", "-C"])
+            .arg(dest)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .context("running tar")?;
+        child.stdin.take().context("tar's input")?.write_all(&tar)?;
+        if !child.wait()?.success() {
+            bail!("unpacking the configuration at {id} failed");
+        }
+        Ok(())
+    }
+
     /// The tree's files at `rev` (exact bytes): only paths the schema describes, and only regular
     /// files — a symlink or anything else at a tree path is refused, never followed.
     pub fn tree_files(&self, schema: &Schema, rev: &str) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -120,7 +140,8 @@ impl Candidate {
     /// the current HEAD — a rollback is a new change on top of today's configuration.
     pub fn from_repo(repo: &Repo, schema: &Schema, rev: &str) -> Result<Candidate> {
         let base = repo.head()?;
-        let files = repo.tree_files(schema, rev)?;
+        // HEAD read once: a commit landing in between must not mix two configurations.
+        let files = repo.tree_files(schema, if rev == "HEAD" { &base } else { rev })?;
         let config = schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
         Ok(Candidate { base, config })
     }
@@ -407,5 +428,27 @@ mod review_tests {
             assert!(format!("{:#}", r.tree_files(&schema(), bad).unwrap_err()).contains("not a commit id"), "{bad}");
         }
         assert!(r.tree_files(&schema(), &r.head().unwrap()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    /// `commit check` evaluates the committed base, as the broker builds it: not untracked files or
+    /// edits in the repo's working copy (review of 4a12b45).
+    #[test]
+    fn archive_is_the_committed_tree() {
+        let d = tempfile::tempdir().unwrap();
+        let st = Command::new("sh").arg("-c").arg("git init -q -b main && git config user.name t && git config user.email t@t \
+            && echo committed > a && git add a && git commit -qm x && echo edited > a && echo stray > untracked")
+            .current_dir(d.path()).env("GIT_CONFIG_GLOBAL", "/dev/null").status().unwrap();
+        assert!(st.success());
+        let r = Repo::new(d.path());
+        let out = tempfile::tempdir().unwrap();
+        r.archive(&r.head().unwrap(), out.path()).unwrap();
+        assert_eq!(fs::read_to_string(out.path().join("a")).unwrap(), "committed\n");
+        assert!(!out.path().join("untracked").exists());
+        assert!(r.archive("HEAD", out.path()).is_err(), "a commit id, nothing else");
     }
 }

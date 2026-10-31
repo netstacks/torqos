@@ -9,17 +9,28 @@ use std::path::PathBuf;
 
 /// What the session needs from the machine: evaluation and the broker.
 pub trait Machine {
-    /// `commit check`: does the configuration with these tree files evaluate?
-    fn check(&self, files: &[(String, Option<String>)]) -> Result<()>;
+    /// `commit check`: does the configuration at commit `base`, with these tree files changed
+    /// (None: deleted), evaluate?
+    fn check(&self, base: &str, files: &[(String, Option<String>)]) -> Result<()>;
     /// Propose `diff` against `base` and apply it (with `confirm` minutes: commit confirmed). The
     /// broker's tier must be `tier`. Returns the applied ledger entry's number.
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64>;
-    /// A commit confirmed waiting: (its change number, its deadline).
-    fn pending_confirm(&self) -> Result<Option<(u64, String)>>;
+    /// A commit confirmed waiting, if there is one.
+    fn pending_confirm(&self) -> Result<Option<Waiting>>;
     /// Keep the waiting commit confirmed.
     fn confirm(&self) -> Result<u64>;
     /// Ask a person (a system-tier commit); false when there is no one to ask.
     fn ask(&self, question: &str) -> bool;
+}
+
+/// A commit confirmed waiting for its author.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Waiting {
+    /// Its change (the applied ledger entry).
+    pub seq: u64,
+    pub deadline: String,
+    /// Who made it: the one who may confirm it.
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,6 +48,8 @@ pub struct Session<'a> {
     pub mode: Mode,
     candidate: Option<Candidate>,
     machine: &'a dyn Machine,
+    /// Who is at the shell (their login name): their own folder needs no question.
+    me: String,
     /// Set by `exit` in operational mode (or `quit`).
     pub done: bool,
 }
@@ -103,8 +116,8 @@ fn split_pipes(w: &[String]) -> Result<(Vec<String>, Pipes)> {
 }
 
 impl<'a> Session<'a> {
-    pub fn new(schema: Schema, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine) -> Self {
-        Session { schema, repo, saved, mode: Mode::Operational, candidate: None, machine, done: false }
+    pub fn new(schema: Schema, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str) -> Self {
+        Session { schema, repo, saved, mode: Mode::Operational, candidate: None, machine, me: me.into(), done: false }
     }
 
     /// The configuration that is committed now.
@@ -179,12 +192,13 @@ impl<'a> Session<'a> {
                 r
             }
             (Mode::Configuration, "exit" | "quit" | "top") => {
-                let changed = self.uncommitted()?;
+                // Leave first: a candidate that cannot be read must not keep anyone in here.
                 self.mode = Mode::Operational;
-                Ok(if changed {
-                    "The configuration has been changed but not committed (it is kept: `configure` returns to it).\n".into()
-                } else {
-                    String::new()
+                let changed = self.uncommitted().unwrap_or(true);
+                Ok(match (changed, self.saved.is_some()) {
+                    (false, _) => String::new(),
+                    (true, true) => "The configuration has been changed but not committed (it is kept: `configure` returns to it).\n".into(),
+                    (true, false) => "The configuration has been changed but not committed.\n".into(),
                 })
             }
             (Mode::Operational, other) => bail!("unknown command: {other}; one of: configure, show, exit"),
@@ -272,15 +286,7 @@ impl<'a> Session<'a> {
     }
 
     fn commit(&mut self, w: &[String]) -> Result<String> {
-        let ws: Vec<&str> = w.iter().map(String::as_str).collect();
-        let (check, confirm, comment) = match ws.as_slice() {
-            ["check"] => (true, None, None),
-            [] => (false, None, None),
-            ["comment", c] => (false, None, Some(c.to_string())),
-            ["confirmed"] => (false, Some(10), None),
-            ["confirmed", m] => (false, Some(m.parse().with_context(|| format!("commit confirmed: '{m}' is not a number of minutes"))?), None),
-            _ => bail!("commit: one of: commit, commit check, commit comment \"…\", commit confirmed [<minutes>]"),
-        };
+        let o = parse_commit(w)?;
         let s = self.schema.clone();
         let head = self.repo.head()?;
         let (base, config) = {
@@ -289,23 +295,35 @@ impl<'a> Session<'a> {
         };
         let base_files = self.repo.tree_files(&s, &base)?;
         let changes = candidate::changes(&s, &base_files, &config)?;
-        if check {
+        let files: Vec<(String, Option<String>)> = changes.iter().map(|(p, _, n)| (p.clone(), n.clone())).collect();
+        if o.check {
             if base != head {
                 bail!("the configuration has changed since your candidate was started: `rollback 0` starts over");
             }
-            let files: Vec<(String, Option<String>)> = changes.iter().map(|(p, _, n)| (p.clone(), n.clone())).collect();
-            self.machine.check(&files)?;
+            self.machine.check(&base, &files)?;
             return Ok("configuration check succeeds\n".into());
         }
+        // A commit confirmed waiting freezes every other change (the broker refuses them): say so
+        // before evaluating, asking or proposing anything.
+        let waiting = self.machine.pending_confirm()?;
         if changes.is_empty() {
-            // Junos: committing again within the window confirms a commit confirmed.
-            if let Some((seq, _)) = self.machine.pending_confirm()? {
-                if confirm.is_none() {
-                    let n = self.machine.confirm()?;
-                    return Ok(format!("commit complete: change #{seq} confirmed (#{n})\n"));
-                }
+            let Some(w) = waiting else { return Ok("commit complete (no changes)\n".into()) };
+            if o.confirm.is_some() {
+                bail!("change #{} is already waiting for confirmation until {}: `commit` confirms it", w.seq, w.deadline);
             }
-            return Ok("commit complete (no changes)\n".into());
+            // Junos: committing again within the window confirms it — but only its author may.
+            if w.by.as_deref().is_some_and(|by| by != self.me) {
+                bail!("change #{} is waiting for {} to confirm it; it rolls back at {} unless they do", w.seq, w.by.as_deref().unwrap_or("?"), w.deadline);
+            }
+            let n = self.machine.confirm()?;
+            return Ok(format!("commit complete: change #{} confirmed (#{n})\n", w.seq));
+        }
+        if let Some(w) = waiting {
+            bail!(
+                "change #{} (commit confirmed) is waiting until {}: nothing else can change until it is confirmed \
+                 (`commit` with no changes) or rolled back",
+                w.seq, w.deadline
+            );
         }
         if base != head {
             bail!(
@@ -316,13 +334,23 @@ impl<'a> Session<'a> {
             );
         }
         let tier = self.tier_of(&changes);
-        let files: Vec<(String, Option<String>)> = changes.iter().map(|(p, _, n)| (p.clone(), n.clone())).collect();
-        self.machine.check(&files)?;
+        // A person approves at a terminal: a system change, and a change to someone else's folder.
+        let others = self.others_folders(&changes);
+        self.machine.check(&base, &files)?;
         let base_config = s.load(base_files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
         let compare = s.compare(&base_config, &config);
-        if tier == "system" && !self.machine.ask(&format!("{compare}This changes the system (all users). Commit? ")) {
-            bail!("not committed: a system change needs a person to approve it at a terminal");
+        let shown: String = compare.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
+        let why = match (tier, others.is_empty()) {
+            ("system", _) => Some("This changes the system (all users).".to_string()),
+            (_, false) => Some(format!("This changes the settings of: {}.", others.join(", "))),
+            _ => None,
+        };
+        if let Some(why) = why {
+            if !self.machine.ask(&format!("{shown}{why} Commit? ")) {
+                bail!("not committed: this change needs a person to approve it at a terminal");
+            }
         }
+        let (confirm, comment) = (o.confirm, o.comment);
         let scratch = tempfile::tempdir()?;
         let diff = candidate::unified_diff(scratch.path(), &changes)?;
         let reason = comment.unwrap_or_else(|| summary(&compare));
@@ -339,6 +367,55 @@ impl<'a> Session<'a> {
         let user = changes.iter().all(|(p, _, _)| self.schema.tier_of(p) == Some("user"));
         if user { "user" } else { "system" }
     }
+
+    /// The users other than you whose folders (users/<name>/) the changes touch.
+    fn others_folders(&self, changes: &[(String, Option<&[u8]>, Option<String>)]) -> Vec<String> {
+        let mut names: Vec<String> = changes
+            .iter()
+            .filter_map(|(p, _, _)| p.strip_prefix("users/")?.split('/').next().map(String::from))
+            .filter(|n| *n != self.me)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
+/// `commit` options: `check` alone, or any of `confirmed [<minutes>]` and `comment "<text>"`.
+struct CommitOptions {
+    check: bool,
+    confirm: Option<u32>,
+    comment: Option<String>,
+}
+
+fn parse_commit(w: &[String]) -> Result<CommitOptions> {
+    let usage = || anyhow::anyhow!("commit: one of: commit, commit check, commit [confirmed [<minutes>]] [comment \"…\"]");
+    if w.len() == 1 && w[0] == "check" {
+        return Ok(CommitOptions { check: true, confirm: None, comment: None });
+    }
+    let (mut confirm, mut comment, mut i) = (None, None, 0);
+    while i < w.len() {
+        match w[i].as_str() {
+            "confirmed" if confirm.is_none() => {
+                let mut m = 10;
+                if let Some(n) = w.get(i + 1).filter(|n| n.bytes().all(|b| b.is_ascii_digit())) {
+                    m = n.parse().map_err(|_| anyhow::anyhow!("commit confirmed: '{n}' minutes is too many"))?;
+                    i += 1;
+                }
+                if !(1..=1440).contains(&m) {
+                    bail!("commit confirmed takes 1 to 1440 minutes, not {m}");
+                }
+                confirm = Some(m);
+            }
+            "comment" if comment.is_none() => {
+                comment = Some(w.get(i + 1).ok_or_else(usage)?.clone());
+                i += 1;
+            }
+            _ => return Err(usage()),
+        }
+        i += 1;
+    }
+    Ok(CommitOptions { check: false, confirm, comment })
 }
 
 /// A ledger reason from the comparison: its `+`/`-` lines, short.
@@ -368,20 +445,25 @@ mod tests {
         commits: RefCell<Vec<(String, String, String, String, Option<u32>)>>,
         checks: RefCell<Vec<Vec<(String, Option<String>)>>>,
         answer: bool,
-        pending: Option<(u64, String)>,
+        pending: Option<Waiting>,
         confirmed: RefCell<u32>,
         asked: RefCell<Vec<String>>,
+        /// The broker refuses the commit.
+        refuse: bool,
     }
     impl Machine for Fake {
-        fn check(&self, files: &[(String, Option<String>)]) -> Result<()> {
+        fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<()> {
             self.checks.borrow_mut().push(files.to_vec());
             Ok(())
         }
         fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64> {
+            if self.refuse {
+                bail!("commit refused: busy");
+            }
             self.commits.borrow_mut().push((diff.into(), base.into(), tier.into(), reason.into(), confirm));
             Ok(42)
         }
-        fn pending_confirm(&self) -> Result<Option<(u64, String)>> {
+        fn pending_confirm(&self) -> Result<Option<Waiting>> {
             Ok(self.pending.clone())
         }
         fn confirm(&self) -> Result<u64> {
@@ -406,7 +488,10 @@ mod tests {
         d
     }
     fn session<'a>(d: &Path, saved: Option<PathBuf>, m: &'a Fake) -> Session<'a> {
-        Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), Repo::new(d), saved, m)
+        Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), Repo::new(d), saved, m, "dev")
+    }
+    fn waiting(by: &str) -> Option<Waiting> {
+        Some(Waiting { seq: 42, deadline: "soon".into(), by: Some(by.into()) })
     }
     fn run(s: &mut Session, lines: &[&str]) -> String {
         lines.iter().map(|l| s.exec(l).unwrap_or_else(|e| panic!("{l}: {e:#}"))).collect()
@@ -492,7 +577,7 @@ mod tests {
         assert!(out.contains("rolled back in 5 minutes"), "{out}");
         assert_eq!(m.commits.borrow()[0].4, Some(5));
         // Committing again, with nothing changed, confirms it (as in Junos).
-        let m = Fake { pending: Some((42, "soon".into())), ..Fake::default() };
+        let m = Fake { pending: waiting("dev"), ..Fake::default() };
         let mut s = session(d.path(), None, &m);
         assert_eq!(run(&mut s, &["configure", "commit"]), "Entering configuration mode\ncommit complete: change #42 confirmed (#43)\n");
         assert_eq!(*m.confirmed.borrow(), 1);
@@ -516,6 +601,80 @@ mod tests {
         let mut p = session(d.path(), None, &m);
         run(&mut p, &["configure", "set users dev cli style cisco"]);
         assert!(!fs_has(state.path(), "cli.json"));
+    }
+
+    /// While a commit confirmed waits, a commit with changes is refused before anything is evaluated,
+    /// asked or proposed; only its author confirms it (review of 4a12b45).
+    #[test]
+    fn a_waiting_commit_confirmed_comes_first() {
+        let (d, m) = (repo(), Fake { answer: true, pending: waiting("dev"), ..Fake::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three"]);
+        let e = format!("{:#}", s.exec("commit").unwrap_err());
+        assert!(e.contains("change #42 (commit confirmed) is waiting"), "{e}");
+        assert!(m.checks.borrow().is_empty() && m.asked.borrow().is_empty() && m.commits.borrow().is_empty());
+        let m = Fake { pending: waiting("ana"), ..Fake::default() };
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", run_err(&mut s, &["configure"], "commit"));
+        assert!(e.contains("waiting for ana to confirm it"), "{e}");
+        assert_eq!(*m.confirmed.borrow(), 0);
+        let m = Fake { pending: waiting("dev"), ..Fake::default() };
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", run_err(&mut s, &["configure"], "commit confirmed 5"));
+        assert!(e.contains("already waiting for confirmation") && e.contains("`commit` confirms it"), "{e}");
+    }
+
+    fn run_err(s: &mut Session, before: &[&str], line: &str) -> anyhow::Error {
+        run(s, before);
+        s.exec(line).unwrap_err()
+    }
+
+    #[test]
+    fn commit_options_parse_and_are_bounded() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set users dev cli style cisco"]);
+        for (bad, why) in [("commit confirmed 0", "1 to 1440"), ("commit confirmed 1441", "1 to 1440"), ("commit confirmed 99999999999", "too many"), ("commit now", "one of")] {
+            assert!(format!("{:#}", s.exec(bad).unwrap_err()).contains(why), "{bad}");
+        }
+        assert!(m.checks.borrow().is_empty(), "refused before anything is checked");
+        s.exec("commit confirmed 5 comment \"ssh, keys only\"").unwrap();
+        let c = m.commits.borrow();
+        assert_eq!((c[0].3.as_str(), c[0].4), ("ssh, keys only", Some(5)));
+    }
+
+    /// The ledger reason is built from the comparison and starts with `-` for any changed value: it is
+    /// passed through as it is (shell.rs gives it to the broker as `--reason=…`).
+    #[test]
+    fn a_reason_may_start_with_a_dash() {
+        let (d, m) = (repo(), Fake { answer: true, ..Fake::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three", "commit"]);
+        assert_eq!(m.commits.borrow()[0].3, "-   host-name two; +   host-name three;");
+    }
+
+    /// Your own folder is yours; anyone else's takes a person's yes, like a system change.
+    #[test]
+    fn another_users_folder_needs_a_person() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        s.schema.nodes.get_mut("users").unwrap().values.as_mut().unwrap().insert("ana".into(), String::new());
+        run(&mut s, &["configure", "set users ana cli style cisco"]);
+        let e = format!("{:#}", s.exec("commit").unwrap_err());
+        assert!(e.contains("needs a person"), "{e}");
+        assert!(m.asked.borrow()[0].contains("This changes the settings of: ana."), "{:?}", m.asked.borrow());
+        assert!(m.commits.borrow().is_empty());
+    }
+
+    /// A refused commit keeps the candidate; `-c`'s exit does not promise to keep it.
+    #[test]
+    fn a_failed_commit_keeps_the_candidate() {
+        let (d, m) = (repo(), Fake { refuse: true, ..Fake::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set users dev cli style cisco"]);
+        assert!(format!("{:#}", s.exec("commit").unwrap_err()).contains("busy"));
+        assert!(s.exec("show | compare").unwrap().contains("style cisco"));
+        assert_eq!(s.exec("exit").unwrap(), "The configuration has been changed but not committed.\n");
     }
 
     fn fs_has(dir: &Path, needle: &str) -> bool {

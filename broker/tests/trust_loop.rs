@@ -1742,3 +1742,32 @@ fn user_cli_style_is_user_tier_data() {
         assert!(err.contains(r#"exactly {"style": ...}, one of juniper, cisco"#), "{name}: {err}");
     }
 }
+
+/// Only the one who made a commit confirmed confirms it (review of torqcli 3c).
+#[test]
+fn only_its_author_confirms_a_commit_confirmed() {
+    let m = Confirmable::new();
+    let seq = m.propose_theme();
+    let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    assert_eq!(m.b.status().unwrap().pending_confirm.unwrap().approved_by.as_deref(), Some("casey"));
+    let e = format!("{:#}", m.b.confirm("dana").unwrap_err());
+    assert!(e.contains(&format!("change #{} is waiting for casey to confirm it", a.body.seq)), "{e}");
+    assert!(m.b.status().unwrap().pending_confirm.is_some(), "still waiting");
+    m.b.confirm("casey").unwrap();
+}
+
+/// torqcli passes every value as `--name=value`: a reason that starts with `-` (any changed value
+/// does, "-   host-name two; …") must reach the ledger as it is (review of torqcli 3c).
+#[test]
+fn a_reason_may_start_with_a_dash() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "theme.diff", THEME);
+    let reason = "-   theme dark; +   theme light;";
+    let out = run_cli(dir.path(), "true", &["--json", "propose", &format!("--diff={}", d.display()), &format!("--reason={reason}"), "--actor=user"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let seq = serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["seq"].as_u64().unwrap();
+    assert_eq!(b.ledger.get(seq).unwrap().body.reason, reason);
+    // The form torqcli used to send is what the review caught: clap reads it as an option.
+    let out = run_cli(dir.path(), "true", &["propose", "--diff", &d.to_string_lossy(), "--reason", reason]);
+    assert!(!out.status.success());
+}

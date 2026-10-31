@@ -5,7 +5,9 @@
 pkgs.testers.runNixOSTest {
   name = "torq-trust-loop";
 
-  nodes.machine = { options, ... }: {
+  nodes.machine = { options, pkgs, ... }: {
+    # A terminal to drive torqcli's line editor in.
+    environment.systemPackages = [ pkgs.tmux ];
     imports = [ self.nixosModules.default ];
     torq.user = "dev";
     torq.desktop.enable = false;
@@ -137,6 +139,38 @@ pkgs.testers.runNixOSTest {
         assert " host" in out.splitlines()[0], out
         out = machine.fail("su - dev -c 'torqcli -c \"configure; set system host-name my_laptop\"' 2>&1")
         assert "is not a valid system host-name" in out, out
+
+    with subtest("torqcli on a terminal: ? lists what may come next, Tab completes"):
+        import shlex
+        def as_dev(cmd, ok=True):
+            run = machine.succeed if ok else machine.fail
+            return run(f"su - dev -c {shlex.quote(cmd)}")
+        screen = "tmux capture-pane -p -t t"
+        as_dev("tmux new-session -d -s t -x 160 -y 50 torqcli")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q dev@machine')}", timeout=30)
+        as_dev("tmux send-keys -t t configure Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q dev@machine#')}", timeout=30)
+        as_dev("tmux send-keys -t t 'set system cli style ' '?'")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q Possible.completions')}", timeout=30)
+        out = as_dev(screen)
+        assert "cisco" in out and "IOS-style" in out and "juniper" in out, out
+        # The line is still there after the list, ready to finish.
+        assert out.rstrip().splitlines()[-1].endswith("set system cli style"), out
+        as_dev("tmux send-keys -t t C-u 'set system ti' Tab")
+        # (capture-pane drops trailing spaces, so the space Tab adds is not seen here.)
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"set system time-zone\"')}", timeout=30)
+        # A pasted block of commands (bracketed paste) runs line by line.
+        as_dev("tmux send-keys -t t C-u")
+        as_dev("printf 'set users dev packages htop\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")
+        as_dev("tmux send-keys -t t Enter")
+        # (the compare's output, not the pasted command: both lines ran)
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"+   packages [ htop ];\"')}", timeout=30)
+        # Leave (one line at a time: keys typed before the next prompt are not kept).
+        last_line = screen + " | grep -v '^$' | tail -n 1"
+        as_dev("tmux send-keys -t t exit Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(last_line + ' | grep -q \"dev@machine>\"')}", timeout=30)
+        as_dev("tmux send-keys -t t exit Enter")
+        machine.wait_until_fails(f"su - dev -c {shlex.quote('tmux has-session -t t')}", timeout=30)
 
     with subtest("a stray nixos-rebuild cannot switch away from the ledgered config"):
         # The owner's files are moved aside, never overwritten or opened: a config that merely

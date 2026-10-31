@@ -3,9 +3,9 @@
 //! session.rs, the tree in tree.rs, the candidate in candidate.rs.
 
 use crate::candidate::{Candidate, Repo};
-use crate::session::{Machine, Mode, Session};
+use crate::session::{Machine, Mode, Session, Waiting};
 use crate::tree::Schema;
-use crate::{broker, check_repo, config_name, copy_tree, evaluate, history, me, run, scratch_dir, Cli, Cmd, BROKER, REPO};
+use crate::{broker, check_repo, config_name, evaluate, history, me, run, scratch_dir, Cli, Cmd, BROKER, REPO};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
@@ -29,10 +29,13 @@ fn done(o: run::Outcome, what: &str) -> Result<serde_json::Value> {
 }
 
 impl Machine for Real<'_> {
-    fn check(&self, files: &[(String, Option<String>)]) -> Result<()> {
+    fn check(&self, base: &str, files: &[(String, Option<String>)]) -> Result<()> {
         let scratch = scratch_dir()?;
         let copy = scratch.path().join("config");
-        copy_tree(&self.cli.repo, &copy)?;
+        fs::create_dir(&copy)?;
+        // The committed configuration the change is based on, as the broker will build it — not the
+        // repo's working copy.
+        Repo::new(&self.cli.repo).archive(base, &copy)?;
         for (path, content) in files {
             let f = copy.join(path);
             match content {
@@ -57,10 +60,9 @@ impl Machine for Real<'_> {
         fs::write(&file, diff)?;
         let log = run::start_log()?;
         let file = file.to_string_lossy();
-        let proposed = done(
-            run::broker_json(broker(self.cli, &["propose", "--diff", &file, "--base", base, "--reason", reason, "--actor", "user"]), &log)?,
-            "commit",
-        )?;
+        let args = propose_args(&file, base, reason);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let proposed = done(run::broker_json(broker(self.cli, &args), &log)?, "commit")?;
         let seq = proposed["seq"].as_u64().context("the broker did not say which proposal it made")?;
         // What was shown (and, for the system, asked) must be what the broker applies.
         if proposed["tier"].as_str() != Some(tier) {
@@ -76,20 +78,35 @@ impl Machine for Real<'_> {
         if let Some(m) = &minutes {
             args.extend(["--confirm", m]);
         }
-        let applied = {
+        let outcome = {
             let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Committing")) };
-            done(run::broker_json(broker(self.cli, &args), &log)?, "commit")?
+            run::broker_json(broker(self.cli, &args), &log)
         };
-        applied["seq"].as_u64().context("the broker did not say which change it applied")
+        match outcome.map_err(anyhow::Error::from).and_then(|o| done(o, "commit")) {
+            Ok(applied) => applied["seq"].as_u64().context("the broker did not say which change it applied"),
+            // The answer was lost, or unclear: the ledger says whether the change was made. (A
+            // refusal is certain, and keeps the candidate.)
+            Err(e) => match crate::read_ledger(self.cli).ok().and_then(|l| {
+                l.iter().find(|x| x.kind == "applied" && x.data["proposal"].as_u64() == Some(seq)).map(|x| x.seq)
+            }) {
+                Some(applied) => Ok(applied),
+                None => Err(e),
+            },
+        }
     }
 
-    fn pending_confirm(&self) -> Result<Option<(u64, String)>> {
+    fn pending_confirm(&self) -> Result<Option<Waiting>> {
         let log = run::start_log()?;
         let v = match run::broker_status(broker(self.cli, &["status"]), &log)? {
             Ok(v) => v,
             Err(why) => bail!("cannot check for a commit confirmed waiting: {why}"),
         };
-        Ok(v["pending_confirm"]["applied"].as_u64().map(|seq| (seq, v["pending_confirm"]["deadline"].as_str().unwrap_or("?").to_string())))
+        let p = &v["pending_confirm"];
+        Ok(p["applied"].as_u64().map(|seq| Waiting {
+            seq,
+            deadline: history::one_line(p["deadline"].as_str().unwrap_or("?"), 40),
+            by: p["approved_by"].as_str().map(|s| history::one_line(s, 40)),
+        }))
     }
 
     fn confirm(&self) -> Result<u64> {
@@ -107,6 +124,51 @@ impl Machine for Real<'_> {
         let mut answer = String::new();
         std::io::stdin().lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
     }
+}
+
+/// `propose`'s arguments. Every value given as `--name=value`: a reason or comment that starts with
+/// `-` (any change of an existing value does: "-   host-name two; …") must not read as an option.
+fn propose_args(diff: &str, base: &str, reason: &str) -> Vec<String> {
+    vec!["propose".into(), format!("--diff={diff}"), format!("--base={base}"), format!("--reason={reason}"), "--actor=user".into()]
+}
+
+/// A `-c` script's commands: split at `;` and newlines, but not inside "quotes".
+fn script_lines(script: &str) -> Vec<String> {
+    let (mut out, mut cur, mut quoted, mut escaped) = (Vec::new(), String::new(), false, false);
+    for c in script.chars() {
+        match c {
+            _ if escaped => {
+                cur.push(c);
+                escaped = false;
+                continue;
+            }
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ';' | '\n' if !quoted => {
+                out.push(std::mem::take(&mut cur));
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    out.push(cur);
+    out.into_iter().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
+}
+
+#[cfg(test)]
+#[test]
+fn propose_values_are_never_options() {
+    let a = propose_args("/tmp/d", "abc", "-   host-name two; +   host-name three;");
+    assert_eq!(a[3], "--reason=-   host-name two; +   host-name three;");
+    assert!(a[1..].iter().all(|x| x.starts_with("--") && x.contains('=')), "{a:?}");
+}
+
+#[cfg(test)]
+#[test]
+fn scripts_split_outside_quotes() {
+    assert_eq!(script_lines("configure; set a b\ncommit comment \"a; b\" ;"), ["configure", "set a b", "commit comment \"a; b\""]);
+    assert_eq!(script_lines(r#"commit comment "say \"x; y\"""#), [r#"commit comment "say \"x; y\"""#]);
 }
 
 /// The shell: `torqcli` (interactive) or `torqcli -c "<command>; <command>…"` (a private candidate,
@@ -138,10 +200,11 @@ fn run_shell(args: &[String]) -> Result<i32> {
         _ => bail!("usage: torqcli [-c \"<command>; <command>…\"]"),
     };
     let saved = if script.is_some() { None } else { Some(Candidate::default_path()?) };
-    let mut s = Session::new(schema, Repo::new(&cli.repo), saved, &machine);
+    let mut s = Session::new(schema, Repo::new(&cli.repo), saved, &machine, &me()?);
     match script {
         Some(script) => {
-            for line in script.split([';', '\n']).map(str::trim).filter(|l| !l.is_empty()) {
+            for line in script_lines(&script) {
+                let line = line.as_str();
                 match s.exec(line) {
                     Ok(out) => print_clean(&out),
                     Err(e) => {
@@ -297,7 +360,16 @@ mod editor {
                 println!("{a}");
             }
             match ed.readline(&p) {
-                Ok(line) => run_line(s, line.trim()),
+                // A paste of several lines (bracketed paste) arrives as one: run each, in order, as
+                // if typed — pasting a block of `set` commands is how configurations travel.
+                Ok(text) => {
+                    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                        run_line(s, line);
+                        if s.done {
+                            break;
+                        }
+                    }
+                }
                 // Ctrl-C: drop the line, as a shell does.
                 Err(ReadlineError::Interrupted) => continue,
                 Err(ReadlineError::Eof) => {
