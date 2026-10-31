@@ -111,6 +111,11 @@ impl Repo {
         Ok(self.git(&["cat-file", "-e", "--end-of-options", &format!("{id}^{{commit}}")]).is_ok())
     }
 
+    /// The paths of every file of commit `rev`.
+    pub fn paths(&self, rev: &str) -> Result<Vec<String>> {
+        Ok(self.listing(rev)?.into_iter().map(|(_, _, _, p)| p).collect())
+    }
+
     /// The commit before `id` (its first parent), if there is one.
     pub fn parent_of(&self, id: &str) -> Result<Option<String>> {
         if !self.has_commit(id)? {

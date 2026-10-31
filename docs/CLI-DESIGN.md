@@ -119,7 +119,8 @@ a system value must never reach the broker's environment, and people will paste 
 They come back with an allow-list of names, per-user delivery, escaped values and a secrets check.
 
 Files outside the tree (`flake.nix`, `machine.nix`, hardware, any `.nix`) are system tier and edited
-as Nix, not through the shell; `show configuration` lists them at the end as "plus N Nix files", and
+as Nix, not through the shell; `show configuration` names them at the end (`## also set outside this
+configuration, in Nix: …`, 5a), with the software the machine runs (`## software: …`), and
 any change to one is shown as its raw diff in `show | compare` and in `commit`.
 
 ```

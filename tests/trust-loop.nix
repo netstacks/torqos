@@ -128,7 +128,9 @@ pkgs.testers.runNixOSTest {
         # environment points git elsewhere or configures it.
         hostile = "GIT_DIR=/nonexistent GIT_CONFIG_PARAMETERS=bogus GIT_INDEX_FILE=/nonexistent"
         out = machine.succeed(f"su - dev -c '{hostile} torqcli -c \"show configuration\"'")
-        assert out == "system {\n    host-name machine;\n}\n", out
+        assert out.startswith("system {\n    host-name machine;\n}\n"), out
+        # The whole device: what is set outside the tree is named, as a comment a saved file keeps.
+        assert "## also set outside this configuration, in Nix: " in out and "flake.nix" in out, out
         out = machine.succeed("su - dev -c 'torqcli -c \"configure; set system time-zone UTC; show | compare\"'")
         assert "[edit system]\n+   time-zone UTC;" in out, out
         # -c uses a private candidate; the interactive shell keeps one, private, between sessions.
@@ -174,7 +176,7 @@ pkgs.testers.runNixOSTest {
         # What is behind a view, only when asked.
         out = machine.succeed(dev_sh("torqcli 'show configuration | display detail'"))
         assert "## commit " in out and "## system/host.json: system host-name\n" in out, out
-        assert "##" not in machine.succeed(dev_sh("torqcli show configuration")), "no internals unless asked"
+        assert "## commit " not in machine.succeed(dev_sh("torqcli show configuration")), "no internals unless asked"
         # The commands before torqcli say what replaced them.
         out = machine.fail(dev_sh("torq pkg add htop 2>&1"))
         assert "is gone" in out and "set users <you> packages <name>" in out, out

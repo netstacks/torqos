@@ -228,6 +228,10 @@ impl<'a> Session<'a> {
     /// Run one command, already split into words (`torqcli <command>`: as the calling shell split
     /// them; a word that is exactly `|` is a pipe).
     pub fn exec_words(&mut self, w: &[String]) -> Result<String> {
+        // A comment (`## software: …` in a saved configuration) is not a command.
+        if w.first().is_some_and(|x| x.starts_with('#')) {
+            return Ok(String::new());
+        }
         if w.is_empty() {
             return Ok(String::new());
         }
@@ -262,14 +266,14 @@ impl<'a> Session<'a> {
         match op {
             Op::Configure => self.configure(),
             Op::ShowActive { path, display } => {
-                if display != Some(Display::Detail) {
-                    let active = self.active()?;
-                    return self.view(&active, &path, display, "");
-                }
                 // The commit named is the one shown: read at that id, not at HEAD again.
                 let head = self.repo.head()?;
                 let active = self.configuration_of(&head)?;
-                self.view(&active, &path, display, &format!("commit {head}"))
+                let mut out = self.view(&active, &path, display, &format!("commit {head}"))?;
+                if path.is_empty() {
+                    out.push_str(&self.whole(&head, None)?);
+                }
+                Ok(out)
             }
             Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } => {
                 self.show_operational(op)
@@ -354,8 +358,13 @@ impl<'a> Session<'a> {
             }
             Op::ShowCandidate { path, display } => {
                 let c = self.candidate()?;
-                let (cfg, origin) = (c.config.clone(), format!("the candidate, from commit {}", c.base));
-                self.view(&cfg, &self.here(&path), display, &origin)
+                let (cfg, base, lock) = (c.config.clone(), c.base.clone(), c.lock.clone());
+                let here = self.here(&path);
+                let mut out = self.view(&cfg, &here, display, &format!("the candidate, from commit {base}"))?;
+                if here.is_empty() {
+                    out.push_str(&self.whole(&base, lock.as_deref())?);
+                }
+                Ok(out)
             }
             Op::Compare { display } => self.compare(display),
             Op::Rollback { n } => self.rollback(n),
@@ -395,6 +404,40 @@ impl<'a> Session<'a> {
             (true, true) => "The configuration has been changed but not committed (it is kept: `configure` returns to it).\n".into(),
             (true, false) => "The configuration has been changed but not committed.\n".into(),
         })
+    }
+
+    /// What a whole configuration at `rev` does not show in its tree, as comments: the software it
+    /// runs (`lock`: the candidate's, if it changes it) and the files outside the tree that also set
+    /// things (Nix). So `show configuration` names everything that makes the device, and stays a
+    /// file `load` reads (`#` lines are comments).
+    fn whole(&self, rev: &str, lock: Option<&str>) -> Result<String> {
+        let mut out = String::new();
+        let lock = match lock {
+            Some(l) => Some(l.to_string()),
+            None => self.repo.file_at(rev, "flake.lock")?.map(|b| String::from_utf8_lossy(&b).into_owned()),
+        };
+        if let Some(lock) = lock {
+            let v: serde_json::Value = serde_json::from_str(&lock).unwrap_or_default();
+            // The machine's own inputs (what it follows from them is theirs).
+            let direct: Vec<String> = v["nodes"]["root"]["inputs"]
+                .as_object()
+                .map(|o| o.iter().filter_map(|(_, n)| n.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let shown: Vec<String> = crate::pkg::lock_moves("", &lock)
+                .iter()
+                .filter(|m| direct.contains(&m.name))
+                .map(|m| format!("{} {}", crate::history::one_line(&m.name, 30), crate::pkg::move_dates(m).1))
+                .collect();
+            if !shown.is_empty() {
+                out.push_str(&format!("## software: {}\n", shown.join(", ")));
+            }
+        }
+        let outside: Vec<String> =
+            self.repo.paths(rev)?.into_iter().filter(|p| p != "flake.lock" && !self.schema.describes(p)).map(|p| crate::history::one_line(&p, 60)).collect();
+        if !outside.is_empty() {
+            out.push_str(&format!("## also set outside this configuration, in Nix: {}\n", outside.join(", ")));
+        }
+        Ok(out)
     }
 
     /// A configuration, or the part below `path`, as `display` asks. `origin`: where it comes from
@@ -470,7 +513,7 @@ impl<'a> Session<'a> {
                 let n_id = self.commit_at(n)?;
                 let n_cfg = self.configuration_of(&n_id)?;
                 match compare {
-                    None => self.view(&n_cfg, &[], display, &format!("commit {n_id} (rollback {n})")),
+                    None => Ok(self.view(&n_cfg, &[], display, &format!("commit {n_id} (rollback {n})"))? + &self.whole(&n_id, None)?),
                     // What going from configuration m to configuration n changes.
                     Some(m) => {
                         let m_id = self.commit_at(m)?;
@@ -966,7 +1009,7 @@ mod tests {
 
     /// A `flake.lock` whose `torq` input was last changed at `t` (seconds).
     fn lock(t: u64) -> String {
-        format!(r#"{{"nodes":{{"root":{{}},"torq":{{"locked":{{"lastModified":{t},"narHash":"h{t}"}}}}}},"version":7}}"#)
+        format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"lastModified":{t},"narHash":"h{t}"}}}}}},"version":7}}"#)
     }
     /// The software the fake machine finds newer (`request system update`), and with `all`.
     const NEWER: u64 = 1_793_400_000;
@@ -1225,6 +1268,32 @@ mod tests {
         assert!(out.lines().any(|l| l.starts_with("off ssh")) && out.contains("! SSH is on anyway, outside the catalog"), "{out}");
         let (d, m) = (repo(), Fake::default());
         assert!(!session(d.path(), None, &m).exec("show services").unwrap().contains('!'));
+    }
+
+    /// The whole device: what it runs, and what is set outside the tree, as comments a file keeps.
+    #[test]
+    fn show_configuration_names_the_whole_device() {
+        let (d, m) = (repo(), Fake::default());
+        let lock = r#"{"nodes":{"root":{"inputs":{"torq":"torq","nixpkgs":["torq","nixpkgs"]}},"torq":{"locked":{"lastModified":1793000000}},"nixpkgs":{"locked":{"lastModified":1790000000}}},"version":7}"#;
+        sh(d.path(), &format!("printf '%s' '{lock}' > flake.lock && printf '{{ }}\\n' > machine.nix && printf '{{ }}\\n' > flake.nix && git add -A && git commit -qm device"));
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("show configuration").unwrap();
+        assert_eq!(
+            out,
+            "system {\n    host-name two;\n}\n## software: torq 2026-10-26\n## also set outside this configuration, in Nix: flake.nix, machine.nix\n",
+            "the machine's own inputs only (nixpkgs follows torq\x27s)"
+        );
+        assert!(!s.exec("show configuration system").unwrap().contains("##"), "a part of it is just that part");
+        assert!(s.exec("show configuration | display set").unwrap().ends_with("in Nix: flake.nix, machine.nix\n"));
+        // The candidate names the software it would install.
+        s.exec("request system update").unwrap();
+        s.exec("configure").unwrap();
+        assert!(s.exec("show").unwrap().contains(&format!("## software: torq {}\n", crate::pkg::ymd(NEWER))));
+        // And what it shows reads back: comments are not commands.
+        let saved = s.exec("run show configuration | display set").unwrap();
+        for line in saved.lines() {
+            s.exec(line).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
     }
 
     #[test]
