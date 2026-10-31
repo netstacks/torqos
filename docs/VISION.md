@@ -1,43 +1,39 @@
 # Vision
 
-**A laptop that is better than a MacBook Pro — and is mine, and only mine.**
+**An operating system that is its configuration.**
 
 ## One sentence
 
-The first laptop OS where a deeply capable AI can manage the whole system while the owner can
-see, approve and undo everything it does — on a machine whose security is rooted in the owner's
-own keys, not Microsoft's or Apple's.
+A thin, command-line-only, fully functional OS built on NixOS, where one configuration, kept in
+a git repo and changed only through `torqcli` and a small privileged broker, defines the whole
+machine, and every change is reviewed, ledgered and undoable.
 
-## What "better" means here
+## What TorqOS is
 
 | Goal | What we do |
 |---|---|
-| Trustworthy deep AI | AI can fix drivers, firmware, config, performance — through typed tools, a permission broker, and a tamper-evident ledger. Every change is a reviewable, reversible commit. |
-| Everything reversible | The whole system is a declarative config in a local git repo. Every change (user, AI, update) is a commit + a bootable NixOS generation. |
-| Owner-rooted security | Per-machine Secure Boot keys, Microsoft removed by default, measured boot, TPM2 + PIN LUKS. Set up for normal people by a guided "Secure this laptop" screen. |
-| Private by default | Local models first. Cloud models are opt-in with a visible indicator and every call recorded. |
-| Taste and refinement | Omarchy's spirit: opinionated, beautiful, one-step theming — but touchpad/touch-first, with measured smoothness targets. |
-| Reproducible | Restore the config repo on a new laptop, rebuild, get the identical system. |
-| Fun dev platform | It can break — because any break is undone in seconds. |
+| The configuration is the device | Like a router's config: one tree (`torqcli`, every NixOS setting) defines the system. `show configuration` is the machine (docs/CONFIG-IS-THE-DEVICE.md). |
+| Small and controlled | torq is the configuration part of the OS: a Rust broker that is the only writer of the config repo, and `torqcli`, a Junos/Cisco-style shell over it. Everything else is plain NixOS. |
+| Everything reversible | Every change is a git commit, a NixOS generation and a ledger entry. `rollback`, `commit confirmed`, `request system revert`. |
+| Ready for AI, later | No AI now. Built so AI layers can be added later without bypass: the broker is the only writer, every change names its actor, tiers decide what needs a person. Then an AI could only *propose*; people stay free. |
+| Thin | CLI only. No desktop, no UI layer: what is not needed is not installed. |
+| Reproducible | The same config repo and lock build the same system on another machine. |
 
 ## Explicit non-goals (for now)
 
-- Servers. This is a laptop/dev platform.
-- Broad hardware support. One reference laptop first, then a short list.
-- Running macOS apps (not legally/technically viable).
-- Being minimal. We are opinionated and complete.
+- A desktop, a graphical shell or any UI beyond the terminal.
+- Being a laptop OS, or touch- and touchpad-first design.
+- Hardware-specific work (reference machines, firmware, Secure Boot key ceremonies): TorqOS runs
+  wherever NixOS runs; today, the dev VM.
+- A broad "complete OS" vision: opinionated apps, theming, smoothness targets.
 
-## Relationship to Omarchy
+## Later (kept, not planned now)
 
-Omarchy 4 ("Quattro") is already agent-first: pre-wired coding-agent CLIs, a crash watcher that
-briefs the agent, an experimental system-customization skill, agent usage tracking. TorqOS's
-difference is **trust and control**:
-
-- Omarchy's recovery for a bad agent edit is "reinstall configs"; ours is per-change undo.
-- Omarchy agents act with the user's full powers; ours go through a broker with tiers.
-- Omarchy tracks agent *usage*; we keep a tamper-evident ledger of every *action*.
-- Omarchy's agents are mostly cloud CLIs; ours is local-first.
-- Owner-key boot security is core to us and not Omarchy's focus.
-
-We borrow Omarchy's ideas freely (crash watcher, agent skill, theming, curated defaults) and aim
-to do each with a trust layer underneath.
+- The AI layers (docs/AI-LAYER.md): an agent that reads the system and *proposes* changes through
+  the broker, limited permanently and without bypass. Everything built now keeps that possible.
+- Owner-rooted boot security (own Secure Boot keys, TPM2 + PIN): SECURITY-MODEL.md.
+- **Far future:** the config repo with a private git remote. At install, TorqOS asks for a
+  GitHub/GitLab (or other) account and permission to create a private repo, and uses it as the
+  config repo's remote, so the system's settings are a true git repo off the machine too. To
+  settle first: push-only or also accepting changes from the remote (never bypassing local
+  approval), and where the credential lives so an AI can never use it.

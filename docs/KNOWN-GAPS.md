@@ -45,8 +45,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 6b. **Drift detection has blind spots** (ADR-012): a lock that never frees (a leaked holder) makes
    every check "busy" and silent; drift is reported but not written into the ledger, so an outside
    switch followed by a broker apply leaves no trace in the audit trail (`repair` does ledger the
-   drift it fixes); the warning reaches only interactive shells, not a desktop user (needs the
-   Quickshell UI). `repair` checks after its switch that the running system and next boot agree and
+   drift it fixes); the warning reaches interactive shells (and `show system alarms`) only. `repair` checks after its switch that the running system and next boot agree and
    that no other switch is running, but an outside switch that both starts and finishes between
    its own switch and that check would set both alike and pass; comparing against the exact path it
    built would close that.
@@ -122,7 +121,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing
    is not built into the kernel either, so "signed modules only" (SECURITY-MODEL.md) is not true.
 
-## Desktop
+## Desktop (out of scope since ADR-019; the dev VM still runs it)
 7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
    `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a TorqOS niri config.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq.user` in `system.nix` is the one place

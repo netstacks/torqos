@@ -5,25 +5,29 @@
 
 ## What this project is
 
-TorqOS is a **laptop operating system** built on **NixOS** with three non-negotiable goals:
+TorqOS is a **thin, CLI-only operating system** built on **NixOS**, where **the configuration is the
+device** (ADR-019). Its goals:
 
-1. **Ground-up security owned by the user.** Each installed laptop is its own root of trust:
-   owner-generated Secure Boot keys (Microsoft keys removed by default), measured boot,
-   TPM2 + PIN disk unlock. No shim, no vendor keys, no one else's signatures.
-2. **Deep AI integration that is auditable and reversible.** An AI agent can diagnose and
-   change almost anything on the system — drivers, firmware, config, performance — but it can
-   only *propose config changes*. A small privileged **broker** applies them as signed git
-   commits that become bootable NixOS generations. Every action is in a tamper-evident ledger
-   and every change has one-click undo.
-3. **Omarchy-level taste, refinement and speed.** Opinionated, beautiful, ready out of the box,
-   designed for touchpad/touch first (keyboard shortcuts optional), with measured smoothness
-   targets.
+1. **One configuration defines the machine.** Like a network device's config: `torqcli` edits one
+   tree, every NixOS setting plus plain Nix config files, kept in the machine's config git repo
+   (`docs/CONFIG-IS-THE-DEVICE.md`). torq is the small, tightly controlled configuration part of
+   the OS; everything else is plain NixOS.
+2. **Every change is controlled, auditable and reversible.** A small privileged **broker** is the
+   only writer of the config repo: each change is a git commit that becomes a bootable NixOS
+   generation, recorded in a tamper-evident ledger, undoable in one command.
+3. **Ready for AI, later.** No AI work now, but everything is built so AI layers can be added
+   later, limited permanently and without bypass: an AI will only *propose* configuration changes;
+   people stay free (anything in their own home, any change they approve).
+
+Not goals now: the AI layers (later), a desktop or any UI, laptop- or touch-specific design, hardware-specific work, a
+broad "complete OS". Owner-rooted boot security is later; a private git remote for the config
+repo is far future (`docs/ROADMAP.md`).
 
 Read `docs/VISION.md` first, then `docs/ARCHITECTURE.md`.
 
 ## The one rule that shapes everything
 
-**The AI never changes the running system directly.** It edits the system *configuration*
+**The AI (when it comes) never changes the running system directly.** It edits the system *configuration*
 (the local git repo at `/var/lib/torq/config`), and the broker builds the system from it.
 That is what makes auditing and reversal automatic. Do not add code paths that bypass this.
 
@@ -33,10 +37,10 @@ That is what makes auditing and reversal automatic. Do not add code paths that b
 flake.nix              entry point: VMs, ISO, checks, packages
 modules/               the distribution, as NixOS modules (torq.* options)
   base.nix             nix settings, users, locale, core packages
-  security.nix         boot chain, lanzaboote, TPM/LUKS, hardening
-  desktop.nix          compositor (niri), greetd, pipewire, portals
+  security.nix         hardening (boot chain and TPM: later)
+  desktop.nix          a desktop, from before ADR-019: out of scope, still on the dev VM
   broker.nix           the privileged change broker service + config repo
-  ai.nix               local model runtime + agent service (stubbed)
+  ai.nix               local model runtime + agent service (a stub: the AI layers are later)
 hosts/
   dev-vm/              throwaway VM (`.#nixosConfigurations.dev-vm-{aarch64,x86_64}`)
 templates/config/      the per-machine config repo the broker manages
@@ -77,26 +81,25 @@ sudo torq-broker log && sudo torq-broker verify
 A shell with operational and configuration modes, Juniper and Cisco syntax (`switch cli`), a
 candidate configuration, `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`, and a
 configuration tree that is the config repo's files (ADR-016, `docs/CLI-DESIGN.md`). Built in small,
-reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
+reviewed steps, broker first. Next: the rest of M1.5 (`docs/ROADMAP.md`); the AI layers are later.
 
 ## Engineering principles
 
 - **Privileged code is Rust**, small, and boring. The broker must stay auditable line by line.
-- **Unprivileged UI is QML (Quickshell).** The agent runs unprivileged and sandboxed.
+- **CLI only.** No UI layer; the agent runs unprivileged and sandboxed.
 - **Everything declarative.** If it isn't in the config repo, it doesn't exist after a rebuild.
 - **Test the trust properties, not just features.** Every security or reversibility claim
   should have a NixOS VM test (`tests/`) that would fail if the claim broke.
-- **One reference laptop first.** Polish on one machine beats broad mediocre support.
-- **Prefer existing, maintained components** (Lanzaboote, sbctl, systemd-cryptenroll, fwupd,
-  niri/Hyprland, Quickshell, llama.cpp, MCP). Original work goes into the broker, ledger,
-  agent tools, Activity UI, installer and the "Secure this laptop" flow.
+- **Thin.** What the system does not need is not installed; torq stays small.
+- **Prefer existing, maintained components** (NixOS, nixpkgs, the real Linux tools, llama.cpp,
+  MCP). Original work goes into the broker, ledger, torqcli and the agent tools.
 
 ## Guardrails for Claude Code working in this repo
 
 - Never weaken a security default to make something work. Add an explicit, documented option
   instead, defaulting to the secure value.
 - Never give the agent a code path to: modify its own permissions, disable/edit the ledger,
-  touch Secure Boot keys, or run arbitrary root commands. Those are user-only, via direct UI.
+  touch Secure Boot keys, or run arbitrary root commands. Those are user-only, done by a person at a terminal.
 - Record significant design choices in `docs/DECISIONS.md` (short ADR entries).
 - Keep `docs/` in sync when behaviour changes.
 - Things in this scaffold marked `TODO(M1)` / `TODO(M2)` are the intended next steps.
@@ -126,7 +129,7 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
   `torqcli show system alarms` runs one command. Covered in `tests/trust-loop.nix`.
 - **The tree is every NixOS setting (S1–S3e, docs/CONFIG-IS-THE-DEVICE.md):** `set virtualisation docker enable true`; old names are aliases; `file edit` + `set <place> config <file>` attach plain Nix files. `| display detail` / `| display diff` (4d); the software in the candidate (`request system update`,
   4e); configuration numbers from the ledger (4f); `request system revert`, `show system ledger`, the
-  SSH key check at commit, and the old commands retired (4g). Next: M2 (`docs/ROADMAP.md`); what is
+  SSH key check at commit, and the old commands retired (4g). Next: the rest of M1.5 (`docs/ROADMAP.md`); what is
   left of M1.5 needs a person (usability check, terminal look) or its own design (environment
   variables). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 

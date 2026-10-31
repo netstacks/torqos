@@ -1,6 +1,6 @@
 # Roadmap
 
-## Stage 1 — Virtual machines (M4 Mac + optional x86 server)
+## Virtual machines (the dev VM on an M4 Mac; NixOS VM tests)
 
 ### M1 — The trust loop  ✓ done
 In an ARM NixOS VM (UTM on the M4 Mac):
@@ -49,6 +49,9 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [x] Configuration numbers from the ledger (4f); `request system revert <change>`, `show system
       ledger`, the SSH key check at commit; `torq pkg/service/update/log/undo/status` retired, each
       saying what replaced it (4g).
+- [x] The tree is every NixOS setting, plus config files (S1–S3e, docs/CONFIG-IS-THE-DEVICE.md).
+- [ ] The rest of the machine in the tree: `hardware`, `system software` branches; fixed
+      `flake.nix`/`machine.nix`; `save` / `load override|merge|set` (CONFIG-IS-THE-DEVICE.md 5–6).
 - [ ] Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 
 **First round** (done with the earlier command names; carried over):
@@ -66,8 +69,10 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       do: whole-command snapshots of pkg/service/update/undo (success, refusal, failure).
 - [x] New, small: "did you mean" for misspelled packages; `torq status --repair` to return a
       drifted machine to its ledgered system (asks first; ADR-012 still: never automatic).
-- [ ] Terminal look to match (prompt, palette, font) — with the desktop work, soon after.
+- [ ] Terminal look (prompt, colours) in torqcli itself.
 - [ ] Usability check: someone new to TorqOS installs, removes, undoes and reads the log unaided.
+
+## Later: the AI layers (not planned now; everything built keeps them possible)
 
 ### M2 — The agent sees
 - Local model reachable (llama.cpp on the Mac host during dev).
@@ -76,17 +81,22 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 
 ### M3 — The agent acts
 - `config.propose` tool → broker; tiers enforced; taint tracking.
-- Quickshell Activity timeline with diff view and undo.
+- Agent proposals shown and approved in torqcli (`show system ledger`, the commit prompt).
+- A default-deny allow-list at the broker for what an agent may propose (KNOWN-GAPS 6m).
 - Signed commits (broker key), ledger anchoring.
 
-### M4 — Secure boot in emulation (x86 server)
-- QEMU + OVMF (Secure Boot, Setup Mode) + swtpm.
-- "Secure this laptop" flow end to end; tamper test → disk refuses to unlock.
+## Later (not planned now): boot security
 
-## Stage 2 — Old ThinkPad (T480/T490/X1C6–7/T14, iGPU only, TPM 2.0)
-- Real firmware owner-key enrollment, option-ROM hashes, firmware password.
-- Suspend/resume, battery, gestures, installer ISO from USB.
+- Owner-rooted boot security (own Secure Boot keys, TPM2 + PIN; SECURITY-MODEL.md), tested in
+  emulation first (QEMU + OVMF + swtpm).
 
-## Stage 3 — Reference laptop (16" Strix Halo, OLED, 128 GB)
-- Smoothness targets, real local models, polish.
-- Windows app compatibility layer.
+## Far future
+
+- **The config repo with a private git remote.** At install, TorqOS asks for a GitHub/GitLab (or
+  other) account and permission to create a private repo, and uses it as the config repo's remote:
+  the system's settings are a true git repo off the machine too. To settle before building it:
+  push-only or also accepting changes from the remote (never bypassing local approval); where the
+  credential lives so an AI can never use it.
+
+Dropped with the laptop and desktop goals (ADR-019): the reference-laptop stages, the desktop
+and UI work. They are in git history.

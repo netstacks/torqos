@@ -220,7 +220,7 @@ delete <file>`; `delete <place> config` unattaches.
     whose it is; the broker refuses them too). As built (3c), torqcli says all this before
     evaluating, asking or proposing anything;
   - confirming is accepted until the broker has *started* the rollback (checked under its lock),
-    not by comparing clocks, so a clock jump or a suspended laptop can never leave a commit that
+    not by comparing clocks, so a clock jump or a suspended machine can never leave a commit that
     can be neither confirmed nor rolled back;
   - if not confirmed in time, the broker restores the previous system **directly** (its store path,
     kept alive for the window — no evaluation, no download) and resets the config repo to the
@@ -416,5 +416,5 @@ arguments. **JSON-escaped is not terminal-safe**: the CLI neutralises every stri
 
 ## Related: the terminal itself
 
-The prompt, colours and font around the shell are stock NixOS today; a TorqOS terminal look belongs
-with the desktop work.
+The prompt and colours around the shell are stock NixOS today; a TorqOS look for torqcli itself
+(prompt, colours) is an open M1.5 item. There is no desktop (ADR-019).

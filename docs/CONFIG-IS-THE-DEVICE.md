@@ -1,6 +1,7 @@
 # The configuration is the device (proposal)
 
-Status: **proposed** (2026-10-31), for discussion before anything is built. Becomes ADR-018 once
+Status: **proposed** (2026-10-31), for discussion before anything is built (the focus of TorqOS
+since ADR-019). Becomes ADR-018 once
 agreed.
 
 ## The idea
@@ -187,6 +188,8 @@ torq.desktop.enable = true;       →  torq desktop enable true
    its SSH state evaluated like any other. Where NixOS has its own `config` (`containers <name>
    config`) or below named entries, the word is NixOS's. An attached file is part of the
    configuration: `show configuration` no longer lists it as set outside it.
-4. The TorqOS layer: users, groups, applications, permissions; TorqOS-default warnings at commit.
+4. ~~The TorqOS layer (shorthand for users, groups, applications)~~: dropped (2026-10-31): the tree
+   uses NixOS's own paths (`users users <name> extraGroups [ … ]`). TorqOS-default warnings at
+   commit may still come.
 5. `hardware` and `system software` branches; fixed `flake.nix`/`machine.nix`; migrate this machine.
 6. `save` / `load override|merge|set`: a saved configuration recreates a device.

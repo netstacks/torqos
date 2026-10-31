@@ -7,7 +7,7 @@
 2. Boot ISO: `latest-nixos-graphical-aarch64-linux.iso` (verify SHA-256).
 3. 8 GB RAM (16 if available), 4+ cores, 64 GB disk. Hardware OpenGL **off** for install.
 4. Install with the graphical installer. Any (lowercase) user name works; setup below uses `$USER`.
-   Desktop choice doesn't matter — it gets replaced.
+   Desktop choice doesn't matter: TorqOS is CLI only.
 5. Shut down, remove the ISO from the CD drive, boot the installed system.
 
 ### 2. Bootstrap inside the VM
@@ -51,7 +51,7 @@ sudo torq-broker log
 sudo torq-broker revert <applied-seq> --approved-by $USER
 sudo torq-broker verify
 ```
-(Producing diffs by hand is temporary — the agent and the Activity UI will do this in M2/M3.)
+(Producing diffs by hand is the low-level way: torqcli makes them for you, and the agent will propose them in M2/M3.)
 
 Everything else is `torqcli` (`torq` is the same program), driven like a network device
 (ADR-016, docs/CLI-DESIGN.md): edit a candidate, look at it, commit it as one ledgered change.

@@ -10,6 +10,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   non-FHS binaries need nix-ld/Flatpak/Distrobox. User count is not a goal — quality is.
 
 ## ADR-002 — Owner-only Secure Boot keys, no shim, Microsoft removed by default
+- **Deferred by ADR-019** (later, not planned now).
 - **Context:** Users must be able to secure the machine even from Microsoft; we don't want to be
   in the shim-signing business.
 - **Decision:** Per-machine PK/KEK/db generated at install; option-ROM hashes from TPM event log;
@@ -29,10 +30,12 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Decision:** llama.cpp locally; cloud agents opt-in, indicated, ledgered.
 
 ## ADR-006 — Reference hardware
+- **Superseded by ADR-019** (no reference hardware: TorqOS runs wherever NixOS runs).
 - **Decision:** Dev on M4 Mac (ARM VM) → old ThinkPad (iGPU, TPM2) → 16" Strix Halo OLED.
   Apple Silicon only as a secondary dev profile (no owner-key boot chain there).
 
 ## ADR-007 — Privileged code in Rust, UI in QML
+- **UI part superseded by ADR-019** (CLI only).
 - **Decision:** Broker, ledger, tools in Rust. Shell in Quickshell (QML), unprivileged.
 
 ## ADR-008 — A failed rebuild is followed by a restore rebuild
@@ -216,3 +219,21 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   `| no-more`: there is no pager. Results follow the tools, so `sort` order follows the locale. A
   `grep` that matches nothing is an empty answer, not an error (a script cannot tell them apart).
   An apostrophe now opens a quote, as in a shell: text with one goes in "double quotes".
+
+## ADR-019 — TorqOS is a thin, CLI-only OS whose configuration is the device
+- **Context:** The plans had grown to a complete laptop OS: owner-key boot on reference laptops, a
+  touchpad-first desktop (niri, Quickshell), smoothness targets, Omarchy-level polish. What exists
+  and works is the configuration part: torqcli, the broker, the ledger, the tree over every NixOS
+  setting (2026-10-31).
+- **Decision:** Focus on that alone. TorqOS is a thin, CLI-only, fully functional OS based on
+  NixOS, with torq as the small, tightly controlled configuration part. Dropped from the goals
+  and plans: laptop-specific design, touch- and touchpad-first, the desktop and every UI, the broad
+  OS vision, reference hardware. Also no AI work for now: the AI layers (M2, M3) are later, and
+  everything is built so they can be added without a bypass. Kept for later: owner-rooted boot
+  security. Far future: the
+  config repo with a private git remote (GitHub/GitLab account and repo created at install). The
+  tree keeps NixOS's own paths, without a TorqOS shorthand for users, groups and applications.
+- **Consequences:** VISION, README, ARCHITECTURE, ROADMAP, HARDWARE, SECURITY-MODEL, AI-LAYER
+  and CLAUDE.md rewritten to match; earlier ADRs (002, 006, 007) stand as history, their laptop
+  and UI parts superseded here. Code is not removed yet: modules/desktop.nix and the dev VM's
+  `torq desktop enable true` stay until removed by a commit of their own.

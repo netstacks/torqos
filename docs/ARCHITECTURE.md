@@ -1,92 +1,64 @@
 # Architecture
 
-Six layers, bottom up. Each lists what we **reuse** and what we **build**.
+Three layers, bottom up. Each lists what we **reuse** and what we **build**.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ 5  AI layer        agent (unprivileged) ─► broker (privileged)│
-│                    MCP tools · ledger · Activity timeline     │
+│ 2  AI (later)      agent (unprivileged) ─► broker             │
+│                    read tools · proposals only · ledger       │
 ├──────────────────────────────────────────────────────────────┤
-│ 4  Desktop         niri/Hyprland · Quickshell shell · greetd  │
+│ 1  torq            torqcli (the configuration tree, the shell)│
+│                    torq-broker (the only writer) · ledger     │
 ├──────────────────────────────────────────────────────────────┤
-│ 3  Speed           sched_ext · zram · power profiles · Mesa   │
-├──────────────────────────────────────────────────────────────┤
-│ 2  Isolation       Wayland · Flatpak+portals · Podman · bwrap │
-├──────────────────────────────────────────────────────────────┤
-│ 1  Base            NixOS flake · local config git repo ·      │
-│                    generations · btrfs snapshots for /home    │
-├──────────────────────────────────────────────────────────────┤
-│ 0  Trust           owner Secure Boot keys · Lanzaboote UKIs · │
-│                    measured boot · TPM2+PIN LUKS2 · fwupd     │
+│ 0  Base            NixOS flake · the config git repo ·        │
+│                    generations · a thin CLI-only system       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## Layer 0 — Trust (see `SECURITY-MODEL.md`)
+## Layer 0: Base
 
-- **Reuse:** Lanzaboote (Secure Boot + measured boot for NixOS), sbctl (key enrollment,
-  incl. option-ROM hashes from the TPM event log), systemd-cryptenroll (TPM2+PIN), fwupd/LVFS.
-- **Build:** the "Secure this laptop" first-boot flow; security status panel.
+- The **system configuration lives in a local git repo** at `/var/lib/torq/config`
+  (a flake that imports the TorqOS modules, plus the machine's settings files).
+- Every rebuild is a NixOS generation, listed in the boot menu.
+- CLI only: no display server, desktop or graphical apps by default.
+- **Reuse:** NixOS, nixpkgs. **Build:** the distribution modules (`modules/`).
 
-## Layer 1 — Base
+## Layer 1: torq, the configuration part of the OS
 
-- The **system config lives in a local git repo** at `/var/lib/torq/config`
-  (a flake that imports the TorqOS modules plus per-machine settings).
-- Every rebuild = a NixOS generation, listed in the boot menu.
-- `/home` on btrfs with snapper snapshots (covers user files, which Nix does not).
-- Optional later: impermanence (root wiped each boot; only declared state persists).
-- **Reuse:** NixOS, nixpkgs, home-manager, disko, snapper. **Build:** the distribution modules.
+- **`torqcli`**, a shell driven like a network device: operational and configuration modes,
+  Juniper and Cisco syntax, a candidate, `show | compare`, `commit check`, `commit confirmed`,
+  `rollback <n>`. Its tree is every NixOS setting, generated from the system's own options
+  (docs/CONFIG-IS-THE-DEVICE.md), plus plain Nix config files for what is not a value.
+- **`torq-broker`** (Rust, privileged, small): the only writer of the config repo; enforces
+  tiers (user / system / forbidden); commits, rebuilds, confirms, rolls back; appends to the ledger.
+- **Ledger**: append-only, hash-chained JSONL of every proposal and change.
+- Filters (`| grep`, `| wc`) are the real Linux tools, sandboxed (ADR-017).
 
-## Layer 2 — Isolation
+## Layer 2: AI (later; see `AI-LAYER.md`)
 
-- Wayland only. GUI apps via Flatpak + xdg-desktop-portal (file access by picker = capability).
-- Dev environments in rootless Podman / Distrobox.
-- Our own services hardened with systemd sandboxing; agent additionally in bubblewrap
-  (later: its own microVM, Qubes-style).
-- Windows apps: Steam/Proton/Wine; fallback QEMU VM with WinApps-style window integration.
+Not built now. Layers 0 and 1 are built so it can be added without a bypass: the broker is the
+only writer, every proposal names its actor, and tiers decide what needs a person. The design, for then:
 
-## Layer 3 — Speed and smoothness
-
-Targets (measured, CI-tested on the reference laptop):
-
-| Metric | Target |
-|---|---|
-| Boot to desktop | < 10 s |
-| Resume from suspend | < 1 s |
-| Shell animations @120 Hz | 0 dropped frames in standard scenarios |
-| Input-to-photon latency | tracked per release, never regresses |
-
-**Reuse:** sched_ext (e.g. scx_lavd), zram, power-profiles-daemon, Mesa/RADV.
-
-## Layer 4 — Desktop
-
-- Compositor: **niri** (scrollable tiling, great with touchpads) — Hyprland as alternative.
-- Shell: **Quickshell** (QML): bar, launcher/command bar, AI panel, Activity timeline,
-  security status panel. One design system; one-step themes.
-- Command bar accepts app names, files, and natural language.
-- Keyboard shortcuts are an optional power layer, never required.
-
-## Layer 5 — AI (see `AI-LAYER.md`)
-
-- **Agent daemon** (unprivileged, sandboxed): talks to a local model (llama.cpp), calls tools.
-- **MCP tool servers** per subsystem (hardware, logs, packages, display, network, power,
-  firmware, scoped files). Read tools are free; write tools only *propose*.
-- **Broker** (Rust, privileged, small): the only writer of the config repo; enforces
-  permission tiers; commits, rebuilds, rolls back, snapshots; appends to the ledger.
-- **Ledger**: append-only, hash-chained JSONL; every prompt/tool call/diff/commit.
-- **Activity timeline** (Quickshell): what, why, diff, undo.
+- **Agent** (unprivileged, sandboxed): reads the system through typed tools, *proposes* changes.
+- Proposals go to the broker like anyone's; what an agent may propose is a default-deny
+  allow-list by identity (KNOWN-GAPS 6m). A person approves system changes at a terminal.
 
 ## Change flow
 
 ```
-user / agent ──propose(diff, reason)──► broker
-                                         │ 1. classify tier, check taint
-                                         │ 2. show preview, wait for approval (if needed)
-                                         │ 3. snapshot /home (if user-tier)
-                                         │ 4. git commit (signed, Ledger-Entry trailer)
-                                         │ 5. nixos-rebuild switch  ──► new generation
-                                         │ 6. ledger.append(result)
-                                         ▼
-                              Activity timeline: [what] [why] [diff] [undo]
-undo ──► broker: git revert <commit> → rebuild → ledger.append
-broken boot ──► pick previous generation in boot menu
+person (torqcli) / agent ──propose(diff, reason, base)──► broker
+                                                  │ 1. classify tier; refuse forbidden paths
+                                                  │ 2. a person approves (system tier)
+                                                  │ 3. git commit (Ledger-Entry trailer)
+                                                  │ 4. build and switch  ──► new generation
+                                                  │ 5. ledger.append(result)
+                                                  ▼
+                                 show system ledger · show system commit
+undo ──► request system revert <change> / rollback <n> → commit → rebuild → ledger
+broken boot ──► pick the previous generation in the boot menu
 ```
+
+## Later
+
+- Owner-rooted boot security (SECURITY-MODEL.md).
+- Far future: the config repo with a private git remote (VISION.md).

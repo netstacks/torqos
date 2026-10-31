@@ -1,5 +1,8 @@
 # AI layer
 
+**Later, not planned now (ADR-019).** This is the design the AI layers will follow when they come;
+everything built now (the broker as the only writer, actors, tiers, the ledger) keeps it possible.
+
 ## Components
 
 | Component | Privilege | Language | Role |
@@ -7,8 +10,8 @@
 | `torq-agent` | unprivileged, sandboxed | Rust (or Python early) | Talks to the model, plans, calls MCP tools, *proposes* changes |
 | MCP tool servers | unprivileged, read-mostly | Rust | Typed access per subsystem |
 | `torq-broker` | privileged (root, minimal) | Rust | Only writer of the config repo; tiers, commits, rebuild, rollback, ledger |
-| Model runtime | unprivileged | llama.cpp | Local inference (Vulkan/ROCm on Strix Halo) |
-| Activity UI | user session | QML | Timeline, approvals, diffs, undo |
+| Model runtime | unprivileged | llama.cpp | Local inference |
+| torqcli | the person's | Rust | Shows proposals, diffs and the ledger; a person approves at a terminal |
 
 ## Permission tiers
 
@@ -17,7 +20,7 @@
 | `observe` | read logs, hardware info, settings, config repo | automatic, still ledgered |
 | `user` | one user's *data* files: today `users/<name>/packages.json` (apps) and `users/<name>/cli.json` (CLI style); later themes, dotfiles. Never a `.nix` module (that is `system`, wherever it lives) | approve once per category; /home snapshot first |
 | `system` | services, drivers, kernel params, packages | always preview + explicit approval; commit + generation |
-| `forbidden` | AI permissions, ledger, Secure Boot keys, firmware password, disabling audit | **never** via agent; user-only UI |
+| `forbidden` | AI permissions, ledger, Secure Boot keys, firmware password, disabling audit | **never** via agent; user-only, at a terminal |
 
 ## Taint tracking
 
@@ -55,18 +58,13 @@ Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `reverted`, `revert_
 2. Broker validates: diff applies cleanly, touches only allowed paths for its tier, tier ≤ allowed.
    Paths are what the diff actually changes (applied to a scratch index): both sides of a
    rename, raw names — so renames, deletions and quoted names cannot dodge the forbidden tier.
-3. Preview shown; approval collected (UI → broker over a local socket; M1: CLI flag).
+3. Preview shown; approval collected (torqcli at a terminal; the broker takes `--approved-by`).
 4. `apply` — commit (signed with the broker's key), `nixos-rebuild switch`, ledger append.
 5. `rollback <seq|commit>` — `git revert`, rebuild, ledger append.
 
 ## Tool inventory (initial)
 
 `hw.inventory`, `hw.firmware_status`, `logs.query`, `logs.coredump`, `pkg.search`,
-`config.read`, `config.propose`, `display.status`, `net.status`, `power.status`,
+`config.read`, `config.propose`, `net.status`, `power.status`,
 `secureboot.status` (read-only), `files.read_scoped`.
 
-## Ideas borrowed from Omarchy (do them with the trust layer)
-
-- Crash watcher (systemd-coredump → agent briefing → proposed fix as a commit).
-- System-tailoring skill → becomes typed tools + broker.
-- Agent usage widget → part of the Activity timeline.
