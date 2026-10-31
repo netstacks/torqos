@@ -540,6 +540,8 @@ pub fn display_set_entries(entries: &[(Vec<String>, Val)]) -> String {
         let path = words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
         match val {
             Val::One(v) => out.push_str(&format!("set {path} {}\n", quote(v))),
+            // An empty list too, so `load set` gives it back.
+            Val::Many(vs) if vs.is_empty() => out.push_str(&format!("set {path} [ ]\n")),
             Val::Many(vs) => {
                 for v in vs {
                     out.push_str(&format!("set {path} {}\n", quote(v)));
@@ -648,8 +650,9 @@ fn list_values(words: &[String]) -> Result<Vec<String>> {
 
 fn statement(leaf: &str, v: &Val) -> String {
     match v {
-        Val::One(v) => format!("{leaf} {}", quote(v)),
-        Val::Many(vs) => format!("{leaf} [ {} ]", vs.iter().map(|v| quote(v)).collect::<Vec<_>>().join(" ")),
+        // The setting's own name quoted too: what `show` prints, a saved file reads back (saved.rs).
+        Val::One(v) => format!("{} {}", quote(leaf), quote(v)),
+        Val::Many(vs) => format!("{} [ {} ]", quote(leaf), vs.iter().map(|v| quote(v)).collect::<Vec<_>>().join(" ")),
     }
 }
 
@@ -675,7 +678,8 @@ fn render(entries: &[(Vec<String>, Val)], depth: usize, out: &mut String) {
 
 /// A word as Junos shows it: quoted if it has spaces or characters the syntax uses.
 fn quote(w: &str) -> String {
-    if w.is_empty() || w.chars().any(|c| c.is_whitespace() || c.is_control() || ";{}[]\"#'\\".contains(c)) {
+    // (`|` too: a line torqcli reads splits there.)
+    if w.is_empty() || w.chars().any(|c| c.is_whitespace() || c.is_control() || ";{}[]\"#'\\|".contains(c)) {
         format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         w.to_string()

@@ -33,7 +33,7 @@ impl Style {
 /// (Schema::parse refuses it), so a command word is never also a path.
 pub const RESERVED: &[&str] = &[
     "no", "do", "exit", "end", "top", "up", "show", "commit", "rollback", "set", "delete", "edit", "configure", "config",
-    "run", "switch", "quit", "request", "all", "help", "diff", "file",
+    "run", "switch", "quit", "request", "all", "help", "diff", "file", "save", "load",
 ];
 
 /// `| display …` after a `show`: what each view offers (CLI-DESIGN principle 5: internals only when
@@ -101,6 +101,10 @@ pub enum Op {
     /// `file show|edit|delete <path>`, `file list`: the config repo's config files (in configuration
     /// mode, the candidate's; in operational mode, the active ones; `edit` and `delete` only there).
     File { action: FileAction, path: Option<String> },
+    /// `save <file>`: the whole candidate, and its config files' content, to a file (saved.rs).
+    Save { file: String },
+    /// `load override|merge|set <file>`: a saved configuration into the candidate, all or nothing.
+    Load { how: LoadHow, file: String },
     // Configuration mode.
     /// A leaf's value or leaf-list elements: the words after `set` (Cisco: the bare path).
     Set { words: Vec<String> },
@@ -124,6 +128,25 @@ pub enum Op {
     /// Out of configuration mode from anywhere (Cisco `end`, Juniper `exit configuration-mode`).
     End,
     SwitchCli,
+}
+
+/// How `load` takes a saved configuration: as the whole candidate, onto it, or as `set` lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadHow {
+    Override,
+    Merge,
+    Set,
+}
+
+fn parse_load(w: &[String]) -> Result<Op> {
+    let s: Vec<&str> = w.iter().map(String::as_str).collect();
+    let how = match s.as_slice() {
+        ["override", _] => LoadHow::Override,
+        ["merge", _] => LoadHow::Merge,
+        ["set", _] => LoadHow::Set,
+        _ => bail!("load: one of: load override <file> (the file is the candidate), load merge <file> (onto it), load set <file> (set and delete lines)"),
+    };
+    Ok(Op::Load { how, file: w[1].clone() })
 }
 
 /// What `file` does.
@@ -359,6 +382,9 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
                     (false, _) => Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? },
                 }
             }
+            ["save", f] => Op::Save { file: f.to_string() },
+            ["save", ..] => bail!("save <file>: one file (the whole candidate is saved, from the top)"),
+            ["load", ..] => parse_load(&w[1..])?,
             ["file", ..] => parse_file(&w[1..], mode)?,
             ["rollback"] => Op::Rollback { n: 0 },
             ["rollback", n] => Op::Rollback { n: number(n)? },
@@ -384,6 +410,9 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
                 }
                 Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
             }
+            ["save", f] => Op::Save { file: f.to_string() },
+            ["save", ..] => bail!("save <file>: one file (the whole candidate is saved, from the top)"),
+            ["load", ..] => parse_load(&w[1..])?,
             ["file", ..] => parse_file(&w[1..], mode)?,
             ["rollback", "configuration"] => Op::Rollback { n: 0 },
             ["rollback", "configuration", n] => Op::Rollback { n: number(n)? },
@@ -457,6 +486,15 @@ pub fn render(style: Style, op: &Op) -> String {
         (_, Op::ShowLedger { count: Some(n) }) => format!("show system ledger {n}"),
         (_, Op::ShowPackages { terms }) => sep("show packages available", terms),
         (_, Op::Request { words }) => sep("request", words),
+        (_, Op::Save { file }) => format!("save {}", quote(file)),
+        (_, Op::Load { how, file }) => {
+            let h = match how {
+                LoadHow::Override => "override",
+                LoadHow::Merge => "merge",
+                LoadHow::Set => "set",
+            };
+            format!("load {h} {}", quote(file))
+        }
         (_, Op::File { action, path }) => {
             let a = match action {
                 FileAction::Show => "show",

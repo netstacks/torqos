@@ -50,9 +50,10 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       ledger`, the SSH key check at commit; `torq pkg/service/update/log/undo/status` retired, each
       saying what replaced it (4g).
 - [x] The tree is every NixOS setting, plus config files (S1–S3e, docs/CONFIG-IS-THE-DEVICE.md).
-- [ ] The rest of the machine in the tree: `hardware`, `system software` branches; fixed
-      `flake.nix`/`machine.nix`; `save` / `load override|merge|set` (CONFIG-IS-THE-DEVICE.md 5–6).
-- [ ] Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
+- [x] The rest of the machine in the tree: hardware and boot as NixOS paths, a fixed `flake.nix`,
+      `system software torq source` (S4a, S4b); `save` / `load override|merge|set` (S5)
+      (CONFIG-IS-THE-DEVICE.md 5–6).
+- [ ] Later: `commit at <time>`, `configure exclusive`.
 
 **First round** (done with the earlier command names; carried over):
 - [x] Broker `--json` for every command (shapes and exit codes in `CLI-DESIGN.md`).

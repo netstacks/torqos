@@ -3,11 +3,11 @@
 //! through `Machine`, so the whole command layer is testable without either.
 
 use crate::candidate::{self, Candidate, Repo};
-use crate::syntax::{self, CommitOptions, Display, FileAction, Op, Style};
+use crate::syntax::{self, CommitOptions, Display, FileAction, LoadHow, Op, Style};
 use crate::whole::Data;
 use crate::tree::Schema;
 use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What the session needs from the machine: evaluation and the broker.
 pub trait Machine {
@@ -295,6 +295,8 @@ impl<'a> Session<'a> {
             }
             Op::Request { words } => self.request(&words),
             Op::File { action, path } => self.file(action, path),
+            Op::Save { file } => self.save_to(&file),
+            Op::Load { how, file } => self.load_from(how, &file),
             Op::SwitchCli => {
                 self.style = match self.style {
                     Style::Juniper => Style::Cisco,
@@ -928,6 +930,124 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// `save <file>`: the whole candidate, from the top, and the content of every config file attached
+    /// in it, so the file alone recreates the device (saved.rs). Private (0600): a configuration can
+    /// hold secrets.
+    fn save_to(&mut self, file: &str) -> Result<String> {
+        let d = self.candidate_data()?;
+        let tree = self.whole().show(&d, &[])?;
+        let (base, nix) = {
+            let c = self.candidate()?;
+            (c.base.clone(), c.nix.clone())
+        };
+        // Every Nix file of the configuration as the candidate has it (not only the attached ones: one
+        // may import another), except TorqOS's own flake.nix.
+        let mut paths: std::collections::BTreeSet<String> = self.repo.paths(&base)?.into_iter().filter(|p| p.ends_with(".nix") && p != "flake.nix").collect();
+        paths.extend(nix.keys().cloned());
+        let mut files = Vec::new();
+        for rel in paths {
+            let content = match nix.get(&rel) {
+                Some(t) => t.clone(),
+                None => self.repo.file_at(&base, &rel)?.map(|b| String::from_utf8(b).with_context(|| format!("{rel}: not text"))).transpose()?,
+            };
+            if let Some(content) = content {
+                files.push((rel, content));
+            }
+        }
+        for rel in d.attached.values() {
+            if !files.iter().any(|(p, _)| p == rel) {
+                bail!("{rel} is attached but not in the configuration: `file edit {rel}`, or `delete <place> config`");
+            }
+        }
+        let text = crate::saved::render(&tree, &files);
+        write_private(std::path::Path::new(file), text.as_bytes()).with_context(|| format!("save {file}"))?;
+        let n = text.lines().count();
+        Ok(format!("Wrote {n} line{} of configuration to '{file}'\n", if n == 1 { "" } else { "s" }))
+    }
+
+    /// `load override|merge|set <file>`: a saved configuration into the candidate, from the top — all
+    /// of it or, if any part is refused, none of it (the candidate is left as it was).
+    fn load_from(&mut self, how: LoadHow, file: &str) -> Result<String> {
+        // A configuration is small: a file far bigger is not one (and is not read into memory).
+        let size = std::fs::metadata(file).with_context(|| format!("load {file}"))?.len();
+        if size > 16 << 20 {
+            bail!("load {file}: {size} bytes is not a saved configuration (the most is 16 MiB)");
+        }
+        let text = std::fs::read_to_string(file).with_context(|| format!("load {file}"))?;
+        let before = (self.candidate()?.clone(), self.edit.clone());
+        let result = match how {
+            LoadHow::Set => self.load_set(&text),
+            LoadHow::Override | LoadHow::Merge => self.load_tree(&text, how == LoadHow::Override),
+        };
+        self.edit = before.1;
+        match result {
+            Ok(out) => Ok(out),
+            Err(e) => {
+                self.candidate = Some(before.0);
+                self.save()?;
+                Err(e.context(format!("load {file}: nothing loaded")))
+            }
+        }
+    }
+
+    /// `load set`: each line a `set` or `delete` command, from the top (what `| display set` writes).
+    fn load_set(&mut self, text: &str) -> Result<String> {
+        self.edit.clear();
+        let mut n = 0;
+        for (i, line) in text.lines().enumerate() {
+            let w = words(line).with_context(|| format!("line {}", i + 1))?;
+            match w.first().map(String::as_str) {
+                None => continue,
+                Some(c) if c.starts_with('#') => continue,
+                Some("set" | "delete") => {}
+                Some(_) => bail!("line {}: only `set` and `delete` lines load (`| display set` writes them)", i + 1),
+            }
+            let style = std::mem::replace(&mut self.style, Style::Juniper);
+            let r = self.exec_words(&w);
+            self.style = style;
+            r.with_context(|| format!("line {}: {}", i + 1, crate::history::one_line(line, 80)))?;
+            n += 1;
+        }
+        Ok(format!("load complete ({n} line{})\n", if n == 1 { "" } else { "s" }))
+    }
+
+    /// `load override` (the file is the candidate) or `load merge` (the file's settings set onto it).
+    fn load_tree(&mut self, text: &str, whole: bool) -> Result<String> {
+        let saved = crate::saved::parse(text)?;
+        let cur = self.candidate_data()?;
+        let mut d = if whole { Data { source: cur.source.clone(), ..Default::default() } } else { cur.clone() };
+        for (path, v) in &saved.entries {
+            let w = crate::saved::set_words(path, v);
+            self.whole().set(&mut d, &w).with_context(|| format!("set {}", w.iter().map(|x| syntax::quote(x)).collect::<Vec<_>>().join(" ")))?;
+        }
+        let base = self.candidate()?.base.clone();
+        let mut nix = if whole { Default::default() } else { self.candidate()?.nix.clone() };
+        for (rel, content) in &saved.files {
+            let at_base = self.repo.file_at(&base, rel)?;
+            if at_base.as_deref() == Some(content.as_bytes()) {
+                nix.remove(rel);
+            } else {
+                nix.insert(rel.clone(), Some(content.clone()));
+            }
+        }
+        // Every attached file has its content (in the file, or the configuration), as `save` requires.
+        for rel in d.attached.values() {
+            if !nix.get(rel).is_some_and(Option::is_some) && self.repo.file_at(&base, rel)?.is_none() {
+                bail!("{rel} is attached but its content is neither in the file nor in the configuration");
+            }
+        }
+        // A new source is locked as `set` locks it (what `commit` installs is shown first).
+        let mut out = String::new();
+        if d.source != cur.source {
+            out = self.lock_source(d.source.as_deref().unwrap_or_default())?;
+        }
+        self.put_data(d)?;
+        self.candidate()?.nix = nix;
+        self.save()?;
+        out.push_str("load complete\n");
+        Ok(out)
+    }
+
     /// The tier a set of changed files is: user if every one is a user-tier node's file.
     fn tier_of(&self, changes: &[(String, Option<&[u8]>, Option<String>)]) -> &'static str {
         let user = changes.iter().all(|(p, _, _)| self.schema.tier_of(p) == Some("user"));
@@ -945,6 +1065,27 @@ impl<'a> Session<'a> {
         names.dedup();
         names
     }
+}
+
+/// Write `bytes` to `path`, private (0600) from the first byte: a new file beside it, then renamed
+/// over it, so a reader never sees it half written or with another mode, and a link at `path` is
+/// replaced, never written through. Anything there but a plain file (a device, a folder) is refused.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Ok(m) = std::fs::symlink_metadata(path) {
+        if !m.file_type().is_file() && !m.file_type().is_symlink() {
+            bail!("{} is not a plain file: not written over", path.display());
+        }
+    }
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = path.file_name().context("a file name")?.to_string_lossy();
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    let written = std::io::Write::write_all(&mut f, bytes).and_then(|_| f.sync_all()).and_then(|_| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(written?)
 }
 
 /// The tree data in a commit's files: the kept files, nixos/*.json, config-files.json.
@@ -1777,6 +1918,94 @@ mod tests {
         // A folder: said in the question.
         run(&mut s, &["rollback 0", "set system software torq source path:/home/dev/torq", "commit"]);
         assert!(m.asked.borrow()[0].contains("comes from a folder"), "{}", m.asked.borrow()[0]);
+    }
+
+    /// `save` / `load`: a saved configuration recreates the candidate — the tree, the config files'
+    /// content, the software's source — and loads all or nothing.
+    #[test]
+    fn a_saved_configuration_recreates_the_device() {
+        let (d, m) = (repo_with_software(), Fake { answer: true, edit_to: Some("{ ... }:\n{\n  networking.domain = \"x\";\n}\n".into()), ..Default::default() });
+        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && git add -A && git commit -qm flake");
+        let f = d.path().join("saved.conf");
+        let file = f.to_str().unwrap();
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set virtualisation docker enable true", "set networking firewall allowedTCPPorts [ 80 443 ]", "file edit custom/a.nix", "set config custom/a.nix", "set environment variables GREETING \"hello there; {x}\""]);
+        let wanted = s.exec("show | compare").unwrap();
+        let out = s.exec(&format!("save {file}")).unwrap();
+        assert!(out.starts_with("Wrote ") && out.contains(file), "{out}");
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&f).unwrap().permissions()) & 0o777, 0o600, "private");
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(text.contains("## config file custom/a.nix\n##| { ... }:\n") && text.contains("source github:netstacks/torqos;"), "{text}");
+        // Override: the file is the candidate — the same changes, from a fresh one.
+        run(&mut s, &["rollback 0", "set time timeZone UTC"]);
+        assert_eq!(s.exec(&format!("load override {file}")).unwrap(), "load complete\n");
+        assert_eq!(s.exec("show | compare").unwrap(), wanted, "recreated exactly (and the time zone set before is gone)");
+        // Merge: onto the candidate, which keeps its own.
+        run(&mut s, &["rollback 0", "set time timeZone UTC", &format!("load merge {file}")]);
+        let merged = s.exec("show | compare").unwrap();
+        assert!(merged.contains("+   timeZone UTC;") && merged.contains("+   enable true;"), "{merged}");
+        // Set: `| display set` lines, from the top, wherever configuration mode is.
+        let lines = d.path().join("lines.set");
+        run(&mut s, &["rollback 0", "set virtualisation docker enable true"]);
+        std::fs::write(&lines, s.exec("show virtualisation | display set").unwrap() + "## a comment\n\ndelete virtualisation docker enable\nset time timeZone UTC\n").unwrap();
+        run(&mut s, &["rollback 0", "edit networking", &format!("load set {}", lines.display()), "top"]);
+        assert_eq!(s.exec("show | compare").unwrap(), "[edit time]\n+   timeZone UTC;\n", "the delete took the set before it");
+        // All or nothing: one refused statement, and the candidate is as it was.
+        std::fs::write(&lines, "set time timeZone UTC\nset torq broker rebuildCommand x\n").unwrap();
+        run(&mut s, &["rollback 0", "set virtualisation docker enable true"]);
+        let before = s.exec("show | compare").unwrap();
+        let e = format!("{:#}", s.exec(&format!("load set {}", lines.display())).unwrap_err());
+        assert!(e.contains("nothing loaded") && e.contains("line 2"), "{e}");
+        assert_eq!(s.exec("show | compare").unwrap(), before);
+        std::fs::write(&f, "virtualisation {\n    docker {\n        enable true;\n    }\n}\ntorq {\n    broker {\n        rebuildCommand x;\n    }\n}\n").unwrap();
+        let e = format!("{:#}", s.exec(&format!("load override {file}")).unwrap_err());
+        assert!(e.contains("nothing loaded") && e.contains("set torq broker rebuildCommand x"), "{e}");
+        assert_eq!(s.exec("show | compare").unwrap(), before, "nothing of it");
+        std::fs::write(&f, "virtualisation {\n    docker {\n").unwrap();
+        assert!(format!("{:#}", s.exec(&format!("load merge {file}")).unwrap_err()).contains("line 2"));
+        // Only `set` and `delete` lines: a file cannot commit, or run anything else.
+        std::fs::write(&lines, "set time timeZone UTC\ncommit\n").unwrap();
+        let e = format!("{:#}", s.exec(&format!("load set {}", lines.display())).unwrap_err());
+        assert!(e.contains("line 2") && e.contains("only `set` and `delete`"), "{e}");
+        assert!(m.commits.borrow().is_empty(), "nothing committed");
+        assert!(s.exec("load sideways x").is_err() && s.exec("save").is_err());
+    }
+
+    /// From the review of S5: every Nix file is saved (one may import another); `| display set`
+    /// always loads back (a `|`, an empty list); save writes a new private file and never through a
+    /// link or over a device; load refuses a huge file, and an attachment with no content.
+    #[test]
+    fn save_and_load_keep_everything_and_write_safely() {
+        let (d, m) = (repo_with_software(), Fake::default());
+        sh(d.path(), "mkdir -p custom && printf '{ ... }: { imports = [ ./helper.nix ]; }\\n' > custom/a.nix && printf '{ ... }: { }\\n' > custom/helper.nix && printf '{ \"\": \"custom/a.nix\" }\\n' > config-files.json && git add -A && git commit -qm nix");
+        let f = d.path().join("saved.conf");
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set environment variables PIPE \"a|b\"", "set networking firewall allowedTCPPorts [ ]", &format!("save {}", f.display())]);
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(text.contains("## config file custom/helper.nix\n"), "not attached, still saved: {text}");
+        // display set loads back exactly.
+        let lines = d.path().join("l.set");
+        std::fs::write(&lines, s.exec("show | display set").unwrap()).unwrap();
+        let wanted = s.exec("show | compare").unwrap();
+        run(&mut s, &["rollback 0", &format!("load set {}", lines.display())]);
+        assert_eq!(s.exec("show | compare").unwrap(), wanted);
+        // A link at the path is replaced, not written through; a folder or device is refused.
+        let target = d.path().join("target");
+        std::fs::write(&target, "keep me").unwrap();
+        let link = d.path().join("link.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        s.exec(&format!("save {}", link.display())).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(s.exec(&format!("save {}", d.path().display())).unwrap_err().to_string().contains("save"));
+        assert!(format!("{:#}", s.exec("save /dev/null").unwrap_err()).contains("not a plain file"));
+        assert!(std::fs::read_dir(d.path()).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")), "no temp file left");
+        // Load: not a huge file; not an attachment without content.
+        let big = d.path().join("big");
+        std::fs::File::create(&big).unwrap().set_len(17 << 20).unwrap();
+        assert!(format!("{:#}", s.exec(&format!("load override {}", big.display())).unwrap_err()).contains("not a saved configuration"));
+        std::fs::write(&f, "config custom/none.nix;\n").unwrap();
+        assert!(format!("{:#}", s.exec(&format!("load override {}", f.display())).unwrap_err()).contains("neither in the file nor in the configuration"));
     }
 
     #[test]

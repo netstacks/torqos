@@ -225,3 +225,19 @@ torq.desktop.enable = true;       →  torq desktop enable true
    folder as the source (`path:`) is said in the commit question. Live as change #48; the broker's
    first build with the flag was the next update.
 6. `save` / `load override|merge|set`: a saved configuration recreates a device.
+   **Built (S5):** `save <file>` (configuration mode) writes the whole candidate, from the top, in
+   the brace format `show` prints, and then the content of every Nix file of the configuration
+   (attached or imported by one; `## config file <path>`, each line `##| …`, byte for byte), so the
+   file alone recreates the device; written private (0600, a new file renamed into place: never
+   through a link, never over a device), as a configuration can hold secrets. `load override <file>` makes the candidate exactly
+   the file (its settings, attachments, config files' content, the software's source, which is
+   locked as `set` locks it; software already loaded into the candidate for the same source, and
+   Nix files the file does not name, stay); `load merge <file>` sets the file's settings onto the candidate; `load
+   set <file>` runs its `set` and `delete` lines (what `| display set` writes, from the top) and
+   nothing else, so a file can never commit. All or nothing: one refused statement and the
+   candidate is as it was, the error naming the line (all or nothing for errors: `load set` keeps
+   the candidate as it goes, so a crash midway leaves it partly loaded, as a paste would). Nothing reaches the machine until `commit`
+   shows it and a person approves it. The software's version is not saved, only its source (as
+   Junos keeps configuration and software apart): a loaded configuration builds on the newest
+   software of that source. On other hardware, the saved `fileSystems`, `boot` and hardware file
+   are this machine's: the commit question warns about them (KNOWN-GAPS 6n).

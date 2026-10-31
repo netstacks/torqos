@@ -134,6 +134,10 @@ pkgs.testers.runNixOSTest {
         assert "## also set outside this configuration, in Nix: desktop.nix\n" in out, out
         out = machine.succeed("su - dev -c 'torqcli -c \"configure; set system time-zone UTC; show | compare\"'")
         assert "[edit time]\n+   timeZone UTC;" in out, out
+        # save / load: as the user, private; a saved configuration loaded back is the same candidate.
+        out = machine.succeed("su - dev -c 'torqcli -c \"configure; set system time-zone UTC; save /home/dev/saved.conf; rollback 0; load override /home/dev/saved.conf; show | compare\"'")
+        assert "Wrote " in out and "[edit time]\n+   timeZone UTC;" in out, out
+        machine.succeed("su - dev -c 'test \"$(stat -c %a /home/dev/saved.conf)\" = 600'")
         # -c uses a private candidate; the interactive shell keeps one, private, between sessions.
         machine.succeed("su - dev -c 'test ! -e ~/.local/state/torq/candidate.json'")
         machine.succeed("su - dev -c 'printf \"configure\\nset users dev cli style cisco\\nexit\\nexit\\n\" | torqcli'")

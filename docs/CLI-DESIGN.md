@@ -267,12 +267,14 @@ line by line.
 | `request system update [all]` | load the newest TorqOS (and its nixpkgs) into the candidate |
 | `request system software rollback <n>` | load commit <n>'s software into the candidate (a downgrade) |
 | `set system software torq source <source>` | (configuration mode) where TorqOS comes from: locks that source into the candidate |
+| `save <file>` | (configuration mode) the whole candidate and its config files' content to a file, private |
+| `load override\|merge\|set <file>` | (configuration mode) a saved configuration into the candidate, all or nothing |
 | `request system repair` | return a machine changed outside TorqOS to its last commit |
 | `request system revert <change>` | undo one change (a new change forward; asks unless it is only your own folder) |
 | `configure` / `config` | enter configuration mode |
 | `switch cli` | Juniper ↔ Cisco style for this session |
 
-Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
+Later: `commit at <time>`, `configure exclusive`. (`save` / `load`: built, S5.)
 
 As built (3e, 4a, 4e): all of the above. The candidate holds the software too (4e): `request system
 update [all]` runs `nix flake update` on the commit the candidate is based on and loads the new

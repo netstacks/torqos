@@ -36,10 +36,12 @@ const CONFIGURATION: &[(&str, &str)] = &[
     ("delete", "Remove a setting"),
     ("edit", "Go down to a part of the configuration"),
     ("file", "The configuration's Nix files (list, show, edit, delete)"),
+    ("load", "Load a saved configuration into the candidate (override, merge, set)"),
     ("exit", "Up one level (out of configuration mode at the top; the candidate is kept)"),
     ("quit", "Up one level (out of configuration mode at the top; the candidate is kept)"),
     ("rollback", "Load an earlier configuration into the candidate"),
     ("run", "Run an operational-mode command"),
+    ("save", "Save the whole candidate, and its config files, to a file"),
     ("set", "Set a value"),
     ("show", "Show the candidate configuration"),
     ("switch", "Switch to the Cisco style"),
@@ -211,6 +213,13 @@ fn choices_juniper(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Ch
         (Mode::Configuration, Some("exit")) if words.len() == 1 => {
             table(&[("configuration-mode", "Leave configuration mode from anywhere")])
         }
+        (Mode::Configuration, Some("load")) if words.len() == 1 => table(&[
+            ("merge", "Set the file's settings onto the candidate"),
+            ("override", "The file becomes the candidate"),
+            ("set", "Run the file's `set` and `delete` lines (what `| display set` writes)"),
+        ]),
+        (Mode::Configuration, Some("load")) if words.len() == 2 => vec![Choice::new("<file>", "A configuration saved with `save` (or `| display set` lines)")],
+        (Mode::Configuration, Some("save")) if words.len() == 1 => vec![Choice::new("<file>", "Where to save it (written private: 0600)")],
         (_, Some("file")) if words.len() == 1 => {
             let mut t = vec![("list", "Every Nix file of the configuration"), ("show", "Print one")];
             if mode == Mode::Configuration {
@@ -419,7 +428,7 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["compare"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "revert", "software", "update"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["set", "show", "switch"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show", "switch"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "file", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
     }
@@ -445,6 +454,8 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd config"), "")), ["<file>"]);
         assert!(choices(&s, Mode::Configuration, &w("show services httpd"), "c").is_empty(), "show has no config to attach");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("file"), "")), ["delete", "edit", "list", "show"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("load"), "")), ["merge", "override", "set"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "l")), ["load"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("file"), "")), ["list", "show"]);
     }
 

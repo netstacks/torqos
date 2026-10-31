@@ -14,6 +14,7 @@ mod settings;
 mod whole;
 mod attach;
 mod software;
+mod saved;
 mod pkg;
 mod run;
 mod status;
