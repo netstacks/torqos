@@ -41,6 +41,8 @@
           modules = [
             self.nixosModules.default
             { nixpkgs.hostPlatform = system; torq.packages.configDir = configDir; }
+            # The tree's NixOS settings (nixos/*.json), built from the path itself (modules/nixos-settings.nix).
+            (import ./modules/nixos-settings.nix configDir)
           ] ++ modules;
         };
 

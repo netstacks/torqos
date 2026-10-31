@@ -156,6 +156,10 @@ torq.desktop.enable = true;       →  torq desktop enable true
    cli/src/nixos.rs reads it (17 ms), resolves paths with named entries, checks values against
    NixOS's types, offers what may come next. Not yet editable in `configure` (S3).
 2. One generic module applies the tree's values to NixOS; values stored as data in the repo.
+   **Built (S2):** `nixos/<top-level>.json` in the config repo, shaped like the options
+   (`nixos/virtualisation.json`: `{ "docker": { "enable": true } }`); modules/nixos-settings.nix
+   gives them to NixOS as they are (package names become packages), built by `mkSystem` from the
+   path itself; NixOS's types check every value. All system tier at the broker.
 3. `config <file>` and `edit`, through the candidate and `commit`.
 4. The TorqOS layer: users, groups, applications, permissions; TorqOS-default warnings at commit.
 5. `hardware` and `system software` branches; fixed `flake.nix`/`machine.nix`; migrate this machine.

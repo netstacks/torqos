@@ -36,6 +36,33 @@ let
   };
   cliInvalid = [ "cli-bad-style" "cli-bad-extra" "cli-bad-list" "cli-bad-leaf" "cli-bad-user" "cli-bad-symlink" ];
 
+  # The tree's NixOS settings (nixos/*.json, modules/nixos-settings.nix) reach NixOS as they are,
+  # package names as packages; a wrong value, package or setting fails evaluation.
+  isPkg = want: ps: builtins.any (p: p.outPath == want.outPath) ps;
+  nixosValues = case:
+    let c = configOf case; in
+    tryValue {
+      docker = c.virtualisation.docker.enable;
+      hello = isPkg pkgs.hello c.environment.systemPackages;
+      rich = isPkg pkgs.python3Packages.rich c.environment.systemPackages;
+      forceSSL = c.services.httpd.virtualHosts."example.com".forceSSL;
+      root = toString c.services.httpd.virtualHosts."example.com".documentRoot;
+      ports = lib.sort lib.lessThan (lib.filter (p: p == 80 || p == 443) c.networking.firewall.allowedTCPPorts);
+    };
+  nixosExpect = { docker = true; hello = true; rich = true; forceSSL = true; root = "/var/www"; ports = [ 80 443 ]; };
+  # Each bad case, forced only where it is bad (tryEval catches a throw, not a missing attribute).
+  nixosInvalid = {
+    nixos-bad-type = c: c.virtualisation.docker.enable;
+    nixos-bad-package = c: map (p: p.outPath) c.environment.systemPackages;
+    nixos-bad-option = c: c.virtualisation.docker.enable;
+  };
+  nixosGood = nixosValues "nixos-good";
+  nixosMismatches =
+    lib.optional (nixosGood != nixosExpect) "nixos-good: got ${builtins.toJSON nixosGood}"
+    ++ lib.optional ((configOf "host-empty").virtualisation.docker.enable) "host-empty: docker on without a nixos/ file"
+    ++ lib.concatLists (lib.mapAttrsToList (case: probe:
+      lib.optional (tryValue (probe (configOf case)) != null) "${case}: evaluated, but must be refused") nixosInvalid);
+
   defaults = host "host-empty";
   expect = {
     host-good = { host = "my-laptop"; zone = "Europe/Berlin"; };
@@ -142,7 +169,8 @@ let
     ++ lib.concatLists (lib.mapAttrsToList (case: want:
       let got = cli case; in lib.optional (got != want) "${case}: cli got ${builtins.toJSON got}, want ${builtins.toJSON want}"
     ) cliExpect)
-    ++ lib.concatMap (case: lib.optional (cli case != null) "${case}: cli evaluated, but must be refused") cliInvalid;
+    ++ lib.concatMap (case: lib.optional (cli case != null) "${case}: cli evaluated, but must be refused") cliInvalid
+    ++ nixosMismatches;
 in
 if mismatches != [ ] then
   throw "tree test:\n  ${lib.concatStringsSep "\n  " mismatches}"
@@ -152,4 +180,5 @@ else
     echo "schema: ${toString (builtins.length (lib.attrNames nodes))} nodes consistent" >> $out
     echo "host: ${toString (builtins.length invalid)} invalid cases refused, ${toString (builtins.length (lib.attrNames expect) + 1)} valid ones read" >> $out
     echo "cli: ${toString (builtins.length cliInvalid)} invalid cases refused, ${toString (builtins.length (lib.attrNames cliExpect))} valid ones read" >> $out
+    echo "nixos: ${toString (builtins.length (lib.attrNames nixosInvalid))} invalid cases refused, nixos-good read" >> $out
   ''
