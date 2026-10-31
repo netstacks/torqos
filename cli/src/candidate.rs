@@ -152,7 +152,12 @@ impl Repo {
     pub fn tree_files(&self, schema: &Schema, rev: &str) -> Result<BTreeMap<String, Vec<u8>>> {
         let mut files = BTreeMap::new();
         for (mode, kind, id, path) in self.listing(rev)? {
-            if !schema.describes(&path) && crate::settings::top_of(&path).is_none() && path != crate::attach::FILE {
+            // (flake.nix: for its one setting, the software's source, software.rs.)
+            if !schema.describes(&path) && crate::settings::top_of(&path).is_none() && path != crate::attach::FILE && path != "flake.nix" {
+                continue;
+            }
+            // (A flake.nix that is not a plain file has no source: it is not refused here, only not read.)
+            if path == "flake.nix" && (mode != "100644" || kind != "blob") {
                 continue;
             }
             if mode != "100644" || kind != "blob" {
@@ -200,6 +205,8 @@ pub struct Candidate {
     pub attached: crate::attach::Attached,
     /// Config files as edited in the candidate (`file edit`): path → content (None: deleted).
     pub nix: BTreeMap<String, Option<String>>,
+    /// The software's source, if the candidate changes it (`system software torq source`).
+    pub source: Option<String>,
 }
 
 impl Candidate {
@@ -212,7 +219,7 @@ impl Candidate {
         let config = schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
         let settings = crate::settings::load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
         let attached = crate::attach::load(files.get(crate::attach::FILE).map(Vec::as_slice))?;
-        Ok(Candidate { base, config, lock: None, settings, attached, nix: BTreeMap::new() })
+        Ok(Candidate { base, config, lock: None, settings, attached, nix: BTreeMap::new(), source: None })
     }
 
     /// Where a user keeps their candidate: their own state directory, never shared.
@@ -239,9 +246,9 @@ impl Candidate {
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         let v: serde_json::Value = serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))?;
-        // 4: with its config files; 3: with its NixOS settings; 2: with its software (`lock`); 1: neither — read as none. An older
+        // 5: with its software source; 4: with its config files; 3: with its NixOS settings; 2: with its software (`lock`); 1: neither — read as none. An older
         // torqcli refuses a newer one rather than silently drop what it does not know.
-        if !(1..=4).contains(&v["version"].as_u64().unwrap_or(0)) {
+        if !(1..=5).contains(&v["version"].as_u64().unwrap_or(0)) {
             bail!("{}: not a candidate this torqcli reads; `rollback 0` starts a new one", path.display());
         }
         let base = v["base"].as_str().context("candidate without a base")?.to_string();
@@ -282,7 +289,15 @@ impl Candidate {
                 .collect::<Result<_>>()?,
             _ => bail!("{}: its config files are not what torqcli writes; `rollback 0` starts a new candidate", path.display()),
         };
-        Ok(Some(Candidate { base, config, lock, settings, attached, nix }))
+        let source = match &v["source"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => {
+                crate::software::valid(s).with_context(|| path.display().to_string())?;
+                Some(s.clone())
+            }
+            _ => bail!("{}: its software source is not what torqcli writes; `rollback 0` starts a new candidate", path.display()),
+        };
+        Ok(Some(Candidate { base, config, lock, settings, attached, nix, source }))
     }
 
     /// Save it atomically, readable by its owner only, in a folder only its owner can write: anyone
@@ -292,7 +307,7 @@ impl Candidate {
         private_dir(dir)?;
         let files: serde_json::Map<String, serde_json::Value> =
             self.config.files.iter().map(|(p, d)| (p.clone(), d.render().into())).collect();
-        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 4, "base": self.base, "files": files, "lock": self.lock, "settings": self.settings, "attached": self.attached, "nix": self.nix }))?;
+        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 5, "base": self.base, "files": files, "lock": self.lock, "settings": self.settings, "attached": self.attached, "nix": self.nix, "source": self.source }))?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?; // created 0600
         tmp.write_all(&body)?;
         tmp.as_file().sync_all()?;
@@ -425,7 +440,7 @@ mod tests {
         let (_d, r) = repo();
         let s = schema();
         let now = r.tree_files(&s, "HEAD").unwrap();
-        assert_eq!(now.keys().collect::<Vec<_>>(), ["system/host.json", "system/packages.json"], "flake.nix is not a tree file");
+        assert_eq!(now.keys().collect::<Vec<_>>(), ["flake.nix", "system/host.json", "system/packages.json"], "flake.nix too, for its one setting (software.rs); no other file");
         let first = r.tree_files(&s, &r.history(3).unwrap()[2].id).unwrap();
         assert_eq!(String::from_utf8_lossy(&first["system/host.json"]), "{ \"host-name\": \"one\" }\n");
     }
@@ -463,15 +478,17 @@ mod tests {
         Candidate::discard(&path).unwrap();
         assert_eq!(Candidate::load(&path, &s).unwrap(), None);
         Candidate::discard(&path).unwrap(); // twice is fine
+        fs::write(&path, r#"{"version":5,"base":"x","files":{},"source":"github:a/b\";x"}"#).unwrap();
+        assert!(Candidate::load(&path, &s).is_err(), "a saved candidate's source is a plain one");
         fs::write(&path, r#"{"version":4,"base":"x","files":{},"nix":{"../etc/x.nix":"{}"}}"#).unwrap();
         assert!(Candidate::load(&path, &s).is_err(), "a saved candidate's config files are inside the repo");
-        fs::write(&path, r#"{"version":5,"base":"x","files":{}}"#).unwrap();
+        fs::write(&path, r#"{"version":6,"base":"x","files":{}}"#).unwrap();
         assert!(format!("{:#}", Candidate::load(&path, &s).unwrap_err()).contains("rollback 0"));
         // Its software is kept too; a saved one without (an older torqcli's) has none; one that is
         // not JSON is refused.
         c.lock = Some(r#"{"nodes":{}}"#.into());
         c.save(&path).unwrap();
-        assert!(fs::read_to_string(&path).unwrap().contains("\"version\": 4"), "an older torqcli refuses it, not drop its software");
+        assert!(fs::read_to_string(&path).unwrap().contains("\"version\": 5"), "an older torqcli refuses it, not drop its software");
         assert_eq!(Candidate::load(&path, &s).unwrap(), Some(c.clone()));
         fs::write(&path, format!(r#"{{"version":1,"base":"{}","files":{{}}}}"#, c.base)).unwrap();
         assert_eq!(Candidate::load(&path, &s).unwrap().unwrap().lock, None);
@@ -546,7 +563,7 @@ mod review_tests {
         use std::os::unix::fs::PermissionsExt;
         let state = tempfile::tempdir().unwrap();
         let dir = state.path().join("torq");
-        let c = Candidate { base: "x".into(), config: Config::default(), lock: None, settings: Default::default(), attached: Default::default(), nix: Default::default() };
+        let c = Candidate { base: "x".into(), config: Config::default(), lock: None, settings: Default::default(), attached: Default::default(), nix: Default::default(), source: None };
         c.save(&dir.join("candidate.json")).unwrap();
         assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "created private");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();

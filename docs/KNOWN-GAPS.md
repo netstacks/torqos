@@ -125,6 +125,12 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    kept), which needs the machine's console, and `boot loader timeout 0` hides the menu. To do: make
    the new boot entry one-shot until a confirmed commit is confirmed; refuse a zero timeout.
 
+6o. **A flake.lock that does not match flake.nix is fetched before it is refused** (review of S4b).
+   The broker builds with `--no-update-lock-file`, so such a commit never builds, but to find out
+   that the lock needs changing Nix first fetches the new source, as root (its `inputs` are read,
+   nothing is built). torqcli never commits a mismatch (a lock belongs to the flake.nix it is
+   committed with); a hand-made proposal still could.
+
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing

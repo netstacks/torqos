@@ -297,9 +297,21 @@ pub struct Know {
 /// The next word of a tree path (`set virtualisation docker …`): from the NixOS tree, and for a
 /// setting TorqOS keeps in its own files, its values from the hand-made schema.
 fn tree_choices(k: &Know, rest: &[String], cmd: &str) -> Vec<Choice> {
+    // Where TorqOS comes from (software.rs): its one setting, `system software torq source`.
+    let sw: Vec<&str> = rest.iter().map(String::as_str).collect();
+    match sw.as_slice() {
+        ["system", "software"] => return vec![Choice::new("torq", "TorqOS: where it comes from (its version: `request system update`)")],
+        ["system", "software", "torq"] => return vec![Choice::new("source", "Where TorqOS comes from: github:<owner>/<repo>[/<ref>], path:/<folder>, …")],
+        ["system", "software", "torq", "source"] if cmd != "show" => return vec![Choice::new("<source>", "github:netstacks/torqos, a tag (…/v0.1.0), or path:/<folder> while developing")],
+        _ => {}
+    }
     if let Some(hand) = crate::whole::to_hand(rest) {
-        let c = hand_tree_choices(&k.schema, &hand, cmd);
+        let mut c = hand_tree_choices(&k.schema, &hand, cmd);
         if !c.is_empty() {
+            if sw.as_slice() == ["system"] {
+                c.push(Choice::new("software", "Where this machine's TorqOS comes from"));
+                c.sort_by(|a, b| (a.word == "|").cmp(&(b.word == "|")).then(a.word.cmp(&b.word)));
+            }
             return c;
         }
     }

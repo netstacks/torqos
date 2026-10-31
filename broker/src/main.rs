@@ -20,7 +20,7 @@ struct Cli {
     #[arg(long, env = "TORQ_STATE_DIR")]
     state_dir: Option<PathBuf>,
     /// Command run after each commit; `{repo}` is replaced with the repo path
-    /// [default: nixos-rebuild switch --flake {repo}].
+    /// [default: nixos-rebuild switch --no-update-lock-file --flake {repo}].
     #[arg(long, env = "TORQ_REBUILD_CMD")]
     rebuild_cmd: Option<String>,
     /// `apply --confirm`: build the system and print its store path; `{repo}`

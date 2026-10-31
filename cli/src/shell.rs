@@ -376,25 +376,12 @@ impl Machine for Real<'_> {
     /// As `torq update` does it, but on the committed configuration the candidate is based on (as
     /// the broker builds it), not the repo's working copy; nothing is proposed here.
     fn update_lock(&self, base: &str, all: bool) -> Result<String> {
-        let scratch = scratch_dir()?;
-        let copy = scratch.path().join("config");
-        fs::create_dir(&copy)?;
-        Repo::new(&self.cli.repo).archive(base, &copy)?;
-        let out = {
-            let _p = run::Progress::start("Looking for updates");
-            let mut cmd = std::process::Command::new("nix");
-            cmd.args(["flake", "update", "--flake"]).arg(crate::flake_ref(&copy));
-            if !all {
-                cmd.arg("torq");
-            }
-            cmd.output().context("running nix flake update")?
-        };
-        if !out.status.success() {
-            bail!("couldn't look for updates: {}", history::one_line(&crate::last_error(&out.stderr), 200));
-        }
-        fs::read_to_string(copy.join("flake.lock")).context("reading the updated flake.lock")
+        self.relock(base, None, all)
     }
 
+    fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
+        self.relock(base, Some(flake_nix), all)
+    }
     fn ask(&self, question: &str) -> bool {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             return false;
@@ -938,4 +925,31 @@ fn configurations_are_the_ledger_entries_that_made_one() {
 /// Whether `prog` is a program on PATH.
 fn which(prog: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(prog).is_file()))
+}
+
+impl Real<'_> {
+    /// The flake.lock `nix flake update` (of `torq`, or with `all` every input) makes from the
+    /// configuration at `base`, its flake.nix replaced by `flake_nix` if given.
+    fn relock(&self, base: &str, flake_nix: Option<&str>, all: bool) -> Result<String> {
+        let scratch = scratch_dir()?;
+        let copy = scratch.path().join("config");
+        fs::create_dir(&copy)?;
+        Repo::new(&self.cli.repo).archive(base, &copy)?;
+        if let Some(f) = flake_nix {
+            fs::write(copy.join("flake.nix"), f)?;
+        }
+        let out = {
+            let _p = run::Progress::start("Looking for updates");
+            let mut cmd = std::process::Command::new("nix");
+            cmd.args(["flake", "update", "--flake"]).arg(crate::flake_ref(&copy));
+            if !all {
+                cmd.arg("torq");
+            }
+            cmd.output().context("running nix flake update")?
+        };
+        if !out.status.success() {
+            bail!("couldn't look for updates: {}", history::one_line(&crate::last_error(&out.stderr), 200));
+        }
+        fs::read_to_string(copy.join("flake.lock")).context("reading the updated flake.lock")
+    }
 }

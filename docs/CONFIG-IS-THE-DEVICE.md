@@ -206,5 +206,21 @@ torq.desktop.enable = true;       →  torq desktop enable true
    starts is warned about at commit (KNOWN-GAPS 6n). Also fixed: `| display set` prints whole lines
    from the top (pasteable, as Junos); `torqcli … | head` stops quietly (141), and a failure to
    write the output (a full disk) is an error; a top-level attachment (`set config x.nix`) reads
-   back. Still to do: the `system software` branch (S4b).
+   back.
+   **Built (S4b):** `system software torq source <source>`: where TorqOS comes from, the one
+   `torq.url` line of the fixed flake.nix, shown in the tree (`system { software { torq { source …;
+   } } }`). Setting it locks the new source at once, into the candidate (`show | compare` shows the
+   source and the new software together; `commit` writes both, system tier); `request system
+   update` then updates that source; `request system software rollback` is refused while the
+   candidate changes the source; it is never deleted. Only plain flake references (`github:`,
+   `gitlab:`, `sourcehut:`, `git+https://`, `https://`, `path:/`), written with plain URL
+   characters. The version stays the lock's (`## software: …`, `request system update`), as Junos
+   keeps configuration and software installs apart. A flake.nix that is not TorqOS's fixed one has
+   no source in the tree. This completes step 5: nothing of the machine is outside the tree.
+   From the independent review: `rollback <n>` dropped the source but kept its lock, so a commit
+   could pair the old flake.nix with another source's lock, and Nix would quietly re-lock it, as
+   root, to something nobody saw (proven on a scratch copy). Now a lock never outlives its source
+   (`rollback <n>` drops it), and the broker builds, and `commit check` evaluates, with
+   `--no-update-lock-file`: a flake.lock that does not match flake.nix fails, never re-locked. A
+   folder as the source (`path:`) is said in the commit question.
 6. `save` / `load override|merge|set`: a saved configuration recreates a device.

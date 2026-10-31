@@ -11,6 +11,7 @@ use crate::nixos::Tree;
 use crate::settings::{self, Settings};
 use crate::tree::{Config, Kind, Schema, Val};
 use crate::attach::{self, Attached};
+use crate::software;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 
@@ -70,13 +71,23 @@ pub struct Whole<'a> {
     pub tree: &'a Tree,
 }
 
-/// The tree's data: the files TorqOS keeps (the hand-made schema's), nixos/*.json, and the config
-/// files attached (config-files.json).
+/// `system software torq source …`: the words after the path (None: not that setting). Only `torq`
+/// has a source of its own (nixpkgs follows TorqOS's).
+fn software_words(words: &[String]) -> Option<&[String]> {
+    let n = software::PATH.len();
+    (words.len() >= n && words[..n].iter().zip(software::PATH).all(|(a, b)| a == b)).then(|| &words[n..])
+}
+
+/// The tree's data: the files TorqOS keeps (the hand-made schema's), nixos/*.json, the config files
+/// attached (config-files.json), and the software's source (flake.nix).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Data {
     pub config: Config,
     pub settings: Settings,
     pub attached: Attached,
+    /// Where TorqOS comes from (`system software torq source`, software.rs); None: flake.nix is not
+    /// TorqOS's fixed one (or there is none).
+    pub source: Option<String>,
 }
 
 impl Whole<'_> {
@@ -118,6 +129,9 @@ impl Whole<'_> {
             .collect();
         all.extend(settings::entries(&d.settings));
         all.extend(attach::entries(&d.attached));
+        if let Some(s) = &d.source {
+            all.push((software::PATH.map(String::from).to_vec(), Val::One(s.clone())));
+        }
         all.sort_by(|a, b| a.0.cmp(&b.0));
         all
     }
@@ -138,11 +152,27 @@ impl Whole<'_> {
         for (w, _) in attach::entries(&d.attached) {
             out.insert(w, attach::FILE.to_string());
         }
+        if d.source.is_some() {
+            out.insert(software::PATH.map(String::from).to_vec(), "flake.nix".into());
+        }
         out
     }
 
     /// `set <words>` (NixOS path, or an old name; `<place> config <file>` attaches a config file).
     pub fn set(&self, d: &mut Data, words: &[String]) -> Result<()> {
+        if let Some(rest) = software_words(words) {
+            return match rest {
+                [url] => {
+                    if d.source.is_none() {
+                        bail!("this machine's flake.nix is not TorqOS's fixed one: its software source cannot be set here");
+                    }
+                    software::valid(url)?;
+                    d.source = Some(url.clone());
+                    Ok(())
+                }
+                _ => bail!("set system software torq source <source>: one source (like github:netstacks/torqos); the version is `request system update`'s"),
+            };
+        }
         if let Some((place, file)) = self.attachment(words) {
             let file = file.context("config <file>: which file (a .nix file of the config repo, like services/httpd.nix)")?;
             attach::valid(file)?;
@@ -159,6 +189,9 @@ impl Whole<'_> {
     /// config`), or (with `all`) everything shown below a place — from every kind of file — or an old
     /// name's place (`delete users dev all`).
     pub fn delete(&self, d: &mut Data, words: &[String], all: bool, del: &str, typed: &[String]) -> Result<()> {
+        if software_words(words).is_some() || words == ["system", "software"] || words == ["system", "software", "torq"] {
+            bail!("the software's source can be changed (`set system software torq source …`), not deleted: a machine always has one");
+        }
         if let Some((place, _)) = self.attachment(words).filter(|_| !all) {
             return match d.attached.remove(&place.join(" ")) {
                 Some(_) => Ok(()),

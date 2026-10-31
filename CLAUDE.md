@@ -127,7 +127,7 @@ reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 
 - **Filters and `torqcli <command>` (4b, 4c; ADR-017):** `show … | grep -i x | wc -l` runs the real
   coreutils/grep, sandboxed in bubblewrap (no files, network, environment or inherited descriptors);
   `torqcli show system alarms` runs one command. Covered in `tests/trust-loop.nix`.
-- **The tree is every NixOS setting (S1–S4a, docs/CONFIG-IS-THE-DEVICE.md):** `set virtualisation docker enable true`; old names are aliases; `file edit` + `set <place> config <file>` attach plain Nix files. `| display detail` / `| display diff` (4d); the software in the candidate (`request system update`,
+- **The tree is every NixOS setting (S1–S4b, docs/CONFIG-IS-THE-DEVICE.md):** `set virtualisation docker enable true`; old names are aliases; `file edit` + `set <place> config <file>` attach plain Nix files. `| display detail` / `| display diff` (4d); the software in the candidate (`request system update`,
   4e); configuration numbers from the ledger (4f); `request system revert`, `show system ledger`, the
   SSH key check at commit, and the old commands retired (4g). Next: the rest of M1.5 (`docs/ROADMAP.md`); what is
   left of M1.5 needs a person (usability check, terminal look) or its own design (environment
@@ -146,7 +146,8 @@ reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 
   ```bash
   torqcli -c "request system update; configure; show | compare; commit comment \"…\""   # asks y/N
   ```
-  Read the prompt before answering: it must show only `[edit system software]`.
+  Read the prompt before answering: it must show only `[edit system software]` (not `[edit system
+  software torq]`, which would change where TorqOS comes from).
   To change the machine's config repo itself (not just bump inputs), do it by hand:
   ```bash
   rm -rf /tmp/cfg && cp -r /var/lib/torq/config /tmp/cfg && cd /tmp/cfg   # edit, then:

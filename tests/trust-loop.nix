@@ -61,7 +61,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test ! -e /run/torq/drift")
     # The broker builds the fixed configuration `torq`, not one named after the host (this host is
     # "machine"): changing the host name must never leave rebuilds looking for a missing config.
-    machine.succeed("grep -qx 'nixos-rebuild switch --flake {repo}#torq' /etc/torq-test/default-rebuild")
+    machine.succeed("grep -qx 'nixos-rebuild switch --no-update-lock-file --flake {repo}#torq' /etc/torq-test/default-rebuild")
     machine.succeed("jq -e '.rebuild == \"true\" and .repo == \"/var/lib/torq/config\"' /etc/torq/broker.json")
     # Undo's tools come from fixed store paths, not only from the (changeable) running system.
     machine.succeed("jq -r .path /etc/torq/broker.json | tr : '\\n' | head -1 | grep -q '^/nix/store/.*nixos-rebuild'")

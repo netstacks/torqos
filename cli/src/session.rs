@@ -53,6 +53,9 @@ pub trait Machine {
     /// `request system update [all]`: the `flake.lock` that `nix flake update` (of `torq`, or with
     /// `all` every input) makes from the configuration at commit `base`.
     fn update_lock(&self, base: &str, all: bool) -> Result<String>;
+    /// `set system software torq source`: the `flake.lock` that locking `torq` (with `all`, every
+    /// input) makes, from the configuration at commit `base` with its flake.nix as `flake_nix`.
+    fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String>;
 }
 
 
@@ -331,7 +334,15 @@ impl<'a> Session<'a> {
             Op::Set { words } => {
                 let full = self.here(&words);
                 let mut d = self.candidate_data()?;
+                let was = d.source.clone();
                 self.whole().set(&mut d, &full)?;
+                if d.source != was {
+                    // A new source is locked now, in the candidate: what `commit` installs is shown first.
+                    let shown = self.lock_source(d.source.as_deref().unwrap_or_default())?;
+                    self.put_data(d)?;
+                    self.save()?;
+                    return Ok(shown);
+                }
                 self.put_data(d)?;
                 self.save()?;
                 Ok(String::new())
@@ -573,14 +584,22 @@ impl<'a> Session<'a> {
 
     /// The candidate's tree data.
     fn candidate_data(&mut self) -> Result<Data> {
+        let base_source = self.base_source()?;
         let c = self.candidate()?;
-        Ok(Data { config: c.config.clone(), settings: c.settings.clone(), attached: c.attached.clone() })
+        let source = c.source.clone().or(base_source);
+        Ok(Data { config: c.config.clone(), settings: c.settings.clone(), attached: c.attached.clone(), source })
+    }
+
+    /// The software's source at the candidate's base (its flake.nix).
+    fn base_source(&mut self) -> Result<Option<String>> {
+        let base = self.candidate()?.base.clone();
+        Ok(self.repo.file_at(&base, "flake.nix")?.and_then(|b| crate::software::source_of(&String::from_utf8_lossy(&b))))
     }
 
     /// Put the tree data back into the candidate (not saved yet).
     fn put_data(&mut self, d: Data) -> Result<()> {
         let c = self.candidate()?;
-        (c.config, c.settings, c.attached) = (d.config, d.settings, d.attached);
+        (c.config, c.settings, c.attached, c.source) = (d.config, d.settings, d.attached, d.source);
         Ok(())
     }
 
@@ -601,12 +620,36 @@ impl<'a> Session<'a> {
     /// `request system update [all]`: the newest TorqOS (with `all`, every input) into the candidate.
     fn update(&mut self, all: bool) -> Result<String> {
         let base = self.candidate()?.base.clone();
-        let new = self.machine.update_lock(&base, all)?;
+        // With a new source in the candidate, the update is of that source (its flake.nix as it will be).
+        let new = match self.candidate()?.source.clone() {
+            Some(url) if Some(&url) != self.base_source()?.as_ref() => {
+                let flake = self.repo.file_at(&base, "flake.nix")?.context("this machine has no flake.nix")?;
+                let flake = crate::software::with_source(&String::from_utf8(flake).context("flake.nix is not text")?, &url)?;
+                self.machine.lock_with(&base, &flake, all)?
+            }
+            _ => self.machine.update_lock(&base, all)?,
+        };
         self.load_software(new, "This machine has the newest software: nothing to load.\n")
+    }
+
+    /// `set system software torq source <url>`: lock that source (the newest it has), as
+    /// `request system update` locks the current one, into the candidate.
+    fn lock_source(&mut self, url: &str) -> Result<String> {
+        let base = self.candidate()?.base.clone();
+        let flake = self.repo.file_at(&base, "flake.nix")?.context("this machine has no flake.nix")?;
+        let flake = crate::software::with_source(&String::from_utf8(flake).context("flake.nix is not text")?, url)?;
+        let lock = self.machine.lock_with(&base, &flake, false)?;
+        let base_lock = self.repo.file_at(&base, "flake.lock")?;
+        let shown = software_compare(base_lock.as_deref(), &Some(lock.clone()));
+        self.candidate()?.lock = Some(lock);
+        Ok(format!("{shown}The new source is locked into the candidate: `commit` installs it.\n"))
     }
 
     /// `request system software rollback <n>`: commit n's software into the candidate.
     fn software_rollback(&mut self, n: usize) -> Result<String> {
+        if self.candidate()?.source.clone().is_some_and(|s| Some(s) != self.base_source().ok().flatten()) {
+            bail!("the candidate changes where TorqOS comes from: an earlier configuration's software is of another source (`rollback 0` starts over)");
+        }
         let id = self.commit_at(n)?;
         let lock = self.repo.file_at(&id, "flake.lock")?.with_context(|| format!("configuration {n} has no flake.lock"))?;
         let lock = String::from_utf8(lock).with_context(|| format!("configuration {n}'s flake.lock is not text"))?;
@@ -656,7 +699,10 @@ impl<'a> Session<'a> {
         let id = self.commit_at(n).with_context(|| format!("rollback {n}"))?;
         // A configuration, not software: what the candidate had loaded (`request system update`) stays —
         // except for `rollback 0`, which starts over.
-        let kept = if n == 0 { None } else { self.candidate()?.lock.clone() };
+        // The software's source is the base's after it (a configuration, not software), so a lock made for
+        // another source is dropped with it: a lock always belongs to the flake.nix it is committed with.
+        let other_source = self.candidate()?.source.clone().is_some_and(|s| Some(s) != self.base_source().ok().flatten());
+        let kept = if n == 0 || other_source { None } else { self.candidate()?.lock.clone() };
         let mut c = Candidate::from_repo(&self.repo, &self.schema, &id)?;
         c.lock = kept.clone();
         self.candidate = Some(c);
@@ -768,6 +814,10 @@ impl<'a> Session<'a> {
         let section = |l: &str| l.strip_prefix("[edit ").and_then(|s| s.strip_suffix(']')).and_then(|s| s.split(' ').next()).map(String::from);
         let boots = compare.lines().filter_map(section).any(|top| matches!(top.as_str(), "fileSystems" | "boot" | "swapDevices"))
             || files.iter().any(|(p, _)| p == "hardware-configuration.nix");
+        // A folder as the source: the approval is of its content as it is now (the lock's hash).
+        if a.data.source.as_deref().is_some_and(|s| s.starts_with("path:")) && files.iter().any(|(p, _)| p == "flake.nix" || p == "flake.lock") {
+            shown.push_str("! TorqOS comes from a folder (path:): whoever can write to it decides what the next `request system update` installs.\n");
+        }
         if boots {
             shown.push_str("! This changes how the machine starts (file systems, boot): a mistake shows only at the next restart, where `commit confirmed` cannot undo it; the earlier configurations stay in the boot menu.\n");
         }
@@ -902,7 +952,8 @@ fn data_of(s: &Schema, files: &std::collections::BTreeMap<String, Vec<u8>>) -> R
     let config = s.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
     let settings = crate::settings::load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
     let attached = crate::attach::load(files.get(crate::attach::FILE).map(Vec::as_slice))?;
-    Ok(Data { config, settings, attached })
+    let source = files.get("flake.nix").and_then(|b| crate::software::source_of(&String::from_utf8_lossy(b)));
+    Ok(Data { config, settings, attached, source })
 }
 
 /// The raw change between two commits: every file (the tree's, the Nix files, `flake.lock`), byte
@@ -950,6 +1001,12 @@ impl Against {
             }
             let path = format!("{}{top}.json", crate::settings::DIR);
             c.push((path.clone(), self.files.get(&path).map(Vec::as_slice), new.get(&path).cloned()));
+        }
+        // The software's source: the one line of flake.nix (its lock is the candidate's, below).
+        if let (Some(src), true) = (&self.data.source, base.source != self.data.source) {
+            let was = self.files.get("flake.nix").context("this machine has no flake.nix")?;
+            let now = crate::software::with_source(&String::from_utf8_lossy(was), src)?;
+            c.push(("flake.nix".to_string(), Some(was.as_slice()), Some(now)));
         }
         if base.attached != self.data.attached {
             let path = crate::attach::FILE.to_string();
@@ -1090,6 +1147,8 @@ mod tests {
         edit_to: Option<String>,
         edited: RefCell<Vec<(String, String)>>,
         ssh_calls: RefCell<usize>,
+        /// The flake.nix each source was locked with.
+        flakes: RefCell<Vec<String>>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<()> {
@@ -1168,6 +1227,11 @@ mod tests {
         }
         fn update_lock(&self, base: &str, all: bool) -> Result<String> {
             self.bases.borrow_mut().push(base.into());
+            Ok(lock(if all { NEWER_ALL } else { NEWER }))
+        }
+        fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
+            self.bases.borrow_mut().push(base.into());
+            self.flakes.borrow_mut().push(flake_nix.into());
             Ok(lock(if all { NEWER_ALL } else { NEWER }))
         }
     }
@@ -1651,6 +1715,68 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "file edit hardware-configuration.nix", "commit"]);
         assert!(m.asked.borrow()[0].contains("how the machine starts"));
+    }
+
+    /// `system software torq source`: shown from flake.nix, set (locked at once, into the candidate),
+    /// committed as flake.nix's one line and the new lock together; never deleted; kept across
+    /// sessions; and refused for a flake.nix that is not TorqOS's fixed one.
+    #[test]
+    fn the_software_source_is_a_setting() {
+        let (d, m) = (repo_with_software(), Fake { answer: true, ..Default::default() });
+        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && git add -A && git commit -qm flake");
+        let saved = d.path().join("candidate.json");
+        let mut s = session(d.path(), Some(saved.clone()), &m);
+        assert!(s.exec("show configuration system software").unwrap().contains("source github:netstacks/torqos;"));
+        s.exec("configure").unwrap();
+        let out = s.exec("set system software torq source path:/home/dev/torq").unwrap();
+        assert!(out.contains("[edit system software]") && out.contains("locked into the candidate"), "{out}");
+        assert!(m.flakes.borrow()[0].contains("torq.url = \"path:/home/dev/torq\";"), "locked with the new flake.nix");
+        // Kept: another session (the candidate as saved) has it.
+        let mut s2 = session(d.path(), Some(saved), &m);
+        s2.exec("configure").unwrap();
+        let compare = s2.exec("show | compare").unwrap();
+        assert!(compare.starts_with("[edit system software torq]\n-   source github:netstacks/torqos;\n+   source path:/home/dev/torq;\n"), "{compare}");
+        assert!(compare.contains("[edit system software]\n"), "and the new lock: {compare}");
+        // Not deleted; not anything else; only plain sources.
+        assert!(s.exec("delete system software torq source").unwrap_err().to_string().contains("not deleted"));
+        assert!(s.exec("set system software torq source file:///etc").is_err());
+        assert!(s.exec("set system software torq version 1").is_err());
+        // An update is of the new source; an earlier configuration's software is not loaded onto it.
+        s.exec("run request system update").unwrap();
+        assert_eq!(m.flakes.borrow().len(), 2);
+        assert!(m.flakes.borrow()[1].contains("path:/home/dev/torq"), "updated as it will be");
+        assert!(s.exec("run request system software rollback 1").unwrap_err().to_string().contains("another source"));
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
+        let (diff, _, tier, reason, _) = m.commits.borrow()[0].clone();
+        assert!(diff.contains("-    torq.url = \"github:netstacks/torqos\";\n+    torq.url = \"path:/home/dev/torq\";"), "{diff}");
+        assert!(diff.contains("+++ b/flake.lock"), "with its lock: {diff}");
+        assert_eq!(tier, "system");
+        assert!(reason.starts_with("- system software torq source github:netstacks/torqos; + system software torq source path:/home/dev/torq;"), "{reason}");
+        // A flake.nix that is not TorqOS's fixed one: no source shown, none set.
+        let (d, m) = (repo(), Fake::default());
+        sh(d.path(), "printf '{ }\\n' > flake.nix && git add -A && git commit -qm flake");
+        let mut s = session(d.path(), None, &m);
+        assert!(!s.exec("show configuration").unwrap().contains("software {"));
+        assert!(run(&mut s, &["configure"]).contains("configuration mode"));
+        assert!(s.exec("set system software torq source github:a/b").unwrap_err().to_string().contains("not TorqOS's fixed one"));
+    }
+
+    /// From the review of S4b: a lock made for a source `rollback <n>` does not keep is dropped with it
+    /// (a lock always belongs to the flake.nix it is committed with); a folder as the source is said.
+    #[test]
+    fn a_lock_never_outlives_its_source() {
+        let (d, m) = (repo_with_software(), Fake { answer: true, ..Default::default() });
+        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && git add -A && git commit -qm flake");
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system software torq source github:other/torq"]);
+        assert_eq!(s.exec("rollback 1").unwrap(), "load complete\n", "not kept: it was for the other source");
+        assert!(!s.exec("show | compare").unwrap().contains("[edit system software"), "{}", s.exec("show | compare").unwrap());
+        // Software loaded for the machine's own source is kept, as before.
+        run(&mut s, &["rollback 0", "run request system update"]);
+        assert!(s.exec("rollback 1").unwrap().contains("is kept"));
+        // A folder: said in the question.
+        run(&mut s, &["rollback 0", "set system software torq source path:/home/dev/torq", "commit"]);
+        assert!(m.asked.borrow()[0].contains("comes from a folder"), "{}", m.asked.borrow()[0]);
     }
 
     #[test]

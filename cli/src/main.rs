@@ -13,6 +13,7 @@ mod nixos;
 mod settings;
 mod whole;
 mod attach;
+mod software;
 mod pkg;
 mod run;
 mod status;
@@ -142,7 +143,8 @@ fn asks_for_password(cli: &Cli) -> bool {
 /// admits.
 fn owner(copy: &Path, host: &str) -> Result<String> {
     let out = Command::new("nix")
-        .args(["eval", "--raw"])
+        // As the broker builds it: a flake.lock that does not match flake.nix is an error, not re-locked.
+        .args(["eval", "--no-update-lock-file", "--raw"])
         .arg(format!("{}#nixosConfigurations.{host}.config.torq.user", flake_ref(copy)))
         .output()
         .context("running nix eval")?;

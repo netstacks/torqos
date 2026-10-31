@@ -266,6 +266,7 @@ line by line.
 | `show services` | the catalog, and what is on |
 | `request system update [all]` | load the newest TorqOS (and its nixpkgs) into the candidate |
 | `request system software rollback <n>` | load commit <n>'s software into the candidate (a downgrade) |
+| `set system software torq source <source>` | (configuration mode) where TorqOS comes from: locks that source into the candidate |
 | `request system repair` | return a machine changed outside TorqOS to its last commit |
 | `request system revert <change>` | undo one change (a new change forward; asks unless it is only your own folder) |
 | `configure` / `config` | enter configuration mode |
