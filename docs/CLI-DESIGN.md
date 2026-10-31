@@ -226,8 +226,12 @@ update [all]` runs `nix flake update` on the commit the candidate is based on an
 `[edit system software]` (each input's date, a downgrade said so), `| display diff` as the raw
 `flake.lock` diff, and `commit` (system tier: it asks) installs it. `rollback <n>` loads a configuration and keeps the
 software loaded into the candidate (and says so); `rollback 0` starts over without it. Loading onto a
-candidate whose base is no longer the active configuration warns that `commit` will be refused. `show system commit` lists the config repo's
-history (KNOWN-GAPS 6k); `show packages available` is `nix search` on this machine's nixpkgs.
+candidate whose base is no longer the active configuration warns that `commit` will be refused.
+
+`show system commit` reads the ledger (4f) — through the broker, as a commit does (`sudo`: the
+ledger is root's, and stays unreadable to users) — its configurations, newest first, with who
+approved each; without the broker there are no numbers, rather than git's; `rollback <n>`, `show system rollback <n>`
+and `request system software rollback <n>` use the same numbers (`rollback 0`: what is active). `show packages available` is `nix search` on this machine's nixpkgs.
 
 ## How it is built
 

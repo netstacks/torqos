@@ -29,11 +29,34 @@ pub trait Machine {
     fn search(&self, terms: &[String]) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
     fn repair(&self) -> Result<String>;
+    /// The configurations so far, newest first (at most `count`): the numbers of `rollback <n>` and
+    /// `show system commit`. From the ledger (ADR-016): its entries that produced a configuration.
+    fn configurations(&self, repo: &Repo, count: usize) -> Result<History>;
     /// `request system update [all]`: the `flake.lock` that `nix flake update` (of `torq`, or with
     /// `all` every input) makes from the configuration at commit `base`.
     fn update_lock(&self, base: &str, all: bool) -> Result<String>;
 }
 
+
+/// The configurations (newest first), and where the ledger says the config repo is — by the
+/// broker's own count (`ledgered_commit`), which repairs and interrupted changes are part of.
+#[derive(Debug, Clone, PartialEq)]
+pub struct History {
+    pub configurations: Vec<Configuration>,
+    pub at: Option<String>,
+}
+
+/// One configuration in the history: the commit, and the ledger entry that made it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Configuration {
+    pub id: String,
+    pub date: String,
+    /// Who: the person who approved it, else the actor (`broker` for an automatic rollback).
+    pub who: String,
+    pub what: String,
+    /// The ledger entry (None: read from git, without one).
+    pub seq: Option<u64>,
+}
 
 /// A commit confirmed waiting for its author.
 #[derive(Debug, Clone, PartialEq)]
@@ -413,11 +436,21 @@ impl<'a> Session<'a> {
         match op {
             Op::ShowCommits { display } => {
                 let mut out = String::new();
-                for (n, c) in self.repo.history(50)?.iter().enumerate() {
-                    out.push_str(&format!("{n:<3} {}  {}\n", c.date, c.subject));
+                let h = self.machine.configurations(&self.repo, 50)?;
+                let all = &h.configurations;
+                let width = all.iter().map(|c| c.who.chars().count()).max().unwrap_or(0);
+                for (n, c) in all.iter().enumerate() {
+                    out.push_str(&format!("{n:<3} {}  {:<width$}  {}\n", c.date, c.who, c.what));
                     if display == Some(Display::Detail) {
-                        out.push_str(&format!("    commit {}\n", c.id));
+                        let seq = c.seq.map(|s| format!("  (ledger #{s})")).unwrap_or_default();
+                        out.push_str(&format!("    commit {}{seq}\n", crate::history::one_line(&c.id, 64)));
                     }
+                }
+                // The ledger says where the config repo is (by the broker's count); if it is elsewhere, 0 —
+                // what is active — is not the newest line above.
+                let head = self.repo.head()?;
+                if h.at.as_ref().is_some_and(|at| *at != head) {
+                    out.push_str(&format!("## the config repo is at {}, not where the ledger says: `show system alarms`\n", short(&head)));
                 }
                 Ok(out)
             }
@@ -459,9 +492,16 @@ impl<'a> Session<'a> {
     }
 
     /// The commit n changes back (`rollback <n>`'s numbering: 0 is the current one).
+    /// 0 is what is active (HEAD), whatever the ledger says; the others are the ledger's.
     fn commit_at(&self, n: usize) -> Result<String> {
-        let history = self.repo.history(n + 1)?;
-        let c = history.get(n).with_context(|| format!("there are only {} configurations", history.len()))?;
+        if n == 0 {
+            return self.repo.head();
+        }
+        let all = self.machine.configurations(&self.repo, n + 1)?.configurations;
+        let c = all.get(n).with_context(|| format!("there are only {} configurations", all.len()))?;
+        if !self.repo.has_commit(&c.id)? {
+            bail!("configuration {n} (commit {}) is no longer in the config repo", short(&c.id));
+        }
         Ok(c.id.clone())
     }
 
@@ -536,12 +576,11 @@ impl<'a> Session<'a> {
     }
 
     fn rollback(&mut self, n: usize) -> Result<String> {
-        let history = self.repo.history(n + 1)?;
-        let commit = history.get(n).with_context(|| format!("rollback {n}: there are only {} configurations", history.len()))?;
+        let id = self.commit_at(n).with_context(|| format!("rollback {n}"))?;
         // A configuration, not software: what the candidate had loaded (`request system update`) stays —
         // except for `rollback 0`, which starts over.
         let kept = if n == 0 { None } else { self.candidate()?.lock.clone() };
-        let mut c = Candidate::from_repo(&self.repo, &self.schema, &commit.id)?;
+        let mut c = Candidate::from_repo(&self.repo, &self.schema, &id)?;
         c.lock = kept.clone();
         self.candidate = Some(c);
         self.save()?;
@@ -764,6 +803,10 @@ mod tests {
         refuse: bool,
         /// The bases `request system update` was asked about.
         bases: RefCell<Vec<String>>,
+        /// The ledger's configurations, if a test gives them; else the repo's history stands in.
+        ledger: Option<Vec<Configuration>>,
+        /// Where the ledger says the repo is, if a test says (else: its newest configuration).
+        ledger_at: Option<String>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<()> {
@@ -796,6 +839,18 @@ mod tests {
         }
         fn repair(&self) -> Result<String> {
             Ok("repaired\n".into())
+        }
+        fn configurations(&self, repo: &Repo, count: usize) -> Result<History> {
+            let configurations: Vec<Configuration> = match &self.ledger {
+                Some(l) => l.iter().take(count).cloned().collect(),
+                None => repo
+                    .history(count)?
+                    .into_iter()
+                    .map(|c| Configuration { id: c.id, date: c.date, who: "dev".into(), what: c.subject, seq: None })
+                    .collect(),
+            };
+            let at = self.ledger_at.clone().or_else(|| configurations.first().map(|c| c.id.clone()));
+            Ok(History { configurations, at })
         }
         fn update_lock(&self, base: &str, all: bool) -> Result<String> {
             self.bases.borrow_mut().push(base.into());
@@ -997,6 +1052,66 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         let e = format!("{:#}", s.exec("request system software rollback 0").unwrap_err());
         assert!(e.contains("flake.lock at") && e.contains("is not a plain file"), "{e}");
+    }
+
+    /// After a commit confirmed rolls back, the config repo is reset to the commit before it: git's
+    /// history no longer has it, the ledger does. The numbers are the ledger's.
+    #[test]
+    fn rollback_numbers_are_the_ledgers() {
+        let d = repo();
+        let ids: Vec<String> = Repo::new(d.path()).history(2).unwrap().into_iter().map(|c| c.id).collect();
+        let (two, one) = (ids[0].clone(), ids[1].clone());
+        sh(d.path(), "git reset -q --hard HEAD~1");
+        let conf = |id: &str, who: &str, what: &str, seq| Configuration { id: id.into(), date: "d".into(), who: who.into(), what: what.into(), seq: Some(seq) };
+        let m = Fake {
+            ledger: Some(vec![conf(&one, "broker", "Change #2 rolled back", 3), conf(&two, "viper", "host two", 2), conf(&one, "user", "init", 1)]),
+            ..Default::default()
+        };
+        let mut s = session(d.path(), None, &m);
+        let commits = s.exec("show system commit").unwrap();
+        assert_eq!(commits, "0   d  broker  Change #2 rolled back\n1   d  viper   host two\n2   d  user    init\n");
+        assert!(s.exec("show system commit | display detail").unwrap().contains(&format!("    commit {two}  (ledger #2)\n")));
+        assert_eq!(s.exec("show system rollback 1").unwrap(), "system {\n    host-name two;\n}\n", "git's history alone has no 1");
+        s.exec("configure").unwrap();
+        s.exec("rollback 1").unwrap();
+        assert!(s.exec("show | compare").unwrap().contains("+   host-name two;"));
+        let e = format!("{:#}", s.exec("rollback 3").unwrap_err());
+        assert!(e.contains("rollback 3: there are only 3 configurations"), "{e}");
+    }
+
+    #[test]
+    fn a_repo_away_from_the_ledger_is_said() {
+        let d = repo();
+        let first = Repo::new(d.path()).history(2).unwrap()[1].id.clone();
+        let m = Fake { ledger: Some(vec![Configuration { id: first, date: "d".into(), who: "u".into(), what: "w".into(), seq: Some(1) }]), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("show system commit").unwrap();
+        assert!(out.ends_with("not where the ledger says: `show system alarms`\n"), "{out}");
+        s.exec("configure").unwrap();
+        s.exec("set system host-name x").unwrap();
+        s.exec("rollback 0").unwrap();
+        assert_eq!(s.exec("show").unwrap(), "system {\n    host-name two;\n}\n", "rollback 0: what is active (HEAD)");
+        // 0 is what is active for every command, not the ledger's newest.
+        assert_eq!(s.exec("run show system rollback 0").unwrap(), "system {\n    host-name two;\n}\n");
+        let e = format!("{:#}", s.exec("run request system software rollback 0").unwrap_err());
+        assert!(e.contains("configuration 0 has no flake.lock"), "HEAD's, not the ledger's: {e}");
+    }
+
+    #[test]
+    fn the_drift_note_counts_as_the_broker_does() {
+        // An interrupted change (which numbers nothing) moved the repo: the broker says all is well.
+        let d = repo();
+        let ids: Vec<String> = Repo::new(d.path()).history(2).unwrap().into_iter().map(|c| c.id).collect();
+        let conf = |id: &str| Configuration { id: id.into(), date: "d".into(), who: "u".into(), what: "w".into(), seq: Some(1) };
+        let m = Fake { ledger: Some(vec![conf(&ids[1])]), ledger_at: Some(ids[0].clone()), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        assert!(!s.exec("show system commit").unwrap().contains("##"), "no drift");
+        // A configuration whose commit is gone says so, not git's error.
+        let missing = "0123456789abcdef0123456789abcdef01234567";
+        let m = Fake { ledger: Some(vec![conf(&ids[0]), conf(missing)]), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", s.exec("show system rollback 1").unwrap_err());
+        assert!(e.contains("configuration 1 (commit 0123456789ab) is no longer in the config repo"), "{e}");
     }
 
     #[test]

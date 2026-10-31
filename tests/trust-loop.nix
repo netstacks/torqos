@@ -135,8 +135,12 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'test ! -e ~/.local/state/torq/candidate.json'")
         machine.succeed("su - dev -c 'printf \"configure\\nset users dev cli style cisco\\nexit\\nexit\\n\" | torqcli'")
         machine.succeed("su - dev -c 'test \"$(stat -c %a ~/.local/state/torq/candidate.json)\" = 600'")
-        out = machine.succeed("su - dev -c 'torqcli -c \"show system commit\"'")
-        assert " host" in out.splitlines()[0], out
+        # The ledger is root's (its state directory is 0700): the numbers come through the broker, as a
+        # commit does. Without it there are no numbers, rather than git's (which a rollback can differ from).
+        out = machine.fail("su - dev -c 'torqcli -c \"show system commit\"' 2>&1")
+        assert "could not read the ledger" in out, out
+        out = machine.succeed("torqcli -c 'show system commit'")
+        assert " host" in out.splitlines()[0] and "tester" in out.splitlines()[0], out
         out = machine.fail("su - dev -c 'torqcli -c \"configure; set system host-name my_laptop\"' 2>&1")
         assert "is not a valid system host-name" in out, out
         # Piped input is a script: it stops at its first error (exit 1) and runs nothing after it.
@@ -156,7 +160,7 @@ pkgs.testers.runNixOSTest {
         assert out == "1\n", out
         out = machine.succeed(dev_sh("torqcli 'show configuration | grep -o \"host-name [a-z]*\"'"))
         assert out == "host-name machine\n", out
-        out = machine.succeed(dev_sh("torqcli show system commit '|' head -n 1 '|' wc -l"))
+        out = machine.succeed(dev_sh("torqcli show configuration '|' head -n 1 '|' wc -l"))
         assert out == "1\n", out
         # Their own options cannot read, write or run anything outside the output they filter.
         machine.succeed(dev_sh("echo hidden > ~/secret"))

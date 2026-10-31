@@ -16,7 +16,9 @@ pub struct Repo {
     root: PathBuf,
 }
 
-/// One configuration in the repo's history, newest first: `rollback <n>` loads the n-th.
+/// One commit in the repo's history, newest first. (The configuration numbers are the ledger's, 4f:
+/// git's history stands in for it only in tests.)
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Commit {
     pub id: String,
@@ -63,6 +65,7 @@ impl Repo {
     /// The last `count` configurations, newest first (rollback 0 is the current one). The broker
     /// makes one commit per change on one branch, and resets an undone one away, so the branch's
     /// first-parent history is the machine's history of configurations.
+    #[cfg(test)]
     pub fn history(&self, count: usize) -> Result<Vec<Commit>> {
         let out = self.git(&["log", "--first-parent", "-z", &format!("-n{count}"), "--date=iso-strict-local", "--format=%H%x1f%cd%x1f%s", "HEAD", "--"])?;
         String::from_utf8_lossy(&out)
@@ -97,6 +100,15 @@ impl Repo {
             bail!("unpacking the configuration at {id} failed");
         }
         Ok(())
+    }
+
+    /// Whether commit `id` (40 hex digits) is in the repo.
+    pub fn has_commit(&self, id: &str) -> Result<bool> {
+        if !(id.len() == 40 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
+            bail!("not a commit id: {id:?}");
+        }
+        // Through `git` (its environment cleared, this repo only): it fails when the commit is missing.
+        Ok(self.git(&["cat-file", "-e", "--end-of-options", &format!("{id}^{{commit}}")]).is_ok())
     }
 
     /// The entries of commit `rev`: (mode, kind, object id, path), every file.

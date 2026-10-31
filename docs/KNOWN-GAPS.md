@@ -83,9 +83,8 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    config repo will.
 6k. **torqcli's line editor drops keys typed ahead.** rustyline reads input in chunks and starts each
    prompt with a fresh buffer: keys typed (not pasted) before the next prompt appears are lost. A
-   bracketed paste is kept whole and run line by line. `show system commit` lists git history, not
-   the ledger (which needs the broker); two interactive sessions of the same user share one saved
-   candidate, the last save wins.
+   bracketed paste is kept whole and run line by line. Two interactive sessions of the same user
+   share one saved candidate, the last save wins.
 6i. **User tier: whose folder?** The broker accepts `users/<name>/<leaf>` for any well-formed name;
    that `<name>` is a normal user of the machine is checked only at evaluation (modules/packages.nix),
    so `users/root/cli.json` is refused late — by the failed rebuild, which is undone — not at

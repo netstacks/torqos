@@ -3,7 +3,7 @@
 //! session.rs, the tree in tree.rs, the candidate in candidate.rs.
 
 use crate::candidate::{Candidate, Repo};
-use crate::session::{Machine, Mode, Session, Waiting};
+use crate::session::{Configuration, History, Machine, Mode, Session, Waiting};
 use crate::syntax::Style;
 use crate::tree::Schema;
 use crate::{broker, check_repo, config_name, evaluate, history, me, run, scratch_dir, Cli, Cmd, BROKER, REPO};
@@ -191,6 +191,13 @@ impl Machine for Real<'_> {
             done(run::broker_json(broker(self.cli, &["repair", "--approved-by", &me()?]), &log)?, "repair")?
         };
         Ok(format!("repaired: the machine is back at its last ledgered configuration (#{})\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
+    /// The ledger's entries that produced a configuration (as the broker's `ledgered_commit` counts
+    /// them), newest first. The ledger is the broker's: read through it, as a commit is.
+    fn configurations(&self, _repo: &Repo, count: usize) -> Result<History> {
+        let entries = crate::read_ledger(self.cli)?;
+        Ok(History { configurations: configurations_of(&entries, count), at: ledgered_commit(&entries) })
     }
 
     /// As `torq update` does it, but on the committed configuration the candidate is based on (as
@@ -639,4 +646,63 @@ mod editor {
             }
         }
     }
+}
+
+/// Where the ledger says the config repo is: the commit of its last entry that moved it — the
+/// broker's own count (`ledgered_commit`, broker/src/lib.rs), repairs and interrupted changes too.
+fn ledgered_commit(entries: &[history::Entry]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .filter(|e| matches!(e.kind.as_str(), "init" | "applied" | "reverted" | "interrupted" | "repaired" | "rolled_back"))
+        .find_map(|e| e.data["commit"].as_str().map(String::from))
+}
+
+/// The configurations in a ledger, newest first: its `init`, `applied`, `reverted` and `rolled_back`
+/// entries (each made a commit), at most `count`. Text from the ledger is one line each, cleaned.
+fn configurations_of(entries: &[history::Entry], count: usize) -> Vec<Configuration> {
+    entries
+        .iter()
+        .rev()
+        .filter(|e| matches!(e.kind.as_str(), "init" | "applied" | "reverted" | "rolled_back"))
+        .filter_map(|e| {
+            let id = e.data["commit"].as_str()?;
+            let who = e.approved_by.clone().filter(|w| !w.is_empty()).unwrap_or_else(|| e.actor.clone());
+            Some(Configuration {
+                id: id.to_string(),
+                date: history::one_line(&e.ts, 25),
+                who: history::one_line(&who, 20),
+                what: history::one_line(&e.reason, 80),
+                seq: Some(e.seq),
+            })
+        })
+        .take(count)
+        .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn configurations_are_the_ledger_entries_that_made_one() {
+    let ledger = [
+        r#"{"seq":1,"ts":"2026-10-31T01:00:00Z","actor":"user","approved_by":null,"kind":"init","tier":"system","reason":"Config repository initialised","data":{"commit":"aaaa"}}"#,
+        r#"{"seq":2,"ts":"2026-10-31T02:00:00Z","actor":"user","approved_by":null,"kind":"proposal","tier":"user","reason":"x","data":{}}"#,
+        r#"{"seq":3,"ts":"2026-10-31T02:01:00Z","actor":"user","approved_by":"viper","kind":"applied","tier":"user","reason":"+   style cisco;","data":{"commit":"bbbb","proposal":2}}"#,
+        r#"{"seq":4,"ts":"2026-10-31T02:02:00Z","actor":"user","approved_by":"viper","kind":"confirmed","tier":"user","reason":"Confirmed","data":{"applied":3}}"#,
+        r#"{"seq":5,"ts":"2026-10-31T03:00:00Z","actor":"broker","approved_by":null,"kind":"rolled_back","tier":"user","reason":"Change #3 rolled back\nfake: line","data":{"commit":"aaaa","applied":3}}"#,
+        r#"{"seq":6,"ts":"2026-10-31T04:00:00Z","actor":"user","approved_by":"viper","kind":"apply_failed","tier":"user","reason":"broke","data":{}}"#,
+        // A repair returns to a configuration the ledger has: it makes none of its own.
+        r#"{"seq":7,"ts":"2026-10-31T05:00:00Z","actor":"user","approved_by":"viper","kind":"repaired","tier":"system","reason":"Repaired","data":{"commit":"aaaa"}}"#,
+    ]
+    .join("\n");
+    let entries = history::parse(&ledger).unwrap();
+    let c = configurations_of(&entries, 10);
+    let ids: Vec<&str> = c.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["aaaa", "bbbb", "aaaa"], "newest first; a rollback is a configuration of its own");
+    assert_eq!((c[0].who.as_str(), c[0].seq), ("broker", Some(5)));
+    assert_eq!(c[1].who, "viper", "the person who approved it");
+    assert_eq!(c[0].what, "Change #3 rolled back fake: line", "one line");
+    assert_eq!(configurations_of(&entries, 1).len(), 1);
+    assert_eq!(ledgered_commit(&entries).as_deref(), Some("aaaa"), "the repair is the newest entry that moved it");
+    let more = format!("{ledger}\n{}", r#"{"seq":8,"ts":"t","actor":"broker","approved_by":null,"kind":"interrupted","tier":"user","reason":"i","data":{"commit":"cccc"}}"#);
+    assert_eq!(ledgered_commit(&history::parse(&more).unwrap()).as_deref(), Some("cccc"), "as the broker counts: interrupted too");
 }

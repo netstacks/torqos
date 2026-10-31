@@ -11,6 +11,8 @@ pub struct Entry {
     pub kind: String,
     pub tier: String,
     pub actor: String,
+    /// Who approved it (a person's login name), when someone did.
+    pub approved_by: Option<String>,
     pub tainted: bool,
     pub reason: String,
     pub data: Value,
@@ -60,6 +62,7 @@ pub fn parse(json_lines: &str) -> Result<Vec<Entry>> {
                 kind: s("kind"),
                 tier: s("tier"),
                 actor: s("actor"),
+                approved_by: v["approved_by"].as_str().map(String::from),
                 tainted: v["tainted"].as_bool().unwrap_or(false),
                 reason: s("reason"),
                 data: v["data"].clone(),
