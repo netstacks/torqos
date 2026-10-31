@@ -222,6 +222,14 @@ pkgs.testers.runNixOSTest {
         machine.succeed("journalctl -b -u torq-status -p warning | grep -q 'PROBLEM: running system'")
         out = machine.succeed("bash -ic true 2>&1")
         assert "not as its ledger says" in out, out
+        # torqcli reports it in its own words, without raw colour codes, and will not repair it
+        # without a person's yes (no terminal here: a script cannot switch the system).
+        out = machine.succeed("torqcli -c 'show system alarms'")
+        assert "not as its history says" in out and "request system repair" in out, out
+        assert "\\u{1b}" not in out and "\x1b" not in out, out
+        out = machine.fail("torqcli -c 'request system repair' 2>&1")
+        assert "needs a person to approve it" in out, out
+        machine.succeed("systemctl start torq-status && grep -q 'running system' /run/torq/drift")
         # Back on the ledgered system, all is well again.
         machine.succeed("/run/booted-system/bin/switch-to-configuration test")
         machine.succeed("systemctl start torq-status")

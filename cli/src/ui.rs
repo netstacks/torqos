@@ -21,7 +21,7 @@ impl Ui {
         Ui { color }
     }
 
-    #[cfg(test)]
+    /// No colour (tests, and text the shell cleans before printing).
     pub fn plain() -> Self {
         Ui { color: false }
     }

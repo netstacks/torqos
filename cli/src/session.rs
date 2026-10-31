@@ -31,8 +31,15 @@ pub trait Machine {
 
 /// A number for `rollback` / `show system rollback`.
 fn rollback_number(n: &str) -> Result<usize> {
-    n.parse().with_context(|| format!("'{n}' is not a number"))
+    let n: usize = n.parse().with_context(|| format!("'{n}' is not a number"))?;
+    if n > MAX_ROLLBACK {
+        bail!("rollback numbers go up to {MAX_ROLLBACK}");
+    }
+    Ok(n)
 }
+
+/// How far back `rollback` and `show system rollback` reach.
+const MAX_ROLLBACK: usize = 10_000;
 
 /// A commit confirmed waiting for its author.
 #[derive(Debug, Clone, PartialEq)]
@@ -325,7 +332,7 @@ impl<'a> Session<'a> {
     fn rollback(&mut self, w: &[String]) -> Result<String> {
         let n: usize = match w {
             [] => 0,
-            [n] => n.parse().with_context(|| format!("rollback: '{n}' is not a number"))?,
+            [n] => rollback_number(n).context("rollback")?,
             _ => bail!("rollback: takes one number"),
         };
         let history = self.repo.history(n + 1)?;
@@ -633,6 +640,9 @@ mod tests {
         assert_eq!(s.exec("show | compare").unwrap(), "[edit system]\n-   host-name two;\n+   host-name one;\n");
         assert!(format!("{:#}", s.exec("rollback 9").unwrap_err()).contains("only 2 configurations"));
         assert!(format!("{:#}", s.exec("rollback x").unwrap_err()).contains("not a number"));
+        for huge in ["rollback 18446744073709551615", "run show system rollback 18446744073709551615"] {
+            assert!(format!("{:#}", s.exec(huge).unwrap_err()).contains("go up to 10000"), "{huge}");
+        }
     }
 
     #[test]

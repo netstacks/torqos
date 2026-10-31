@@ -18,6 +18,22 @@ struct Real<'a> {
     cli: &'a Cli,
 }
 
+impl Real<'_> {
+    /// The broker's status as `torq status` reports it — without colour (the shell cleans its
+    /// output, which would show colour codes as text), naming the shell's own commands.
+    fn status_report(&self) -> Result<(serde_json::Value, crate::status::Report)> {
+        let log = run::start_log()?;
+        let v = match run::broker_status(broker(self.cli, &["status"]), &log)? {
+            Ok(v) => v,
+            Err(why) => bail!("couldn't check this machine: {why}"),
+        };
+        let last = crate::read_ledger(self.cli).ok().and_then(|l| history::last_change(&l));
+        let mut report = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &crate::ui::Ui::plain());
+        report.text = report.text.replace("torq status --repair", "request system repair");
+        Ok((v, report))
+    }
+}
+
 /// A broker outcome as a result, its message cleaned for the terminal.
 fn done(o: run::Outcome, what: &str) -> Result<serde_json::Value> {
     match o {
@@ -117,13 +133,8 @@ impl Machine for Real<'_> {
     }
 
     fn alarms(&self) -> Result<String> {
-        let log = run::start_log()?;
-        let v = match run::broker_status(broker(self.cli, &["status"]), &log)? {
-            Ok(v) => v,
-            Err(why) => bail!("couldn't check this machine: {why}"),
-        };
-        let last = crate::read_ledger(self.cli).ok().and_then(|l| history::last_change(&l));
-        let mut out = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &crate::ui::Ui::detect()).text;
+        let (v, report) = self.status_report()?;
+        let mut out = report.text;
         if let Some(seq) = v["pending_confirm"]["applied"].as_u64() {
             out.push_str(&format!(
                 "  change #{seq} (commit confirmed) rolls back at {} unless confirmed\n",
@@ -134,11 +145,26 @@ impl Machine for Real<'_> {
     }
 
     fn search(&self, terms: &[String]) -> Result<String> {
+        if let Some(t) = terms.iter().find(|t| t.starts_with('-')) {
+            bail!("show packages available: '{t}' is not a search term");
+        }
         crate::search(&self.cli.repo, terms)?; // prints as it goes (nix search)
         Ok(String::new())
     }
 
+    /// As `torq status --repair`: only when the report says a repair can fix what is wrong, and only
+    /// with a person's yes — it rebuilds and switches the whole system.
     fn repair(&self) -> Result<String> {
+        let (_, report) = self.status_report()?;
+        match report.fix {
+            crate::status::Fix::Repair => {}
+            crate::status::Fix::Nothing if report.exit == 0 => return Ok(format!("{}  Nothing to repair.\n", report.text)),
+            _ => bail!("not repaired: a repair would not fix this (see `show system alarms`); a person has to look"),
+        }
+        let shown: String = report.text.lines().map(|l| format!("{}\n", history::clean(l))).collect();
+        if !self.ask(&format!("{shown}This rebuilds and switches the system (all users). Repair? ")) {
+            bail!("not repaired: a repair needs a person to approve it at a terminal");
+        }
         let log = run::start_log()?;
         let v = {
             let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Repairing")) };
