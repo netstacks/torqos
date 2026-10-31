@@ -55,7 +55,11 @@ $ torqcli -c "configure; set users viper packages htop; commit"
 The same in both: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`,
 `rollback <n>`, `show system commit`, `switch cli`, `?` help, Tab completion, history (↑).
 
-**Pipes**: `| compare` and `| display set` (`| display detail`, `| display diff` later), then any
+**Pipes**: `| compare`, and one `| display`: `set` (a configuration as `set` commands), `detail` (what
+is behind a view: the config repo files and commit of a configuration, the commit ids of `show system
+commit`, the broker's commits and store paths in `show system alarms`), `diff` (a comparison as the
+raw diff of the files: for the candidate exactly what `commit` proposes; between two commits, the
+files as committed). Each view refuses what it does not offer. Then any
 number of **filters**, the real Linux tools with their own options (ADR-017): `| grep`, `| wc`, `| head`,
 `| tail`, `| sort`, `| uniq`, `| cut`, `| tr`, after any `show` in either style — e.g.
 `show configuration | grep -i host`, `show system commit | head -n 5 | wc -l`. They read the show's

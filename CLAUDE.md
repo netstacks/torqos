@@ -127,7 +127,7 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
 - **Filters and `torqcli <command>` (4b, 4c; ADR-017):** `show … | grep -i x | wc -l` runs the real
   coreutils/grep, sandboxed in bubblewrap (no files, network, environment or inherited descriptors);
   `torqcli show system alarms` runs one command. Covered in `tests/trust-loop.nix`.
-- Next: `| display detail` / `| display diff`, retiring `torq pkg/service/undo`, then M2 (`docs/ROADMAP.md`). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
+- `| display detail` / `| display diff` (4d). Next: retiring `torq pkg/service/undo`, then M2 (`docs/ROADMAP.md`). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
 ### You are probably running inside the dev VM
 - Host `torq-utm`, user **`viper`** (the template no longer names a user; `torq.user` in

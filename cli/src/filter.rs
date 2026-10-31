@@ -148,7 +148,9 @@ fn run(f: &Filter, input: Vec<u8>, max_time: Duration, max_output: u64) -> Resul
     let nothing = f.tool == "grep" && status.code() == Some(1);
     if !status.success() && !nothing {
         let why = String::from_utf8_lossy(&err);
-        let why = why.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| history::one_line(l, 200));
+        // The tool names itself (`head: cannot open …`): said once, as `| head: cannot open …`.
+        let first = why.lines().map(str::trim).find(|l| !l.is_empty());
+        let why = first.map(|l| history::one_line(l.strip_prefix(&format!("{}: ", f.tool)).unwrap_or(l), 200));
         match why {
             Some(why) => bail!("| {}: {why}", f.tool),
             None => bail!("| {}: it failed ({status})", f.tool),
@@ -193,6 +195,7 @@ mod tests {
         assert!(e.starts_with("| grep: "), "{e}");
         let e = format!("{:#}", apply(&f("head -n x"), OUT.into()).unwrap_err());
         assert!(e.starts_with("| head: "), "{e}");
+        assert!(!e.contains("head: head:"), "the tool named once: {e}");
     }
 
     #[test]
@@ -257,12 +260,15 @@ mod tests {
         let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
         let outside = dir.path().join("outside");
         let file = std::fs::File::create(&outside).unwrap();
-        // SAFETY: dup2 onto a descriptor number nothing else here uses; dup2 leaves it inheritable.
-        assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), 77) }, 77);
-        let payload: String = (0..50_000).map(|_| "echo escaped >&77\n").collect();
+        // An inheritable copy on a free descriptor (F_DUPFD never takes one in use: the tests run in
+        // parallel, and a fixed number could be another test's pipe).
+        // SAFETY: duplicates a descriptor this test owns; no memory is involved.
+        let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 100) };
+        assert!(fd >= 100, "F_DUPFD");
+        let payload: String = (0..50_000).map(|_| format!("echo escaped >&{fd}\n")).collect();
         let _ = apply(&f(&format!("sort -S 64k --compress-program={}", sh.display())), payload);
         // SAFETY: closes only the descriptor made above.
-        unsafe { libc::close(77) };
+        unsafe { libc::close(fd) };
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "", "a descriptor reached inside");
     }
 

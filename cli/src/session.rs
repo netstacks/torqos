@@ -3,7 +3,7 @@
 //! through `Machine`, so the whole command layer is testable without either.
 
 use crate::candidate::{self, Candidate, Repo};
-use crate::syntax::{self, CommitOptions, Op, Pipes, Style};
+use crate::syntax::{self, CommitOptions, Display, Op, Style};
 use crate::tree::{Config, Kind, Schema};
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
@@ -22,8 +22,9 @@ pub trait Machine {
     fn confirm(&self) -> Result<u64>;
     /// Ask a person (a system-tier commit); false when there is no one to ask.
     fn ask(&self, question: &str) -> bool;
-    /// `show system alarms`: what is not as the ledger says (and a commit confirmed waiting).
-    fn alarms(&self) -> Result<String>;
+    /// `show system alarms`: what is not as the ledger says (and a commit confirmed waiting); with
+    /// `detail`, the broker's facts behind it (commits, store paths).
+    fn alarms(&self, detail: bool) -> Result<String>;
     /// `show packages available <term>…`.
     fn search(&self, terms: &[String]) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
@@ -222,11 +223,17 @@ impl<'a> Session<'a> {
     fn run(&mut self, op: Op) -> Result<String> {
         match op {
             Op::Configure => self.configure(),
-            Op::ShowActive { path, pipes } => {
-                let active = self.active()?;
-                Ok(if pipes.display_set { self.display_set(&active, &path)? } else { self.schema.show(&active, &path)? })
+            Op::ShowActive { path, display } => {
+                if display != Some(Display::Detail) {
+                    let active = self.active()?;
+                    return self.view(&active, &path, display, "");
+                }
+                // The commit named is the one shown: read at that id, not at HEAD again.
+                let head = self.repo.head()?;
+                let active = self.configuration_of(&head)?;
+                self.view(&active, &path, display, &format!("commit {head}"))
             }
-            Op::ShowCommits | Op::ShowRollback { .. } | Op::ShowAlarms | Op::ShowServices | Op::ShowPackages { .. } => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } => {
                 self.show_operational(op)
             }
             Op::Request { words } => self.request(&words),
@@ -307,8 +314,12 @@ impl<'a> Session<'a> {
                 self.save()?;
                 Ok(String::new())
             }
-            Op::ShowCandidate { path, pipes } => self.show_candidate(&self.here(&path), &pipes),
-            Op::Compare => self.compare(),
+            Op::ShowCandidate { path, display } => {
+                let c = self.candidate()?;
+                let (cfg, origin) = (c.config.clone(), format!("the candidate, from commit {}", c.base));
+                self.view(&cfg, &self.here(&path), display, &origin)
+            }
+            Op::Compare { display } => self.compare(display),
             Op::Rollback { n } => self.rollback(n),
             Op::Commit(o) => self.commit(o),
             Op::Run(op) => {
@@ -348,6 +359,32 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// A configuration, or the part below `path`, as `display` asks. `origin`: where it comes from
+    /// (`| display detail`).
+    fn view(&self, cfg: &Config, path: &[String], display: Option<Display>, origin: &str) -> Result<String> {
+        match display {
+            None => self.schema.show(cfg, path),
+            Some(Display::Set) => self.display_set(cfg, path),
+            Some(Display::Detail) => {
+                let mut out = self.schema.show(cfg, path)?;
+                let at = self.schema.resolve_in(path, Some(cfg))?.words;
+                out.push_str(&format!("## {origin}\n"));
+                for (file, settings) in self.schema.files_of(cfg, &at) {
+                    out.push_str(&format!("## {file}: {}\n", settings.join(", ")));
+                }
+                Ok(out)
+            }
+            Some(Display::Diff) => bail!("| display diff is for a comparison"),
+        }
+    }
+
+    /// The raw change from `base` (tree files) to `cfg`, as the broker records it (`| display diff`).
+    fn raw_diff(&self, base: &std::collections::BTreeMap<String, Vec<u8>>, cfg: &Config) -> Result<String> {
+        let changes = candidate::changes(&self.schema, base, cfg)?;
+        let scratch = tempfile::tempdir()?;
+        candidate::unified_diff(scratch.path(), &changes)
+    }
+
     /// `| display set`, of the whole configuration or the part below `path`.
     fn display_set(&self, cfg: &Config, path: &[String]) -> Result<String> {
         let all = self.schema.display_set(cfg);
@@ -378,22 +415,35 @@ impl<'a> Session<'a> {
 
     fn show_operational(&mut self, op: Op) -> Result<String> {
         match op {
-            Op::ShowCommits => {
+            Op::ShowCommits { display } => {
                 let mut out = String::new();
                 for (n, c) in self.repo.history(50)?.iter().enumerate() {
                     out.push_str(&format!("{n:<3} {}  {}\n", c.date, c.subject));
+                    if display == Some(Display::Detail) {
+                        out.push_str(&format!("    commit {}\n", c.id));
+                    }
                 }
                 Ok(out)
             }
-            Op::ShowRollback { n, compare } => {
-                let n_cfg = self.configuration_at(n)?;
-                Ok(match compare {
-                    None => self.schema.show(&n_cfg, &[])?,
+            Op::ShowRollback { n, compare, display } => {
+                let n_id = self.commit_at(n)?;
+                let n_cfg = self.configuration_of(&n_id)?;
+                match compare {
+                    None => self.view(&n_cfg, &[], display, &format!("commit {n_id} (rollback {n})")),
                     // What going from configuration m to configuration n changes.
-                    Some(m) => self.schema.compare(&self.configuration_at(m)?, &n_cfg),
-                })
+                    Some(m) => {
+                        let m_id = self.commit_at(m)?;
+                        match display {
+                            Some(Display::Diff) => {
+                                let (old, new) = (self.repo.all_files(&m_id)?, self.repo.all_files(&n_id)?);
+                                commits_diff(&old, &new)
+                            }
+                            _ => Ok(self.schema.compare(&self.configuration_of(&m_id)?, &n_cfg)),
+                        }
+                    }
+                }
             }
-            Op::ShowAlarms => self.machine.alarms(),
+            Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail)),
             Op::ShowServices => {
                 let active = self.active()?;
                 let on: Vec<String> = match active.files.get("services.json") {
@@ -412,11 +462,16 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// The configuration n changes back (`rollback <n>`'s numbering: 0 is the current one).
-    fn configuration_at(&self, n: usize) -> Result<Config> {
+    /// The commit n changes back (`rollback <n>`'s numbering: 0 is the current one).
+    fn commit_at(&self, n: usize) -> Result<String> {
         let history = self.repo.history(n + 1)?;
         let c = history.get(n).with_context(|| format!("there are only {} configurations", history.len()))?;
-        let files = self.repo.tree_files(&self.schema, &c.id)?;
+        Ok(c.id.clone())
+    }
+
+    /// The configuration at commit `id`.
+    fn configuration_of(&self, id: &str) -> Result<Config> {
+        let files = self.repo.tree_files(&self.schema, id)?;
         self.schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))
     }
 
@@ -430,18 +485,17 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn show_candidate(&mut self, path: &[String], pipes: &Pipes) -> Result<String> {
-        let cfg = self.candidate()?.config.clone();
-        Ok(if pipes.display_set { self.display_set(&cfg, path)? } else { self.schema.show(&cfg, path)? })
-    }
-
-    /// What the candidate changes from its base.
-    fn compare(&mut self) -> Result<String> {
+    /// What the candidate changes from its base (`| display diff`: as the raw diff of the files).
+    fn compare(&mut self, display: Option<Display>) -> Result<String> {
         let s = self.schema.clone();
         let base = self.candidate()?.base.clone();
         let base_files = self.repo.tree_files(&s, &base)?;
+        let cfg = self.candidate()?.config.clone();
+        if display == Some(Display::Diff) {
+            return self.raw_diff(&base_files, &cfg);
+        }
         let before = s.load(base_files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        Ok(s.compare(&before, &self.candidate()?.config))
+        Ok(s.compare(&before, &cfg))
     }
 
     fn rollback(&mut self, n: usize) -> Result<String> {
@@ -561,6 +615,19 @@ impl<'a> Session<'a> {
     }
 }
 
+/// The raw change between two commits: every file (the tree's, the Nix files, `flake.lock`), byte
+/// for byte as committed (not as TorqOS would write them now).
+fn commits_diff(old: &std::collections::BTreeMap<String, Vec<u8>>, new: &std::collections::BTreeMap<String, Vec<u8>>) -> Result<String> {
+    let paths: std::collections::BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+    let changes: Vec<candidate::RawChange> = paths
+        .into_iter()
+        .filter(|p| old.get(*p) != new.get(*p))
+        .map(|p| (p.clone(), old.get(p).map(Vec::as_slice), new.get(p).map(Vec::as_slice)))
+        .collect();
+    let scratch = tempfile::tempdir()?;
+    candidate::unified_diff_bytes(scratch.path(), &changes)
+}
+
 /// A ledger reason from the comparison: its `+`/`-` lines, short.
 fn summary(compare: &str) -> String {
     let lines: Vec<&str> = compare.lines().filter(|l| !l.starts_with('[')).map(|l| l.trim()).collect();
@@ -613,8 +680,8 @@ mod tests {
             self.asked.borrow_mut().push(q.into());
             self.answer
         }
-        fn alarms(&self) -> Result<String> {
-            Ok("all well\n".into())
+        fn alarms(&self, detail: bool) -> Result<String> {
+            Ok(if detail { "all well\n  running system /nix/store/x\n".into() } else { "all well\n".into() })
         }
         fn search(&self, terms: &[String]) -> Result<String> {
             Ok(format!("searched {}\n", terms.join(" ")))
@@ -666,6 +733,61 @@ mod tests {
         assert!(words("grep 'open").is_err());
         let e = format!("{:#}", words("commit comment it's fine").unwrap_err());
         assert!(e.contains("put the text in \"double quotes\""), "an apostrophe opens a quote, as in a shell: {e}");
+    }
+
+    #[test]
+    fn a_raw_diff_between_commits_is_every_file_as_committed() {
+        let (d, m) = (repo(), Fake::default());
+        sh(d.path(), "printf '{\"nodes\":{}}' > flake.lock && printf '{ }\\n' > flake.nix && git add -A && git commit -qm software");
+        let mut s = session(d.path(), None, &m);
+        let raw = s.exec("show system rollback 0 compare 1 | display diff").unwrap();
+        assert!(raw.contains("+++ b/flake.lock\n") && raw.contains("+{\"nodes\":{}}") && raw.contains("+++ b/flake.nix\n"), "{raw}");
+        assert!(!raw.contains("host.json"), "only what changed: {raw}");
+        assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "", "the tree did not change");
+    }
+
+    #[test]
+    fn display_detail_names_each_users_files() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set users dev packages htop", "set users dev cli style cisco"]);
+        let out = s.exec("show users dev | display detail").unwrap();
+        assert!(out.contains("## users/dev/cli.json: users dev cli style\n") && out.contains("## users/dev/packages.json: users dev packages\n"), "{out}");
+        assert!(!out.contains("system/"), "only what is shown: {out}");
+        let sys = s.exec("show system | display detail").unwrap();
+        assert!(sys.contains("## system/host.json: system host-name\n") && !sys.contains("users/"), "{sys}");
+    }
+
+    #[test]
+    fn display_detail_and_diff_show_what_is_behind() {
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        let head = s.repo.head().unwrap();
+        let first = s.repo.history(2).unwrap()[1].id.clone();
+        assert_eq!(
+            s.exec("show configuration | display detail").unwrap(),
+            format!("system {{\n    host-name two;\n}}\n## commit {head}\n## system/host.json: system host-name\n"),
+            "only the settings set (no time-zone here)"
+        );
+        assert!(s.exec("show configuration users | display detail").unwrap().ends_with(&format!("## commit {head}\n")), "no files below users");
+        let commits = s.exec("show system commit | display detail").unwrap();
+        assert!(commits.contains(&format!("\n    commit {head}\n")) && commits.ends_with(&format!("    commit {first}\n")), "{commits}");
+        assert!(s.exec("show system rollback 1 | display detail").unwrap().contains(&format!("host-name one;\n}}\n## commit {first} (rollback 1)\n")));
+        let raw = s.exec("show system rollback 0 compare 1 | display diff").unwrap();
+        assert_eq!(raw, "--- a/system/host.json\n+++ b/system/host.json\n@@ -1 +1 @@\n-{ \"host-name\": \"one\" }\n+{ \"host-name\": \"two\" }\n", "the files as committed");
+        assert_eq!(s.exec("show system alarms | display detail").unwrap(), "all well\n  running system /nix/store/x\n");
+        assert_eq!(s.exec("show system alarms").unwrap(), "all well\n");
+        run(&mut s, &["configure", "set system host-name three"]);
+        let raw = s.exec("show | compare | display diff").unwrap();
+        assert!(raw.contains("+++ b/system/host.json") && raw.contains("+  \"host-name\": \"three\""), "{raw}");
+        assert_eq!(s.exec("show | compare | display diff").unwrap(), {
+            // What `show | compare | display diff` shows is exactly what commit proposes.
+            s.exec("commit").unwrap();
+            m.commits.borrow()[0].0.clone()
+        });
+        run(&mut s, &["set system host-name four"]);
+        let detail = s.exec("show system | display detail").unwrap();
+        assert!(detail.contains("host-name four;") && detail.contains(&format!("## the candidate, from commit {head}\n")), "{detail}");
     }
 
     #[cfg(target_os = "linux")] // the filters' sandbox

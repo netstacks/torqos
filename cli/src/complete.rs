@@ -91,6 +91,10 @@ pub fn choices_at(schema: &Schema, at: &At, words: &[String], partial: &str) -> 
         (Mode::Configuration, Style::Cisco, Some("show")) => match &words[1..] {
             [] => table(&[("configuration", "The candidate")]),
             [w] if w == "configuration" => table(&[("diff", "What the candidate changes")]),
+            [c, d, b] if c == "configuration" && d == "diff" && b == "|" => table(DISPLAY),
+            [c, d, b, x] if c == "configuration" && d == "diff" && b == "|" && x == "display" => table(OF_COMPARISON),
+            [c, .., b] if c == "configuration" && b == "|" => table(DISPLAY),
+            [c, .., b, x] if c == "configuration" && b == "|" && x == "display" => table(OF_CONFIGURATION),
             _ => vec![],
         },
         (Mode::Configuration, Style::Cisco, Some("rollback")) => match &words[1..] {
@@ -137,6 +141,14 @@ fn with_filters(words: &[String], mut all: Vec<Choice>) -> Vec<Choice> {
     let after_filter = words[..bar].windows(2).any(|p| p[0] == "|" && is_filter(&p[1]));
     match words.get(bar + 1) {
         None => {
+            // Each of a show's own pipes comes once (one `| display`, one `| compare`).
+            let used = |p: &str| words[..bar].windows(2).any(|w| w[0] == "|" && w[1] == p);
+            if used("display") {
+                all.retain(|c| c.word != "display" && c.word != "compare");
+            }
+            if used("compare") {
+                all.retain(|c| c.word != "compare");
+            }
             if after_filter {
                 all.clear();
             }
@@ -149,6 +161,12 @@ fn with_filters(words: &[String], mut all: Vec<Choice>) -> Vec<Choice> {
     }
     all
 }
+
+const DISPLAY: &[(&str, &str)] = &[("display", "Show it differently")];
+/// What `| display` offers after a configuration, a comparison, and the commit list or alarms.
+const OF_CONFIGURATION: &[(&str, &str)] = &[("detail", "With the files and commit behind it"), ("set", "As set commands")];
+const OF_COMPARISON: &[(&str, &str)] = &[("diff", "As the raw diff of the files (what the broker records)")];
+const OF_DETAIL: &[(&str, &str)] = &[("detail", "With the commits and store paths behind it")];
 
 fn commit_choices(rest: &[String]) -> Vec<Choice> {
     match rest {
@@ -222,8 +240,11 @@ fn operational_show(style: Style, rest: &[String]) -> Vec<Choice> {
         ["system", "rollback", _, "compare"] => vec![Choice::new("<number>", "The configuration to compare with")],
         ["packages"] => table(&[("available", "Search nixpkgs")]),
         ["packages", "available", ..] => vec![Choice::new("<term>", "Words to search for")],
-        ["configuration", .., "|"] => table(&[("display", "Show it differently")]),
-        ["configuration", .., "|", "display"] => table(&[("set", "As set commands")]),
+        ["configuration", .., "|"] | ["system", "commit" | "alarms", "|"] => table(DISPLAY),
+        ["system", "rollback", _, "|"] | ["system", "rollback", _, "compare", _, "|"] => table(DISPLAY),
+        ["configuration", .., "|", "display"] | ["system", "rollback", _, "|", "display"] => table(OF_CONFIGURATION),
+        ["system", "commit" | "alarms", "|", "display"] => table(OF_DETAIL),
+        ["system", "rollback", _, "compare", _, "|", "display"] => table(OF_COMPARISON),
         _ => vec![],
     }
 }
@@ -234,9 +255,12 @@ fn pipe_choices(cmd: &str, rest: &[String]) -> Option<Vec<Choice>> {
     if cmd != "show" {
         return Some(vec![]);
     }
-    Some(match &rest[at + 1..] {
-        [] => table(&[("compare", "What the candidate changes"), ("display", "Show it differently")]),
-        [w] if w == "display" => table(&[("set", "As set commands")]),
+    let compare = rest[..at].iter().any(|w| w == "compare");
+    Some(match (&rest[at + 1..], compare) {
+        ([], false) => table(&[("compare", "What the candidate changes"), DISPLAY[0]]),
+        ([], true) => table(DISPLAY),
+        ([w], false) if w == "display" => table(OF_CONFIGURATION),
+        ([w], true) if w == "display" => table(OF_COMPARISON),
         _ => vec![],
     })
 }
@@ -351,7 +375,19 @@ mod tests {
         let s = schema();
         assert!(words_of(&choices(&s, Mode::Configuration, &w("show"), "")).contains(&"|"));
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show |"), "")), ["compare", "display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show system | display"), "")), ["set"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show system | display"), "")), ["detail", "set"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | compare |"), "")), ["display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | compare | display"), "")), ["diff"]);
+        let filters = ["cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"];
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | display set |"), "")), filters, "one display");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | compare | display diff |"), "")), filters);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration | display set |"), "")), filters);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system commit | display"), "")), ["detail"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2 | display"), "")), ["detail", "set"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2 compare 0 | display"), "")), ["diff"]);
+        let cisco = At { mode: Mode::Configuration, style: Style::Cisco, edit: vec![] };
+        assert_eq!(words_of(&choices_at(&s, &cisco, &w("show configuration diff | display"), "")), ["diff"]);
+        assert_eq!(words_of(&choices_at(&s, &cisco, &w("show configuration system | display"), "")), ["detail", "set"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "")), ["display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"]);
     }
 
@@ -359,8 +395,10 @@ mod tests {
     fn filters_after_any_show() {
         let s = schema();
         let filters = ["cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"];
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system commit |"), "")), filters);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run show system alarms |"), "")), filters);
+        let mut with_display = vec!["display"];
+        with_display.extend(filters);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system commit |"), "")), with_display);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run show system alarms |"), "")), with_display);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | grep x |"), "")), filters, "after a filter, only filters");
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "g")), ["grep"]);
         assert!(choices(&s, Mode::Operational, &w("show configuration | grep"), "").is_empty(), "grep's options are grep's");
@@ -368,9 +406,7 @@ mod tests {
         assert!(choices(&s, Mode::Operational, &w("show packages available x |"), "").is_empty(), "a search cannot be filtered");
         assert!(choices(&s, Mode::Configuration, &w("set system |"), "").is_empty(), "only a show");
         let cisco = At { mode: Mode::Configuration, style: Style::Cisco, edit: vec![] };
-        assert_eq!(words_of(&choices_at(&s, &cisco, &w("show configuration |"), "")), filters);
-        let mut with_display = vec!["display"];
-        with_display.extend(filters);
+        assert_eq!(words_of(&choices_at(&s, &cisco, &w("show configuration |"), "")), with_display);
         assert_eq!(words_of(&choices_at(&s, &cisco, &w("do show running-config |"), "")), with_display);
     }
 

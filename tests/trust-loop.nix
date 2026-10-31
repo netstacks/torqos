@@ -167,6 +167,10 @@ pkgs.testers.runNixOSTest {
         # What a filter prints reaches the terminal cleaned, like everything else.
         out = machine.succeed(dev_sh("torqcli -c \"show configuration | tr s '\\\\033'\""))
         assert "\x1b" not in out and "\\u{1b}y\\u{1b}tem {" in out, repr(out)
+        # What is behind a view, only when asked.
+        out = machine.succeed(dev_sh("torqcli 'show configuration | display detail'"))
+        assert "## commit " in out and "## system/host.json: system host-name\n" in out, out
+        assert "##" not in machine.succeed(dev_sh("torqcli show configuration")), "no internals unless asked"
         # One command, no -c: a configuration change is refused, and says how.
         out = machine.fail(dev_sh("torqcli configure 2>&1"))
         assert "torqcli -c" in out, out

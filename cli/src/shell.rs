@@ -133,7 +133,7 @@ impl Machine for Real<'_> {
         v["seq"].as_u64().context("the broker did not say what it recorded")
     }
 
-    fn alarms(&self) -> Result<String> {
+    fn alarms(&self, detail: bool) -> Result<String> {
         let (v, report) = self.status_report()?;
         let mut out = report.text;
         if let Some(seq) = v["pending_confirm"]["applied"].as_u64() {
@@ -141,6 +141,25 @@ impl Machine for Real<'_> {
                 "  change #{seq} (commit confirmed) rolls back at {} unless confirmed\n",
                 history::one_line(v["pending_confirm"]["deadline"].as_str().unwrap_or("?"), 40)
             ));
+        }
+        if detail {
+            // The facts behind the report, as the broker gives them (`torq-broker status`).
+            let fact = |k: &str| match &v[k] {
+                serde_json::Value::Null => "-".to_string(),
+                serde_json::Value::String(s) => history::one_line(s, 120),
+                other => history::one_line(&other.to_string(), 120),
+            };
+            for (label, key) in [
+                ("config repo commit", "head"),
+                ("ledgered commit", "ledgered_commit"),
+                ("ledger entries", "ledger_entries"),
+                ("ledgered system", "ledgered_system"),
+                ("running system", "running_system"),
+                ("next boot", "next_boot"),
+            ] {
+                out.push_str(&format!("  {label:<20} {}\n", fact(key)));
+            }
+            out.push_str(&format!("  {:<20} {} status\n", "from", history::one_line(&self.cli.broker, 80)));
         }
         Ok(out)
     }

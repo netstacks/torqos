@@ -36,11 +36,42 @@ pub const RESERVED: &[&str] = &[
     "run", "switch", "quit", "request", "all", "help", "diff",
 ];
 
-/// The pipes after a `show`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Pipes {
-    pub compare: bool,
-    pub display_set: bool,
+/// `| display …` after a `show`: what each view offers (CLI-DESIGN principle 5: internals only when
+/// asked).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Display {
+    /// A configuration as `set` commands.
+    Set,
+    /// With what is behind it: the files, commits, store paths.
+    Detail,
+    /// A comparison as the raw diff of the files (what the broker records).
+    Diff,
+}
+
+impl Display {
+    fn name(self) -> &'static str {
+        match self {
+            Display::Set => "set",
+            Display::Detail => "detail",
+            Display::Diff => "diff",
+        }
+    }
+}
+
+/// The displays a configuration, a comparison, and the commit list or alarms offer.
+const OF_CONFIGURATION: &[Display] = &[Display::Set, Display::Detail];
+const OF_COMPARISON: &[Display] = &[Display::Diff];
+const OF_DETAIL: &[Display] = &[Display::Detail];
+
+/// `d` if `what` offers it.
+fn offered(what: &str, allowed: &[Display], d: Option<Display>) -> Result<Option<Display>> {
+    match d {
+        Some(d) if !allowed.contains(&d) => {
+            let names: Vec<String> = allowed.iter().map(|a| format!("| display {}", a.name())).collect();
+            bail!("| display {}: not for {what} (it has {})", d.name(), names.join(", "))
+        }
+        d => Ok(d),
+    }
 }
 
 /// `commit` options.
@@ -57,11 +88,11 @@ pub struct CommitOptions {
 pub enum Op {
     // Operational mode.
     Configure,
-    /// `show configuration [path] [| display set]` (Cisco: `show running-config`).
-    ShowActive { path: Vec<String>, pipes: Pipes },
-    ShowCommits,
-    ShowRollback { n: usize, compare: Option<usize> },
-    ShowAlarms,
+    /// `show configuration [path] [| display set|detail]` (Cisco: `show running-config`).
+    ShowActive { path: Vec<String>, display: Option<Display> },
+    ShowCommits { display: Option<Display> },
+    ShowRollback { n: usize, compare: Option<usize>, display: Option<Display> },
+    ShowAlarms { display: Option<Display> },
     ShowServices,
     ShowPackages { terms: Vec<String> },
     Request { words: Vec<String> },
@@ -75,9 +106,9 @@ pub enum Op {
     Up,
     Top,
     /// The candidate (Cisco: `show configuration`).
-    ShowCandidate { path: Vec<String>, pipes: Pipes },
+    ShowCandidate { path: Vec<String>, display: Option<Display> },
     /// What the candidate changes (Juniper `show | compare`, Cisco `show configuration diff`).
-    Compare,
+    Compare { display: Option<Display> },
     Rollback { n: usize },
     Commit(CommitOptions),
     /// An operational command from configuration mode (Juniper `run`, Cisco `do`).
@@ -101,18 +132,44 @@ fn number(n: &str) -> Result<usize> {
     Ok(n)
 }
 
-fn split_pipes(w: &[String]) -> Result<(Vec<String>, Pipes)> {
+/// A show's words and its own pipes: the words before them, whether `| compare` came, and the
+/// `| display` (one).
+fn split_pipes(w: &[String]) -> Result<(Vec<String>, bool, Option<Display>)> {
     let mut parts = w.split(|x| x == "|");
     let head = parts.next().unwrap_or_default().to_vec();
-    let mut p = Pipes::default();
+    let (mut compare, mut display) = (false, None);
     for part in parts {
-        match part.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-            ["compare"] => p.compare = true,
-            ["display", "set"] => p.display_set = true,
-            other => bail!("unknown pipe: | {}; one of: compare, display set, or a filter: {}", other.join(" "), crate::filter::names()),
+        let d = match part.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            ["compare"] if !compare => {
+                compare = true;
+                continue;
+            }
+            ["display", "set"] => Display::Set,
+            ["display", "detail"] => Display::Detail,
+            ["display", "diff"] => Display::Diff,
+            other => bail!(
+                "unknown pipe: | {}; one of: compare, display set|detail|diff, or a filter: {}",
+                other.join(" "),
+                crate::filter::names()
+            ),
+        };
+        if let Some(was) = display.replace(d) {
+            bail!("one | display at a time (| display {} and | display {})", was.name(), d.name());
         }
     }
-    Ok((head, p))
+    Ok((head, compare, display))
+}
+
+/// The pipes after a show that takes no more words (`show system commit [| display detail]`).
+fn view_pipes(what: &str, w: &[String], allowed: &[Display]) -> Result<Option<Display>> {
+    let (rest, compare, display) = split_pipes(w)?;
+    if let Some(x) = rest.first() {
+        bail!("{what}: unexpected '{x}'");
+    }
+    if compare {
+        bail!("| compare is for the candidate, in configuration mode");
+    }
+    offered(what, allowed, display)
 }
 
 /// The most filters one line may chain (each runs in its own sandbox).
@@ -148,8 +205,8 @@ fn split_filters(w: &[String]) -> Result<(Vec<String>, Vec<Filter>)> {
 /// Whether `op` prints output a filter can work on.
 fn shows(op: &Op) -> bool {
     match op {
-        Op::ShowActive { .. } | Op::ShowCommits | Op::ShowRollback { .. } | Op::ShowAlarms | Op::ShowServices => true,
-        Op::ShowCandidate { .. } | Op::Compare => true,
+        Op::ShowActive { .. } | Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices => true,
+        Op::ShowCandidate { .. } | Op::Compare { .. } => true,
         Op::Run(op) => shows(op),
         _ => false,
     }
@@ -209,23 +266,31 @@ fn parse_operational(style: Style, w: &[String]) -> Result<Op> {
         ["exit" | "quit"] => Op::Exit,
         ["switch", "cli"] => Op::SwitchCli,
         ["show", "configuration", ..] if style == Style::Juniper => {
-            let (path, pipes) = split_pipes(&w[2..])?;
-            if pipes.compare {
+            let (path, compare, display) = split_pipes(&w[2..])?;
+            if compare {
                 bail!("| compare is for the candidate, in configuration mode");
             }
-            Op::ShowActive { path, pipes }
+            Op::ShowActive { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
         }
         ["show", "running-config", ..] if style == Style::Cisco => {
-            let (path, pipes) = split_pipes(&w[2..])?;
-            if pipes.compare {
+            let (path, compare, display) = split_pipes(&w[2..])?;
+            if compare {
                 bail!("| compare is for the candidate: `show configuration diff` in configuration mode");
             }
-            Op::ShowActive { path, pipes }
+            Op::ShowActive { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
         }
-        ["show", "system", "commit"] => Op::ShowCommits,
-        ["show", "system", "rollback", n] => Op::ShowRollback { n: number(n)?, compare: None },
-        ["show", "system", "rollback", n, "compare", m] => Op::ShowRollback { n: number(n)?, compare: Some(number(m)?) },
-        ["show", "system", "alarms"] => Op::ShowAlarms,
+        ["show", "system", "commit", ..] => Op::ShowCommits { display: view_pipes("show system commit", &w[3..], OF_DETAIL)? },
+        ["show", "system", "rollback", ..] => {
+            let bar = w.iter().position(|x| x == "|").unwrap_or(w.len());
+            let (n, compare) = match &s[3..bar] {
+                [n] => (number(n)?, None),
+                [n, "compare", m] => (number(n)?, Some(number(m)?)),
+                _ => bail!("show system rollback <n> [compare <m>]"),
+            };
+            let (what, allowed) = if compare.is_some() { ("a comparison", OF_COMPARISON) } else { ("a configuration", OF_CONFIGURATION) };
+            Op::ShowRollback { n, compare, display: view_pipes(what, &w[bar..], allowed)? }
+        }
+        ["show", "system", "alarms", ..] => Op::ShowAlarms { display: view_pipes("show system alarms", &w[3..], OF_DETAIL)? },
         ["show", "services"] => Op::ShowServices,
         ["show", "packages", "available", terms @ ..] if !terms.is_empty() => Op::ShowPackages { terms: w[3..].to_vec() },
         ["request", ..] => Op::Request { words: w[1..].to_vec() },
@@ -256,13 +321,13 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
             ["edit", ..] => Op::Edit { words: w[1..].to_vec() },
             ["up"] => Op::Up,
             ["top"] => Op::Top,
-            ["show", "|", "compare"] => Op::Compare,
             ["show", ..] => {
-                let (path, pipes) = split_pipes(&w[1..])?;
-                if pipes.compare {
-                    bail!("| compare compares the whole candidate: `show | compare`");
+                let (path, compare, display) = split_pipes(&w[1..])?;
+                match (compare, path.is_empty()) {
+                    (true, true) => Op::Compare { display: offered("a comparison", OF_COMPARISON, display)? },
+                    (true, false) => bail!("| compare compares the whole candidate: `show | compare`"),
+                    (false, _) => Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? },
                 }
-                Op::ShowCandidate { path, pipes }
             }
             ["rollback"] => Op::Rollback { n: 0 },
             ["rollback", n] => Op::Rollback { n: number(n)? },
@@ -280,13 +345,13 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
             ["exit"] => Op::Exit,
             ["top"] => Op::Top,
             ["end"] => Op::End,
-            ["show", "configuration", "diff"] => Op::Compare,
+            ["show", "configuration", "diff", ..] => Op::Compare { display: view_pipes("a comparison", &w[3..], OF_COMPARISON)? },
             ["show", "configuration", ..] => {
-                let (path, pipes) = split_pipes(&w[2..])?;
-                if pipes.compare {
+                let (path, compare, display) = split_pipes(&w[2..])?;
+                if compare {
                     bail!("the comparison is `show configuration diff`");
                 }
-                Op::ShowCandidate { path, pipes }
+                Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
             }
             ["rollback", "configuration"] => Op::Rollback { n: 0 },
             ["rollback", "configuration", n] => Op::Rollback { n: number(n)? },
@@ -308,15 +373,8 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
 // an Op yet, so it is compiled for the tests only.
 
 #[cfg(test)]
-fn pipes_text(p: &Pipes) -> String {
-    let mut s = String::new();
-    if p.compare {
-        s.push_str(" | compare");
-    }
-    if p.display_set {
-        s.push_str(" | display set");
-    }
-    s
+fn display_text(d: &Option<Display>) -> String {
+    d.map(|d| format!(" | display {}", d.name())).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -356,12 +414,12 @@ pub fn render(style: Style, op: &Op) -> String {
     };
     match (style, op) {
         (_, Op::Configure) => "configure".into(),
-        (Style::Juniper, Op::ShowActive { path, pipes }) => format!("{}{}", sep("show configuration", path), pipes_text(pipes)),
-        (Style::Cisco, Op::ShowActive { path, pipes }) => format!("{}{}", sep("show running-config", path), pipes_text(pipes)),
-        (_, Op::ShowCommits) => "show system commit".into(),
-        (_, Op::ShowRollback { n, compare: None }) => format!("show system rollback {n}"),
-        (_, Op::ShowRollback { n, compare: Some(m) }) => format!("show system rollback {n} compare {m}"),
-        (_, Op::ShowAlarms) => "show system alarms".into(),
+        (Style::Juniper, Op::ShowActive { path, display }) => format!("{}{}", sep("show configuration", path), display_text(display)),
+        (Style::Cisco, Op::ShowActive { path, display }) => format!("{}{}", sep("show running-config", path), display_text(display)),
+        (_, Op::ShowCommits { display }) => format!("show system commit{}", display_text(display)),
+        (_, Op::ShowRollback { n, compare: None, display }) => format!("show system rollback {n}{}", display_text(display)),
+        (_, Op::ShowRollback { n, compare: Some(m), display }) => format!("show system rollback {n} compare {m}{}", display_text(display)),
+        (_, Op::ShowAlarms { display }) => format!("show system alarms{}", display_text(display)),
         (_, Op::ShowServices) => "show services".into(),
         (_, Op::ShowPackages { terms }) => sep("show packages available", terms),
         (_, Op::Request { words }) => sep("request", words),
@@ -374,10 +432,10 @@ pub fn render(style: Style, op: &Op) -> String {
         (Style::Juniper, Op::Up) => "up".into(),
         (Style::Cisco, Op::Up) => "exit".into(),
         (_, Op::Top) => "top".into(),
-        (Style::Juniper, Op::ShowCandidate { path, pipes }) => format!("{}{}", sep("show", path), pipes_text(pipes)),
-        (Style::Cisco, Op::ShowCandidate { path, pipes }) => format!("{}{}", sep("show configuration", path), pipes_text(pipes)),
-        (Style::Juniper, Op::Compare) => "show | compare".into(),
-        (Style::Cisco, Op::Compare) => "show configuration diff".into(),
+        (Style::Juniper, Op::ShowCandidate { path, display }) => format!("{}{}", sep("show", path), display_text(display)),
+        (Style::Cisco, Op::ShowCandidate { path, display }) => format!("{}{}", sep("show configuration", path), display_text(display)),
+        (Style::Juniper, Op::Compare { display }) => format!("show | compare{}", display_text(display)),
+        (Style::Cisco, Op::Compare { display }) => format!("show configuration diff{}", display_text(display)),
         (Style::Juniper, Op::Rollback { n }) => format!("rollback {n}"),
         (Style::Cisco, Op::Rollback { n }) => format!("rollback configuration {n}"),
         (_, Op::Commit(o)) => commit(o),
@@ -409,15 +467,20 @@ mod tests {
     /// Every operation, in both modes it exists in.
     fn ops() -> Vec<(Mode, Op)> {
         let v = |s: &str| w(s);
-        let pipes = Pipes { compare: false, display_set: true };
+        let (set, detail, diff) = (Some(Display::Set), Some(Display::Detail), Some(Display::Diff));
         vec![
             (Mode::Operational, Op::Configure),
-            (Mode::Operational, Op::ShowActive { path: vec![], pipes: Pipes::default() }),
-            (Mode::Operational, Op::ShowActive { path: v("users dev"), pipes: pipes.clone() }),
-            (Mode::Operational, Op::ShowCommits),
-            (Mode::Operational, Op::ShowRollback { n: 3, compare: None }),
-            (Mode::Operational, Op::ShowRollback { n: 0, compare: Some(2) }),
-            (Mode::Operational, Op::ShowAlarms),
+            (Mode::Operational, Op::ShowActive { path: vec![], display: None }),
+            (Mode::Operational, Op::ShowActive { path: v("users dev"), display: set }),
+            (Mode::Operational, Op::ShowActive { path: v("system"), display: detail }),
+            (Mode::Operational, Op::ShowCommits { display: None }),
+            (Mode::Operational, Op::ShowCommits { display: detail }),
+            (Mode::Operational, Op::ShowRollback { n: 3, compare: None, display: None }),
+            (Mode::Operational, Op::ShowRollback { n: 3, compare: None, display: detail }),
+            (Mode::Operational, Op::ShowRollback { n: 0, compare: Some(2), display: None }),
+            (Mode::Operational, Op::ShowRollback { n: 0, compare: Some(2), display: diff }),
+            (Mode::Operational, Op::ShowAlarms { display: None }),
+            (Mode::Operational, Op::ShowAlarms { display: detail }),
             (Mode::Operational, Op::ShowServices),
             (Mode::Operational, Op::ShowPackages { terms: v("rip grep") }),
             (Mode::Operational, Op::Request { words: v("system repair") }),
@@ -431,15 +494,18 @@ mod tests {
             (Mode::Configuration, Op::Edit { words: v("system") }),
             (Mode::Configuration, Op::Edit { words: v("users dev") }),
             (Mode::Configuration, Op::Top),
-            (Mode::Configuration, Op::ShowCandidate { path: vec![], pipes: Pipes::default() }),
-            (Mode::Configuration, Op::ShowCandidate { path: v("system"), pipes: pipes.clone() }),
-            (Mode::Configuration, Op::Compare),
+            (Mode::Configuration, Op::ShowCandidate { path: vec![], display: None }),
+            (Mode::Configuration, Op::ShowCandidate { path: v("system"), display: set }),
+            (Mode::Configuration, Op::ShowCandidate { path: vec![], display: detail }),
+            (Mode::Configuration, Op::Compare { display: None }),
+            (Mode::Configuration, Op::Compare { display: diff }),
             (Mode::Configuration, Op::Rollback { n: 2 }),
             (Mode::Configuration, Op::Commit(CommitOptions::default())),
             (Mode::Configuration, Op::Commit(CommitOptions { check: true, ..Default::default() })),
             (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()) })),
-            (Mode::Configuration, Op::Run(Box::new(Op::ShowAlarms))),
-            (Mode::Configuration, Op::Run(Box::new(Op::ShowActive { path: v("system"), pipes: Pipes::default() }))),
+            (Mode::Configuration, Op::Run(Box::new(Op::ShowAlarms { display: None }))),
+            (Mode::Configuration, Op::Run(Box::new(Op::ShowActive { path: v("system"), display: None }))),
+            (Mode::Configuration, Op::Run(Box::new(Op::ShowRollback { n: 1, compare: Some(0), display: diff }))),
             (Mode::Configuration, Op::Exit),
             (Mode::Configuration, Op::End),
             (Mode::Configuration, Op::SwitchCli),
@@ -467,6 +533,7 @@ mod tests {
             ("delete system packages jq", "no system packages jq"),
             ("edit system", "system"),
             ("show | compare", "show configuration diff"),
+            ("show | compare | display diff", "show configuration diff | display diff"),
             ("rollback 1", "rollback configuration 1"),
             ("run show system alarms", "do show system alarms"),
             ("exit configuration-mode", "end"),
@@ -514,21 +581,42 @@ mod tests {
     }
 
     #[test]
+    fn each_view_has_its_own_displays() {
+        let (j, o, c) = (Style::Juniper, Mode::Operational, Mode::Configuration);
+        for (mode, line, want) in [
+            (o, "show system commit | display set", "| display set: not for show system commit (it has | display detail)"),
+            (o, "show system alarms | display diff", "not for show system alarms"),
+            (o, "show configuration | display diff", "not for a configuration (it has | display set, | display detail)"),
+            (o, "show system rollback 1 compare 0 | display set", "not for a comparison (it has | display diff)"),
+            (o, "show configuration | display set | display detail", "one | display at a time"),
+            (o, "show system commit extra", "show system commit: unexpected 'extra'"),
+            (o, "show system rollback 1 compare", "show system rollback <n> [compare <m>]"),
+            (c, "show | compare | display set", "not for a comparison"),
+            (c, "show | display diff", "not for a configuration"),
+        ] {
+            let e = err(j, mode, line);
+            assert!(e.contains(want), "{line}: {e}");
+        }
+        let e = err(Style::Cisco, c, "show configuration diff | display detail");
+        assert!(e.contains("not for a comparison"), "{e}");
+    }
+
+    #[test]
     fn filters_come_after_the_commands_own_pipes() {
         let (j, o, c) = (Style::Juniper, Mode::Operational, Mode::Configuration);
         assert_eq!(pl(j, o, "show configuration | grep 'a b'").unwrap().1, [f("grep", "\"a b\"")]);
         assert_eq!(pl(j, o, "show configuration | grep \"a|b\"").unwrap().1, [f("grep", "\"a|b\"")], "a quoted | is the pattern's");
-        assert_eq!(pl(j, c, "show | compare | grep x").unwrap(), (Op::Compare, vec![f("grep", "x")]));
+        assert_eq!(pl(j, c, "show | compare | grep x").unwrap(), (Op::Compare { display: None }, vec![f("grep", "x")]));
         let (op, fs) = pl(j, c, "show system | display set | wc -l").unwrap();
-        assert_eq!((op, fs), (Op::ShowCandidate { path: w("system"), pipes: Pipes { compare: false, display_set: true } }, vec![f("wc", "-l")]));
-        assert_eq!(pl(Style::Cisco, c, "show configuration diff | grep x").unwrap().0, Op::Compare);
-        assert_eq!(pl(Style::Cisco, c, "do show system alarms | wc -l").unwrap().0, Op::Run(Box::new(Op::ShowAlarms)));
+        assert_eq!((op, fs), (Op::ShowCandidate { path: w("system"), display: Some(Display::Set) }, vec![f("wc", "-l")]));
+        assert_eq!(pl(Style::Cisco, c, "show configuration diff | grep x").unwrap().0, Op::Compare { display: None });
+        assert_eq!(pl(Style::Cisco, c, "do show system alarms | wc -l").unwrap().0, Op::Run(Box::new(Op::ShowAlarms { display: None })));
         assert_eq!(pl(j, c, "show").unwrap().1, [], "no pipe, no filter");
         for (line, want) in [
             ("show configuration | grep a | display set", "| display set must come before | grep"),
             ("show configuration | grep x |", "a | needs something after it"),
             ("show configuration |", "a | needs something after it"),
-            ("show configuration | sed s/a/b/", "unknown pipe: | sed s/a/b/; one of: compare, display set, or a filter: cut, grep"),
+            ("show configuration | sed s/a/b/", "unknown pipe: | sed s/a/b/; one of: compare, display set|detail|diff, or a filter: cut, grep"),
             ("show configuration | sh -c x", "unknown pipe: | sh -c x"),
             ("show packages available rg | grep x", "cannot be filtered"),
         ] {

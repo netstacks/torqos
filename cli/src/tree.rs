@@ -490,6 +490,34 @@ impl Schema {
         Ok(out)
     }
 
+    /// The files behind what `show <prefix>` shows (`| display detail`): each config repo file, and
+    /// the settings it holds there (those set, not every one it could hold).
+    pub fn files_of(&self, cfg: &Config, prefix: &[String]) -> Vec<(String, Vec<String>)> {
+        let mut out = Vec::new();
+        for (path, data) in &cfg.files {
+            let mut settings = Vec::new();
+            for (key, node) in &self.nodes {
+                let Some(name) = node.file.as_deref().and_then(|p| matches_file(p, path)) else { continue };
+                let set = match data {
+                    Data::Object(o) => node.key.as_deref().is_some_and(|k| o.contains_key(k)),
+                    Data::List(l) => !l.is_empty(),
+                };
+                if !set {
+                    continue;
+                }
+                let words: Vec<String> =
+                    key.split(' ').map(|k| if k == "<name>" { name.clone().unwrap_or_default() } else { k.to_string() }).collect();
+                if words.starts_with(prefix) || prefix.starts_with(&words) {
+                    settings.push(words.join(" "));
+                }
+            }
+            if !settings.is_empty() {
+                out.push((path.clone(), settings));
+            }
+        }
+        out
+    }
+
     /// `show configuration | display set`: one `set` command per value.
     pub fn display_set(&self, cfg: &Config) -> String {
         let mut out = String::new();

@@ -99,9 +99,8 @@ impl Repo {
         Ok(())
     }
 
-    /// The tree's files at `rev` (exact bytes): only paths the schema describes, and only regular
-    /// files — a symlink or anything else at a tree path is refused, never followed.
-    pub fn tree_files(&self, schema: &Schema, rev: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+    /// The entries of commit `rev`: (mode, kind, object id, path), every file.
+    fn listing(&self, rev: &str) -> Result<Vec<(String, String, String, String)>> {
         // A commit id (from head() or history()) or HEAD — never anything git could read as an
         // option or a path (`--output=…`, `HEAD:system`).
         let is_id = rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
@@ -110,19 +109,41 @@ impl Repo {
         }
         let commit = format!("{rev}^{{commit}}");
         let listing = self.git(&["ls-tree", "-r", "-z", "--full-tree", "--end-of-options", &commit])?;
-        let mut files = BTreeMap::new();
+        let mut out = Vec::new();
         for entry in listing.split(|b| *b == 0).filter(|e| !e.is_empty()) {
             let entry = String::from_utf8_lossy(entry);
             let (meta, path) = entry.split_once('\t').context("git ls-tree")?;
             let mut meta = meta.split(' ');
             let (mode, kind, id) = (meta.next().unwrap_or_default(), meta.next().unwrap_or_default(), meta.next().unwrap_or_default());
-            if !schema.describes(path) {
+            out.push((mode.to_string(), kind.to_string(), id.to_string(), path.to_string()));
+        }
+        Ok(out)
+    }
+
+    /// The tree's files at `rev` (exact bytes): only paths the schema describes, and only regular
+    /// files — a symlink or anything else at a tree path is refused, never followed.
+    pub fn tree_files(&self, schema: &Schema, rev: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+        let mut files = BTreeMap::new();
+        for (mode, kind, id, path) in self.listing(rev)? {
+            if !schema.describes(&path) {
                 continue;
             }
             if mode != "100644" || kind != "blob" {
                 bail!("{path} at {rev} is not a plain data file (git mode {mode}: a link, an executable or a folder)");
             }
-            files.insert(path.to_string(), self.git(&["cat-file", "blob", id])?);
+            files.insert(path, self.git(&["cat-file", "blob", &id])?);
+        }
+        Ok(files)
+    }
+
+    /// Every file of commit `rev` as committed — the tree's, the Nix files, `flake.lock` (a link:
+    /// its target) — for a raw diff between two commits.
+    pub fn all_files(&self, rev: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+        let mut files = BTreeMap::new();
+        for (_, kind, id, path) in self.listing(rev)? {
+            if kind == "blob" {
+                files.insert(path, self.git(&["cat-file", "blob", &id])?);
+            }
         }
         Ok(files)
     }
@@ -241,6 +262,15 @@ pub fn changes<'a>(schema: &Schema, base: &'a BTreeMap<String, Vec<u8>>, candida
 /// The changes as one unified diff for `torq-broker propose` (git apply reads it): new files from
 /// /dev/null, deleted ones to /dev/null.
 pub fn unified_diff(scratch: &Path, changes: &[(String, Option<&[u8]>, Option<String>)]) -> Result<String> {
+    let bytes: Vec<RawChange> = changes.iter().map(|(p, o, n)| (p.clone(), *o, n.as_deref().map(str::as_bytes))).collect();
+    unified_diff_bytes(scratch, &bytes)
+}
+
+/// One file's change as bytes: its path, before and after (None: absent).
+pub type RawChange<'a> = (String, Option<&'a [u8]>, Option<&'a [u8]>);
+
+/// As `unified_diff`, both sides as bytes (two commits' files, exactly as committed).
+pub fn unified_diff_bytes(scratch: &Path, changes: &[RawChange]) -> Result<String> {
     let mut out = String::new();
     for (i, (path, old, new)) in changes.iter().enumerate() {
         let side = |name: &str, text: Option<&[u8]>| -> Result<(PathBuf, String)> {
@@ -254,7 +284,7 @@ pub fn unified_diff(scratch: &Path, changes: &[(String, Option<&[u8]>, Option<St
             })
         };
         let (a, a_label) = side("a", *old)?;
-        let (b, b_label) = side("b", new.as_deref().map(str::as_bytes))?;
+        let (b, b_label) = side("b", *new)?;
         let o = Command::new("diff").arg("-u").args(["--label", &a_label, "--label", &b_label]).arg(&a).arg(&b).output().context("running diff")?;
         if o.status.code() != Some(1) {
             bail!("diff failed on {path}: {}", String::from_utf8_lossy(&o.stderr));
