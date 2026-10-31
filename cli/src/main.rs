@@ -6,6 +6,7 @@ mod tree;
 mod candidate;
 mod session;
 mod shell;
+mod complete;
 mod pkg;
 mod run;
 mod status;

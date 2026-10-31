@@ -164,28 +164,151 @@ fn print_clean(out: &str) {
     }
 }
 
-/// One line at a time. (Line editing, `?` and Tab come next.)
+/// The prompt: `user@host> ` in operational mode, `[edit]` then `user@host# ` in configuration mode.
+fn prompt(mode: Mode, user: &str, host: &str) -> (Option<&'static str>, String) {
+    match mode {
+        Mode::Operational => (None, format!("{user}@{host}> ")),
+        Mode::Configuration => (Some("\n[edit]"), format!("{user}@{host}# ")),
+    }
+}
+
+/// The interactive shell: with a line editor (history, Tab, `?`) on a terminal, one plain line at a
+/// time otherwise (piped input).
 fn interactive(s: &mut Session) -> Result<i32> {
     let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_string();
     let user = me()?;
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        return editor::run(s, &user, &host);
+    }
     let stdin = std::io::stdin();
     loop {
-        match s.mode {
-            Mode::Operational => print!("{user}@{host}> "),
-            Mode::Configuration => print!("\n[edit]\n{user}@{host}# "),
+        let (above, p) = prompt(s.mode, &user, &host);
+        if let Some(a) = above {
+            println!("{a}");
         }
+        print!("{p}");
         std::io::stdout().flush()?;
         let mut line = String::new();
         if stdin.lock().read_line(&mut line)? == 0 {
             println!();
             return Ok(0);
         }
-        match s.exec(line.trim()) {
-            Ok(out) => print_clean(&out),
-            Err(e) => println!("error: {}", history::one_line(&format!("{e:#}"), 300)),
-        }
+        run_line(s, line.trim());
         if s.done {
             return Ok(0);
+        }
+    }
+}
+
+fn run_line(s: &mut Session, line: &str) {
+    match s.exec(line) {
+        Ok(out) => print_clean(&out),
+        Err(e) => println!("error: {}", history::one_line(&format!("{e:#}"), 300)),
+    }
+}
+
+/// The line editor: rustyline, with Tab and `?` answered by complete.rs.
+mod editor {
+    use super::{prompt, run_line};
+    use crate::complete;
+    use crate::session::{words, Mode, Session};
+    use crate::tree::Schema;
+    use anyhow::Result;
+    use rustyline::completion::{Completer, Pair};
+    use rustyline::error::ReadlineError;
+    use rustyline::highlight::Highlighter;
+    use rustyline::hint::Hinter;
+    use rustyline::validate::Validator;
+    use rustyline::{Cmd, ConditionalEventHandler, Context, Event, EventContext, EventHandler, KeyEvent, RepeatCount};
+    use std::sync::{Arc, Mutex};
+
+    /// What Tab and `?` need: the schema, and the mode the session is in now.
+    #[derive(Clone)]
+    struct Help {
+        schema: Arc<Schema>,
+        mode: Arc<Mutex<Mode>>,
+    }
+
+    /// The complete words before the cursor, and the one being typed. None inside a quoted string.
+    fn at_cursor(before: &str) -> Option<(Vec<String>, String)> {
+        if before.matches('"').count() % 2 == 1 {
+            return None;
+        }
+        let partial = if before.ends_with(char::is_whitespace) { "" } else { before.rsplit(char::is_whitespace).next().unwrap_or("") };
+        let done = &before[..before.len() - partial.len()];
+        Some((words(done).ok()?, partial.to_string()))
+    }
+
+    impl Help {
+        fn choices(&self, before: &str) -> Option<(Vec<complete::Choice>, String)> {
+            let (w, partial) = at_cursor(before)?;
+            let mode = *self.mode.lock().unwrap();
+            Some((complete::choices(&self.schema, mode, &w, &partial), partial))
+        }
+    }
+
+    impl Completer for Help {
+        type Candidate = Pair;
+        fn complete(&self, line: &str, pos: usize, _: &Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
+            let Some((choices, partial)) = self.choices(&line[..pos]) else { return Ok((pos, vec![])) };
+            let pairs = complete::tab(&choices).into_iter().map(|(display, replacement)| Pair { display, replacement }).collect();
+            Ok((pos - partial.len(), pairs))
+        }
+    }
+    impl Hinter for Help {
+        type Hint = String;
+    }
+    impl Highlighter for Help {}
+    impl Validator for Help {}
+    impl rustyline::Helper for Help {}
+
+    /// `?`: list what may come next, Junos style, and redraw the line as it was.
+    struct Question(Help);
+    impl ConditionalEventHandler for Question {
+        fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
+            let (choices, _) = self.0.choices(&ctx.line()[..ctx.pos()])?; // in quotes: a plain '?'
+            let text = complete::render(&choices);
+            print!("?\r\n{}", text.replace('\n', "\r\n"));
+            Some(Cmd::Repaint)
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn the_word_at_the_cursor() {
+        let v = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert_eq!(at_cursor("set sys"), Some((v("set"), "sys".into())));
+        assert_eq!(at_cursor("set system "), Some((v("set system"), "".into())));
+        assert_eq!(at_cursor(""), Some((vec![], "".into())));
+        assert_eq!(at_cursor("commit comment \"why"), None, "inside quotes: `?` is a character");
+        assert_eq!(at_cursor("commit comment \"why\" "), Some((vec!["commit".into(), "comment".into(), "why".into()], "".into())));
+    }
+
+    pub fn run(s: &mut Session, user: &str, host: &str) -> Result<i32> {
+        let help = Help { schema: Arc::new(s.schema.clone()), mode: Arc::new(Mutex::new(s.mode)) };
+        let config = rustyline::Config::builder().completion_type(rustyline::CompletionType::List).auto_add_history(true).build();
+        let mut ed: rustyline::Editor<Help, rustyline::history::DefaultHistory> = rustyline::Editor::with_config(config)?;
+        ed.set_helper(Some(help.clone()));
+        ed.bind_sequence(KeyEvent::from('?'), EventHandler::Conditional(Box::new(Question(help.clone()))));
+        loop {
+            *help.mode.lock().unwrap() = s.mode;
+            let (above, p) = prompt(s.mode, user, host);
+            if let Some(a) = above {
+                println!("{a}");
+            }
+            match ed.readline(&p) {
+                Ok(line) => run_line(s, line.trim()),
+                // Ctrl-C: drop the line, as a shell does.
+                Err(ReadlineError::Interrupted) => continue,
+                Err(ReadlineError::Eof) => {
+                    println!();
+                    return Ok(0);
+                }
+                Err(e) => return Err(e.into()),
+            }
+            if s.done {
+                return Ok(0);
+            }
         }
     }
 }
