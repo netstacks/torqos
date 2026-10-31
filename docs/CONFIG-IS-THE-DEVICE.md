@@ -240,4 +240,6 @@ torq.desktop.enable = true;       →  torq desktop enable true
    shows it and a person approves it. The software's version is not saved, only its source (as
    Junos keeps configuration and software apart): a loaded configuration builds on the newest
    software of that source. On other hardware, the saved `fileSystems`, `boot` and hardware file
-   are this machine's: the commit question warns about them (KNOWN-GAPS 6n).
+   are this machine's: the commit question warns about them (KNOWN-GAPS 6n). Live as change #52:
+   this machine saved (80 lines, its hardware file's content in it) and loaded back with `load
+   override` is the identical candidate.
