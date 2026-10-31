@@ -202,7 +202,7 @@ torq.desktop.enable = true;       →  torq desktop enable true
    following nixpkgs. This machine is migrated the same way: its machine.nix values (boot loader,
    the qemuGuest and spice services) go to nixos/boot.json and nixos/services.json, its
    hardware-configuration.nix is attached at the top, and it builds the very system that was
-   running. tests/tree.nix evaluates the template as a whole machine. A change to how the machine
+   running (ledger #46; `show configuration` no longer names anything set outside it). tests/tree.nix evaluates the template as a whole machine. A change to how the machine
    starts is warned about at commit (KNOWN-GAPS 6n). Also fixed: `| display set` prints whole lines
    from the top (pasteable, as Junos); `torqcli … | head` stops quietly (141), and a failure to
    write the output (a full disk) is an error; a top-level attachment (`set config x.nix`) reads
