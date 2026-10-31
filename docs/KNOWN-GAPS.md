@@ -77,9 +77,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    faithfully (wrong shape, unknown key, a value with spaces), so one bad file blocks `configure`
    and `commit` for everyone until it is fixed — by a raw diff through `torq-broker propose`.
    Evaluation normally keeps such files out of HEAD (a change that does not evaluate is undone), so
-   it takes a hand-made system-tier change. Untested so far: that the `GIT_*` clearing really keeps a
-   caller's `GIT_DIR` / `GIT_CONFIG_PARAMETERS` out, and reading a root-owned repo as a user
-   (`safe.directory`); both belong in the VM test with the shell.
+   it takes a hand-made system-tier change. (Tested in the VM: an ordinary user reads the root-owned
+   repo, and a hostile `GIT_*` environment is ignored.) Not yet tested end to end: a `torqcli`
+   commit through the real broker — the test VM's config repo does not evaluate; the cutover's
+   config repo will.
 6i. **User tier: whose folder?** The broker accepts `users/<name>/<leaf>` for any well-formed name;
    that `<name>` is a normal user of the machine is checked only at evaluation (modules/packages.nix),
    so `users/root/cli.json` is refused late — by the failed rebuild, which is undone — not at
