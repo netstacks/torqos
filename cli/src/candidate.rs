@@ -152,7 +152,7 @@ impl Repo {
     pub fn tree_files(&self, schema: &Schema, rev: &str) -> Result<BTreeMap<String, Vec<u8>>> {
         let mut files = BTreeMap::new();
         for (mode, kind, id, path) in self.listing(rev)? {
-            if !schema.describes(&path) {
+            if !schema.describes(&path) && crate::settings::top_of(&path).is_none() {
                 continue;
             }
             if mode != "100644" || kind != "blob" {
@@ -194,6 +194,8 @@ pub struct Candidate {
     /// The software (`flake.lock`) the candidate installs, if it changes it (`request system update`,
     /// `request system software rollback`); None: its base's.
     pub lock: Option<String>,
+    /// The tree's NixOS settings (nixos/*.json, settings.rs).
+    pub settings: crate::settings::Settings,
 }
 
 impl Candidate {
@@ -204,7 +206,8 @@ impl Candidate {
         // HEAD read once: a commit landing in between must not mix two configurations.
         let files = repo.tree_files(schema, if rev == "HEAD" { &base } else { rev })?;
         let config = schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        Ok(Candidate { base, config, lock: None })
+        let settings = crate::settings::load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
+        Ok(Candidate { base, config, lock: None, settings })
     }
 
     /// Where a user keeps their candidate: their own state directory, never shared.
@@ -231,9 +234,9 @@ impl Candidate {
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         let v: serde_json::Value = serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))?;
-        // 2: with its software (`lock`); 1: written before it had any — read as none. An older
-        // torqcli refuses a 2 rather than silently drop the software.
-        if v["version"] != 1 && v["version"] != 2 {
+        // 3: with its NixOS settings; 2: with its software (`lock`); 1: neither — read as none. An older
+        // torqcli refuses a newer one rather than silently drop what it does not know.
+        if v["version"] != 1 && v["version"] != 2 && v["version"] != 3 {
             bail!("{}: not a candidate this torqcli reads; `rollback 0` starts a new one", path.display());
         }
         let base = v["base"].as_str().context("candidate without a base")?.to_string();
@@ -246,7 +249,15 @@ impl Candidate {
             serde_json::Value::String(l) if serde_json::from_str::<serde_json::Value>(l).is_ok_and(|j| j.is_object()) => Some(l.clone()),
             _ => bail!("{}: its software (flake.lock) is not JSON; `rollback 0` starts a new candidate", path.display()),
         };
-        Ok(Some(Candidate { base, config, lock }))
+        let settings = match &v["settings"] {
+            serde_json::Value::Null => crate::settings::Settings::new(),
+            // Each a NixOS top-level name, as a file name of its own (`nixos/<name>.json`).
+            serde_json::Value::Object(o) if o.iter().all(|(k, x)| x.is_object() && crate::settings::top_of(&format!("{}{k}.json", crate::settings::DIR)).is_some()) => {
+                o.clone().into_iter().collect()
+            }
+            _ => bail!("{}: its settings are not what torqcli writes; `rollback 0` starts a new candidate", path.display()),
+        };
+        Ok(Some(Candidate { base, config, lock, settings }))
     }
 
     /// Save it atomically, readable by its owner only, in a folder only its owner can write: anyone
@@ -256,7 +267,7 @@ impl Candidate {
         private_dir(dir)?;
         let files: serde_json::Map<String, serde_json::Value> =
             self.config.files.iter().map(|(p, d)| (p.clone(), d.render().into())).collect();
-        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 2, "base": self.base, "files": files, "lock": self.lock }))?;
+        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 3, "base": self.base, "files": files, "lock": self.lock, "settings": self.settings }))?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?; // created 0600
         tmp.write_all(&body)?;
         tmp.as_file().sync_all()?;
@@ -427,18 +438,24 @@ mod tests {
         Candidate::discard(&path).unwrap();
         assert_eq!(Candidate::load(&path, &s).unwrap(), None);
         Candidate::discard(&path).unwrap(); // twice is fine
-        fs::write(&path, r#"{"version":3,"base":"x","files":{}}"#).unwrap();
+        fs::write(&path, r#"{"version":4,"base":"x","files":{}}"#).unwrap();
         assert!(format!("{:#}", Candidate::load(&path, &s).unwrap_err()).contains("rollback 0"));
         // Its software is kept too; a saved one without (an older torqcli's) has none; one that is
         // not JSON is refused.
         c.lock = Some(r#"{"nodes":{}}"#.into());
         c.save(&path).unwrap();
-        assert!(fs::read_to_string(&path).unwrap().contains("\"version\": 2"), "an older torqcli refuses it, not drop its software");
+        assert!(fs::read_to_string(&path).unwrap().contains("\"version\": 3"), "an older torqcli refuses it, not drop its software");
         assert_eq!(Candidate::load(&path, &s).unwrap(), Some(c.clone()));
         fs::write(&path, format!(r#"{{"version":1,"base":"{}","files":{{}}}}"#, c.base)).unwrap();
         assert_eq!(Candidate::load(&path, &s).unwrap().unwrap().lock, None);
         fs::write(&path, format!(r#"{{"version":1,"base":"{}","files":{{}},"lock":"nope"}}"#, c.base)).unwrap();
         assert!(format!("{:#}", Candidate::load(&path, &s).unwrap_err()).contains("is not JSON"));
+        // Its NixOS settings: kept, and each named as its file is.
+        c.settings.insert("virtualisation".into(), serde_json::json!({"docker": {"enable": true}}));
+        c.save(&path).unwrap();
+        assert_eq!(Candidate::load(&path, &s).unwrap(), Some(c.clone()));
+        fs::write(&path, format!(r#"{{"version":3,"base":"{}","files":{{}},"settings":{{"../users/alice/x":{{}}}}}}"#, c.base)).unwrap();
+        assert!(format!("{:#}", Candidate::load(&path, &s).unwrap_err()).contains("not what torqcli writes"));
     }
 
     /// The diff for the broker: only files whose data changed, from their exact text, and it
@@ -502,7 +519,7 @@ mod review_tests {
         use std::os::unix::fs::PermissionsExt;
         let state = tempfile::tempdir().unwrap();
         let dir = state.path().join("torq");
-        let c = Candidate { base: "x".into(), config: Config::default(), lock: None };
+        let c = Candidate { base: "x".into(), config: Config::default(), lock: None, settings: Default::default() };
         c.save(&dir.join("candidate.json")).unwrap();
         assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "created private");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();

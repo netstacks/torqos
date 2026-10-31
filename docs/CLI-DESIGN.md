@@ -94,6 +94,34 @@ candidate (Junos `configure`); `configure private` is for later.
 
 ## The configuration tree
 
+**Since S3c (docs/CONFIG-IS-THE-DEVICE.md) the tree is every NixOS setting of the system, one to one**
+(`set virtualisation docker enable true`, `set services httpd virtualHosts example.com forceSSL
+true`), generated from the system's own options (/etc/torq/nixos-schema.json) and kept in
+`nixos/<top-level>.json`. Seven settings keep the files described below — for their own checks,
+and for the user tier of a person's own folder — at their NixOS paths; the old names still work for
+setting them, and the tree shows the NixOS one:
+
+| NixOS path | Old name | File |
+|---|---|---|
+| `networking hostName` | `system host-name` | `system/host.json` |
+| `time timeZone` | `system time-zone` | `system/host.json` |
+| `torq packages system` | `system packages` | `system/packages.json` |
+| `torq cli style` | `system cli style` | `system/cli.json` |
+| `torq services enabled` | (`services`: now NixOS's own) | `services.json` |
+| `torq packages user <name>` | `users <name> packages` | `users/<name>/packages.json` (user tier) |
+| `torq cli userStyles <name>` | `users <name> cli style` | `users/<name>/cli.json` (user tier) |
+
+Old names set and delete (and `delete users dev all`, `delete system all` take what they always
+did), but the old *places* are not places to go: `edit users dev` is gone, as the tree now groups
+by NixOS. A setting lives in exactly one place: the seven above are refused inside `nixos/` files (by
+torqcli on reading, and by the evaluation). Text with a line break or another control character is
+refused in the tree: multi-line text goes in a config file. Whether a commit turns SSH on is read
+from the evaluated configuration, before and after, so every way counts; outside the catalog the
+question says its rules do not apply, and whether passwords are allowed.
+Everything else in `nixos/` is system tier. What the tree may never change is fenced
+(modules/settings-fence.nix). Ledger reasons carry each change's section (`+ virtualisation docker
+enable true;`). The rest of this section describes the files TorqOS keeps, as first designed.
+
 Each container is a folder of the config repo; each leaf set is one small data file. The first
 settings (more are added one schema entry at a time):
 

@@ -70,6 +70,8 @@ let
     nixos-fence-etc-slash = c: c.environment.etc."/torq/broker.json".text;
     nixos-fence-etc-dot = c: c.environment.etc."./torq/broker.json".text;
     nixos-fence-etc-target = c: c.environment.etc.innocent.target;
+    # A setting TorqOS keeps in its own file is not also in nixos/ (one setting, one place).
+    nixos-elsewhere = c: c.networking.hostName;
   };
   # torqcli's tests read the fence from cli/src/nixos-fixture.json: it must be the modules' own.
   fenceFixture = (builtins.fromJSON (builtins.readFile ../cli/src/nixos-fixture.json)).fence

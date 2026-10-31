@@ -48,8 +48,8 @@ const CONFIGURATION: &[(&str, &str)] = &[
 /// What may follow `words` (the complete words before the cursor), each starting with `partial`
 /// (the word being typed, possibly empty).
 #[cfg(test)]
-pub fn choices(schema: &Schema, mode: Mode, words: &[String], partial: &str) -> Vec<Choice> {
-    choices_at(schema, &At { mode, style: Style::Juniper, edit: vec![] }, words, partial)
+pub fn choices(k: &Know, mode: Mode, words: &[String], partial: &str) -> Vec<Choice> {
+    choices_at(k, &At { mode, style: Style::Juniper, edit: vec![] }, words, partial)
 }
 
 /// Where the line is typed: the mode, the style, and where configuration mode is.
@@ -73,20 +73,20 @@ const CISCO_CONFIGURATION: &[(&str, &str)] = &[
 ];
 
 /// What may follow `words` at `at`.
-pub fn choices_at(schema: &Schema, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
+pub fn choices_at(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
     let here = |rest: &[String]| -> Vec<String> { at.edit.iter().chain(rest).cloned().collect() };
     let first = words.first().map(String::as_str);
     let all = match (at.mode, at.style, first) {
         (Mode::Configuration, Style::Cisco, None) => {
             // A path from here, or a command.
-            let mut c = tree_choices(schema, &at.edit, "set");
+            let mut c = tree_choices(k, &at.edit, "set");
             c.retain(|x| x.word != "|");
             c.extend(table(CISCO_CONFIGURATION));
             c
         }
-        (Mode::Configuration, Style::Cisco, Some("no")) => tree_choices(schema, &here(&words[1..]), "delete"),
+        (Mode::Configuration, Style::Cisco, Some("no")) => tree_choices(k, &here(&words[1..]), "delete"),
         (Mode::Configuration, Style::Cisco, Some("do")) => {
-            choices_at(schema, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial)
+            choices_at(k, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial)
         }
         (Mode::Configuration, Style::Cisco, Some("show")) => match &words[1..] {
             [] => table(&[("configuration", "The candidate")]),
@@ -106,20 +106,20 @@ pub fn choices_at(schema: &Schema, at: &At, words: &[String], partial: &str) -> 
         (Mode::Configuration, Style::Cisco, Some("commit")) => commit_choices(&words[1..]),
         (Mode::Configuration, Style::Cisco, Some(_)) if CISCO_CONFIGURATION.iter().any(|(w, _)| Some(*w) == first) => vec![],
         // A bare path.
-        (Mode::Configuration, Style::Cisco, Some(_)) => tree_choices(schema, &here(words), "set"),
+        (Mode::Configuration, Style::Cisco, Some(_)) => tree_choices(k, &here(words), "set"),
         (Mode::Configuration, Style::Juniper, Some(cmd @ ("set" | "delete" | "show" | "edit"))) => {
             let rest = &words[1..];
             if let Some(p) = pipe_choices(cmd, rest) {
                 p
             } else {
-                let mut c = tree_choices(schema, &here(rest), if cmd == "edit" { "show" } else { cmd });
+                let mut c = tree_choices(k, &here(rest), if cmd == "edit" { "show" } else { cmd });
                 if cmd == "edit" {
                     c.retain(|x| x.word != "|");
                 }
                 c
             }
         }
-        _ => choices_juniper(schema, at, words, partial),
+        _ => choices_juniper(k, at, words, partial),
     };
     let all = with_filters(words, all);
     all.into_iter().filter(|c| c.is_placeholder() || c.word.starts_with(partial)).collect()
@@ -181,7 +181,7 @@ fn commit_choices(rest: &[String]) -> Vec<Choice> {
     }
 }
 
-fn choices_juniper(schema: &Schema, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
+fn choices_juniper(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
     let mode = at.mode;
     match (mode, words.first().map(String::as_str)) {
         (Mode::Operational, None) => table(OPERATIONAL),
@@ -201,7 +201,7 @@ fn choices_juniper(schema: &Schema, at: &At, words: &[String], partial: &str) ->
             ["system", "software", "rollback"] => vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")],
             _ => vec![],
         },
-        (Mode::Configuration, Some("run")) => choices_at(schema, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial),
+        (Mode::Configuration, Some("run")) => choices_at(k, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial),
         (Mode::Configuration, Some("commit")) => commit_choices(&words[1..]),
         (Mode::Configuration, Some("rollback")) if words.len() == 1 => {
             vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")]
@@ -276,8 +276,35 @@ fn pipe_choices(cmd: &str, rest: &[String]) -> Option<Vec<Choice>> {
     })
 }
 
-/// The next word of a tree path (`set system host-name …`).
-fn tree_choices(schema: &Schema, rest: &[String], cmd: &str) -> Vec<Choice> {
+/// What `?` and Tab know: the hand-made schema (the values of the settings TorqOS keeps in its own
+/// files: time zones, styles, user names) and every NixOS setting of the system (the tree's paths).
+pub struct Know {
+    pub schema: Schema,
+    pub tree: crate::nixos::Tree,
+}
+
+/// The next word of a tree path (`set virtualisation docker …`): from the NixOS tree, and for a
+/// setting TorqOS keeps in its own files, its values from the hand-made schema.
+fn tree_choices(k: &Know, rest: &[String], cmd: &str) -> Vec<Choice> {
+    if let Some(hand) = crate::whole::to_hand(rest) {
+        let c = hand_tree_choices(&k.schema, &hand, cmd);
+        if !c.is_empty() {
+            return c;
+        }
+    }
+    let at_place = rest.is_empty() || matches!(k.tree.locate(rest), Ok((_, None, _)));
+    if cmd == "show" && !at_place {
+        return vec![];
+    }
+    let mut c: Vec<Choice> = k.tree.next(rest).into_iter().map(|(w, h)| Choice::new(&w, &h)).collect();
+    if cmd == "show" {
+        c.push(Choice::new("|", "Pipe the output (compare, display set, grep, wc, …)"));
+    }
+    c
+}
+
+/// The next word of a path of the hand-made schema (`system host-name …`).
+fn hand_tree_choices(schema: &Schema, rest: &[String], cmd: &str) -> Vec<Choice> {
     let t = match schema.resolve(rest) {
         Ok(t) => t,
         Err(_) => return vec![],
@@ -341,8 +368,8 @@ pub fn tab(choices: &[Choice]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
 
-    fn schema() -> Schema {
-        Schema::parse(include_str!("schema-fixture.json")).unwrap()
+    fn schema() -> Know {
+        Know { schema: Schema::parse(include_str!("schema-fixture.json")).unwrap(), tree: crate::nixos::Tree::parse(include_str!("nixos-fixture.json")).unwrap() }
     }
     fn w(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
@@ -368,16 +395,17 @@ mod tests {
     fn the_tree_from_the_schema() {
         let s = schema();
         let c = choices(&s, Mode::Configuration, &w("set"), "");
-        assert_eq!(words_of(&c), ["services", "system", "users"]);
-        assert_eq!(c[1].help, "This machine");
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set system"), "")), ["cli", "host-name", "packages", "time-zone"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set users"), "")), ["dev"], "the machine's users");
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set users dev cli style"), "")), ["cisco", "juniper"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set system host-name"), "")), ["<host-name>"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set system packages htop"), "")), ["<package>"], "a list takes more");
-        assert!(choices(&s, Mode::Configuration, &w("set system host-name torq"), "").is_empty(), "a leaf has its value");
-        assert!(choices(&s, Mode::Configuration, &w("delete system host-name"), "").is_empty());
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set system time-zone"), "Europe/Be")), ["Europe/Belfast", "Europe/Belgrade", "Europe/Berlin"]);
+        assert_eq!(words_of(&c), ["boot", "environment", "networking", "services", "specialisation", "system", "systemd", "time", "torq", "users", "virtualisation"], "NixOS's top level");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set virtualisation docker"), "")), ["enable", "rootless"]);
+        assert!(choices(&s, Mode::Configuration, &w("set virtualisation docker"), "")[0].help.starts_with("This option enables docker"), "NixOS's own help");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd virtualHosts"), "")), ["<name>"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking firewall allowedTCPPorts"), "")), ["<[ a number … ]>"]);
+        // The settings TorqOS keeps in its own files: their values, as before.
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set torq cli style"), "")), ["cisco", "juniper"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set torq cli userStyles dev"), "")), ["cisco", "juniper"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking hostName"), "")), ["<host-name>"]);
+        assert!(choices(&s, Mode::Configuration, &w("set networking hostName torq"), "").is_empty(), "a leaf has its value");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set time timeZone"), "Europe/Be")), ["Europe/Belfast", "Europe/Belgrade", "Europe/Berlin"]);
         assert!(choices(&s, Mode::Configuration, &w("set nonsense"), "").is_empty());
     }
 
@@ -438,11 +466,11 @@ mod tests {
         let s = schema();
         let t = |words: &str, partial: &str| tab(&choices(&s, Mode::Configuration, &w(words), partial));
         assert_eq!(t("", "co"), [("commit".to_string(), "commit ".to_string())], "the only one: with its space");
-        assert_eq!(t("set system", "t"), [("time-zone".to_string(), "time-zone ".to_string())]);
-        let berlin = t("set system time-zone", "Europe/Be");
+        assert_eq!(t("set time", "t"), [("timeZone".to_string(), "timeZone ".to_string())]);
+        let berlin = t("set time timeZone", "Europe/Be");
         assert_eq!(berlin.len(), 3);
         assert!(berlin.iter().all(|(shown, inserted)| shown == inserted), "several: no space yet");
-        assert!(t("set system host-name", "").is_empty(), "a placeholder is not inserted");
+        assert!(t("set networking hostName", "").is_empty(), "a placeholder is not inserted");
     }
 
     /// Cisco style: in configuration mode the first word is a path from where you are, or a
@@ -453,22 +481,22 @@ mod tests {
         let at = |mode, edit: &str| At { mode, style: Style::Cisco, edit: w(edit) };
         let top = choices_at(&s, &at(Mode::Configuration, ""), &[], "");
         let words = words_of(&top);
-        assert!(words.contains(&"system") && words.contains(&"no") && words.contains(&"end") && !words.contains(&"set"), "{words:?}");
-        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, "system"), &[], "h")), ["host-name"], "from where you are");
-        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("no system"), "t")), ["time-zone"]);
-        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("users dev cli style"), "")), ["cisco", "juniper"]);
+        assert!(words.contains(&"networking") && words.contains(&"no") && words.contains(&"end") && !words.contains(&"set"), "{words:?}");
+        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, "networking"), &[], "h")), ["hostName"], "from where you are");
+        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("no time"), "t")), ["timeZone"]);
+        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("torq cli userStyles dev"), "")), ["cisco", "juniper"]);
         assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("show configuration"), "")), ["diff"]);
         assert_eq!(words_of(&choices_at(&s, &at(Mode::Operational, ""), &w("show"), "r")), ["running-config"]);
-        let j = At { mode: Mode::Configuration, style: Style::Juniper, edit: w("users dev") };
-        assert_eq!(words_of(&choices_at(&s, &j, &w("set"), "")), ["cli", "packages"], "Juniper, from where you are");
+        let j = At { mode: Mode::Configuration, style: Style::Juniper, edit: w("virtualisation docker") };
+        assert_eq!(words_of(&choices_at(&s, &j, &w("set"), "")), ["enable", "rootless"], "Juniper, from where you are");
     }
 
     #[test]
     fn question_mark_lists_with_help() {
         let s = schema();
-        let out = render(&choices(&s, Mode::Configuration, &w("set system cli style"), ""));
+        let out = render(&choices(&s, Mode::Configuration, &w("set torq cli style"), ""));
         assert!(out.starts_with("Possible completions:\n  cisco    IOS-style syntax"), "{out}");
-        let out = render(&choices(&s, Mode::Configuration, &w("set system time-zone"), ""));
+        let out = render(&choices(&s, Mode::Configuration, &w("set time timeZone"), ""));
         assert!(out.contains("… and 537 more"), "{out}");
     }
 }

@@ -128,11 +128,11 @@ pkgs.testers.runNixOSTest {
         # environment points git elsewhere or configures it.
         hostile = "GIT_DIR=/nonexistent GIT_CONFIG_PARAMETERS=bogus GIT_INDEX_FILE=/nonexistent"
         out = machine.succeed(f"su - dev -c '{hostile} torqcli -c \"show configuration\"'")
-        assert out.startswith("system {\n    host-name machine;\n}\n"), out
+        assert out.startswith("networking {\n    hostName machine;\n}\n"), out
         # The whole device: what is set outside the tree is named, as a comment a saved file keeps.
         assert "## also set outside this configuration, in Nix: " in out and "flake.nix" in out, out
         out = machine.succeed("su - dev -c 'torqcli -c \"configure; set system time-zone UTC; show | compare\"'")
-        assert "[edit system]\n+   time-zone UTC;" in out, out
+        assert "[edit time]\n+   timeZone UTC;" in out, out
         # -c uses a private candidate; the interactive shell keeps one, private, between sessions.
         machine.succeed("su - dev -c 'test ! -e ~/.local/state/torq/candidate.json'")
         machine.succeed("su - dev -c 'printf \"configure\\nset users dev cli style cisco\\nexit\\nexit\\n\" | torqcli'")
@@ -150,7 +150,7 @@ pkgs.testers.runNixOSTest {
         assert "is not a valid system host-name" in out and "[edit" not in out.split("my_laptop")[-1], out
         # The Cisco style says the same: a bare path sets, `show configuration diff` compares.
         out = machine.succeed("su - dev -c 'torqcli --style cisco -c \"config; system; time-zone UTC; end; config; show configuration diff\"'")
-        assert "[edit system]\n+   time-zone UTC;" in out, out
+        assert "[edit time]\n+   timeZone UTC;" in out, out
 
     with subtest("torqcli filters: the real tools, in a sandbox that reaches nothing"):
         import shlex
@@ -158,10 +158,10 @@ pkgs.testers.runNixOSTest {
             return f"su - dev -c {shlex.quote(cmd)}"
         # The tools are the system's own: a grep first on PATH is not the one that runs.
         machine.succeed("mkdir -p /tmp/evil && printf '#!/bin/sh\\necho evil\\n' > /tmp/evil/grep && chmod 755 /tmp/evil /tmp/evil/grep")
-        out = machine.succeed(dev_sh("PATH=/tmp/evil:$PATH torqcli -c 'show configuration | grep -c host-name'"))
+        out = machine.succeed(dev_sh("PATH=/tmp/evil:$PATH torqcli -c 'show configuration | grep -c hostName'"))
         assert out == "1\n", out
-        out = machine.succeed(dev_sh("torqcli 'show configuration | grep -o \"host-name [a-z]*\"'"))
-        assert out == "host-name machine\n", out
+        out = machine.succeed(dev_sh("torqcli 'show configuration | grep -o \"hostName [a-z]*\"'"))
+        assert out == "hostName machine\n", out
         out = machine.succeed(dev_sh("torqcli show configuration '|' head -n 1 '|' wc -l"))
         assert out == "1\n", out
         # Their own options cannot read, write or run anything outside the output they filter.
@@ -172,10 +172,10 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test ! -e /home/dev/written")
         # What a filter prints reaches the terminal cleaned, like everything else.
         out = machine.succeed(dev_sh("torqcli -c \"show configuration | tr s '\\\\033'\""))
-        assert "\x1b" not in out and "\\u{1b}y\\u{1b}tem {" in out, repr(out)
+        assert "\x1b" not in out and "ho\\u{1b}tName machine;" in out, repr(out)
         # What is behind a view, only when asked.
         out = machine.succeed(dev_sh("torqcli 'show configuration | display detail'"))
-        assert "## commit " in out and "## system/host.json: system host-name\n" in out, out
+        assert "## commit " in out and "## system/host.json: networking hostName\n" in out, out
         assert "## commit " not in machine.succeed(dev_sh("torqcli show configuration")), "no internals unless asked"
         # Every NixOS setting of the system, TorqOS's too, generated with it for torqcli.
         schema = json.loads(machine.succeed("cat /etc/torq/nixos-schema.json"))
@@ -209,15 +209,15 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q dev@machine')}", timeout=30)
         as_dev("tmux send-keys -t t configure Enter")
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q dev@machine#')}", timeout=30)
-        as_dev("tmux send-keys -t t 'set system cli style ' '?'")
+        as_dev("tmux send-keys -t t 'set torq cli style ' '?'")
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q Possible.completions')}", timeout=30)
         out = as_dev(screen)
         assert "cisco" in out and "IOS-style" in out and "juniper" in out, out
         # The line is still there after the list, ready to finish.
-        assert out.rstrip().splitlines()[-1].endswith("set system cli style"), out
-        as_dev("tmux send-keys -t t C-u 'set system ti' Tab")
+        assert out.rstrip().splitlines()[-1].endswith("set torq cli style"), out
+        as_dev("tmux send-keys -t t C-u 'set time ti' Tab")
         # (capture-pane drops trailing spaces, so the space Tab adds is not seen here.)
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"set system time-zone\"')}", timeout=30)
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"set time timeZone\"')}", timeout=30)
         # `switch cli` changes the syntax for the session, and the prompt with it.
         as_dev("tmux send-keys -t t C-u 'edit system' Enter")
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"[edit system]\"')}", timeout=30)
@@ -241,7 +241,7 @@ pkgs.testers.runNixOSTest {
         as_dev("printf 'set users dev packages htop\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")
         as_dev("tmux send-keys -t t Enter")
         # (the compare's output, not the pasted command: both lines ran)
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"+   packages [ htop ];\"')}", timeout=30)
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"+   dev [ htop ];\"')}", timeout=30)
         # Leave (one line at a time: keys typed before the next prompt are not kept).
         last_line = screen + " | grep -v '^$' | tail -n 1"
         as_dev("tmux send-keys -t t exit Enter")

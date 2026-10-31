@@ -25,6 +25,52 @@ pub fn top_of(path: &str) -> Option<&str> {
     ok.then_some(name)
 }
 
+/// The first text with a control character (a line break, an escape) in a value, by path: such text
+/// would draw lines of its own in `show`, `show | compare` and an approval question, and does not
+/// read back from `| display set`. Multi-line text belongs in a config file.
+fn control_text(path: &mut Vec<String>, v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) if s.chars().any(char::is_control) => Some(path.join(" ")),
+        Value::Array(a) => a.iter().find_map(|x| control_text(path, x)),
+        Value::Object(o) => o.iter().find_map(|(k, x)| {
+            if k.chars().any(char::is_control) {
+                return Some(path.join(" "));
+            }
+            path.push(k.clone());
+            let r = control_text(path, x);
+            path.pop();
+            r
+        }),
+        _ => None,
+    }
+}
+
+/// The first of the settings TorqOS keeps in its own files (whole.rs MAP) set in a nixos/ file too:
+/// one setting, one place — two would show one value and build another.
+fn kept_elsewhere(top: &str, v: &Value) -> Option<(String, String)> {
+    for (nixos, hand, _) in crate::whole::MAP {
+        let words: Vec<&str> = nixos.split(' ').collect();
+        if words[0] != top {
+            continue;
+        }
+        let mut at = vec![v];
+        for w in &words[1..] {
+            at = at
+                .into_iter()
+                .flat_map(|x| match (x, *w) {
+                    (Value::Object(o), "<name>") => o.values().collect::<Vec<_>>(),
+                    (Value::Object(o), k) => o.get(k).into_iter().collect(),
+                    _ => vec![],
+                })
+                .collect();
+        }
+        if !at.is_empty() {
+            return Some((nixos.replace(" <name>", ""), hand.to_string()));
+        }
+    }
+    None
+}
+
 /// Read the files (path, content) that are ours. Each must be a JSON object: anything else is
 /// refused, naming the file — the shell must not hide, or rewrite, what it cannot show.
 pub fn load<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<Settings> {
@@ -34,6 +80,12 @@ pub fn load<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<
         let v: Value = serde_json::from_slice(bytes).with_context(|| format!("{path}: not JSON; fix the file (as raw JSON) first"))?;
         if !v.is_object() {
             bail!("{path}: not a JSON object; fix the file (as raw JSON) first");
+        }
+        if let Some(at) = control_text(&mut vec![top.to_string()], &v) {
+            bail!("{path}: {at} holds a line break or another control character; torqcli cannot show it faithfully — fix the file (multi-line text goes in a config file)");
+        }
+        if let Some((nixos, hand)) = kept_elsewhere(top, &v) {
+            bail!("{path}: {nixos} is kept in its own file (`{hand}`), not here; remove it from {path}");
         }
         s.insert(top.to_string(), v);
     }
@@ -83,6 +135,10 @@ pub fn entries(s: &Settings) -> Vec<(Vec<String>, Val)> {
 /// elements; a set of plain values gains its entry; anything else is replaced).
 pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     let r = tree.resolve(words)?;
+    // A command word as an entry's name would be ambiguous (`delete … virtualHosts all`, Cisco `top`).
+    if let Some(i) = tree.entry_positions(&r.loc).into_iter().find(|i| crate::syntax::RESERVED.contains(&r.loc[*i].as_str())) {
+        bail!("'{}' cannot be named in {}: torqcli keeps the word for a command", r.loc[i], r.loc[..i].join(" "));
+    }
     if let Some(k) = r.loc.iter().find(|k| k.starts_with('_')) {
         bail!("{}: a name starting with _ is a NixOS module directive, not a setting: the tree holds data only", k);
     }
@@ -90,6 +146,9 @@ pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
         bail!("{}: not settable in the configuration tree (it reaches the broker or TorqOS itself)", r.loc.join(" "));
     }
     let new = crate::nixos::value(r.ty, &r.values).with_context(|| r.loc.join(" "))?;
+    if control_text(&mut r.loc.clone(), &new).is_some() {
+        bail!("{}: a line break or another control character in a value: multi-line text goes in a config file", r.loc.join(" "));
+    }
     let (top, rest) = r.loc.split_first().context("a setting has a path")?;
     let mut at = s.entry(top.clone()).or_insert_with(|| Value::Object(Map::new()));
     for k in rest {
@@ -122,6 +181,13 @@ pub fn delete(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
         _ => None,
     };
     let (top, rest) = loc.split_first().context("a path")?;
+    // A whole top-level place: its file.
+    if rest.is_empty() {
+        return match s.remove(top) {
+            Some(_) => Ok(()),
+            None => bail!("{}: not set", loc.join(" ")),
+        };
+    }
     let Some(root) = s.get_mut(top) else { bail!("{}: not set", loc.join(" ")) };
     if !remove_at(root, rest, remove.as_ref())? {
         bail!("{}: not set", loc.join(" "));

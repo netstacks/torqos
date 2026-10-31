@@ -3,7 +3,7 @@
 //! session.rs, the tree in tree.rs, the candidate in candidate.rs.
 
 use crate::candidate::{Candidate, Repo};
-use crate::session::{Configuration, History, Machine, Mode, Session, Waiting};
+use crate::session::{Configuration, History, Machine, Mode, Session, Ssh, Waiting};
 use crate::syntax::Style;
 use crate::tree::Schema;
 use crate::{broker, check_repo, config_name, evaluate, history, me, run, scratch_dir, Cli, BROKER, REPO};
@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 /// The schema of the running system (modules/schema.nix).
 const SCHEMA: &str = "/etc/torq/schema.json";
+/// Every NixOS setting of the running system (modules/nixos-schema.nix): the tree's paths.
+const NIXOS_SCHEMA: &str = "/etc/torq/nixos-schema.json";
 
 struct Real<'a> {
     cli: &'a Cli,
@@ -273,6 +275,30 @@ impl Machine for Real<'_> {
             bail!("cannot read this machine's services: {}", history::one_line(&crate::last_error(&out.stderr), 200));
         }
         Ok(serde_json::from_slice::<bool>(&out.stdout)?)
+    }
+
+    fn ssh(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)> {
+        let state = |files: &[(String, Option<String>)]| -> Result<Ssh> {
+            let (_scratch, copy) = self.changed_copy(base, files)?;
+            let host = config_name(&copy)?;
+            let out = std::process::Command::new("nix")
+                .args(["eval", "--json"])
+                .arg(format!("{}#nixosConfigurations.{host}.config", crate::flake_ref(&copy)))
+                .args([
+                    "--apply",
+                    "c: { on = c.services.openssh.enable; catalog = builtins.elem \"ssh\" c.torq.services.enabled; \
+                     passwords = c.services.openssh.settings.PasswordAuthentication != false; }",
+                ])
+                .output()
+                .context("running nix eval")?;
+            if !out.status.success() {
+                bail!("cannot read the SSH settings: {}", history::one_line(&crate::last_error(&out.stderr), 200));
+            }
+            let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+            Ok(Ssh { on: v["on"] == true, catalog: v["catalog"] == true, passwords: v["passwords"] == true })
+        };
+        let _p = run::Progress::start("Reading the SSH settings");
+        Ok((state(&[])?, state(files)?))
     }
 
     fn ledger(&self, count: usize) -> Result<String> {
@@ -546,6 +572,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
     };
     check_repo(&cli)?;
     let schema = Schema::parse(&fs::read_to_string(SCHEMA).with_context(|| format!("reading {SCHEMA} (is this TorqOS?)"))?)?;
+    let tree = crate::nixos::Tree::parse(&fs::read_to_string(NIXOS_SCHEMA).with_context(|| format!("reading {NIXOS_SCHEMA} (is this TorqOS, from S1 on?)"))?)?;
     let machine = Real { cli: &cli };
     let who = me()?;
     // Scripts and commands speak Juniper unless told otherwise (they must not change meaning with a
@@ -560,7 +587,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
     };
     // Only the interactive shell keeps a candidate between runs; a script's is its own.
     let saved = if run == Invocation::Interactive { Some(Candidate::default_path()?) } else { None };
-    let mut s = Session::new(schema, Repo::new(&cli.repo), saved, &machine, &who, style);
+    let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who, style);
     let fail = |line: &str, e: anyhow::Error| {
         eprintln!("error: {}: {}", history::one_line(line, 80), history::one_line(&format!("{e:#}"), 300));
         Ok(1)
@@ -675,7 +702,6 @@ mod editor {
     use super::{prompt, run_line};
     use crate::complete;
     use crate::session::{words, Session};
-    use crate::tree::Schema;
     use anyhow::Result;
     use rustyline::completion::{Completer, Pair};
     use rustyline::error::ReadlineError;
@@ -688,7 +714,7 @@ mod editor {
     /// What Tab and `?` need: the schema, and the mode the session is in now.
     #[derive(Clone)]
     struct Help {
-        schema: Arc<Schema>,
+        know: Arc<complete::Know>,
         /// Where the session is: mode, style, edit path (updated before each line is read).
         at: Arc<Mutex<complete::At>>,
     }
@@ -708,7 +734,7 @@ mod editor {
         fn choices(&self, before: &str) -> Option<(Vec<complete::Choice>, String)> {
             let (w, partial) = at_cursor(before)?;
             let at = self.at.lock().unwrap().clone();
-            Some((complete::choices_at(&self.schema, &at, &w, &partial), partial))
+            Some((complete::choices_at(&self.know, &at, &w, &partial), partial))
         }
     }
 
@@ -752,7 +778,8 @@ mod editor {
 
     pub fn run(s: &mut Session, user: &str, host: &str) -> Result<i32> {
         let at = |s: &Session| complete::At { mode: s.mode, style: s.style, edit: s.edit_path().to_vec() };
-        let help = Help { schema: Arc::new(s.schema.clone()), at: Arc::new(Mutex::new(at(s))) };
+        let know = complete::Know { schema: s.schema.clone(), tree: s.tree.clone() };
+        let help = Help { know: Arc::new(know), at: Arc::new(Mutex::new(at(s))) };
         let config = rustyline::Config::builder().completion_type(rustyline::CompletionType::List).auto_add_history(true).build();
         let mut ed: rustyline::Editor<Help, rustyline::history::DefaultHistory> = rustyline::Editor::with_config(config)?;
         ed.set_helper(Some(help.clone()));

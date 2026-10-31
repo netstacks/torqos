@@ -466,6 +466,7 @@ impl Schema {
     /// `leaf-list [ a b ];`.
     /// The path is resolved first: an unknown setting or name is an error, not empty output; a path
     /// to a leaf or leaf-list shows that one statement.
+    #[cfg(test)] // torqcli shows the whole tree (whole.rs); these show the hand-made part alone
     pub fn show(&self, cfg: &Config, prefix: &[String]) -> Result<String> {
         let t = self.resolve_in(prefix, Some(cfg))?;
         if !t.values.is_empty() {
@@ -519,12 +520,14 @@ impl Schema {
     }
 
     /// `show configuration | display set`: one `set` command per value.
+    #[cfg(test)] // torqcli shows the whole tree (whole.rs); these show the hand-made part alone
     pub fn display_set(&self, cfg: &Config) -> String {
         display_set_entries(&self.entries(cfg))
     }
 
     /// `show | compare`: what `new` changes from `old`, Junos style — under `[edit <container>]`,
     /// `-` lines for what goes and `+` lines for what comes.
+    #[cfg(test)] // torqcli shows the whole tree (whole.rs); these show the hand-made part alone
     pub fn compare(&self, old: &Config, new: &Config) -> String {
         compare_entries(self.entries(old), self.entries(new))
     }

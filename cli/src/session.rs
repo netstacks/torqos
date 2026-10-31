@@ -4,7 +4,8 @@
 
 use crate::candidate::{self, Candidate, Repo};
 use crate::syntax::{self, CommitOptions, Display, Op, Style};
-use crate::tree::{Config, Kind, Schema};
+use crate::settings::Settings;
+use crate::tree::{Config, Schema};
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
@@ -29,6 +30,9 @@ pub trait Machine {
     fn search(&self, terms: &[String]) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
     fn repair(&self) -> Result<String>;
+    /// SSH as the configuration at `base` has it, and as it will with `files` changed — evaluated, so
+    /// every way of turning it on counts (the catalog, `services openssh`, its `sshd` alias, …).
+    fn ssh(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)>;
     /// Turning SSH on: who it admits, and the keys that will be able to log in as them — read from
     /// the configuration at `base` with `files` changed, as it will be. One line per key (and a
     /// warning line above a key with options); none: nobody could log in.
@@ -70,6 +74,15 @@ pub struct Configuration {
     pub seq: Option<u64>,
 }
 
+/// SSH in an evaluated configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Ssh {
+    pub on: bool,
+    /// By TorqOS's catalog (`torq services enabled ssh`): keys only, only the owner.
+    pub catalog: bool,
+    pub passwords: bool,
+}
+
 /// A commit confirmed waiting for its author.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Waiting {
@@ -88,6 +101,8 @@ pub enum Mode {
 
 pub struct Session<'a> {
     pub schema: Schema,
+    /// Every NixOS setting of the system (nixos.rs): the tree's paths.
+    pub tree: crate::nixos::Tree,
     pub repo: Repo,
     /// Where the candidate is kept between sessions; None: a private one (`torqcli -c`), discarded
     /// at the end.
@@ -180,14 +195,13 @@ fn word(out: &mut Vec<String>, w: String) -> Result<()> {
 }
 
 impl<'a> Session<'a> {
-    pub fn new(schema: Schema, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str, style: Style) -> Self {
-        Session { schema, repo, saved, mode: Mode::Operational, style, edit: Vec::new(), candidate: None, machine, me: me.into(), done: false }
+    pub fn new(schema: Schema, tree: crate::nixos::Tree, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str, style: Style) -> Self {
+        Session { schema, tree, repo, saved, mode: Mode::Operational, style, edit: Vec::new(), candidate: None, machine, me: me.into(), done: false }
     }
 
-    /// The configuration that is committed now.
-    fn active(&self) -> Result<Config> {
-        let files = self.repo.tree_files(&self.schema, "HEAD")?;
-        self.schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))
+    /// The whole tree over both kinds of files (whole.rs).
+    fn whole(&self) -> crate::whole::Whole<'_> {
+        crate::whole::Whole { schema: &self.schema, tree: &self.tree }
     }
 
     fn candidate(&mut self) -> Result<&mut Candidate> {
@@ -243,13 +257,9 @@ impl<'a> Session<'a> {
         crate::filter::apply(&filters, self.run(op)?)
     }
 
-    /// Whether `words`, from where configuration mode is, name a container or list entry.
+    /// Whether `words`, from where configuration mode is, name a place (somewhere to go), not a setting.
     fn is_place(&self, words: &[String]) -> bool {
-        let full: Vec<String> = self.edit.iter().chain(words).cloned().collect();
-        let cfg = self.candidate.as_ref().map(|c| &c.config);
-        self.schema.resolve_in(&full, cfg).is_ok_and(|t| {
-            t.values.is_empty() && !t.node.is_empty() && matches!(self.schema.nodes[&t.node].kind, Kind::Container | Kind::List)
-        })
+        self.whole().is_place(&self.here(words))
     }
 
     /// Where configuration mode is (`edit system`): its words, for the prompt.
@@ -268,10 +278,10 @@ impl<'a> Session<'a> {
             Op::ShowActive { path, display } => {
                 // The commit named is the one shown: read at that id, not at HEAD again.
                 let head = self.repo.head()?;
-                let active = self.configuration_of(&head)?;
-                let mut out = self.view(&active, &path, display, &format!("commit {head}"))?;
+                let (active, st) = self.configuration_of(&head)?;
+                let mut out = self.view(&active, &st, &path, display, &format!("commit {head}"))?;
                 if path.is_empty() {
-                    out.push_str(&self.whole(&head, None)?);
+                    out.push_str(&self.footer(&head, None)?);
                 }
                 Ok(out)
             }
@@ -308,61 +318,50 @@ impl<'a> Session<'a> {
             }
             Op::Edit { words } => {
                 let full = self.here(&words);
-                let cfg = self.candidate()?.config.clone();
-                let t = self.schema.resolve_in(&full, Some(&cfg))?;
-                let kind = (!t.node.is_empty()).then(|| self.schema.nodes[&t.node].kind);
-                if !t.values.is_empty() || !matches!(kind, Some(Kind::Container | Kind::List)) {
+                self.candidate()?;
+                if !self.whole().is_place(&full) {
                     bail!("{}: not somewhere to go (a setting takes a value)", full.join(" "));
                 }
-                if kind == Some(Kind::List) {
-                    bail!("{}: name an entry ({} <name>)", full.join(" "), full.join(" "));
-                }
-                self.edit = t.words;
+                self.edit = full;
                 Ok(String::new())
             }
             Op::Set { words } => {
-                let s = self.schema.clone();
                 let full = self.here(&words);
-                s.set(&mut self.candidate()?.config, &full)?;
+                let (mut cfg, mut st) = {
+                    let c = self.candidate()?;
+                    (c.config.clone(), c.settings.clone())
+                };
+                self.whole().set(&mut cfg, &mut st, &full)?;
+                let c = self.candidate()?;
+                (c.config, c.settings) = (cfg, st);
                 self.save()?;
                 Ok(String::new())
             }
             Op::Delete { words, all } => {
-                let s = self.schema.clone();
+                // Everything below a place, or a whole list of values, goes only with `all`: an Enter
+                // pressed before the value must not take them all.
                 let full = self.here(&words);
-                let cfg = self.candidate()?.config.clone();
-                let t = s.resolve_in(&full, Some(&cfg))?;
-                // Everything below a container or list entry, or a whole list of values, goes only
-                // with `all`: an Enter pressed before the value must not take them all.
-                let kind = (!t.node.is_empty()).then(|| s.nodes[&t.node].kind);
-                let whole = match kind {
-                    None | Some(Kind::Container | Kind::List) => true,
-                    Some(Kind::LeafList) => t.values.is_empty(),
-                    Some(Kind::Leaf) => false,
-                };
                 let del = match self.style {
                     Style::Juniper => "delete",
                     Style::Cisco => "no",
                 };
-                let typed = words.iter().map(|w| syntax::quote(w)).collect::<Vec<_>>().join(" ");
-                let typed = if typed.is_empty() { String::new() } else { format!("{typed} ") };
-                if whole && !all {
-                    bail!("{del} {}: deletes everything below it — say `{del} {typed}all`", full.join(" "));
-                }
-                if all && !whole {
-                    bail!("{del} {}: `all` is for a whole container or list", full.join(" "));
-                }
-                s.delete(&mut self.candidate()?.config, &full)?;
+                let (mut cfg, mut st) = {
+                    let c = self.candidate()?;
+                    (c.config.clone(), c.settings.clone())
+                };
+                self.whole().delete(&mut cfg, &mut st, &full, all, del, &words)?;
+                let c = self.candidate()?;
+                (c.config, c.settings) = (cfg, st);
                 self.save()?;
                 Ok(String::new())
             }
             Op::ShowCandidate { path, display } => {
                 let c = self.candidate()?;
-                let (cfg, base, lock) = (c.config.clone(), c.base.clone(), c.lock.clone());
+                let (cfg, st, base, lock) = (c.config.clone(), c.settings.clone(), c.base.clone(), c.lock.clone());
                 let here = self.here(&path);
-                let mut out = self.view(&cfg, &here, display, &format!("the candidate, from commit {base}"))?;
+                let mut out = self.view(&cfg, &st, &here, display, &format!("the candidate, from commit {base}"))?;
                 if here.is_empty() {
-                    out.push_str(&self.whole(&base, lock.as_deref())?);
+                    out.push_str(&self.footer(&base, lock.as_deref())?);
                 }
                 Ok(out)
             }
@@ -382,11 +381,9 @@ impl<'a> Session<'a> {
 
     /// Up one level: out of a list entry (its name and the list), else one word.
     fn up(&mut self) {
-        // Out of a list entry means out of the list too (`users dev` → the top), as in Junos and NSO.
-        let entry = self.edit.len() >= 2 && {
-            let key = self.schema.resolve_in(&self.edit, self.candidate.as_ref().map(|c| &c.config)).ok().map(|t| t.node);
-            key.is_some_and(|k| k.ends_with("<name>"))
-        };
+        // Out of a named entry means out of its set too (`services httpd virtualHosts example.com` →
+        // `services httpd`), as in Junos and NSO: the entry and its set are one step.
+        let entry = self.edit.len() >= 2 && self.tree.is_entry(&self.edit);
         self.edit.pop();
         if entry {
             self.edit.pop();
@@ -410,7 +407,7 @@ impl<'a> Session<'a> {
     /// runs (`lock`: the candidate's, if it changes it) and the files outside the tree that also set
     /// things (Nix). So `show configuration` names everything that makes the device, and stays a
     /// file `load` reads (`#` lines are comments).
-    fn whole(&self, rev: &str, lock: Option<&str>) -> Result<String> {
+    fn footer(&self, rev: &str, lock: Option<&str>) -> Result<String> {
         let mut out = String::new();
         let lock = match lock {
             Some(l) => Some(l.to_string()),
@@ -433,7 +430,7 @@ impl<'a> Session<'a> {
             }
         }
         let outside: Vec<String> =
-            self.repo.paths(rev)?.into_iter().filter(|p| p != "flake.lock" && !self.schema.describes(p)).map(|p| crate::history::one_line(&p, 60)).collect();
+            self.repo.paths(rev)?.into_iter().filter(|p| p != "flake.lock" && !self.schema.describes(p) && crate::settings::top_of(p).is_none()).map(|p| crate::history::one_line(&p, 60)).collect();
         if !outside.is_empty() {
             out.push_str(&format!("## also set outside this configuration, in Nix: {}\n", outside.join(", ")));
         }
@@ -442,32 +439,28 @@ impl<'a> Session<'a> {
 
     /// A configuration, or the part below `path`, as `display` asks. `origin`: where it comes from
     /// (`| display detail`).
-    fn view(&self, cfg: &Config, path: &[String], display: Option<Display>, origin: &str) -> Result<String> {
+    fn view(&self, cfg: &Config, st: &Settings, path: &[String], display: Option<Display>, origin: &str) -> Result<String> {
+        let w = self.whole();
         match display {
-            None => self.schema.show(cfg, path),
-            Some(Display::Set) => self.display_set(cfg, path),
+            None => w.show(cfg, st, path),
+            Some(Display::Set) => w.display_set(cfg, st, path),
             Some(Display::Detail) => {
-                let mut out = self.schema.show(cfg, path)?;
-                let at = self.schema.resolve_in(path, Some(cfg))?.words;
+                let mut out = w.show(cfg, st, path)?;
                 out.push_str(&format!("## {origin}\n"));
-                for (file, settings) in self.schema.files_of(cfg, &at) {
-                    out.push_str(&format!("## {file}: {}\n", settings.join(", ")));
+                // Each file behind what is shown, with the settings it holds.
+                let mut by_file: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+                for (words, file) in w.files(cfg, st) {
+                    if words.starts_with(path) {
+                        by_file.entry(file).or_default().push(words.join(" "));
+                    }
+                }
+                for (file, held) in by_file {
+                    out.push_str(&format!("## {file}: {}\n", held.join(", ")));
                 }
                 Ok(out)
             }
             Some(Display::Diff) => bail!("| display diff is for a comparison"),
         }
-    }
-
-    /// `| display set`, of the whole configuration or the part below `path`.
-    fn display_set(&self, cfg: &Config, path: &[String]) -> Result<String> {
-        let all = self.schema.display_set(cfg);
-        if path.is_empty() {
-            return Ok(all);
-        }
-        let t = self.schema.resolve_in(path, Some(cfg))?;
-        let prefix = format!("set {}", t.words.iter().map(|w| syntax::quote(w)).collect::<Vec<_>>().join(" "));
-        Ok(all.lines().filter(|l| *l == prefix || l.starts_with(&format!("{prefix} "))).map(|l| format!("{l}\n")).collect())
     }
 
     fn configure(&mut self) -> Result<String> {
@@ -511,9 +504,9 @@ impl<'a> Session<'a> {
             }
             Op::ShowRollback { n, compare, display } => {
                 let n_id = self.commit_at(n)?;
-                let n_cfg = self.configuration_of(&n_id)?;
+                let (n_cfg, n_st) = self.configuration_of(&n_id)?;
                 match compare {
-                    None => Ok(self.view(&n_cfg, &[], display, &format!("commit {n_id} (rollback {n})"))? + &self.whole(&n_id, None)?),
+                    None => Ok(self.view(&n_cfg, &n_st, &[], display, &format!("commit {n_id} (rollback {n})"))? + &self.footer(&n_id, None)?),
                     // What going from configuration m to configuration n changes.
                     Some(m) => {
                         let m_id = self.commit_at(m)?;
@@ -522,14 +515,17 @@ impl<'a> Session<'a> {
                                 let (old, new) = (self.repo.all_files(&m_id)?, self.repo.all_files(&n_id)?);
                                 commits_diff(&old, &new)
                             }
-                            _ => Ok(self.schema.compare(&self.configuration_of(&m_id)?, &n_cfg)),
+                            _ => {
+                                let (m_cfg, m_st) = self.configuration_of(&m_id)?;
+                                Ok(self.whole().compare((&m_cfg, &m_st), (&n_cfg, &n_st)))
+                            }
                         }
                     }
                 }
             }
             Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail)),
             Op::ShowServices => {
-                let active = self.active()?;
+                let (active, _) = self.configuration_of("HEAD")?;
                 let on: Vec<String> = match active.files.get("services.json") {
                     Some(crate::tree::Data::List(l)) => l.clone(),
                     _ => vec![],
@@ -567,9 +563,11 @@ impl<'a> Session<'a> {
     }
 
     /// The configuration at commit `id`.
-    fn configuration_of(&self, id: &str) -> Result<Config> {
+    fn configuration_of(&self, id: &str) -> Result<(Config, Settings)> {
         let files = self.repo.tree_files(&self.schema, id)?;
-        self.schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))
+        let cfg = self.schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
+        let st = crate::settings::load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
+        Ok((cfg, st))
     }
 
     fn request(&mut self, w: &[String]) -> Result<String> {
@@ -637,7 +635,7 @@ impl<'a> Session<'a> {
             let scratch = tempfile::tempdir()?;
             return candidate::unified_diff(scratch.path(), &a.changes(&self.schema)?);
         }
-        a.compare(&self.schema)
+        a.compare(&self.whole())
     }
 
     fn rollback(&mut self, n: usize) -> Result<String> {
@@ -663,13 +661,13 @@ impl<'a> Session<'a> {
 
     /// The candidate and what it is based on, read once.
     fn against(&mut self) -> Result<Against> {
-        let (base, config, new_lock) = {
+        let (base, config, settings, new_lock) = {
             let c = self.candidate()?;
-            (c.base.clone(), c.config.clone(), c.lock.clone())
+            (c.base.clone(), c.config.clone(), c.settings.clone(), c.lock.clone())
         };
         let files = self.repo.tree_files(&self.schema, &base)?;
         let lock = self.repo.file_at(&base, "flake.lock")?;
-        Ok(Against { base, files, lock, config, new_lock })
+        Ok(Against { base, files, lock, config, settings, new_lock })
     }
 
     fn commit(&mut self, o: CommitOptions) -> Result<String> {
@@ -720,19 +718,34 @@ impl<'a> Session<'a> {
         // A person approves at a terminal: a system change, and a change to someone else's folder.
         let others = self.others_folders(&changes);
         self.machine.check(&base, &files)?;
-        let compare = a.compare(&s)?;
+        let compare = a.compare(&self.whole())?;
         let mut shown: String = compare.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
         // The catalog's SSH admits its owner's keys only: with none, nobody could log in; with some,
         // approving it approves exactly those (as the changed configuration has them).
-        if a.turns_on(&s, "ssh")? {
+        // Whether this turns SSH on is read from the evaluated configurations, before and after: every
+        // way counts (the catalog, `services openssh`, its `sshd` alias). Only tree files can.
+        let ssh_relevant = files.iter().any(|(p, _)| p == "services.json" || p.starts_with(crate::settings::DIR));
+        let (was, now) = if ssh_relevant { self.machine.ssh(&base, &files)? } else { Default::default() };
+        if now.on && !was.on {
             let (owner, keys) = self.machine.ssh_keys(&base, &files)?;
-            if keys.is_empty() {
-                bail!(
-                    "not committed: SSH here lets in {owner}'s keys only, and they have none, so nobody could \
-                     log in; add a public key to ~/.ssh/authorized_keys first"
-                );
+            if now.catalog {
+                if keys.is_empty() {
+                    bail!(
+                        "not committed: SSH here lets in {owner}'s keys only, and they have none, so nobody could \
+                         log in; add a public key to ~/.ssh/authorized_keys first"
+                    );
+                }
+                shown.push_str(&format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")));
+            } else {
+                // Turned on outside TorqOS's catalog: its rules (keys only, only the owner) are not there.
+                shown.push_str("SSH is turned on outside TorqOS's catalog: its rules (keys only, only the owner) do not apply.\n");
+                if now.passwords {
+                    shown.push_str("! Password logins are allowed (services openssh settings PasswordAuthentication).\n");
+                }
+                if !keys.is_empty() {
+                    shown.push_str(&format!("Keys that will be able to log in as {owner}, among others:\n{}\n", keys.join("\n")));
+                }
             }
-            shown.push_str(&format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")));
         }
         let why = match (tier, others.is_empty()) {
             ("system", _) => Some("This changes the system (all users).".to_string()),
@@ -797,28 +810,40 @@ struct Against {
     files: std::collections::BTreeMap<String, Vec<u8>>,
     lock: Option<Vec<u8>>,
     config: Config,
+    settings: Settings,
     new_lock: Option<String>,
 }
 
 impl Against {
-    /// Whether the candidate turns service `name` on (it was off in the base).
-    fn turns_on(&self, s: &Schema, name: &str) -> Result<bool> {
-        let on = |c: &Config| matches!(c.files.get("services.json"), Some(crate::tree::Data::List(l)) if l.iter().any(|x| x == name));
-        let before = s.load(self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        Ok(!on(&before) && on(&self.config))
+    /// The base's NixOS settings (nixos/*.json, parsed).
+    fn base_settings(&self) -> Result<Settings> {
+        crate::settings::load(self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))
     }
 
-    /// What the candidate changes: the tree's files, then the software.
+    /// What the candidate changes: the tree's files (both kinds), then the software. A NixOS settings
+    /// file changes when its values do, not its formatting.
     fn changes(&self, s: &Schema) -> Result<Vec<candidate::Change<'_>>> {
         let mut c = candidate::changes(s, &self.files, &self.config)?;
+        let (base, new) = (self.base_settings()?, crate::settings::files(&self.settings));
+        let tops: std::collections::BTreeSet<&String> = base.keys().chain(self.settings.keys()).collect();
+        for top in tops {
+            let empty = |v: Option<&serde_json::Value>| v.is_none_or(|v| v.as_object().is_some_and(|o| o.is_empty()));
+            let (was, now) = (base.get(top), self.settings.get(top));
+            if was == now || (empty(was) && empty(now)) {
+                continue;
+            }
+            let path = format!("{}{top}.json", crate::settings::DIR);
+            c.push((path.clone(), self.files.get(&path).map(Vec::as_slice), new.get(&path).cloned()));
+        }
         c.extend(candidate::lock_change(self.lock.as_deref(), &self.new_lock));
         Ok(c)
     }
 
-    /// `show | compare`: the tree's changes, then the software's.
-    fn compare(&self, s: &Schema) -> Result<String> {
-        let before = s.load(self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        let mut out = s.compare(&before, &self.config);
+    /// `show | compare`: the tree's changes by NixOS path, then the software's.
+    fn compare(&self, w: &crate::whole::Whole) -> Result<String> {
+        let before = w.schema.load(self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
+        let base = self.base_settings()?;
+        let mut out = w.compare((&before, &base), (&self.config, &self.settings));
         out.push_str(&software_compare(self.lock.as_deref(), &self.new_lock));
         Ok(out)
     }
@@ -859,7 +884,20 @@ fn software_compare(old: Option<&[u8]>, new: &Option<String>) -> String {
 
 /// A ledger reason from the comparison: its `+`/`-` lines, short.
 fn summary(compare: &str) -> String {
-    let lines: Vec<&str> = compare.lines().filter(|l| !l.starts_with('[') && !l.starts_with('#')).map(|l| l.trim()).collect();
+    // Each `+`/`-` line with its section (`[edit torq cli userStyles]` + `+   dev cisco;` →
+    // `+ torq cli userStyles dev cisco;`): a ledger reason is read on its own.
+    let mut section = String::new();
+    let mut lines: Vec<String> = Vec::new();
+    for l in compare.lines() {
+        if let Some(s) = l.strip_prefix("[edit").and_then(|s| s.strip_suffix(']')) {
+            section = s.trim().to_string();
+        } else if let Some((sign, rest)) = l.split_at_checked(1).filter(|(s, _)| *s == "+" || *s == "-") {
+            let at = if section.is_empty() { String::new() } else { format!("{section} ") };
+            lines.push(format!("{sign} {at}{}", rest.trim()));
+        } else if !l.starts_with('#') && !l.trim().is_empty() {
+            lines.push(l.trim().to_string());
+        }
+    }
     let s = lines.join(" ");
     if s.chars().count() > 120 { format!("{}…", s.chars().take(119).collect::<String>()) } else { s }
 }
@@ -896,6 +934,8 @@ mod tests {
         ledger_at: Option<String>,
         /// sshd on outside the catalog.
         ssh_outside: bool,
+        /// SSH before and after a commit, if a test says.
+        ssh_state: Option<(Ssh, Ssh)>,
         /// The keys turning SSH on would admit, and what was asked about.
         keys: Vec<String>,
         ssh_asked: RefCell<Vec<Files>>,
@@ -938,6 +978,19 @@ mod tests {
         fn ssh_outside(&self) -> Result<bool> {
             Ok(self.ssh_outside)
         }
+        /// As the evaluator would: the catalog's `ssh`, or `services openssh|sshd enable true` in the
+        /// changed files (a test may say otherwise).
+        fn ssh(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)> {
+            if let Some(s) = self.ssh_state {
+                return Ok(s);
+            }
+            let has = |path: &str, f: &dyn Fn(&serde_json::Value) -> bool| {
+                files.iter().any(|(p, c)| p == path && c.as_deref().and_then(|c| serde_json::from_str(c).ok()).is_some_and(|v| f(&v)))
+            };
+            let catalog = has("services.json", &|v| v.as_array().is_some_and(|a| a.iter().any(|x| x == "ssh")));
+            let nixos = has("nixos/services.json", &|v| v.pointer("/openssh/enable") == Some(&serde_json::Value::Bool(true)) || v.pointer("/sshd/enable") == Some(&serde_json::Value::Bool(true)));
+            Ok((Ssh::default(), Ssh { on: catalog || nixos, catalog, passwords: nixos && !catalog }))
+        }
         fn ssh_keys(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)> {
             self.ssh_asked.borrow_mut().push(files.to_vec());
             Ok(("dev".into(), self.keys.clone()))
@@ -974,8 +1027,14 @@ mod tests {
             && printf '{ \"host-name\": \"two\" }\\n' > system/host.json && git commit -qam second");
         d
     }
+    fn w(s: &str) -> Vec<String> {
+        words(s).unwrap()
+    }
+    fn nixos_tree() -> crate::nixos::Tree {
+        crate::nixos::Tree::parse(include_str!("nixos-fixture.json")).unwrap()
+    }
     fn session<'a>(d: &Path, saved: Option<PathBuf>, m: &'a Fake) -> Session<'a> {
-        Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), Repo::new(d), saved, m, "dev", Style::Juniper)
+        Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d), saved, m, "dev", Style::Juniper)
     }
     fn waiting(by: &str) -> Option<Waiting> {
         Some(Waiting { seq: 42, deadline: "soon".into(), by: Some(by.into()) })
@@ -1044,7 +1103,7 @@ mod tests {
         let (diff, _, tier, reason, _) = m.commits.borrow()[0].clone();
         assert_eq!(diff, raw, "commit proposes what | display diff showed");
         assert_eq!(tier, "system", "software is the system's");
-        assert!(reason.contains(&format!("+   torq {newer};")), "{reason}");
+        assert!(reason.contains(&format!("+ system software torq {newer};")), "{reason}");
         assert!(m.asked.borrow()[0].contains("[edit system software]"), "a person sees it before it is committed");
         // `all`: every input.
         let out = s.exec("run request system update all").unwrap();
@@ -1117,7 +1176,7 @@ mod tests {
         s.exec("configure").unwrap();
         assert_eq!(s.exec("rollback 3").unwrap(), "load complete (the software loaded into the candidate is kept)\n");
         let c = s.exec("show | compare").unwrap();
-        assert!(c.contains("host-name one;") && c.contains("[edit system software]"), "{c}");
+        assert!(c.contains("hostName one;") && c.contains("[edit system software]"), "{c}");
         assert_eq!(s.exec("rollback 0").unwrap(), "load complete\n");
         assert_eq!(s.exec("show | compare").unwrap(), "");
     }
@@ -1176,10 +1235,10 @@ mod tests {
         let commits = s.exec("show system commit").unwrap();
         assert_eq!(commits, "0   d  broker  Change #2 rolled back\n1   d  viper   host two\n2   d  user    init\n");
         assert!(s.exec("show system commit | display detail").unwrap().contains(&format!("    commit {two}  (ledger #2)\n")));
-        assert_eq!(s.exec("show system rollback 1").unwrap(), "system {\n    host-name two;\n}\n", "git's history alone has no 1");
+        assert_eq!(s.exec("show system rollback 1").unwrap(), "networking {\n    hostName two;\n}\n", "git's history alone has no 1");
         s.exec("configure").unwrap();
         s.exec("rollback 1").unwrap();
-        assert!(s.exec("show | compare").unwrap().contains("+   host-name two;"));
+        assert!(s.exec("show | compare").unwrap().contains("+   hostName two;"));
         let e = format!("{:#}", s.exec("rollback 3").unwrap_err());
         assert!(e.contains("rollback 3: there are only 3 configurations"), "{e}");
     }
@@ -1195,9 +1254,9 @@ mod tests {
         s.exec("configure").unwrap();
         s.exec("set system host-name x").unwrap();
         s.exec("rollback 0").unwrap();
-        assert_eq!(s.exec("show").unwrap(), "system {\n    host-name two;\n}\n", "rollback 0: what is active (HEAD)");
+        assert_eq!(s.exec("show").unwrap(), "networking {\n    hostName two;\n}\n", "rollback 0: what is active (HEAD)");
         // 0 is what is active for every command, not the ledger's newest.
-        assert_eq!(s.exec("run show system rollback 0").unwrap(), "system {\n    host-name two;\n}\n");
+        assert_eq!(s.exec("run show system rollback 0").unwrap(), "networking {\n    hostName two;\n}\n");
         let e = format!("{:#}", s.exec("run request system software rollback 0").unwrap_err());
         assert!(e.contains("configuration 0 has no flake.lock"), "HEAD's, not the ledger's: {e}");
     }
@@ -1236,7 +1295,7 @@ mod tests {
     fn turning_ssh_on_shows_the_keys_it_admits_and_needs_one() {
         let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set services ssh"]);
+        run(&mut s, &["configure", "set torq services enabled ssh"]);
         let e = format!("{:#}", s.exec("commit").unwrap_err());
         assert!(e.contains("lets in dev's keys only, and they have none"), "{e}");
         assert!(m.commits.borrow().is_empty() && m.asked.borrow().is_empty(), "nothing asked, nothing committed");
@@ -1244,7 +1303,7 @@ mod tests {
 
         let m = Fake { answer: true, keys: vec!["    256 SHA256:abc dev@mac (ED25519)  (from /home/dev/.ssh/authorized_keys)".into()], ..Default::default() };
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set services ssh"]);
+        run(&mut s, &["configure", "set torq services enabled ssh"]);
         assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
         let q = m.asked.borrow()[0].clone();
         assert!(q.contains("Keys that will be able to log in as dev:\n    256 SHA256:abc dev@mac (ED25519)  (from /home/dev/.ssh/authorized_keys)\n"), "{q}");
@@ -1280,7 +1339,7 @@ mod tests {
         let out = s.exec("show configuration").unwrap();
         assert_eq!(
             out,
-            "system {\n    host-name two;\n}\n## software: torq 2026-10-26\n## also set outside this configuration, in Nix: flake.nix, machine.nix\n",
+            "networking {\n    hostName two;\n}\n## software: torq 2026-10-26\n## also set outside this configuration, in Nix: flake.nix, machine.nix\n",
             "the machine's own inputs only (nixpkgs follows torq\x27s)"
         );
         assert!(!s.exec("show configuration system").unwrap().contains("##"), "a part of it is just that part");
@@ -1294,6 +1353,73 @@ mod tests {
         for line in saved.lines() {
             s.exec(line).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
+    }
+
+    /// A NixOS setting commits as its nixos/ file, system tier, asked; a person's own packages,
+    /// by their NixOS path, stay user tier.
+    #[test]
+    fn nixos_settings_commit_as_their_files_at_their_tier() {
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set virtualisation docker enable true", "set networking firewall allowedTCPPorts [ 80 443 ]"]);
+        assert_eq!(s.exec("show | compare").unwrap(), "[edit networking firewall]\n+   allowedTCPPorts [ 80 443 ];\n[edit virtualisation docker]\n+   enable true;\n");
+        s.exec("commit check").unwrap();
+        let checked: Vec<String> = m.checks.borrow()[0].iter().map(|(p, _)| p.clone()).collect();
+        assert_eq!(checked, ["nixos/networking.json", "nixos/virtualisation.json"], "checked as the files it writes");
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
+        let (diff, _, tier, reason, _) = m.commits.borrow()[0].clone();
+        assert!(diff.contains("+++ b/nixos/virtualisation.json") && diff.contains("\"enable\": true"), "{diff}");
+        assert_eq!(tier, "system");
+        assert_eq!(reason, "+ networking firewall allowedTCPPorts [ 80 443 ]; + virtualisation docker enable true;");
+        assert!(m.asked.borrow()[0].contains("This changes the system (all users)."));
+        // Your own packages, by their NixOS path: your folder, no question.
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set torq packages user dev [ htop ]"]);
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
+        assert_eq!(m.commits.borrow()[0].2, "user");
+        assert!(m.commits.borrow()[0].0.contains("+++ b/users/dev/packages.json"));
+        assert!(m.asked.borrow().is_empty());
+    }
+
+    #[test]
+    fn ssh_by_any_path_is_said_as_it_is() {
+        // `services openssh`, or NixOS's `sshd` alias for it: on, outside the catalog — the question
+        // says the catalog's rules do not apply, and that passwords are allowed.
+        for line in ["set services openssh enable true", "set services sshd enable true"] {
+            let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+            let mut s = session(d.path(), None, &m);
+            run(&mut s, &["configure", line]);
+            s.exec("commit").unwrap_or_else(|e| panic!("{line}: {e:#}"));
+            let q = m.asked.borrow()[0].clone();
+            assert!(q.contains("outside TorqOS's catalog: its rules (keys only, only the owner) do not apply") && q.contains("! Password logins are allowed"), "{line}: {q}");
+        }
+        // What the evaluation says counts, not what the files look like: already on, nothing to say.
+        let on = Ssh { on: true, catalog: false, passwords: true };
+        let (d, m) = (repo(), Fake { answer: true, ssh_state: Some((on, on)), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set services openssh ports [ 2222 ]", "commit"]);
+        assert!(!m.asked.borrow()[0].contains("SSH is turned on"), "{}", m.asked.borrow()[0]);
+        // Not a tree file that could turn it on: not even asked about.
+        let (d, m) = (repo(), Fake { answer: true, ssh_state: Some((Ssh::default(), on)), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set networking hostName x", "commit"]);
+        assert!(!m.asked.borrow()[0].contains("SSH"), "only services.json and nixos/ files can");
+    }
+
+    #[test]
+    fn fenced_and_reserved_in_the_session() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        s.exec("configure").unwrap();
+        for (line, why) in [
+            ("set torq broker rebuildCommand x", "not settable in the configuration tree"),
+            ("set environment etc torq/broker.json text x", "not settable in the configuration tree"),
+            ("set services httpd virtualHosts _x forceSSL true", "the tree holds data only"),
+        ] {
+            assert!(format!("{:#}", s.exec(line).unwrap_err()).contains(why), "{line}");
+        }
+        assert_eq!(s.exec("show | compare").unwrap(), "", "nothing changed");
     }
 
     #[test]
@@ -1311,12 +1437,13 @@ mod tests {
     fn display_detail_names_each_users_files() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set users dev packages htop", "set users dev cli style cisco"]);
-        let out = s.exec("show users dev | display detail").unwrap();
-        assert!(out.contains("## users/dev/cli.json: users dev cli style\n") && out.contains("## users/dev/packages.json: users dev packages\n"), "{out}");
+        // By its NixOS path, and by its old name: the same file.
+        run(&mut s, &["configure", "set torq packages user dev htop", "set users dev cli style cisco"]);
+        let out = s.exec("show torq | display detail").unwrap();
+        assert!(out.contains("## users/dev/cli.json: torq cli userStyles dev\n") && out.contains("## users/dev/packages.json: torq packages user dev\n"), "{out}");
         assert!(!out.contains("system/"), "only what is shown: {out}");
-        let sys = s.exec("show system | display detail").unwrap();
-        assert!(sys.contains("## system/host.json: system host-name\n") && !sys.contains("users/"), "{sys}");
+        let net = s.exec("show networking | display detail").unwrap();
+        assert!(net.contains("## system/host.json: networking hostName\n") && !net.contains("users/"), "{net}");
     }
 
     #[test]
@@ -1327,13 +1454,13 @@ mod tests {
         let first = s.repo.history(2).unwrap()[1].id.clone();
         assert_eq!(
             s.exec("show configuration | display detail").unwrap(),
-            format!("system {{\n    host-name two;\n}}\n## commit {head}\n## system/host.json: system host-name\n"),
+            format!("networking {{\n    hostName two;\n}}\n## commit {head}\n## system/host.json: networking hostName\n"),
             "only the settings set (no time-zone here)"
         );
         assert!(s.exec("show configuration users | display detail").unwrap().ends_with(&format!("## commit {head}\n")), "no files below users");
         let commits = s.exec("show system commit | display detail").unwrap();
         assert!(commits.contains(&format!("\n    commit {head}\n")) && commits.ends_with(&format!("    commit {first}\n")), "{commits}");
-        assert!(s.exec("show system rollback 1 | display detail").unwrap().contains(&format!("host-name one;\n}}\n## commit {first} (rollback 1)\n")));
+        assert!(s.exec("show system rollback 1 | display detail").unwrap().contains(&format!("hostName one;\n}}\n## commit {first} (rollback 1)\n")));
         let raw = s.exec("show system rollback 0 compare 1 | display diff").unwrap();
         assert_eq!(raw, "--- a/system/host.json\n+++ b/system/host.json\n@@ -1 +1 @@\n-{ \"host-name\": \"one\" }\n+{ \"host-name\": \"two\" }\n", "the files as committed");
         assert_eq!(s.exec("show system alarms | display detail").unwrap(), "all well\n  running system /nix/store/x\n");
@@ -1347,8 +1474,8 @@ mod tests {
             m.commits.borrow()[0].0.clone()
         });
         run(&mut s, &["set system host-name four"]);
-        let detail = s.exec("show system | display detail").unwrap();
-        assert!(detail.contains("host-name four;") && detail.contains(&format!("## the candidate, from commit {head}\n")), "{detail}");
+        let detail = s.exec("show networking | display detail").unwrap();
+        assert!(detail.contains("hostName four;") && detail.contains(&format!("## the candidate, from commit {head}\n")), "{detail}");
     }
 
     #[cfg(target_os = "linux")] // the filters' sandbox
@@ -1356,20 +1483,20 @@ mod tests {
     fn filters_work_on_what_a_show_prints() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        assert_eq!(s.exec("show configuration | grep host").unwrap(), "    host-name two;\n");
+        assert_eq!(s.exec("show configuration | grep host").unwrap(), "    hostName two;\n");
         assert_eq!(s.exec("show configuration | grep -v host | wc -l").unwrap(), "2\n");
         assert_eq!(s.exec("show configuration | grep nothing").unwrap(), "", "nothing matched: no error");
         assert_eq!(s.exec("show system commit | wc -l").unwrap(), "2\n");
-        assert_eq!(s.exec("show configuration | display set | grep -o 'host-name [a-z]*'").unwrap(), "host-name two\n");
+        assert_eq!(s.exec("show configuration | display set | grep -o 'hostName [a-z]*'").unwrap(), "hostName two\n");
         run(&mut s, &["configure", "set system host-name three", "set system time-zone UTC"]);
-        assert_eq!(s.exec("show | compare | grep '^+'").unwrap(), "+   host-name three;\n+   time-zone UTC;\n");
-        assert_eq!(s.exec("show system | grep -o '^ *[a-z-]*' | tr -d ' ' | sort -r | head -n 1").unwrap(), "time-zone\n");
-        assert_eq!(s.exec("run show configuration | grep host").unwrap(), "    host-name two;\n", "run: the active one, filtered");
+        assert_eq!(s.exec("show | compare | grep '^+'").unwrap(), "+   hostName three;\n+   timeZone UTC;\n");
+        assert_eq!(s.exec("show time | grep -o 'timeZone [A-Z]*' | tr A-Z a-z").unwrap(), "timezone utc\n");
+        assert_eq!(s.exec("run show configuration | grep host").unwrap(), "    hostName two;\n", "run: the active one, filtered");
         s.exec("switch cli").unwrap();
         assert_eq!(s.exec("do show running-config | grep -c host").unwrap(), "1\n");
         assert!(format!("{:#}", s.exec("show configuration diff | grep -Q x").unwrap_err()).starts_with("| grep: "));
         assert!(s.exec("system host-name four | wc -l").is_err());
-        assert_eq!(s.exec("show configuration | grep host").unwrap(), "    host-name three;\n", "the refused line changed nothing");
+        assert_eq!(s.exec("show configuration | grep host").unwrap(), "    hostName three;\n", "the refused line changed nothing");
     }
 
     #[test]
@@ -1377,13 +1504,13 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         let out = run(&mut s, &["configure", "set users dev cli style cisco", "show | compare"]);
-        assert!(out.contains("[edit users dev cli]\n+   style cisco;\n"), "{out}");
+        assert!(out.contains("[edit torq cli userStyles]\n+   dev cisco;\n"), "{out}");
         let out = s.exec("commit").unwrap();
         assert_eq!(out, "commit complete (change #42)\n");
         let c = m.commits.borrow();
         let (diff, base, tier, reason, confirm) = &c[0];
         assert!(diff.contains("+++ b/users/dev/cli.json") && diff.contains("+  \"style\": \"cisco\""), "{diff}");
-        assert_eq!((base.as_str(), tier.as_str(), reason.as_str(), *confirm), (s.repo.head().unwrap().as_str(), "user", "+   style cisco;", None));
+        assert_eq!((base.as_str(), tier.as_str(), reason.as_str(), *confirm), (s.repo.head().unwrap().as_str(), "user", "+ torq cli userStyles dev cisco;", None));
         assert!(m.asked.borrow().is_empty(), "user tier: no question");
         assert_eq!(m.checks.borrow().len(), 1, "checked before committing");
         assert_eq!(s.exec("show | compare").unwrap(), "", "the candidate starts over after a commit");
@@ -1397,9 +1524,9 @@ mod tests {
         let e = format!("{:#}", s.exec("commit").unwrap_err());
         assert!(e.contains("needs a person to approve it"), "{e}");
         assert!(m.commits.borrow().is_empty());
-        assert!(m.asked.borrow()[0].contains("-   host-name two;\n+   host-name three;"), "the question shows the change");
+        assert!(m.asked.borrow()[0].contains("-   hostName two;\n+   hostName three;"), "the question shows the change");
         // The candidate is kept for another try.
-        assert!(s.exec("show | compare").unwrap().contains("host-name three"));
+        assert!(s.exec("show | compare").unwrap().contains("hostName three"));
         let m = Fake { answer: true, ..Fake::default() };
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set system host-name three", "commit comment \"rename\""]);
@@ -1425,7 +1552,7 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         assert_eq!(run(&mut s, &["configure", "rollback 1"]), "Entering configuration mode\nload complete\n");
-        assert_eq!(s.exec("show | compare").unwrap(), "[edit system]\n-   host-name two;\n+   host-name one;\n");
+        assert_eq!(s.exec("show | compare").unwrap(), "[edit networking]\n-   hostName two;\n+   hostName one;\n");
         assert!(format!("{:#}", s.exec("rollback 9").unwrap_err()).contains("only 2 configurations"));
         assert!(format!("{:#}", s.exec("rollback x").unwrap_err()).contains("not a number"));
         for huge in ["rollback 18446744073709551615", "run show system rollback 18446744073709551615"] {
@@ -1464,7 +1591,7 @@ mod tests {
         assert!(out.contains("changed but not committed"), "{out}");
         assert_eq!(s.mode, Mode::Operational);
         let mut s = session(d.path(), Some(saved.clone()), &m);
-        assert!(run(&mut s, &["configure", "show | compare"]).contains("+   packages [ htop ];"));
+        assert!(run(&mut s, &["configure", "show | compare"]).contains("+   dev [ htop ];"));
         // `torqcli -c`: a private candidate; nothing is saved.
         let mut p = session(d.path(), None, &m);
         run(&mut p, &["configure", "set users dev cli style cisco"]);
@@ -1518,7 +1645,7 @@ mod tests {
         let (d, m) = (repo(), Fake { answer: true, ..Fake::default() });
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set system host-name three", "commit"]);
-        assert_eq!(m.commits.borrow()[0].3, "-   host-name two; +   host-name three;");
+        assert_eq!(m.commits.borrow()[0].3, "- networking hostName two; + networking hostName three;");
     }
 
     /// Your own folder is yours; anyone else's takes a person's yes, like a system change.
@@ -1541,7 +1668,7 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set users dev cli style cisco"]);
         assert!(format!("{:#}", s.exec("commit").unwrap_err()).contains("busy"));
-        assert!(s.exec("show | compare").unwrap().contains("style cisco"));
+        assert!(s.exec("show | compare").unwrap().contains("dev cisco"));
         assert_eq!(s.exec("exit").unwrap(), "The configuration has been changed but not committed.\n");
     }
 
@@ -1554,19 +1681,20 @@ mod tests {
     fn moving_through_the_tree() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "edit users dev", "set cli style cisco", "edit cli"]);
-        assert_eq!(s.edit_path(), ["users", "dev", "cli"]);
-        assert_eq!(s.exec("show").unwrap(), "style cisco;\n");
+        run(&mut s, &["configure", "edit services httpd virtualHosts example.com", "set forceSSL true"]);
+        assert_eq!(s.edit_path(), w("services httpd virtualHosts example.com"));
+        assert_eq!(s.exec("show").unwrap(), "forceSSL true;\n");
         run(&mut s, &["up"]);
-        assert_eq!(s.edit_path(), ["users", "dev"]);
-        assert!(format!("{:#}", s.exec("edit cli style").unwrap_err()).contains("not somewhere to go"));
-        run(&mut s, &["top", "set system time-zone UTC"]);
-        assert!(s.edit_path().is_empty());
+        assert_eq!(s.edit_path(), w("services httpd"), "out of an entry and its set: one step");
+        assert!(format!("{:#}", s.exec("edit enable").unwrap_err()).contains("not somewhere to go"));
+        run(&mut s, &["top", "edit system", "set time-zone UTC"]);
+        assert!(s.exec("show | compare").unwrap().contains("[edit time]\n+   timeZone UTC;"), "an old name, from where you are");
+        run(&mut s, &["top"]);
         assert!(format!("{:#}", s.exec("up").unwrap_err()).contains("already at the top"));
         // `exit` goes up a level, and out of configuration mode at the top.
-        run(&mut s, &["edit system", "exit"]);
+        run(&mut s, &["edit virtualisation", "exit"]);
         assert_eq!((s.mode, s.edit_path().is_empty()), (Mode::Configuration, true));
-        run(&mut s, &["edit system", "exit configuration-mode"]);
+        run(&mut s, &["edit virtualisation", "exit configuration-mode"]);
         assert_eq!(s.mode, Mode::Operational);
     }
 
@@ -1575,23 +1703,24 @@ mod tests {
     fn delete_of_a_container_needs_all() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set users dev cli style cisco"]);
-        run(&mut s, &["set system packages [ htop vim ]"]);
+        run(&mut s, &["configure", "set torq cli userStyles dev cisco", "set torq packages system [ htop vim ]"]);
+        run(&mut s, &["set virtualisation docker enable true", "set virtualisation docker rootless enable true"]);
         for (bad, why) in [
-            ("delete users dev", "say `delete users dev all`"),
-            ("delete system", "say `delete system all`"),
-            ("delete system host-name all", "`all` is for a whole container"),
+            ("delete virtualisation docker", "say `delete virtualisation docker all`"),
+            ("delete virtualisation", "say `delete virtualisation all`"),
+            ("delete virtualisation docker enable all", "`all` is for a whole place or list"),
+            ("delete networking hostName all", "`all` is for a whole place or list"),
             // A whole list of values too: Enter pressed before the value (review of f705cc8).
-            ("delete system packages", "say `delete system packages all`"),
+            ("delete torq packages system", "say `delete torq packages system all`"),
         ] {
             assert!(format!("{:#}", s.exec(bad).unwrap_err()).contains(why), "{bad}");
         }
         // The hint is relative to where you are.
-        run(&mut s, &["edit system"]);
-        assert!(format!("{:#}", s.exec("delete packages").unwrap_err()).contains("say `delete packages all`"));
-        run(&mut s, &["delete packages htop", "delete packages all", "top", "delete users dev all"]);
+        run(&mut s, &["edit virtualisation docker"]);
+        assert!(format!("{:#}", s.exec("delete rootless").unwrap_err()).contains("say `delete rootless all`"));
+        run(&mut s, &["delete rootless all", "top", "delete torq packages system htop", "delete torq packages system all", "delete torq cli userStyles dev"]);
         let c = s.exec("show | compare").unwrap();
-        assert!(!c.contains("style") && !c.contains("packages"), "{c}");
+        assert_eq!(c, "[edit virtualisation docker]\n+   enable true;\n");
     }
 
     /// Out of a list entry is out of the list; a bare list is nowhere to stand; a command word cannot
@@ -1600,13 +1729,14 @@ mod tests {
     fn up_leaves_a_list_entry_whole() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "edit users dev cli", "up"]);
-        assert_eq!(s.edit_path(), ["users", "dev"]);
-        run(&mut s, &["up"]);
+        run(&mut s, &["configure", "edit services httpd virtualHosts example.com", "up"]);
+        assert_eq!(s.edit_path(), w("services httpd"));
+        run(&mut s, &["up", "up"]);
         assert!(s.edit_path().is_empty());
-        assert!(format!("{:#}", s.exec("edit users").unwrap_err()).contains("name an entry"));
+        // A command word as an entry's name would be ambiguous (`delete … all`).
+        assert!(format!("{:#}", s.exec("set services httpd virtualHosts all forceSSL true").unwrap_err()).contains("keeps the word for a command"));
         s.schema.nodes.get_mut("users").unwrap().values.as_mut().unwrap().insert("all".into(), String::new());
-        assert!(format!("{:#}", s.exec("set users all packages vim").unwrap_err()).contains("keeps the word for a command"));
+        assert!(format!("{:#}", s.exec("set users all packages vim").unwrap_err()).contains("keeps the word for a command"), "the old names too");
     }
 
     /// The same session in Cisco style: bare paths set, a container path is a submode, `no`
@@ -1614,22 +1744,23 @@ mod tests {
     #[test]
     fn a_session_in_cisco_style() {
         let (d, m) = (repo(), Fake { answer: true, ..Fake::default() });
-        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), Repo::new(d.path()), None, &m, "dev", Style::Cisco);
-        run(&mut s, &["config", "system host-name three", "users dev", "cli style juniper"]);
-        assert_eq!(s.edit_path(), ["users", "dev"]);
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, "dev", Style::Cisco);
+        run(&mut s, &["config", "networking hostName three", "services httpd virtualHosts example.com", "forceSSL true"]);
+        assert_eq!(s.edit_path(), w("services httpd virtualHosts example.com"), "a bare path to a place is a submode");
         run(&mut s, &["exit"]);
-        assert!(s.edit_path().is_empty(), "out of a list entry is out of the list (review of f705cc8)");
+        assert_eq!(s.edit_path(), w("services httpd"), "out of a named entry is out of its set (review of f705cc8)");
+        run(&mut s, &["top"]);
         assert_eq!(s.mode, Mode::Configuration);
         assert_eq!(
             s.exec("show configuration diff").unwrap(),
-            "[edit system]\n-   host-name two;\n+   host-name three;\n[edit users dev cli]\n+   style juniper;\n"
+            "[edit networking]\n-   hostName two;\n+   hostName three;\n[edit services httpd virtualHosts example.com]\n+   forceSSL true;\n"
         );
-        run(&mut s, &["no users dev cli style", "do show system alarms"]);
+        run(&mut s, &["no services httpd virtualHosts example.com forceSSL", "do show system alarms"]);
         assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("in Cisco style"));
         assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
         assert_eq!(s.exec("end").unwrap(), "");
         assert_eq!(s.mode, Mode::Operational);
-        assert_eq!(s.exec("show running-config").unwrap(), "system {\n    host-name two;\n}\n", "the fake commits nothing");
+        assert_eq!(s.exec("show running-config").unwrap(), "networking {\n    hostName two;\n}\n", "the fake commits nothing");
     }
 
     /// `switch cli` changes the syntax for the session, wherever you are.
@@ -1641,15 +1772,15 @@ mod tests {
         assert_eq!(s.exec("switch cli").unwrap(), "Switched to the cisco style (for this session)\n");
         run(&mut s, &["time-zone UTC", "no time-zone"]);
         run(&mut s, &["switch cli", "set time-zone UTC"]);
-        assert!(s.exec("show | compare").unwrap().contains("+   time-zone UTC;"));
+        assert!(s.exec("show | compare").unwrap().contains("+   timeZone UTC;"));
     }
 
     #[test]
     fn earlier_configurations_and_their_differences() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        assert_eq!(s.exec("show system rollback 1").unwrap(), "system {\n    host-name one;\n}\n");
-        assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "[edit system]\n-   host-name one;\n+   host-name two;\n");
+        assert_eq!(s.exec("show system rollback 1").unwrap(), "networking {\n    hostName one;\n}\n");
+        assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "[edit networking]\n-   hostName one;\n+   hostName two;\n");
         assert!(format!("{:#}", s.exec("show system rollback 5").unwrap_err()).contains("only 2 configurations"));
         assert!(format!("{:#}", s.exec("show system rollback x").unwrap_err()).contains("not a number"));
     }
@@ -1675,12 +1806,12 @@ mod tests {
     fn operational_mode_shows_the_active_configuration() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        assert_eq!(s.exec("show configuration").unwrap(), "system {\n    host-name two;\n}\n");
-        assert_eq!(s.exec("show configuration | display set").unwrap(), "set system host-name two\n");
+        assert_eq!(s.exec("show configuration").unwrap(), "networking {\n    hostName two;\n}\n");
+        assert_eq!(s.exec("show configuration | display set").unwrap(), "set networking hostName two\n");
         assert!(s.exec("show system commit").unwrap().starts_with("0   "));
         assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("unknown command: set"));
         run(&mut s, &["configure", "set system host-name three"]);
-        assert_eq!(s.exec("run show configuration").unwrap(), "system {\n    host-name two;\n}\n", "run: the active one");
+        assert_eq!(s.exec("run show configuration").unwrap(), "networking {\n    hostName two;\n}\n", "run: the active one");
         assert_eq!(s.mode, Mode::Configuration);
         s.exec("exit").unwrap();
         s.exec("exit").unwrap();

@@ -9,11 +9,9 @@ mod shell;
 mod complete;
 mod syntax;
 mod filter;
-// The NixOS settings tree: read and checked here (S1), editable in configuration mode next (S3).
-#[allow(dead_code)]
 mod nixos;
-#[allow(dead_code)]
 mod settings;
+mod whole;
 mod pkg;
 mod run;
 mod status;

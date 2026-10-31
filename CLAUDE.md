@@ -124,7 +124,7 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
 - **Filters and `torqcli <command>` (4b, 4c; ADR-017):** `show … | grep -i x | wc -l` runs the real
   coreutils/grep, sandboxed in bubblewrap (no files, network, environment or inherited descriptors);
   `torqcli show system alarms` runs one command. Covered in `tests/trust-loop.nix`.
-- `| display detail` / `| display diff` (4d); the software in the candidate (`request system update`,
+- **The tree is every NixOS setting (S1–S3c, docs/CONFIG-IS-THE-DEVICE.md):** `set virtualisation docker enable true`; old names are aliases. `| display detail` / `| display diff` (4d); the software in the candidate (`request system update`,
   4e); configuration numbers from the ledger (4f); `request system revert`, `show system ledger`, the
   SSH key check at commit, and the old commands retired (4g). Next: M2 (`docs/ROADMAP.md`); what is
   left of M1.5 needs a person (usability check, terminal look) or its own design (environment

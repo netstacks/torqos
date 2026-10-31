@@ -316,6 +316,17 @@
       }
     },
     {
+      "help": "Whether to enable printing support through the CUPS daemon.",
+      "loc": [
+        "services",
+        "printing",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
       "help": "Additional configurations to build. If `inheritParentConfig` is true, the system will be based on the overall system configuration.",
       "loc": [
         "specialisation"
@@ -325,6 +336,16 @@
           "name": "submodule"
         },
         "name": "attrsOf"
+      }
+    },
+    {
+      "help": "This option defines the first version of NixOS you have installed on this particular machine, and is used to maintain compatibility with application data (e.g. ",
+      "loc": [
+        "system",
+        "stateVersion"
+      ],
+      "type": {
+        "name": "str"
       }
     },
     {
@@ -377,6 +398,39 @@
       }
     },
     {
+      "help": "The syntax torqcli speaks on this machine (system/cli.json).",
+      "loc": [
+        "torq",
+        "cli",
+        "style"
+      ],
+      "type": {
+        "name": "enum",
+        "values": [
+          "juniper",
+          "cisco"
+        ]
+      }
+    },
+    {
+      "help": "Per-user torqcli syntax, overriding `style` (users/<name>/cli.json).",
+      "loc": [
+        "torq",
+        "cli",
+        "userStyles"
+      ],
+      "type": {
+        "elem": {
+          "name": "enum",
+          "values": [
+            "juniper",
+            "cisco"
+          ]
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
       "help": "Development mode: convenience over security while TorqOS itself is being built. Passwordless sudo for wheel, Claude Code + gh + tmux installed, the owner is a t",
       "loc": [
         "torq",
@@ -385,6 +439,85 @@
       ],
       "type": {
         "name": "bool"
+      }
+    },
+    {
+      "help": "nixpkgs attribute paths installed system-wide.",
+      "loc": [
+        "torq",
+        "packages",
+        "system"
+      ],
+      "type": {
+        "elem": {
+          "name": "str"
+        },
+        "name": "listOf"
+      }
+    },
+    {
+      "help": "Per-user nixpkgs attribute paths, keyed by user name.",
+      "loc": [
+        "torq",
+        "packages",
+        "user"
+      ],
+      "type": {
+        "elem": {
+          "elem": {
+            "name": "str"
+          },
+          "name": "listOf"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "Catalog services to enable. Read from the config repo's services.json only.",
+      "loc": [
+        "torq",
+        "services",
+        "enabled"
+      ],
+      "type": {
+        "elem": {
+          "name": "enum",
+          "values": [
+            "podman",
+            "printing",
+            "ssh",
+            "tailscale"
+          ]
+        },
+        "name": "listOf"
+      }
+    },
+    {
+      "help": "Additional user accounts to be created automatically by the system. This can also be used to set options for root.",
+      "loc": [
+        "users",
+        "users"
+      ],
+      "type": {
+        "elem": {
+          "name": "submodule"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "The user's auxiliary groups.",
+      "loc": [
+        "users",
+        "users",
+        "<name>",
+        "extraGroups"
+      ],
+      "type": {
+        "elem": {
+          "name": "str"
+        },
+        "name": "listOf"
       }
     },
     {
@@ -404,6 +537,17 @@
         "virtualisation",
         "docker",
         "rootless",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
+      "help": "Alias of {option}`services.openssh.enable`.",
+      "loc": [
+        "services",
+        "sshd",
         "enable"
       ],
       "type": {

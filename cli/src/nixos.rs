@@ -36,6 +36,7 @@ impl Type {
             "listOf" => format!("[ {} … ]", self.elem.as_ref().map_or("value".into(), |e| e.describe())),
             "enum" => format!("one of: {}", self.values.iter().flatten().map(plain).collect::<Vec<_>>().join(", ")),
             "package" => "a package name".into(),
+            "attrsOf" | "lazyAttrsOf" => format!("<name> {}", self.elem.as_ref().map_or("value".into(), |e| e.describe())),
             "path" | "pathInStore" => "a path".into(),
             k if is_int(k) => "a number".into(),
             k if is_str(k) => "text".into(),
@@ -78,7 +79,7 @@ struct File {
 
 /// One point of the tree: a setting (with its type and help), what is below it, or both (a set of
 /// named entries is a setting whose entries hold more settings).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Node {
     pub setting: Option<(Type, String)>,
     pub children: BTreeMap<String, Node>,
@@ -95,6 +96,7 @@ pub struct Resolved<'a> {
     pub values: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct Tree {
     pub root: Node,
     fence: Vec<Vec<String>>,
@@ -152,6 +154,36 @@ impl Tree {
             Some((ty, _)) if takes_value(ty) => Ok(Resolved { loc, ty, values: vec![] }),
             _ => bail!("{}: not a setting by itself (`?` shows what is below it)", loc.join(" ")),
         }
+    }
+
+    /// Where in `words` an entry is named (`services httpd virtualHosts example.com` → [3]).
+    pub fn entry_positions(&self, words: &[String]) -> Vec<usize> {
+        let (mut n, mut at) = (&self.root, Vec::new());
+        for (i, w) in words.iter().enumerate() {
+            n = match (n.children.get(w), n.children.get("<name>")) {
+                (Some(c), _) => c,
+                (None, Some(e)) => {
+                    at.push(i);
+                    e
+                }
+                _ => break,
+            };
+        }
+        at
+    }
+
+    /// Whether the last of `words` names an entry of a set of named ones (`virtualHosts example.com`).
+    pub fn is_entry(&self, words: &[String]) -> bool {
+        let Some((last, parent)) = words.split_last() else { return false };
+        let mut n = &self.root;
+        for w in parent {
+            n = match (n.children.get(w), n.children.get("<name>")) {
+                (Some(c), _) => c,
+                (None, Some(e)) => e,
+                _ => return false,
+            };
+        }
+        !n.children.contains_key(last) && n.children.contains_key("<name>")
     }
 
     /// Where `words` lead, setting or not: the path (entry names in place of `<name>`), the setting
