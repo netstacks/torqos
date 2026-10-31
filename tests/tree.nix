@@ -8,11 +8,17 @@
 let
   inherit (pkgs) lib;
 
+  # "template": the config repo template as a new machine has it, with its hardware file (written at
+  # setup by nixos-generate-config) and its own owner placeholder.
+  templateMachine = pkgs.runCommand "template-machine" { } ''
+    cp -r ${../templates/config} $out && chmod -R u+w $out
+    cp ${./tree/template-hardware.nix} $out/hardware-configuration.nix
+    sed -i s/CHANGE-ME/dev/ $out/nixos/torq.json  # as setup does
+  '';
   configOf = case: (self.lib.mkSystem {
     system = pkgs.stdenv.hostPlatform.system;
-    # "template": the config repo template's own data files (its .nix modules need hardware).
-    configDir = if case == "template" then ../templates/config else ./tree + "/${case}";
-    modules = [ { torq.user = "dev"; } ];
+    configDir = if case == "template" then templateMachine else ./tree + "/${case}";
+    modules = lib.optional (case != "template") { torq.user = "dev"; };
   }).config;
 
   # The value, or null if evaluating it fails (a throw).
@@ -94,6 +100,11 @@ let
     ++ lib.optional (fenceOk != "hi") "nixos-fence-ok: motd-torq/x is not fenced, got ${builtins.toJSON fenceOk}"
     ++ lib.optional (!fenceFixture) "cli/src/nixos-fixture.json: its fence is not modules/settings-fence.nix's"
     ++ lib.optional (tryValue (configOf "config-good").services.httpd.virtualHosts."from-a-file".documentRoot != "/srv/file") "config-good: the attached file did not take effect"
+    ++ lib.optional (tryValue (configOf "config-good").networking.domain != "from-the-top") "config-good: the file attached at the top did not take effect"
+    # The template is a whole machine: data, its hardware attached, nothing else, no desktop.
+    ++ lib.optional (tryValue (configOf "template").system.build.toplevel.drvPath == null) "template: does not evaluate as a machine"
+    ++ lib.optional (tryValue (configOf "template").fileSystems."/".device != "/dev/vda1") "template: its hardware file is not attached"
+    ++ lib.optional (tryValue (configOf "template").torq.desktop.enable != false) "template: the desktop is on"
     ++ lib.concatLists (lib.mapAttrsToList (case: probe:
       lib.optional (tryValue (probe (configOf case)) != null) "${case}: evaluated, but must be refused") nixosInvalid);
 

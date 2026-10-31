@@ -240,14 +240,22 @@ impl Whole<'_> {
         Ok(crate::tree::render_entries(&below))
     }
 
-    /// `| display set` below `path`.
+    /// `| display set` below `path`: each line whole, from the top (as Junos), so it can be pasted back.
     pub fn display_set(&self, d: &Data, path: &[String]) -> Result<String> {
-        Ok(crate::tree::display_set_entries(&self.below(d, path)?))
+        self.below(d, path)?;
+        let path = self.shown_path(d, path);
+        let all: Vec<(Vec<String>, Val)> = self.entries(d).into_iter().filter(|(w, _)| w.starts_with(&path)).collect();
+        Ok(crate::tree::display_set_entries(&all))
+    }
+
+    /// The path entries are shown below: an old name's, by its NixOS path.
+    fn shown_path(&self, d: &Data, path: &[String]) -> Vec<String> {
+        translate(path, 1, true).filter(|_| self.schema.resolve_in(path, Some(&d.config)).is_ok()).unwrap_or_else(|| path.to_vec())
     }
 
     /// The entries below `path`, the path taken off (the brace format starts where you are).
     fn below(&self, d: &Data, path: &[String]) -> Result<Vec<(Vec<String>, Val)>> {
-        let path = translate(path, 1, true).filter(|_| self.schema.resolve_in(path, Some(&d.config)).is_ok()).unwrap_or_else(|| path.to_vec());
+        let path = self.shown_path(d, path);
         let all = self.entries(d);
         let below: Vec<(Vec<String>, Val)> =
             all.into_iter().filter(|(w, _)| w.starts_with(&path)).map(|(w, v)| (w[path.len()..].to_vec(), v)).collect();

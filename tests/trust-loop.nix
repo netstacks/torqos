@@ -129,8 +129,9 @@ pkgs.testers.runNixOSTest {
         hostile = "GIT_DIR=/nonexistent GIT_CONFIG_PARAMETERS=bogus GIT_INDEX_FILE=/nonexistent"
         out = machine.succeed(f"su - dev -c '{hostile} torqcli -c \"show configuration\"'")
         assert out.startswith("networking {\n    hostName machine;\n}\n"), out
-        # The whole device: what is set outside the tree is named, as a comment a saved file keeps.
-        assert "## also set outside this configuration, in Nix: " in out and "flake.nix" in out, out
+        # The whole device: what is set outside the tree is named, as a comment a saved file keeps;
+        # flake.nix is TorqOS's own, not set outside it.
+        assert "## also set outside this configuration, in Nix: desktop.nix\n" in out, out
         out = machine.succeed("su - dev -c 'torqcli -c \"configure; set system time-zone UTC; show | compare\"'")
         assert "[edit time]\n+   timeZone UTC;" in out, out
         # -c uses a private candidate; the interactive shell keeps one, private, between sessions.

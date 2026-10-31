@@ -58,10 +58,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    `status --json`; the CLI hides the head finding only when HEAD is `before` or that commit.
    Also low: `history::asked_by` credits a failed/interrupted *undo* to the original change's
    actor; undo is user-only, so rollbacks should show "user". (Found by review of f2da8b7.)
-6f. **Nothing evaluates `templates/config` itself.** The VM test checks the broker builds `#torq`,
-   but no `nix flake check` entry builds a config made from the template (it needs a hardware
-   file and a user name), so a template that stopped exposing `nixosConfigurations.torq` would
-   only show at the next install. (`tests/tree.nix` does read the template's data files.) A config
+6f. **The template's flake.nix is not evaluated.** tests/tree.nix evaluates the template as a whole
+   machine (its data, its hardware file attached, an owner set, as setup does: S4a), but through
+   `torq.lib.mkSystem`, not the template's own flake.nix, so a flake.nix that stopped exposing
+   `nixosConfigurations.torq` would only show at the next install. A config
    repo made from an older template (output `torq-utm`) must be renamed to `torq` before its broker
    is updated; only the dev VM ever had one. Such a repo also sets `networking.hostName` in
    `machine.nix`: adding `system/host.json` with a host name to it is a conflict until that line
@@ -116,6 +116,15 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    someone (`AuthorizedKeysCommand`, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile`), which the
    catalog does not pin either.
 
+6n. **A mistake in how the machine starts shows only at the next restart** (review of S4a). The
+   tree sets `fileSystems`, `boot` (loader, initrd modules) and `swapDevices` like any setting, and
+   the attached hardware-configuration.nix is plain Nix: a wrong but well-formed value (`fileSystems
+   /boot fsType ext4`) builds, switches, and fails at the next boot, into an emergency shell.
+   `commit confirmed` cannot help (its timer runs on the new system, which never comes up). torqcli
+   says so in the commit question; the way back is an earlier configuration in the boot menu (20
+   kept), which needs the machine's console, and `boot loader timeout 0` hides the menu. To do: make
+   the new boot entry one-shot until a confirmed commit is confirmed; refuse a zero timeout.
+
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing
@@ -124,7 +133,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 ## Desktop (off since ADR-019; kept for later)
 7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
    `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a TorqOS niri config.
-8. ~~Template hard-codes user `casey`.~~ Fixed: `torq.user` in `system.nix` is the one place
+8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
 
 ## UTM VM quirks (not TorqOS bugs)

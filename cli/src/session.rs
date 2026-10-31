@@ -431,7 +431,8 @@ impl<'a> Session<'a> {
             .repo
             .paths(rev)?
             .into_iter()
-            .filter(|p| p != "flake.lock" && p != crate::attach::FILE && !self.schema.describes(p) && crate::settings::top_of(p).is_none())
+            // (flake.nix is TorqOS's own: its software is the line above.)
+            .filter(|p| p != "flake.lock" && p != "flake.nix" && p != crate::attach::FILE && !self.schema.describes(p) && crate::settings::top_of(p).is_none())
             .filter(|p| !attached.values().any(|f| f == p)).map(|p| crate::history::one_line(&p, 60)).collect();
         if !outside.is_empty() {
             out.push_str(&format!("## also set outside this configuration, in Nix: {}\n", outside.join(", ")));
@@ -762,6 +763,14 @@ impl<'a> Session<'a> {
                 }
             }
         }
+        // How the machine boots: a mistake shows only at the next restart (no `commit confirmed` timer runs
+        // on a system that does not come up), so say so before anyone approves it.
+        let section = |l: &str| l.strip_prefix("[edit ").and_then(|s| s.strip_suffix(']')).and_then(|s| s.split(' ').next()).map(String::from);
+        let boots = compare.lines().filter_map(section).any(|top| matches!(top.as_str(), "fileSystems" | "boot" | "swapDevices"))
+            || files.iter().any(|(p, _)| p == "hardware-configuration.nix");
+        if boots {
+            shown.push_str("! This changes how the machine starts (file systems, boot): a mistake shows only at the next restart, where `commit confirmed` cannot undo it; the earlier configurations stay in the boot menu.\n");
+        }
         let why = match (tier, others.is_empty()) {
             ("system", _) => Some("This changes the system (all users).".to_string()),
             (_, false) => Some(format!("This changes the settings of: {}.", others.join(", "))),
@@ -820,7 +829,9 @@ impl<'a> Session<'a> {
                     None => "",
                 };
                 let at: Vec<&str> = attached.iter().filter(|(_, f)| **f == p).map(|(a, _)| a.as_str()).collect();
+                let at: Vec<&str> = at.into_iter().map(|a| if a.is_empty() { "the top" } else { a }).collect();
                 let at = if at.is_empty() { String::new() } else { format!("  [attached at: {}]", at.join("; ")) };
+                let at = if p == "flake.nix" { "  (TorqOS's own: it builds the machine from the tree)".to_string() } else { at };
                 out.push_str(&format!("{p}{state}{at}\n"));
             }
             return Ok(out);
@@ -1484,11 +1495,11 @@ mod tests {
         let out = s.exec("show configuration").unwrap();
         assert_eq!(
             out,
-            "networking {\n    hostName two;\n}\n## software: torq 2026-10-26\n## also set outside this configuration, in Nix: flake.nix, machine.nix\n",
+            "networking {\n    hostName two;\n}\n## software: torq 2026-10-26\n## also set outside this configuration, in Nix: machine.nix\n",
             "the machine's own inputs only (nixpkgs follows torq\x27s)"
         );
         assert!(!s.exec("show configuration system").unwrap().contains("##"), "a part of it is just that part");
-        assert!(s.exec("show configuration | display set").unwrap().ends_with("in Nix: flake.nix, machine.nix\n"));
+        assert!(s.exec("show configuration | display set").unwrap().ends_with("in Nix: machine.nix\n"));
         // The candidate names the software it would install.
         s.exec("request system update").unwrap();
         s.exec("configure").unwrap();
@@ -1538,7 +1549,10 @@ mod tests {
         assert_eq!(m.edited.borrow()[0], ("services/httpd.nix".into(), "{ ... }:\n{\n}\n".into()), "a new file starts as an empty module");
         run(&mut s, &["set services httpd config services/httpd.nix"]);
         assert_eq!(s.exec("show services httpd").unwrap(), "config services/httpd.nix;\n");
-        assert_eq!(s.exec("show services | display set").unwrap(), "set httpd config services/httpd.nix\n");
+        assert_eq!(s.exec("show services | display set").unwrap(), "set services httpd config services/httpd.nix\n", "whole lines, to paste back");
+        run(&mut s, &["edit services"]);
+        assert_eq!(s.exec("show | display set").unwrap(), "set services httpd config services/httpd.nix\n", "from where you are, too");
+        run(&mut s, &["top"]);
         // Another session (the candidate as saved) sees the same.
         let mut s2 = session(d.path(), Some(saved), &m);
         s2.exec("configure").unwrap();
@@ -1605,7 +1619,38 @@ mod tests {
         sh(d.path(), "printf '{ \"services httpd\": \"system.nix\" }\\n' > config-files.json && git add -A && git commit -qm attach");
         let shown = s.exec("show configuration").unwrap();
         assert!(shown.contains("httpd {\n        config system.nix;") && !shown.contains("in Nix"), "{shown}");
-        assert_eq!(s.exec("file list").unwrap(), "system.nix  [attached at: services httpd]\n");
+        sh(d.path(), "touch flake.nix && git add -A && git commit -qm flake");
+        assert!(!s.exec("show configuration").unwrap().contains("in Nix"), "flake.nix is TorqOS's own, not set outside");
+        assert_eq!(s.exec("file list").unwrap(), "flake.nix  (TorqOS's own: it builds the machine from the tree)\nsystem.nix  [attached at: services httpd]\n");
+        // At the top of the tree, and TorqOS's own flake.nix said as such.
+        sh(d.path(), "printf '{ \"\": \"system.nix\" }\\n' > config-files.json && touch flake.nix && git add -A && git commit -qm top");
+        assert!(s.exec("show configuration").unwrap().starts_with("config system.nix;\n"));
+        assert_eq!(s.exec("file list").unwrap(), "flake.nix  (TorqOS's own: it builds the machine from the tree)\nsystem.nix  [attached at: the top]\n");
+        let mut d2 = crate::whole::Data::default();
+        s.whole().set(&mut d2, &w("config a.nix")).unwrap();
+        assert_eq!(crate::attach::load(crate::attach::render(&d2.attached).as_deref().map(str::as_bytes)).unwrap(), d2.attached, "a top-level attachment reads back");
+    }
+
+    /// A change to how the machine starts is said so before anyone approves it; others are not.
+    #[test]
+    fn boot_changes_are_warned_about() {
+        for (line, warned) in [
+            ("set fileSystems /boot fsType vfat", true),
+            ("set boot loader timeout 3", true),
+            ("set virtualisation docker enable true", false),
+            ("set environment variables BOOT x", false),
+        ] {
+            let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+            let mut s = session(d.path(), None, &m);
+            run(&mut s, &["configure", line, "commit"]);
+            let asked = m.asked.borrow()[0].clone();
+            assert_eq!(asked.contains("how the machine starts"), warned, "{line}: {asked}");
+        }
+        // Editing the attached hardware file is warned about too.
+        let (d, m) = (repo(), Fake { answer: true, edit_to: Some("{ ... }: { }\n".into()), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "file edit hardware-configuration.nix", "commit"]);
+        assert!(m.asked.borrow()[0].contains("how the machine starts"));
     }
 
     #[test]

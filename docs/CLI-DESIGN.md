@@ -146,7 +146,7 @@ design first (review N2/N3): variable values are effectively code (`PATH`, `LD_P
 a system value must never reach the broker's environment, and people will paste secrets into them.
 They come back with an allow-list of names, per-user delivery, escaped values and a secrets check.
 
-Files outside the tree (`flake.nix`, `machine.nix`, hardware, any `.nix`) are system tier and edited
+Files outside the tree (`flake.nix`, any `.nix` not attached) are system tier and edited
 as Nix, not through the shell; `show configuration` names them at the end (`## also set outside this
 configuration, in Nix: …`, 5a), with the software the machine runs (`## software: …`), and
 any change to one is shown as its raw diff in `show | compare` and in `commit`.

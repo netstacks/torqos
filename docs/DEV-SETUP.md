@@ -28,9 +28,12 @@ git clone <your GitHub repo URL> ~/torq
 
 # c) Create this machine's config repo from the template
 sudo nix flake new -t ~/torq#config /var/lib/torq/config
-sudo cp /etc/nixos/hardware-configuration.nix /var/lib/torq/config/
-sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/torq/config/system.nix          # the one place a user name is set
+sudo cp /etc/nixos/hardware-configuration.nix /var/lib/torq/config/   # attached at the top (config-files.json)
+sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/torq/config/nixos/torq.json    # the one place a user name is set
 sudo sed -i "s|github:netstacks/torqos|path:$HOME/torq|" /var/lib/torq/config/flake.nix  # dev: your checkout
+
+# (In a VM, optionally, from torqcli after the first boot: set services qemuGuest enable true,
+#  set services spice-vdagentd enable true. On x86_64, set `system = "x86_64-linux"` in flake.nix.)
 
 # d) First switch into TorqOS (explicit host name the first time)
 sudo nixos-rebuild switch --flake /var/lib/torq/config#torq
@@ -43,7 +46,7 @@ ledger. From now on, **all** changes go through the broker:
 ```bash
 # make a change in a scratch copy and produce a diff:
 sudo cp -r /var/lib/torq/config /tmp/cfg && sudo chown -R $USER /tmp/cfg
-sed -i 's/torq.desktop.enable = true;/torq.desktop.enable = true;\n  services.printing.enable = true;/' /tmp/cfg/desktop.nix
+printf '{ "printing": { "enable": true } }\n' > /tmp/cfg/nixos/services.json   # (if it does not exist yet)
 (cd /tmp/cfg && git diff > /tmp/printing.diff)
 sudo torq-broker propose --diff /tmp/printing.diff --reason "Enable printing" --actor user
 sudo torq-broker apply <seq> --approved-by $USER      # commits + nixos-rebuild switch

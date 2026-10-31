@@ -64,13 +64,13 @@ let
     let f = if configDir != null then configDir + "/config-files.json" else null; in
     if f != null && builtins.pathExists f then builtins.fromJSON (builtins.readFile f) else { };
   # The same rule as torqcli's (cli/src/attach.rs `valid`): plain path characters, no empty, `.` or
-  # `..` part, not the repo's own flake.nix or hardware-configuration.nix.
+  # `..` part, not TorqOS's own flake.nix.
   configFile = at: rel:
     let
       ok = builtins.isString rel && lib.hasSuffix ".nix" rel
         && builtins.match "[A-Za-z0-9._/-]+" rel != null
         && !(lib.any (p: p == "" || p == "." || p == "..") (lib.splitString "/" rel))
-        && !(builtins.elem rel [ "flake.nix" "hardware-configuration.nix" ]);
+        && rel != "flake.nix";
       path = configDir + "/${rel}";
       shown = if builtins.isString rel then rel else "(not a file name)";
     in

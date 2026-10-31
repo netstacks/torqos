@@ -177,7 +177,7 @@ torq.desktop.enable = true;       →  torq desktop enable true
    system that was running (same store path), so it changed nothing but what is visible.
 3. `config <file>` and `edit`, through the candidate and `commit`.
    **Built (S3e):** `set <place> config <file>` attaches an ordinary NixOS module file of the config
-   repo (a `.nix` file inside it: relative, no `..`; not flake.nix or hardware-configuration.nix)
+   repo (a `.nix` file inside it: relative, no `..`; not TorqOS's own flake.nix)
    at any place of the tree, kept in `config-files.json` and imported by modules/nixos-settings.nix.
    The place is where it is shown and found; the file is a whole NixOS module, and may set anything
    (system tier; KNOWN-GAPS 6m). `file edit <file>` opens your `$EDITOR` (`$VISUAL`, else nano or
@@ -192,4 +192,19 @@ torq.desktop.enable = true;       →  torq desktop enable true
    uses NixOS's own paths (`users users <name> extraGroups [ … ]`). TorqOS-default warnings at
    commit may still come.
 5. `hardware` and `system software` branches; fixed `flake.nix`/`machine.nix`; migrate this machine.
+   **Built (S4a):** hardware is not a branch of its own: it is NixOS's own paths (`fileSystems /
+   device …`, `boot loader systemd-boot enable true`), like every other setting. `flake.nix` is
+   fixed (TorqOS's own, no modules; `file list` says so, `show configuration` no longer lists it as
+   set outside). `machine.nix`, `system.nix` and `desktop.nix` are gone from the template, which is
+   data plus the `hardware-configuration.nix` nixos-generate-config writes at setup, attached at the
+   top of the tree (`config hardware-configuration.nix;`) until an installer writes its values into
+   the tree (M2). It imports nixpkgs profiles (qemu-guest), which are not values and should keep
+   following nixpkgs. This machine is migrated the same way: its machine.nix values (boot loader,
+   the qemuGuest and spice services) go to nixos/boot.json and nixos/services.json, its
+   hardware-configuration.nix is attached at the top, and it builds the very system that was
+   running. tests/tree.nix evaluates the template as a whole machine. A change to how the machine
+   starts is warned about at commit (KNOWN-GAPS 6n). Also fixed: `| display set` prints whole lines
+   from the top (pasteable, as Junos); `torqcli … | head` stops quietly (141), and a failure to
+   write the output (a full disk) is an error; a top-level attachment (`set config x.nix`) reads
+   back. Still to do: the `system software` branch (S4b).
 6. `save` / `load override|merge|set`: a saved configuration recreates a device.

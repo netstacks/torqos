@@ -24,9 +24,9 @@ pub fn valid(rel: &str) -> Result<()> {
     if !rel.ends_with(".nix") || rel.starts_with('/') || !plain || parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
         bail!("'{rel}' must be a .nix file inside the config repo (like services/httpd.nix: relative, no ..)");
     }
-    // Not one of the files TorqOS keeps the configuration's own structure in.
-    if matches!(rel, "flake.nix" | "hardware-configuration.nix") {
-        bail!("'{rel}' is the config repo's own: attach a file of your own");
+    // Not the file TorqOS keeps the configuration's own structure in.
+    if rel == "flake.nix" {
+        bail!("'{rel}' is TorqOS's own (it builds the machine from the tree): attach a file of your own");
     }
     Ok(())
 }
@@ -36,8 +36,9 @@ pub fn load(bytes: Option<&[u8]>) -> Result<Attached> {
     let Some(b) = bytes else { return Ok(Attached::new()) };
     let a: Attached = serde_json::from_slice(b).with_context(|| format!("{FILE}: not a JSON object of strings; fix the file (as raw JSON) first"))?;
     for (at, rel) in &a {
-        if at.is_empty() || at.chars().any(char::is_control) {
-            bail!("{FILE}: an attachment without a place");
+        // (An empty place is the top of the tree: `set config hardware-configuration.nix`.)
+        if at.chars().any(char::is_control) || at.starts_with(' ') || at.ends_with(' ') || at.contains("  ") {
+            bail!("{FILE}: an attachment's place is not words of the tree");
         }
         valid(rel).with_context(|| format!("{FILE}: {at}"))?;
     }
@@ -53,7 +54,7 @@ pub fn render(a: &Attached) -> Option<String> {
 pub fn entries(a: &Attached) -> Vec<(Vec<String>, Val)> {
     a.iter()
         .map(|(at, rel)| {
-            let mut w: Vec<String> = at.split(' ').map(String::from).collect();
+            let mut w: Vec<String> = at.split(' ').filter(|w| !w.is_empty()).map(String::from).collect();
             w.push("config".into());
             (w, Val::One(rel.clone()))
         })
@@ -69,7 +70,7 @@ mod tests {
         for ok in ["services/httpd.nix", "custom_apps/my-app.nix", "a.nix"] {
             valid(ok).unwrap_or_else(|e| panic!("{ok}: {e:#}"));
         }
-        for bad in ["../x.nix", "/etc/x.nix", "a/../b.nix", "notes.txt", "./a.nix", "a//b.nix", "a b.nix", "flake.nix", "hardware-configuration.nix", ""] {
+        for bad in ["../x.nix", "/etc/x.nix", "a/../b.nix", "notes.txt", "./a.nix", "a//b.nix", "a b.nix", "flake.nix", ""] {
             assert!(valid(bad).is_err(), "{bad}");
         }
         assert!(load(Some(br#"{"x": "../y.nix"}"#)).is_err());
@@ -78,5 +79,9 @@ mod tests {
         assert_eq!(entries(&a), [(vec!["services".into(), "httpd".into(), "config".into()], Val::One("services/httpd.nix".into()))]);
         assert_eq!(load(render(&a).as_deref().map(str::as_bytes)).unwrap(), a, "reads back");
         assert_eq!(render(&Attached::new()), None);
+        // At the top of the tree: an empty place, read back (and hardware-configuration.nix may be one).
+        let top = load(Some(br#"{"": "hardware-configuration.nix"}"#)).unwrap();
+        assert_eq!(entries(&top), [(vec!["config".into()], Val::One("hardware-configuration.nix".into()))]);
+        assert!(load(Some(br#"{" services": "a.nix"}"#)).is_err());
     }
 }

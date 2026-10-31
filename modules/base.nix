@@ -6,14 +6,14 @@ in
 {
   options.torq.user = lib.mkOption {
     type = lib.types.str;
-    description = "Primary (owner) user account of this laptop.";
+    description = "Primary (owner) user account of this machine.";
   };
 
   config = {
     assertions = [
       {
         assertion = cfg.user != "CHANGE-ME";
-        message = "Set torq.user to your login name in the config repo's system.nix.";
+        message = "Set the owner's login name: `torq user <name>` (nixos/torq.json in the config repo).";
       }
       {
         # The same shape the broker accepts for users/<name>/ (user tier).

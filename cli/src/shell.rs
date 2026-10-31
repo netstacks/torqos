@@ -512,7 +512,7 @@ fn scripts_split_outside_quotes() {
 /// stops at the first error) or `torqcli <command>` (one operational command). Returns the exit code.
 pub fn main(args: &[String]) -> i32 {
     if matches!(args, [v] if v == "--version" || v == "-V") {
-        println!("torqcli {}", env!("CARGO_PKG_VERSION"));
+        say(&format!("torqcli {}\n", env!("CARGO_PKG_VERSION")));
         return 0;
     }
     match run_shell(args) {
@@ -641,7 +641,21 @@ fn run_shell(args: &[String]) -> Result<i32> {
 /// checked on load, but the ledger's reasons and messages are not ours).
 fn print_clean(out: &str) {
     for line in out.lines() {
-        println!("{}", history::clean(line));
+        say(&format!("{}\n", history::clean(line)));
+    }
+}
+
+/// Write to standard output. Whoever reads it stopped (`torqcli show configuration | head`): stop
+/// too, quietly, as a tool killed by SIGPIPE would (141), not with a panic. Any other failure to
+/// write (a full disk) is an error, never a quiet success with the output missing.
+fn say(text: &str) {
+    let mut o = std::io::stdout().lock();
+    if let Err(e) = o.write_all(text.as_bytes()).and_then(|_| o.flush()) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(141);
+        }
+        eprintln!("error: writing the output: {e}");
+        std::process::exit(1);
     }
 }
 
@@ -683,13 +697,12 @@ fn interactive(s: &mut Session) -> Result<i32> {
     loop {
         let (above, p) = prompt(s, &user, &host);
         if let Some(a) = above {
-            println!("{a}");
+            say(&format!("{a}\n"));
         }
-        print!("{p}");
-        std::io::stdout().flush()?;
+        say(&p);
         let mut line = String::new();
         if stdin.lock().read_line(&mut line)? == 0 {
-            println!();
+            say("\n");
             return Ok(0);
         }
         // Piped lines are a script: stop at the first error, so a later `commit` cannot commit

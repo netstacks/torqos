@@ -76,6 +76,40 @@
       }
     },
     {
+      "help": "Timeout (in seconds) until loader boots the default menu item.",
+      "loc": [
+        "boot",
+        "loader",
+        "timeout"
+      ],
+      "type": {
+        "name": "int"
+      }
+    },
+    {
+      "help": "The file systems to be mounted.",
+      "loc": [
+        "fileSystems"
+      ],
+      "type": {
+        "elem": {
+          "name": "submodule"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "Type of the file system.",
+      "loc": [
+        "fileSystems",
+        "<name>",
+        "fsType"
+      ],
+      "type": {
+        "name": "str"
+      }
+    },
+    {
       "help": "Set of files that have to be linked in {file}`/etc`.",
       "loc": [
         "environment",
@@ -552,6 +586,45 @@
       ],
       "type": {
         "name": "bool"
+      }
+    },
+    {
+      "help": "Timeout (in seconds) until loader boots the default menu item. Use null if the loader menu should be displayed indefinitely.",
+      "loc": [
+        "boot",
+        "loader",
+        "timeout"
+      ],
+      "type": {
+        "elem": {
+          "name": "int"
+        },
+        "name": "nullOr"
+      }
+    },
+    {
+      "help": "The device as passed to `mount`.",
+      "loc": [
+        "fileSystems",
+        "<name>",
+        "device"
+      ],
+      "type": {
+        "elem": {
+          "name": "str"
+        },
+        "name": "nullOr"
+      }
+    },
+    {
+      "help": "Type of the file system.",
+      "loc": [
+        "fileSystems",
+        "<name>",
+        "fsType"
+      ],
+      "type": {
+        "name": "str"
       }
     }
   ]
