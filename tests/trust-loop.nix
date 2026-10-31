@@ -34,6 +34,12 @@ pkgs.testers.runNixOSTest {
       -{ nightLight = false; }
       +{ nightLight = true; }
     '';
+    environment.etc."torq-test/host.diff".text = ''
+      --- /dev/null
+      +++ b/system/host.json
+      @@ -0,0 +1 @@
+      +{ "host-name": "machine" }
+    '';
     environment.etc."torq-test/policy.diff".text = ''
       --- /dev/null
       +++ b/policy/tiers.toml
@@ -43,6 +49,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import json
     machine.wait_for_unit("multi-user.target")
     repo = "/var/lib/torq/config"
     # The boot-time drift check ran (a unit that never ran also reports Result=success, so check
@@ -112,6 +119,25 @@ pkgs.testers.runNixOSTest {
         machine.succeed("cp /tmp/ledger.good /var/lib/torq/state/ledger.jsonl")  # for what follows
         machine.succeed("systemctl start torq-status && test ! -e /run/torq/drift")
 
+    with subtest("torqcli reads the configuration as a user, by git plumbing only"):
+        out = machine.succeed("torq-broker --json propose --diff /etc/torq-test/host.diff --reason host")
+        machine.succeed(f"torq-broker apply {json.loads(out)['seq']} --approved-by tester")
+        # The repo belongs to root; an ordinary user reads it (safe.directory), and nothing in their
+        # environment points git elsewhere or configures it.
+        hostile = "GIT_DIR=/nonexistent GIT_CONFIG_PARAMETERS=bogus GIT_INDEX_FILE=/nonexistent"
+        out = machine.succeed(f"su - dev -c '{hostile} torqcli -c \"show configuration\"'")
+        assert out == "system {\n    host-name machine;\n}\n", out
+        out = machine.succeed("su - dev -c 'torqcli -c \"configure; set system time-zone UTC; show | compare\"'")
+        assert "[edit system]\n+   time-zone UTC;" in out, out
+        # -c uses a private candidate; the interactive shell keeps one, private, between sessions.
+        machine.succeed("su - dev -c 'test ! -e ~/.local/state/torq/candidate.json'")
+        machine.succeed("su - dev -c 'printf \"configure\\nset users dev cli style cisco\\nexit\\nexit\\n\" | torqcli'")
+        machine.succeed("su - dev -c 'test \"$(stat -c %a ~/.local/state/torq/candidate.json)\" = 600'")
+        out = machine.succeed("su - dev -c 'torqcli -c \"show system commit\"'")
+        assert " host" in out.splitlines()[0], out
+        out = machine.fail("su - dev -c 'torqcli -c \"configure; set system host-name my_laptop\"' 2>&1")
+        assert "is not a valid system host-name" in out, out
+
     with subtest("a stray nixos-rebuild cannot switch away from the ledgered config"):
         # The owner's files are moved aside, never overwritten or opened: a config that merely
         # mentions the option, and a symlink to a FIFO (reading it would hang activation at boot).
@@ -160,7 +186,6 @@ pkgs.testers.runNixOSTest {
         out = machine.succeed("bash -ic true 2>&1")
         assert "not as its ledger says" not in out, out
 
-    import json
     def broker(args):
         return json.loads(machine.succeed(f"torq-broker --json {args}"))
     def last_entry():

@@ -2,10 +2,10 @@
 //! proposed change as a diff and hands it to `torq-broker`, which ledgers, applies and can undo it.
 
 mod history;
-#[allow(dead_code)] // torqcli (next) is its user
 mod tree;
-#[allow(dead_code)] // torqcli (next) is its user
 mod candidate;
+mod session;
+mod shell;
 mod pkg;
 mod run;
 mod status;
@@ -130,6 +130,11 @@ enum PkgCmd {
 }
 
 fn main() {
+    // `torqcli` is this program under another name (a link in the package).
+    let args: Vec<String> = std::env::args().collect();
+    if args.first().map(|a| Path::new(a).file_name() == Some("torqcli".as_ref())).unwrap_or(false) {
+        std::process::exit(shell::main(&args[1..]));
+    }
     let cli = Cli::parse();
     let r = match &cli.cmd {
         Cmd::Pkg(PkgCmd::List) => list(&cli.repo),

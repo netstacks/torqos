@@ -22,6 +22,7 @@ pub enum Kind {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Node {
     pub kind: Kind,
+    #[allow(dead_code)] // for `?` (the shell's line editor, next)
     pub help: String,
     pub file: Option<String>,
     pub key: Option<String>,
