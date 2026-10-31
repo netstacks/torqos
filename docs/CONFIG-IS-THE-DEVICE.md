@@ -171,6 +171,9 @@ torq.desktop.enable = true;       →  torq desktop enable true
    over both kinds of files, the mapping table, old names as aliases); `configure` — set, delete,
    edit, show, compare, `| display set|detail`, `?` and Tab — on it; the SSH key check by NixOS's
    path too; reserved words refused as entry names.
+**Built (S3d):** this machine's owner, dev mode, SSH and desktop moved from system.nix/desktop.nix
+   into nixos/torq.json and nixos/services.json (ledger #35); the migrated repo built the very
+   system that was running (same store path), so it changed nothing but what is visible.
 3. `config <file>` and `edit`, through the candidate and `commit`.
 4. The TorqOS layer: users, groups, applications, permissions; TorqOS-default warnings at commit.
 5. `hardware` and `system software` branches; fixed `flake.nix`/`machine.nix`; migrate this machine.
