@@ -296,5 +296,45 @@
         "name": "bool"
       }
     }
+  ],
+  "fence": [
+    [
+      "torq",
+      "broker"
+    ],
+    [
+      "torq",
+      "packages",
+      "configDir"
+    ],
+    [
+      "torq",
+      "schema"
+    ],
+    [
+      "torq",
+      "nixosSchema"
+    ],
+    [
+      "_module"
+    ],
+    [
+      "nixpkgs"
+    ],
+    [
+      "environment",
+      "etc",
+      "torq/*"
+    ],
+    [
+      "systemd",
+      "services",
+      "torq-*"
+    ],
+    [
+      "systemd",
+      "timers",
+      "torq-*"
+    ]
   ]
 }

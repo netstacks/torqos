@@ -71,6 +71,9 @@ struct Entry {
 struct File {
     version: u32,
     settings: Vec<Entry>,
+    /// What the tree may never change (modules/settings-fence.nix).
+    #[serde(default)]
+    fence: Vec<Vec<String>>,
 }
 
 /// One point of the tree: a setting (with its type and help), what is below it, or both (a set of
@@ -94,6 +97,7 @@ pub struct Resolved<'a> {
 
 pub struct Tree {
     pub root: Node,
+    fence: Vec<Vec<String>>,
 }
 
 impl Tree {
@@ -110,7 +114,18 @@ impl Tree {
             }
             n.setting = Some((e.ty, e.help));
         }
-        Ok(Tree { root })
+        Ok(Tree { root, fence: f.fence })
+    }
+
+    /// Whether `loc` (entry names in place of `<name>`) is, or is below, a setting the tree may never
+    /// change — as modules/settings-fence.nix decides it (a segment ending in `*` matches entry names
+    /// starting with what precedes it). The system's evaluation refuses it anyway; this says so early.
+    pub fn fenced(&self, loc: &[String]) -> bool {
+        let seg = |pat: &String, s: &String| match pat.strip_suffix('*') {
+            Some(prefix) => s.starts_with(prefix),
+            None => pat == s,
+        };
+        self.fence.iter().any(|pat| loc.len() >= pat.len() && pat.iter().zip(loc).all(|(p, s)| seg(p, s)))
     }
 
     /// Follow `words` from the top: names of settings, and at a set of named entries, any word as
@@ -355,5 +370,18 @@ mod tests {
         eprintln!("parsed {path} in {:?}", started.elapsed());
         assert!(t.resolve(&w("virtualisation docker enable true")).is_ok());
         assert!(t.resolve(&w("services openssh settings PasswordAuthentication false")).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn the_fence_is_the_modules() {
+    let t = Tree::parse(include_str!("nixos-fixture.json")).unwrap();
+    let w = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+    for fenced in ["torq broker rebuildCommand", "torq broker", "environment etc torq/broker.json text", "systemd services torq-broker-init enable", "nixpkgs config allowUnfree", "_module args"] {
+        assert!(t.fenced(&w(fenced)), "{fenced}");
+    }
+    for open in ["torq dev enable", "environment etc motd-torq/x text", "systemd services myapp enable", "torq", "environment etc"] {
+        assert!(!t.fenced(&w(open)), "{open}");
     }
 }

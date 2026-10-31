@@ -66,6 +66,11 @@ in
 
   config = lib.mkIf config.torq.nixosSchema.enable {
     environment.etc."torq/nixos-schema.json".source =
-      pkgs.writeText "torq-nixos-schema.json" (builtins.toJSON { version = 1; settings = walk options; });
+      pkgs.writeText "torq-nixos-schema.json" (builtins.toJSON {
+        version = 1;
+        settings = walk options;
+        # What the tree may never change (settings-fence.nix), for torqcli to refuse early.
+        fence = (import ./settings-fence.nix { inherit lib; }).patterns;
+      });
   };
 }

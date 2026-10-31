@@ -55,11 +55,22 @@ let
     nixos-bad-type = c: c.virtualisation.docker.enable;
     nixos-bad-package = c: map (p: p.outPath) c.environment.systemPackages;
     nixos-bad-option = c: c.virtualisation.docker.enable;
+    # The fence (modules/settings-fence.nix): what reaches the broker's guard is not the tree's.
+    nixos-fence-broker = c: c.torq.broker.rebuildCommand;
+    nixos-fence-etc = c: c.environment.etc."torq/broker.json".text;
+    nixos-fence-unit = c: c.systemd.services.torq-broker-init.enable;
   };
+  # torqcli's tests read the fence from cli/src/nixos-fixture.json: it must be the modules' own.
+  fenceFixture = (builtins.fromJSON (builtins.readFile ../cli/src/nixos-fixture.json)).fence
+    == (import ../modules/settings-fence.nix { inherit lib; }).patterns;
+  # A name that only looks like a fenced one is not fenced.
+  fenceOk = tryValue (configOf "nixos-fence-ok").environment.etc."motd-torq/x".text;
   nixosGood = nixosValues "nixos-good";
   nixosMismatches =
     lib.optional (nixosGood != nixosExpect) "nixos-good: got ${builtins.toJSON nixosGood}"
     ++ lib.optional ((configOf "host-empty").virtualisation.docker.enable) "host-empty: docker on without a nixos/ file"
+    ++ lib.optional (fenceOk != "hi") "nixos-fence-ok: motd-torq/x is not fenced, got ${builtins.toJSON fenceOk}"
+    ++ lib.optional (!fenceFixture) "cli/src/nixos-fixture.json: its fence is not modules/settings-fence.nix's"
     ++ lib.concatLists (lib.mapAttrsToList (case: probe:
       lib.optional (tryValue (probe (configOf case)) != null) "${case}: evaluated, but must be refused") nixosInvalid);
 
