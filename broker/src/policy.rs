@@ -29,7 +29,7 @@ impl fmt::Display for Tier {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Actor {
     User,
@@ -42,6 +42,19 @@ impl fmt::Display for Actor {
             Actor::User => "user",
             Actor::Agent => "agent",
         })
+    }
+}
+
+/// `--actor user|agent` (clap's ValueEnum derive would write an `allow(dead_code)`, which this crate
+/// forbids).
+impl std::str::FromStr for Actor {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "user" => Ok(Actor::User),
+            "agent" => Ok(Actor::Agent),
+            _ => Err(format!("'{s}': one of user, agent")),
+        }
     }
 }
 

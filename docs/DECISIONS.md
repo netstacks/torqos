@@ -237,3 +237,24 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   and CLAUDE.md rewritten to match; earlier ADRs (002, 006, 007) stand as history, their laptop
   and UI parts superseded here. The desktop is kept, off by default (modules/desktop.nix), to bring back later; the dev VM
   turned it off with `set torq desktop enable false` (2026-10-31).
+
+## ADR-020 — No unsafe code and no dead code: the compiler forbids them
+- **Context:** An audit noted there was no crate-level guard against new `unsafe`, and that the
+  broker's `take_over_process` ("call before any thread or child is started") was enforced only
+  by call order. TorqOS is largely written by AI, so a rule nobody checks by hand must be one the
+  compiler checks.
+- **Decision:** Every crate root (`broker/src/lib.rs`, `broker/src/main.rs`,
+  `broker/tests/trust_loop.rs`, `cli/src/main.rs`) has `#![forbid(unsafe_code)]` and
+  `#![forbid(dead_code)]`: `forbid`, not `deny`, so no `#[allow]` below can undo it. (In a test
+  build the harness itself marks `main` `allow(dead_code)`, so the binaries' test builds `deny`
+  it; the real binaries, which the Nix build compiles, forbid it.) Every `unsafe` was replaced:
+  `geteuid`, `umask`, `tcflush`, the filter's process-group kill through rustix's safe API; the
+  broker no longer changes its own environment at all (no `clearenv`/`set_var`): every program
+  it starts gets the fixed environment and `/` explicitly (`config::command`), which also removes
+  the call-order invariant; the filter sandbox's inherited descriptors are closed by a bash step
+  before bubblewrap (`exec {n}>&-`) instead of `close_range` in `pre_exec`. clap's derive
+  macros write `allow(dead_code)`, so the broker's command line is declared with clap's builder.
+- **Consequences:** New `unsafe` or dead code fails the build. libc is no longer a dependency;
+  rustix (safe wrappers) is. The standard library and dependencies still use `unsafe` inside;
+  this covers TorqOS's own code. The filter's process-group kill is kept as insurance for a race
+  no test now reproduces.

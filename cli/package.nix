@@ -1,4 +1,4 @@
-{ lib, stdenv, rustPlatform, symlinkJoin, git, diffutils, coreutils, gnugrep, bubblewrap }:
+{ lib, stdenv, rustPlatform, symlinkJoin, git, diffutils, coreutils, gnugrep, bubblewrap, bash }:
 
 let
   # The filters after a torqcli `show` (`| grep`, `| wc` …, cli/src/filter.rs, ADR-017) run from these
@@ -6,6 +6,8 @@ let
   filterEnv = lib.optionalAttrs stdenv.hostPlatform.isLinux {
     TORQ_FILTER_BIN = "${symlinkJoin { name = "torq-filters"; paths = [ coreutils gnugrep ]; }}/bin";
     TORQ_BWRAP = lib.getExe bubblewrap;
+    # Closes every descriptor torqcli was given before bubblewrap starts (filter.rs `command`).
+    TORQ_FILTER_SH = "${bash}/bin/bash";
   };
 in
 

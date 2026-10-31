@@ -86,6 +86,10 @@ reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 
 ## Engineering principles
 
 - **Privileged code is Rust**, small, and boring. The broker must stay auditable line by line.
+- **No `unsafe`, no dead code — the compiler forbids them** (ADR-020): `#![forbid(unsafe_code)]` and
+  `#![forbid(dead_code)]` at every crate root. Never add `#[allow(dead_code)]`, `#[allow(unsafe_code)]`
+  or an `unsafe` block: use a safe API (rustix, std), delete the dead code, or redesign. A derive
+  macro that writes an `allow` (clap's) is not used.
 - **CLI only.** No UI layer; the agent runs unprivileged and sandboxed.
 - **Everything declarative.** If it isn't in the config repo, it doesn't exist after a rebuild.
 - **Test the trust properties, not just features.** Every security or reversibility claim

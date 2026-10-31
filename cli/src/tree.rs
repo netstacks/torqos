@@ -22,7 +22,6 @@ pub enum Kind {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Node {
     pub kind: Kind,
-    #[allow(dead_code)] // for `?` (the shell's line editor, next)
     pub help: String,
     pub file: Option<String>,
     pub key: Option<String>,
@@ -580,7 +579,6 @@ pub fn compare_entries(old: Vec<(Vec<String>, Val)>, new: Vec<(Vec<String>, Val)
 }
 
 /// Any entries (path, value), sorted, in the brace format `show configuration` prints.
-#[cfg_attr(not(test), allow(dead_code))] // the session renders with it in S3c
 pub fn render_entries(entries: &[(Vec<String>, Val)]) -> String {
     let mut out = String::new();
     render(entries, 0, &mut out);

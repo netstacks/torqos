@@ -47,9 +47,15 @@ pub fn parse(seg: &[String]) -> Option<Filter> {
 
 /// The sandbox (bwrap) and the tools' folder, as the package names them at build time; None in a
 /// build without them (a Mac, or cargo outside `nix develop`).
-fn sandbox() -> Option<(&'static str, &'static str)> {
-    Some((option_env!("TORQ_BWRAP")?, option_env!("TORQ_FILTER_BIN")?))
+fn sandbox() -> Option<(&'static str, &'static str, &'static str)> {
+    Some((option_env!("TORQ_BWRAP")?, option_env!("TORQ_FILTER_BIN")?, option_env!("TORQ_FILTER_SH")?))
 }
+
+/// Run before the sandbox, by bash: close every descriptor past stderr that torqcli was given (by an
+/// agent's harness, a script, a log pipe), then become the sandbox. (`exec {n}>&-` closes the one
+/// numbered `$n`; closing one already closed, the glob's own, is no error.) What torqcli opens itself
+/// is close-on-exec already: std opens every descriptor so.
+const CLOSE_INHERITED: &str = "for f in /proc/self/fd/*; do n=${f##*/}; case $n in 0|1|2) ;; *) exec {n}>&- ;; esac; done; exec \"$@\"";
 
 /// The most output one filter may give, and how long it may take.
 const MAX_OUTPUT: u64 = 64 << 20;
@@ -62,9 +68,10 @@ const LOCALE: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_COLLATE", "LC_CTYPE"
 
 /// The sandboxed command for `f`.
 fn command(f: &Filter) -> Result<Command> {
-    let (bwrap, bin) = sandbox().context("filters are not available in this build (it has no sandbox for them)")?;
-    let mut c = Command::new(bwrap);
+    let (bwrap, bin, sh) = sandbox().context("filters are not available in this build (it has no sandbox for them)")?;
+    let mut c = Command::new(sh);
     c.env_clear();
+    c.args(["-c", CLOSE_INHERITED, "torq-filter", bwrap]);
     c.args(["--unshare-user", "--unshare-all", "--disable-userns", "--die-with-parent", "--new-session", "--clearenv"]);
     c.args(["--ro-bind", "/nix/store", "/nix/store", "--size", TMP_SIZE, "--tmpfs", "/tmp", "--chdir", "/"]);
     for k in LOCALE {
@@ -77,18 +84,6 @@ fn command(f: &Filter) -> Result<Command> {
         c.arg("--setenv").arg("LOCALE_ARCHIVE").arg(a);
     }
     c.arg("--").arg(Path::new(bin).join(&f.tool)).args(&f.args);
-    // Nothing torqcli was given open (by an agent's harness, a script, a log pipe) may reach inside:
-    // every descriptor past stderr closes at exec. Close-on-exec, not closed, so std's own pipe that
-    // reports a failed exec still works. A kernel without close_range runs no filter.
-    // SAFETY: between fork and exec, one async-signal-safe system call; no memory is touched.
-    unsafe {
-        std::os::unix::process::CommandExt::pre_exec(&mut c, || {
-            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, libc::CLOSE_RANGE_CLOEXEC) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     Ok(c)
 }
 
@@ -135,10 +130,10 @@ fn run(f: &Filter, input: Vec<u8>, max_time: Duration, max_output: u64) -> Resul
             break Some(s);
         }
         if Instant::now() >= deadline {
-            // SAFETY: a signal to the process group this filter was started in (its id is the group's).
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
+            // The whole process group this filter was started in (its id is the group's): insurance for
+            // the race above, which a_stopped_filter_leaves_nothing_running no longer hits reliably (since
+            // a bash step starts the sandbox), so no test fails without it.
+            let _ = rustix::process::kill_process_group(rustix::process::Pid::from_child(&child), rustix::process::Signal::KILL);
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -219,8 +214,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_builds_have_the_sandbox() {
-        let (bwrap, bin) = sandbox().expect("TORQ_BWRAP and TORQ_FILTER_BIN (package.nix; `nix develop`)");
-        assert!(Path::new(bwrap).is_absolute() && Path::new(bwrap).exists(), "{bwrap}");
+        let (bwrap, bin, sh) = sandbox().expect("TORQ_BWRAP, TORQ_FILTER_BIN and TORQ_FILTER_SH (package.nix; `nix develop`)");
+        for p in [bwrap, sh] {
+            assert!(p.starts_with("/nix/store/") && Path::new(p).exists(), "{p}");
+        }
         for (tool, _) in FILTERS {
             let p = Path::new(bin).join(tool);
             assert!(p.starts_with("/nix/store/") && p.exists(), "{}", p.display());
@@ -260,23 +257,34 @@ mod tests {
     #[cfg(target_os = "linux")] // the sandbox
     #[test]
     fn no_open_descriptor_reaches_a_filter() {
-        use std::os::fd::AsRawFd;
         let sh = std::env::var("PATH").unwrap().split(':').map(|d| Path::new(d).join("sh")).find(|p| p.exists());
         let sh = std::fs::canonicalize(sh.expect("a sh on PATH")).unwrap();
         assert!(sh.starts_with("/nix/store/"), "{}", sh.display());
         let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        // As torqcli would be started holding one: a shell opens descriptor 7 (inheritable, as a
+        // harness's or a script's are), then becomes the filter exactly as torqcli starts it.
+        let given = |file: &Path, program: &std::ffi::OsStr, args: Vec<&std::ffi::OsStr>| {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg("exec 7>>\"$0\"; exec \"$@\"").arg(file).arg(program).args(args);
+            c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            c
+        };
+        // The way of testing works: without the filter's start, the descriptor does reach a program.
+        let control = dir.path().join("control");
+        let mut c = given(&control, sh.as_os_str(), vec!["-c".as_ref(), "echo escaped >&7".as_ref()]).spawn().unwrap();
+        drop(c.stdin.take());
+        c.wait().unwrap();
+        assert_eq!(std::fs::read_to_string(&control).unwrap(), "escaped\n", "the test's descriptor is not inheritable");
+        // Through the filter's start: closed before the sandbox, so nothing reaches it.
         let outside = dir.path().join("outside");
-        let file = std::fs::File::create(&outside).unwrap();
-        // An inheritable copy on a free descriptor (F_DUPFD never takes one in use: the tests run in
-        // parallel, and a fixed number could be another test's pipe).
-        // SAFETY: duplicates a descriptor this test owns; no memory is involved.
-        let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 100) };
-        assert!(fd >= 100, "F_DUPFD");
-        let payload: String = (0..50_000).map(|_| format!("echo escaped >&{fd}\n")).collect();
-        let _ = apply(&f(&format!("sort -S 64k --compress-program={}", sh.display())), payload);
-        // SAFETY: closes only the descriptor made above.
-        unsafe { libc::close(fd) };
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "", "a descriptor reached inside");
+        let filter = command(&f(&format!("sort -S 64k --compress-program={}", sh.display()))[0]).unwrap();
+        let mut c = given(&outside, filter.get_program(), filter.get_args().collect()).spawn().unwrap();
+        let payload: String = (0..50_000).map(|_| "echo escaped >&7\n").collect();
+        let mut stdin = c.stdin.take().unwrap();
+        let _ = std::io::Write::write_all(&mut stdin, payload.as_bytes());
+        drop(stdin);
+        c.wait().unwrap();
+        assert_eq!(std::fs::read_to_string(&outside).unwrap_or_default(), "", "a descriptor reached inside");
     }
 
     #[test]
@@ -297,8 +305,9 @@ mod tests {
     fn a_stopped_filter_leaves_nothing_running() {
         let marker = format!("torq-race-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos());
         let probe = Filter { tool: "grep".into(), args: vec![marker.clone()] };
-        for _ in 0..200 {
-            let _ = run(&probe, b"x\n".to_vec(), Duration::ZERO, MAX_OUTPUT);
+        // Stopped across its first 10 ms: before bubblewrap starts, and while it is starting its child.
+        for i in 0..200 {
+            let _ = run(&probe, b"x\n".to_vec(), Duration::from_micros(i * 50), MAX_OUTPUT);
         }
         std::thread::sleep(Duration::from_millis(500));
         let left: Vec<String> = std::fs::read_dir("/proc")

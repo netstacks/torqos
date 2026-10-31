@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use std::ffi::OsStr;
 use std::path::{self, Path, PathBuf};
-use std::process::Command;
+
 
 pub struct Repo {
     root: PathBuf,
@@ -43,7 +43,7 @@ impl Repo {
     fn git_env_bytes(&self, env: &[(&str, &OsStr)], args: &[&str]) -> Result<Vec<u8>> {
         let user_name = format!("user.name={NAME}");
         let user_email = format!("user.email={EMAIL}");
-        let out = Command::new("git")
+        let out = crate::config::command("git")
             .envs(env.iter().copied())
             .arg("-C")
             .arg(&self.root)
@@ -77,7 +77,7 @@ impl Repo {
     /// and the ledger is fsynced on every append, so after a power loss the repo must not be behind
     /// either. Called after every write, before the rebuild and the ledger append.
     fn sync(&self) -> Result<()> {
-        let st = Command::new("sync").arg("--file-system").arg(&self.root).status().context("running sync")?;
+        let st = crate::config::command("sync").arg("--file-system").arg(&self.root).status().context("running sync")?;
         if !st.success() {
             bail!("sync --file-system {} failed ({st})", self.root.display());
         }
@@ -206,7 +206,7 @@ impl Repo {
     }
 
     pub fn is_ancestor(&self, ancestor: &str, of: &str) -> Result<bool> {
-        let st = Command::new("git")
+        let st = crate::config::command("git")
             .arg("-C")
             .arg(&self.root)
             .args(["merge-base", "--is-ancestor", ancestor, of])

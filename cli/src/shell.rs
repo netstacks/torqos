@@ -388,10 +388,7 @@ impl Machine for Real<'_> {
         }
         // Only an answer typed after the question counts: anything already waiting (typed or pasted
         // ahead, e.g. a "y" after "commit") is thrown away.
-        // SAFETY: tcflush on fd 0, a terminal (checked above); no memory is involved.
-        unsafe {
-            libc::tcflush(0, libc::TCIFLUSH);
-        }
+        let _ = rustix::termios::tcflush(std::io::stdin(), rustix::termios::QueueSelector::IFlush);
         print!("{question}[y/N] ");
         let _ = std::io::stdout().flush();
         let mut answer = String::new();

@@ -276,7 +276,7 @@ name = "torq"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "libc",
+ "rustix",
  "rustyline",
  "serde",
  "serde_json",

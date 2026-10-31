@@ -1,5 +1,14 @@
+// No unsafe code and no dead code, ever: `forbid` cannot be undone by any `#[allow]` below it,
+// so the compiler is the guard (docs/DECISIONS.md ADR-020).
+#![forbid(unsafe_code)]
+// (In a test build, the test harness itself marks `main` `allow(dead_code)`, which `forbid` would
+// reject: there it is `deny`. The real binary, which the Nix build compiles, forbids it, so an
+// `allow(dead_code)` in the source never builds.)
+#![cfg_attr(not(test), forbid(dead_code))]
+#![cfg_attr(test, deny(dead_code))]
+
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+
 use torq_broker::config::{self, Requested, Settings};
 use torq_broker::{ledger::Entry, policy::Actor, Broker, Busy};
 use serde_json::json;
@@ -8,130 +17,181 @@ use std::path::{Path, PathBuf};
 /// TorqOS change broker — the only writer of the system config repo.
 ///
 /// Run as root on a TorqOS machine, it takes its settings only from /etc/torq/broker.json and
-/// refuses flags or TORQ_* variables that differ from it. It always runs with a cleared
+/// refuses flags or TORQ_* variables that differ from it. Everything it runs gets a fixed, cleared
 /// environment.
-#[derive(Parser)]
-#[command(version, about)]
 struct Cli {
-    /// Path to the config git repository [default: /var/lib/torq/config].
-    #[arg(long, env = "TORQ_CONFIG_REPO")]
     repo: Option<PathBuf>,
-    /// Directory for the ledger and broker state [default: /var/lib/torq/state].
-    #[arg(long, env = "TORQ_STATE_DIR")]
     state_dir: Option<PathBuf>,
-    /// Command run after each commit; `{repo}` is replaced with the repo path
-    /// [default: nixos-rebuild switch --no-update-lock-file --flake {repo}].
-    #[arg(long, env = "TORQ_REBUILD_CMD")]
     rebuild_cmd: Option<String>,
-    /// `apply --confirm`: build the system and print its store path; `{repo}`
-    /// [default: nix build --no-link --print-out-paths {repo}#nixosConfigurations.torq...].
-    #[arg(long, env = "TORQ_BUILD_CMD")]
     build_cmd: Option<String>,
-    /// Activate an existing system (rollback of an unconfirmed commit); `{system}`.
-    #[arg(long, env = "TORQ_ACTIVATE_CMD")]
     activate_cmd: Option<String>,
-    /// Make a system the boot default (`confirm`); `{system}`, `{profile}`.
-    #[arg(long, env = "TORQ_BOOT_CMD")]
     boot_cmd: Option<String>,
-    /// Schedule `{broker} expire-confirm {seq}` after `{seconds}` [default: a transient systemd timer].
-    #[arg(long, env = "TORQ_SCHEDULE_CMD")]
     schedule_cmd: Option<String>,
-    /// Link to the running system, recorded after every rebuild and compared by `status`
-    /// [default: /run/current-system].
-    #[arg(long, env = "TORQ_CURRENT_SYSTEM")]
     current_system: Option<PathBuf>,
-    /// The system profile: what the next boot starts, compared by `status`
-    /// [default: /nix/var/nix/profiles/system].
-    #[arg(long, env = "TORQ_SYSTEM_PROFILE")]
     system_profile: Option<PathBuf>,
-    /// Machine-readable output: one JSON value per command (a ledger entry, or the status), and
-    /// `{"error": "..."}` on failure. For the `torq` CLI (ADR-014); people get plain text.
-    #[arg(long, global = true)]
     json: bool,
-    #[command(subcommand)]
     cmd: Cmd,
 }
 
-#[derive(Subcommand)]
 enum Cmd {
-    /// Initialise the config repo and ledger (idempotent).
     Init,
-    /// Submit a change (unified diff against the repo) for review.
-    Propose {
-        #[arg(long)]
-        diff: PathBuf,
-        #[arg(long)]
-        reason: String,
-        #[arg(long, value_enum, default_value = "user")]
-        actor: Actor,
-        /// The proposing session ingested untrusted content (web, email, downloads).
-        #[arg(long)]
-        tainted: bool,
-        /// The commit this change was prepared against: refused if the configuration has moved on.
-        #[arg(long)]
-        base: Option<String>,
-    },
-    /// Show a proposal or applied change.
+    Propose { diff: PathBuf, reason: String, actor: Actor, tainted: bool, base: Option<String> },
     Show { seq: u64 },
-    /// Approve and apply a proposal: commit, rebuild, ledger.
-    Apply {
-        seq: u64,
-        #[arg(long)]
-        approved_by: String,
-        #[arg(long)]
-        confirm_tainted: bool,
-        /// Commit confirmed: activate without making it the boot default, and roll it back unless
-        /// `confirm` runs within this many minutes (a reboot rolls it back too).
-        #[arg(long, value_name = "MINUTES")]
-        confirm: Option<u32>,
-    },
-    /// Keep the commit confirmed that is waiting: make it the boot default.
-    Confirm {
-        #[arg(long)]
-        approved_by: String,
-    },
-    /// Roll back the commit confirmed that is waiting (its timer runs this at the deadline).
-    ExpireConfirm {
-        /// Only if this applied change is the one waiting.
-        seq: Option<u64>,
-        /// Run at boot: the machine restarted before the change was confirmed.
-        #[arg(long)]
-        reboot: bool,
-    },
-    /// Undo one applied change: a new commit that reverts it, rebuild, ledger.
-    Revert {
-        seq: u64,
-        #[arg(long)]
-        approved_by: String,
-    },
-    /// Finish an apply or revert whose broker died: discard its unledgered commit, reset to the
-    /// last ledgered config, rebuild, and ledger it. apply and revert do this first on their own.
-    Reconcile {
-        #[arg(long)]
-        approved_by: String,
-    },
-    /// Return the machine to its last ledgered configuration after drift (switched outside the
-    /// broker, a changed boot default, a failed restore): rebuild it and ledger that. Never
-    /// automatic (ADR-012). Refuses when the config repo itself was changed outside the broker.
-    Repair {
-        #[arg(long)]
-        approved_by: String,
-    },
-    /// Print the ledger.
-    Log {
-        /// Leave out proposals' full diffs (for listing: the diffs make the ledger large).
-        #[arg(long)]
-        brief: bool,
-    },
-    /// Verify the ledger hash chain.
+    Apply { seq: u64, approved_by: String, confirm_tainted: bool, confirm: Option<u32> },
+    Confirm { approved_by: String },
+    ExpireConfirm { seq: Option<u64>, reboot: bool },
+    Revert { seq: u64, approved_by: String },
+    Reconcile { approved_by: String },
+    Repair { approved_by: String },
+    Log { brief: bool },
     Verify,
-    /// Compare the machine with its ledger: running system, config repo, interrupted operations,
-    /// ledger chain. Exits 1 if anything is not as ledgered, 75 if an operation is running.
     Status,
 }
 
+/// The command line, declared with clap's builder (its derive macros write an `allow(dead_code)`,
+/// which this crate forbids): every flag, its variable, its help — as `torq-broker --help` shows.
+fn command_line() -> clap::Command {
+    use clap::{value_parser, Arg, ArgAction, Command};
+    let opt = |name: &'static str, var: &'static str, help: &'static str| Arg::new(name).long(name).env(var).help(help);
+    let path = |name: &'static str, var: &'static str, help: &'static str| opt(name, var, help).value_parser(value_parser!(PathBuf));
+    let flag = |name: &'static str, help: &'static str| Arg::new(name).long(name).action(ArgAction::SetTrue).help(help);
+    let by = || Arg::new("approved-by").long("approved-by").required(true);
+    let seq = || Arg::new("seq").required(true).value_parser(value_parser!(u64));
+    Command::new("torq-broker")
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("TorqOS change broker — the only writer of the system config repo.")
+        .long_about(
+            "TorqOS change broker — the only writer of the system config repo.\n\nRun as root on a TorqOS machine, it takes its \
+             settings only from /etc/torq/broker.json and refuses flags or TORQ_* variables that differ from it. Everything it runs gets a \
+             fixed, cleared environment.",
+        )
+        .subcommand_required(true)
+        .arg(path("repo", "TORQ_CONFIG_REPO", "Path to the config git repository [default: /var/lib/torq/config]."))
+        .arg(path("state-dir", "TORQ_STATE_DIR", "Directory for the ledger and broker state [default: /var/lib/torq/state]."))
+        .arg(opt(
+            "rebuild-cmd",
+            "TORQ_REBUILD_CMD",
+            "Command run after each commit; `{repo}` is replaced with the repo path [default: nixos-rebuild switch --no-update-lock-file --flake {repo}].",
+        ))
+        .arg(opt(
+            "build-cmd",
+            "TORQ_BUILD_CMD",
+            "`apply --confirm`: build the system and print its store path; `{repo}` [default: nix build --no-update-lock-file --out-link {link} --print-out-paths {repo}#nixosConfigurations.torq...].",
+        ))
+        .arg(opt("activate-cmd", "TORQ_ACTIVATE_CMD", "Activate an existing system (rollback of an unconfirmed commit); `{system}`."))
+        .arg(opt("boot-cmd", "TORQ_BOOT_CMD", "Make a system the boot default (`confirm`); `{system}`, `{profile}`."))
+        .arg(opt("schedule-cmd", "TORQ_SCHEDULE_CMD", "Schedule `{broker} expire-confirm {seq}` after `{seconds}` [default: a transient systemd timer]."))
+        .arg(path(
+            "current-system",
+            "TORQ_CURRENT_SYSTEM",
+            "Link to the running system, recorded after every rebuild and compared by `status` [default: /run/current-system].",
+        ))
+        .arg(path(
+            "system-profile",
+            "TORQ_SYSTEM_PROFILE",
+            "The system profile: what the next boot starts, compared by `status` [default: /nix/var/nix/profiles/system].",
+        ))
+        .arg(flag(
+            "json",
+            "Machine-readable output: one JSON value per command (a ledger entry, or the status), and `{\"error\": \"...\"}` on failure. For the `torq` CLI (ADR-014); people get plain text.",
+        ).global(true))
+        .subcommand(Command::new("init").about("Initialise the config repo and ledger (idempotent)."))
+        .subcommand(
+            Command::new("propose")
+                .about("Submit a change (unified diff against the repo) for review.")
+                .arg(Arg::new("diff").long("diff").required(true).value_parser(value_parser!(PathBuf)))
+                .arg(Arg::new("reason").long("reason").required(true))
+                .arg(Arg::new("actor").long("actor").default_value("user").value_parser(["user", "agent"]))
+                .arg(flag("tainted", "The proposing session ingested untrusted content (web, email, downloads)."))
+                .arg(Arg::new("base").long("base").help("The commit this change was prepared against: refused if the configuration has moved on.")),
+        )
+        .subcommand(Command::new("show").about("Show a proposal or applied change.").arg(seq()))
+        .subcommand(
+            Command::new("apply")
+                .about("Approve and apply a proposal: commit, rebuild, ledger.")
+                .arg(seq())
+                .arg(by())
+                .arg(Arg::new("confirm-tainted").long("confirm-tainted").action(ArgAction::SetTrue))
+                .arg(Arg::new("confirm").long("confirm").value_name("MINUTES").value_parser(value_parser!(u32)).help(
+                    "Commit confirmed: activate without making it the boot default, and roll it back unless `confirm` runs within this many minutes (a reboot rolls it back too).",
+                )),
+        )
+        .subcommand(Command::new("confirm").about("Keep the commit confirmed that is waiting: make it the boot default.").arg(by()))
+        .subcommand(
+            Command::new("expire-confirm")
+                .about("Roll back the commit confirmed that is waiting (its timer runs this at the deadline).")
+                .arg(Arg::new("seq").value_parser(value_parser!(u64)).help("Only if this applied change is the one waiting."))
+                .arg(flag("reboot", "Run at boot: the machine restarted before the change was confirmed.")),
+        )
+        .subcommand(Command::new("revert").about("Undo one applied change: a new commit that reverts it, rebuild, ledger.").arg(seq()).arg(by()))
+        .subcommand(
+            Command::new("reconcile")
+                .about("Finish an apply or revert whose broker died: discard its unledgered commit, reset to the last ledgered config, rebuild, and ledger it. apply and revert do this first on their own.")
+                .arg(by()),
+        )
+        .subcommand(
+            Command::new("repair")
+                .about("Return the machine to its last ledgered configuration after drift (switched outside the broker, a changed boot default, a failed restore): rebuild it and ledger that. Never automatic (ADR-012). Refuses when the config repo itself was changed outside the broker.")
+                .arg(by()),
+        )
+        .subcommand(Command::new("log").about("Print the ledger.").arg(flag("brief", "Leave out proposals' full diffs (for listing: the diffs make the ledger large).")))
+        .subcommand(Command::new("verify").about("Verify the ledger hash chain."))
+        .subcommand(Command::new("status").about(
+            "Compare the machine with its ledger: running system, config repo, interrupted operations, ledger chain. Exits 1 if anything is not as ledgered, 75 if an operation is running.",
+        ))
+}
+
+/// The command line read into `Cli` (clap exits with its usage on a mistake, as before).
+fn parse_cli() -> Cli {
+    let m = command_line().get_matches();
+    let s = |m: &clap::ArgMatches, k: &str| m.get_one::<String>(k).cloned();
+    let p = |m: &clap::ArgMatches, k: &str| m.get_one::<PathBuf>(k).cloned();
+    let by = |m: &clap::ArgMatches| s(m, "approved-by").unwrap_or_default();
+    let seq = |m: &clap::ArgMatches| m.get_one::<u64>("seq").copied();
+    let (name, sub) = m.subcommand().expect("a subcommand is required");
+    let cmd = match name {
+        "init" => Cmd::Init,
+        "propose" => Cmd::Propose {
+            diff: p(sub, "diff").unwrap_or_default(),
+            reason: s(sub, "reason").unwrap_or_default(),
+            actor: s(sub, "actor").unwrap_or_default().parse().unwrap_or(Actor::User),
+            tainted: sub.get_flag("tainted"),
+            base: s(sub, "base"),
+        },
+        "show" => Cmd::Show { seq: seq(sub).unwrap_or_default() },
+        "apply" => Cmd::Apply {
+            seq: seq(sub).unwrap_or_default(),
+            approved_by: by(sub),
+            confirm_tainted: sub.get_flag("confirm-tainted"),
+            confirm: sub.get_one::<u32>("confirm").copied(),
+        },
+        "confirm" => Cmd::Confirm { approved_by: by(sub) },
+        "expire-confirm" => Cmd::ExpireConfirm { seq: seq(sub), reboot: sub.get_flag("reboot") },
+        "revert" => Cmd::Revert { seq: seq(sub).unwrap_or_default(), approved_by: by(sub) },
+        "reconcile" => Cmd::Reconcile { approved_by: by(sub) },
+        "repair" => Cmd::Repair { approved_by: by(sub) },
+        "log" => Cmd::Log { brief: sub.get_flag("brief") },
+        "verify" => Cmd::Verify,
+        "status" => Cmd::Status,
+        other => unreachable!("clap knows no subcommand {other}"),
+    };
+    Cli {
+        repo: p(&m, "repo"),
+        state_dir: p(&m, "state-dir"),
+        rebuild_cmd: s(&m, "rebuild-cmd"),
+        build_cmd: s(&m, "build-cmd"),
+        activate_cmd: s(&m, "activate-cmd"),
+        boot_cmd: s(&m, "boot-cmd"),
+        schedule_cmd: s(&m, "schedule-cmd"),
+        current_system: p(&m, "current-system"),
+        system_profile: p(&m, "system-profile"),
+        json: m.get_flag("json"),
+        cmd,
+    }
+}
+
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let json = cli.json;
     if let Err(e) = run(cli) {
         // Another operation is running: "try again later", exit 75 (EX_TEMPFAIL) from any command.
@@ -150,9 +210,9 @@ fn print_entry(e: &Entry) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the settings (config.rs), then replace this process's environment, working directory and
-/// umask with the broker's own, before anything runs: every child (git, sh, the rebuild) inherits
-/// them, and nothing of the caller's — GIT_*, NIX_*, LD_*, their HOME and its .gitconfig, their
+/// Resolve the settings (config.rs), then take over from the caller: every child (git, sh, the
+/// rebuild) gets the broker's own environment and `/` (`config::command`), and files its umask, and
+/// nothing of the caller's — GIT_*, NIX_*, LD_*, their HOME and its .gitconfig, their
 /// current directory — may reach a root broker's work. Path arguments are made absolute first, so a
 /// relative `--diff` still means what the caller meant.
 fn settings(cli: &mut Cli) -> Result<Settings> {

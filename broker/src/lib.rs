@@ -5,6 +5,11 @@
 //! If a rebuild fails, the repo is reset to the previous commit, that commit is rebuilt (the
 //! failed rebuild may already have activated), and the failure is ledgered.
 
+// No unsafe code and no dead code, ever: `forbid` cannot be undone by any `#[allow]` below it,
+// so the compiler is the guard (docs/DECISIONS.md ADR-020).
+#![forbid(unsafe_code)]
+#![forbid(dead_code)]
+
 pub mod config;
 pub mod ledger;
 pub mod policy;
@@ -367,7 +372,7 @@ fn ledgered_commit(entries: &[Entry]) -> Option<String> {
 const SWITCH_UNIT: &str = "nixos-rebuild-switch-to-configuration.service";
 
 fn switch_running() -> bool {
-    Command::new("systemctl")
+    config::command("systemctl")
         .args(["is-active", "--quiet", SWITCH_UNIT])
         .status()
         .is_ok_and(|s| s.success())
@@ -908,7 +913,7 @@ impl Broker {
 
     /// `sh -c cmd` holding the broker lock through its stdin (see `Lock::for_child`).
     fn shell(&self, lock: &Lock, cmd: &str) -> Result<Command> {
-        let mut c = Command::new("sh");
+        let mut c = config::command("sh");
         c.arg("-c").arg(cmd).stdin(lock.for_child()?);
         Ok(c)
     }

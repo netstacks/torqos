@@ -193,27 +193,31 @@ pub fn environment(settings: &Settings, inherited: impl Iterator<Item = (String,
 
 /// Whether this process runs as root (effective uid 0).
 pub fn running_as_root() -> bool {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc::geteuid() == 0 }
+    rustix::process::geteuid().is_root()
 }
 
-/// Replace the whole process state a caller hands down with the broker's own: the environment
-/// (`env`, from `environment`), the working directory (`/`) and the umask (022, so the config repo
-/// stays readable to the unprivileged CLI whatever the caller's umask). Call before any thread or
-/// child is started.
+/// What every program the broker starts gets instead of what the caller handed down: exactly this
+/// environment (from `environment`) and `/` as its working directory. Set once (`take_over_process`);
+/// before that (a test broker in-process), children inherit as any program's do.
+static CHILD_ENV: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+
+/// Take over from the caller: from now on every child gets `env` and `/` (`command`), never the
+/// caller's environment or directory, and files are made with umask 022 (so the config repo stays
+/// readable to the unprivileged CLI whatever the caller's umask). The broker's own environment is
+/// not changed — it is read only before this — so there is nothing to get wrong about threads.
 pub fn take_over_process(env: &[(String, String)]) -> Result<()> {
-    // SAFETY: single-threaded at this point (documented precondition). clearenv removes every
-    // variable, including ones std::env::remove_var cannot name (a key containing '=').
-    unsafe {
-        if libc::clearenv() != 0 {
-            bail!("clearing the environment failed");
-        }
-        libc::umask(0o022);
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
+    CHILD_ENV.set(env.to_vec()).map_err(|_| anyhow::anyhow!("the broker took over its process twice"))
+}
+
+/// A program to run, as every child of the broker is started: with the broker's own environment
+/// and in `/` once it has taken over (`take_over_process`). The only way the broker starts one.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut c = std::process::Command::new(program);
+    if let Some(env) = CHILD_ENV.get() {
+        c.env_clear().envs(env.iter().map(|(k, v)| (k, v))).current_dir("/");
     }
-    for (k, v) in env {
-        std::env::set_var(k, v);
-    }
-    std::env::set_current_dir("/").context("changing to /")
+    c
 }
 
 #[cfg(test)]

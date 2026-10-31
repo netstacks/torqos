@@ -1,5 +1,10 @@
 //! End-to-end: propose → apply → revert against a real git repo, with rebuild stubbed.
 
+// No unsafe code and no dead code, ever: `forbid` cannot be undone by any `#[allow]` below it,
+// so the compiler is the guard (docs/DECISIONS.md ADR-020).
+#![forbid(unsafe_code)]
+#![forbid(dead_code)]
+
 use torq_broker::{policy::Actor, Broker};
 use std::fs;
 use std::path::Path;
@@ -1259,6 +1264,32 @@ fn the_callers_environment_does_not_reach_git() {
     }
 }
 
+
+/// The programs the broker runs (git, the rebuild) work from `/`, never the caller's directory: a
+/// relative path in a rebuild command can never mean something the caller put where they stand.
+#[test]
+fn children_run_in_the_root_folder() {
+    let (dir, _b) = setup("true");
+    let d = write_diff(dir.path(), "theme.diff", THEME);
+    let seen = dir.path().join("cwd");
+    let rebuild = format!("pwd > '{}'", seen.display());
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_torq-broker"))
+            .current_dir(dir.path())
+            .arg("--repo").arg(dir.path().join("config"))
+            .arg("--state-dir").arg(dir.path().join("state"))
+            .arg("--rebuild-cmd").arg(&rebuild)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["--json", "propose", "--diff", &d.to_string_lossy(), "--reason", "x"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let seq = serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["seq"].as_u64().unwrap();
+    let out = run(&["--json", "apply", &seq.to_string(), "--approved-by", "casey"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(fs::read_to_string(&seen).unwrap(), "/\n", "the rebuild ran in /");
+}
 /// The broker works from `/`, whatever the caller's directory; a relative `--diff` still means the
 /// file the caller meant (it is made absolute first).
 #[test]

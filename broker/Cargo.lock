@@ -537,7 +537,7 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
- "libc",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

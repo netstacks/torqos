@@ -1,6 +1,15 @@
 //! `torq`: the unprivileged command line. It never changes the system itself: it writes a
 //! proposed change as a diff and hands it to `torq-broker`, which ledgers, applies and can undo it.
 
+// No unsafe code and no dead code, ever: `forbid` cannot be undone by any `#[allow]` below it,
+// so the compiler is the guard (docs/DECISIONS.md ADR-020).
+#![forbid(unsafe_code)]
+// (In a test build, the test harness itself marks `main` `allow(dead_code)`, which `forbid` would
+// reject: there it is `deny`. The real binary, which the Nix build compiles, forbids it, so an
+// `allow(dead_code)` in the source never builds.)
+#![cfg_attr(not(test), forbid(dead_code))]
+#![cfg_attr(test, deny(dead_code))]
+
 mod history;
 mod tree;
 mod candidate;
