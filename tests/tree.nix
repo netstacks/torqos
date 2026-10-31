@@ -59,6 +59,17 @@ let
     nixos-fence-broker = c: c.torq.broker.rebuildCommand;
     nixos-fence-etc = c: c.environment.etc."torq/broker.json".text;
     nixos-fence-unit = c: c.systemd.services.torq-broker-init.enable;
+    # The bypasses the review of S3a demonstrated: module directives in the data, what the broker's
+    # settings and PATH are built from, its units by another option, /etc by where it lands.
+    nixos-fence-type-merge = c: c.torq.broker.rebuildCommand;
+    nixos-fence-type-override = c: c.environment.etc."torq/broker.json".text;
+    nixos-fence-type-list = c: map (p: p.outPath or p) c.environment.systemPackages;
+    nixos-fence-build = c: c.system.build.nixos-rebuild;
+    nixos-fence-nix = c: c.nix.package.outPath;
+    nixos-fence-units = c: c.systemd.units."torq-broker-init.service".text;
+    nixos-fence-etc-slash = c: c.environment.etc."/torq/broker.json".text;
+    nixos-fence-etc-dot = c: c.environment.etc."./torq/broker.json".text;
+    nixos-fence-etc-target = c: c.environment.etc.innocent.target;
   };
   # torqcli's tests read the fence from cli/src/nixos-fixture.json: it must be the modules' own.
   fenceFixture = (builtins.fromJSON (builtins.readFile ../cli/src/nixos-fixture.json)).fence

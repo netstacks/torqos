@@ -111,6 +111,13 @@ user group users1 applications [ htop ]
 
 ## Humans free, the AI fenced — permanently
 
+**The fence (built, S3a).** modules/settings-fence.nix: the tree holds data only (a key starting with
+`_`, NixOS's module directives, is refused anywhere), and the broker's own inputs — its commands and
+paths, what its settings file and PATH are built from (`system.build`, `nix.package`,
+`systemd.package`), its units, its files in /etc by where they land, `nixpkgs` — are not the
+tree's. Enforced when the system is evaluated. It is not the AI's boundary (KNOWN-GAPS 6m): settings
+that run root code stay settable for an approving person; an agent gets a default-deny allow-list.
+
 - The AI runs as **its own account**, sandboxed, without `sudo`. It cannot write the configuration
   or any system file; it can only *propose* a change to the broker.
 - The broker learns who is calling from the kernel (not from anything the caller says) and applies

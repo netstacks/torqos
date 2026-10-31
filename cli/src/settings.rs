@@ -1,0 +1,275 @@
+//! The configuration tree's NixOS settings (docs/CONFIG-IS-THE-DEVICE.md): the config repo's
+//! `nixos/<top-level>.json` files (applied by modules/nixos-settings.nix), as one value per NixOS
+//! top-level name, shaped like the options. `set` and `delete` act on them by NixOS paths, checked
+//! against the system's own settings (nixos.rs) and its fence; the brace format, `| display set` and
+//! `show | compare` see them as entries, like the rest of the tree (tree.rs).
+//!
+//! Pure: it reads and writes file contents it is given. Every file here is system tier.
+
+use crate::nixos::Tree;
+use crate::tree::Val;
+use anyhow::{bail, Context, Result};
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+
+/// The folder of the tree's NixOS settings in the config repo.
+pub const DIR: &str = "nixos/";
+
+/// The values, by NixOS top-level name (`virtualisation` ← nixos/virtualisation.json).
+pub type Settings = BTreeMap<String, Value>;
+
+/// The top-level name a config repo path holds, if it is one of ours.
+pub fn top_of(path: &str) -> Option<&str> {
+    let name = path.strip_prefix(DIR)?.strip_suffix(".json")?;
+    let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    ok.then_some(name)
+}
+
+/// Read the files (path, content) that are ours. Each must be a JSON object: anything else is
+/// refused, naming the file — the shell must not hide, or rewrite, what it cannot show.
+pub fn load<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<Settings> {
+    let mut s = Settings::new();
+    for (path, bytes) in files {
+        let Some(top) = top_of(path) else { continue };
+        let v: Value = serde_json::from_slice(bytes).with_context(|| format!("{path}: not JSON; fix the file (as raw JSON) first"))?;
+        if !v.is_object() {
+            bail!("{path}: not a JSON object; fix the file (as raw JSON) first");
+        }
+        s.insert(top.to_string(), v);
+    }
+    Ok(s)
+}
+
+/// The files as TorqOS writes them (path → content): keys sorted, two-space indent, a final newline.
+/// An empty top-level has no file.
+pub fn files(s: &Settings) -> BTreeMap<String, String> {
+    s.iter()
+        .filter(|(_, v)| v.as_object().is_some_and(|o| !o.is_empty()))
+        .map(|(top, v)| (format!("{DIR}{top}.json"), format!("{}\n", serde_json::to_string_pretty(v).unwrap_or_default())))
+        .collect()
+}
+
+/// A scalar as the tree shows it.
+fn word(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Every value as an entry (path, value), for the brace format, `| display set` and compare.
+pub fn entries(s: &Settings) -> Vec<(Vec<String>, Val)> {
+    fn walk(path: &mut Vec<String>, v: &Value, out: &mut Vec<(Vec<String>, Val)>) {
+        match v {
+            Value::Object(o) => {
+                for (k, x) in o {
+                    path.push(k.clone());
+                    walk(path, x, out);
+                    path.pop();
+                }
+            }
+            Value::Array(a) => out.push((path.clone(), Val::Many(a.iter().map(word).collect()))),
+            other => out.push((path.clone(), Val::One(word(other)))),
+        }
+    }
+    let mut out = Vec::new();
+    for (top, v) in s {
+        walk(&mut vec![top.clone()], v, &mut out);
+    }
+    out
+}
+
+/// `set <words>`: the setting the words name, given the value after them (a list gains its
+/// elements; a set of plain values gains its entry; anything else is replaced).
+pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
+    let r = tree.resolve(words)?;
+    if let Some(k) = r.loc.iter().find(|k| k.starts_with('_')) {
+        bail!("{}: a name starting with _ is a NixOS module directive, not a setting: the tree holds data only", k);
+    }
+    if tree.fenced(&r.loc) {
+        bail!("{}: not settable in the configuration tree (it reaches the broker or TorqOS itself)", r.loc.join(" "));
+    }
+    let new = crate::nixos::value(r.ty, &r.values).with_context(|| r.loc.join(" "))?;
+    let (top, rest) = r.loc.split_first().context("a setting has a path")?;
+    let mut at = s.entry(top.clone()).or_insert_with(|| Value::Object(Map::new()));
+    for k in rest {
+        let o = at.as_object_mut().with_context(|| format!("{}: holds a value, not settings", r.loc.join(" ")))?;
+        at = o.entry(k.clone()).or_insert_with(|| Value::Object(Map::new()));
+    }
+    match (at, new) {
+        (Value::Array(have), Value::Array(add)) => {
+            for x in add {
+                if !have.contains(&x) {
+                    have.push(x);
+                }
+            }
+        }
+        (Value::Object(have), Value::Object(add)) if !have.is_empty() => have.extend(add),
+        (slot, v) => *slot = v,
+    }
+    Ok(())
+}
+
+/// `delete <words>`: a setting, a value of a list, or a whole place (`all`, checked by the caller).
+/// What is left empty above it goes too.
+pub fn delete(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
+    let (loc, ty, values) = tree.locate(words)?;
+    if tree.fenced(&loc) {
+        bail!("{}: not changeable in the configuration tree", loc.join(" "));
+    }
+    let remove = match (ty, values.is_empty()) {
+        (Some(t), false) => Some(crate::nixos::value(t, &values).with_context(|| loc.join(" "))?),
+        _ => None,
+    };
+    let (top, rest) = loc.split_first().context("a path")?;
+    let Some(root) = s.get_mut(top) else { bail!("{}: not set", loc.join(" ")) };
+    if !remove_at(root, rest, remove.as_ref())? {
+        bail!("{}: not set", loc.join(" "));
+    }
+    if root.as_object().is_some_and(|o| o.is_empty()) {
+        s.remove(top);
+    }
+    Ok(())
+}
+
+/// Remove `path` below `v` (with `what`: only those list elements, or that entry of a set). Whether
+/// anything was there; objects left empty are removed on the way back.
+fn remove_at(v: &mut Value, path: &[String], what: Option<&Value>) -> Result<bool> {
+    let Some(o) = v.as_object_mut() else { return Ok(false) };
+    let Some((k, rest)) = path.split_first() else { return Ok(false) };
+    let found = if rest.is_empty() {
+        match (o.get_mut(k), what) {
+            (None, _) => false,
+            (Some(Value::Array(have)), Some(Value::Array(gone))) => {
+                let before = have.len();
+                have.retain(|x| !gone.contains(x));
+                if have.len() == before {
+                    return Ok(false);
+                }
+                if have.is_empty() {
+                    o.remove(k);
+                }
+                true
+            }
+            (Some(Value::Object(have)), Some(Value::Object(gone))) => {
+                let before = have.len();
+                have.retain(|key, _| !gone.contains_key(key));
+                if have.len() == before {
+                    return Ok(false);
+                }
+                if have.is_empty() {
+                    o.remove(k);
+                }
+                true
+            }
+            (Some(_), _) => o.remove(k).is_some(),
+        }
+    } else {
+        match o.get_mut(k) {
+            Some(child) => {
+                let found = remove_at(child, rest, what)?;
+                if child.as_object().is_some_and(|c| c.is_empty()) {
+                    o.remove(k);
+                }
+                found
+            }
+            None => false,
+        }
+    };
+    Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree() -> Tree {
+        Tree::parse(include_str!("nixos-fixture.json")).unwrap()
+    }
+    fn w(s: &str) -> Vec<String> {
+        crate::session::words(s).unwrap()
+    }
+
+    #[test]
+    fn set_writes_files_shaped_like_the_options() {
+        let t = tree();
+        let mut s = Settings::new();
+        for line in [
+            "virtualisation docker enable true",
+            "services httpd virtualHosts example.com forceSSL true",
+            "services httpd virtualHosts example.com serverAliases [ www.example.com ]",
+            "networking firewall allowedTCPPorts [ 80 443 ]",
+            "networking firewall allowedTCPPorts 8080",
+            "networking firewall allowedTCPPorts 80",
+            "environment variables EDITOR vim",
+            "environment variables PAGER less",
+        ] {
+            set(&t, &mut s, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
+        let f = files(&s);
+        assert_eq!(f["nixos/virtualisation.json"], "{\n  \"docker\": {\n    \"enable\": true\n  }\n}\n");
+        let net: Value = serde_json::from_str(&f["nixos/networking.json"]).unwrap();
+        assert_eq!(net, serde_json::json!({"firewall": {"allowedTCPPorts": [80, 443, 8080]}}), "a list gains, without repeats");
+        let env: Value = serde_json::from_str(&f["nixos/environment.json"]).unwrap();
+        assert_eq!(env, serde_json::json!({"variables": {"EDITOR": "vim", "PAGER": "less"}}));
+        let back = load(f.iter().map(|(p, c)| (p.as_str(), c.as_bytes()))).unwrap();
+        assert_eq!(back, s, "what is written reads back");
+    }
+
+    #[test]
+    fn entries_render_and_round_trip_through_display_set() {
+        let t = tree();
+        let mut s = Settings::new();
+        for line in ["virtualisation docker enable true", "networking firewall allowedTCPPorts [ 80 443 ]", "services httpd virtualHosts example.com forceSSL true"] {
+            set(&t, &mut s, &w(line)).unwrap();
+        }
+        let e = entries(&s);
+        assert_eq!(
+            crate::tree::render_entries(&e),
+            "networking {\n    firewall {\n        allowedTCPPorts [ 80 443 ];\n    }\n}\nservices {\n    httpd {\n        virtualHosts {\n            example.com {\n                forceSSL true;\n            }\n        }\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
+        );
+        // `| display set`, run again, makes the same settings.
+        let mut again = Settings::new();
+        for line in crate::tree::display_set_entries(&e).lines() {
+            set(&t, &mut again, &w(line.strip_prefix("set ").unwrap())).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
+        assert_eq!(again, s);
+    }
+
+    #[test]
+    fn delete_takes_exactly_what_it_names() {
+        let t = tree();
+        let mut s = Settings::new();
+        for line in ["networking firewall allowedTCPPorts [ 80 443 ]", "virtualisation docker enable true", "virtualisation docker rootless enable true", "environment variables EDITOR vim"] {
+            set(&t, &mut s, &w(line)).unwrap();
+        }
+        delete(&t, &mut s, &w("networking firewall allowedTCPPorts 80")).unwrap();
+        assert_eq!(s["networking"], serde_json::json!({"firewall": {"allowedTCPPorts": [443]}}));
+        delete(&t, &mut s, &w("networking firewall allowedTCPPorts 443")).unwrap();
+        assert!(!s.contains_key("networking"), "nothing left: no file");
+        delete(&t, &mut s, &w("virtualisation docker rootless")).unwrap();
+        assert_eq!(s["virtualisation"], serde_json::json!({"docker": {"enable": true}}), "a place, and what is below it");
+        delete(&t, &mut s, &w("environment variables EDITOR vim")).unwrap();
+        assert!(!s.contains_key("environment"));
+        let e = format!("{:#}", delete(&t, &mut s, &w("virtualisation docker rootless enable")).unwrap_err());
+        assert!(e.contains("not set"), "{e}");
+    }
+
+    #[test]
+    fn the_fence_and_bad_files() {
+        let t = tree();
+        let mut s = Settings::new();
+        for line in ["torq broker rebuildCommand x", "environment etc torq/broker.json text x", "systemd services torq-broker-init enable false"] {
+            let e = set(&t, &mut s, &w(line)).map(|_| ()).unwrap_err();
+            assert!(format!("{e:#}").contains("not settable in the configuration tree"), "{line}: {e:#}");
+        }
+        assert!(s.is_empty());
+        assert!(format!("{:#}", set(&t, &mut s, &w("services httpd virtualHosts _x forceSSL true")).unwrap_err()).contains("the tree holds data only"));
+        set(&t, &mut s, &w("environment etc motd-torq/x text hi")).unwrap();
+        set(&t, &mut s, &w("systemd services myapp enable true")).unwrap();
+        s.clear();
+        assert!(format!("{:#}", load([("nixos/x.json", b"[1]" as &[u8])]).unwrap_err()).contains("not a JSON object"));
+        assert!(load([("nixos/x.json", b"{" as &[u8])]).is_err());
+        assert_eq!(load([("nixos/../x.json", b"{}" as &[u8]), ("other.json", b"{}")]).unwrap(), Settings::new(), "not ours");
+    }
+}

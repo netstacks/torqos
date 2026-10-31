@@ -147,3 +147,11 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    in words and exits 0. Scripts and monitoring use `sudo torq-broker --json status` (its `ok`,
    `busy`, exit codes), which is what `torq status` read. Pending-change detail (`torq log <n>`) has
    no torqcli view yet beyond `show system ledger`. (Found by review of 4g.)
+6m. **The fence is not the AI's boundary.** modules/settings-fence.nix keeps the broker's own inputs
+   out of the configuration tree's data and refuses module directives (`_type`) in it, but settings
+   that run code as root — a service's script, sudo rules, wrappers, tmpfiles, activation scripts,
+   binary caches and their keys, extra groups — stay settable: ordinary system-tier power when a
+   person approves the change, and a list of forbidden paths can never be complete. What an agent
+   may propose has to be a default-deny allow-list at the broker, by top-level and subtree, keyed on
+   the agent's identity (#4, M3). (Found by review of S3a, which also showed the bypasses now
+   tested in tests/tree.nix.)

@@ -125,7 +125,9 @@ impl Tree {
             Some(prefix) => s.starts_with(prefix),
             None => pat == s,
         };
-        self.fence.iter().any(|pat| loc.len() >= pat.len() && pat.iter().zip(loc).all(|(p, s)| seg(p, s)))
+        // The tree holds data only: a name starting with `_` is a module directive (`_type`, `_module`).
+        loc.iter().any(|s| s.starts_with('_'))
+            || self.fence.iter().any(|pat| loc.len() >= pat.len() && pat.iter().zip(loc).all(|(p, s)| seg(p, s)))
     }
 
     /// Follow `words` from the top: names of settings, and at a set of named entries, any word as
@@ -149,6 +151,16 @@ impl Tree {
         match &n.setting {
             Some((ty, _)) if takes_value(ty) => Ok(Resolved { loc, ty, values: vec![] }),
             _ => bail!("{}: not a setting by itself (`?` shows what is below it)", loc.join(" ")),
+        }
+    }
+
+    /// Where `words` lead, setting or not: the path (entry names in place of `<name>`), the setting
+    /// there if it takes a value, and the words after it. `delete` names places as well as settings.
+    pub fn locate(&self, words: &[String]) -> Result<(Vec<String>, Option<&Type>, Vec<String>)> {
+        match self.resolve(words) {
+            Ok(r) => Ok((r.loc, Some(r.ty), r.values)),
+            Err(e) if format!("{e}").contains("not a setting by itself") => Ok((words.to_vec(), None, vec![])),
+            Err(e) => Err(e),
         }
     }
 
@@ -378,7 +390,12 @@ mod tests {
 fn the_fence_is_the_modules() {
     let t = Tree::parse(include_str!("nixos-fixture.json")).unwrap();
     let w = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
-    for fenced in ["torq broker rebuildCommand", "torq broker", "environment etc torq/broker.json text", "systemd services torq-broker-init enable", "nixpkgs config allowUnfree", "_module args"] {
+    for fenced in [
+        "torq broker rebuildCommand", "torq broker", "environment etc torq/broker.json text", "environment etc torq",
+        "systemd services torq-broker-init enable", "systemd units torq-broker-init.service text", "nixpkgs config allowUnfree",
+        "_module args", "torq packages user", "system build nixos-rebuild", "nix package", "systemd package",
+        "services httpd virtualHosts _x",
+    ] {
         assert!(t.fenced(&w(fenced)), "{fenced}");
     }
     for open in ["torq dev enable", "environment etc motd-torq/x text", "systemd services myapp enable", "torq", "environment etc"] {

@@ -87,7 +87,7 @@ pub struct Target {
 
 /// What one entry of the tree holds: a leaf's value, or a leaf-list's elements.
 #[derive(Debug, Clone, PartialEq)]
-enum Val {
+pub enum Val {
     One(String),
     Many(Vec<String>),
 }
@@ -446,7 +446,7 @@ impl Schema {
     }
 
     /// The tree's entries as (words, value), in display order.
-    fn entries(&self, cfg: &Config) -> Vec<(Vec<String>, Val)> {
+    pub fn entries(&self, cfg: &Config) -> Vec<(Vec<String>, Val)> {
         let mut out: Vec<(Vec<String>, Val)> = self
             .instances(cfg)
             .into_iter()
@@ -520,48 +520,66 @@ impl Schema {
 
     /// `show configuration | display set`: one `set` command per value.
     pub fn display_set(&self, cfg: &Config) -> String {
-        let mut out = String::new();
-        for (words, val) in self.entries(cfg) {
-            let path = words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
-            match val {
-                Val::One(v) => out.push_str(&format!("set {path} {}\n", quote(&v))),
-                Val::Many(vs) => {
-                    for v in vs {
-                        out.push_str(&format!("set {path} {}\n", quote(&v)));
-                    }
-                }
-            }
-        }
-        out
+        display_set_entries(&self.entries(cfg))
     }
 
     /// `show | compare`: what `new` changes from `old`, Junos style — under `[edit <container>]`,
     /// `-` lines for what goes and `+` lines for what comes.
     pub fn compare(&self, old: &Config, new: &Config) -> String {
-        let (a, b): (BTreeMap<_, _>, BTreeMap<_, _>) = (self.entries(old).into_iter().collect(), self.entries(new).into_iter().collect());
-        let paths: BTreeSet<&Vec<String>> = a.keys().chain(b.keys()).collect();
-        let mut out = String::new();
-        let mut section: Option<Vec<String>> = None;
-        for p in paths {
-            let (was, now) = (a.get(p), b.get(p));
-            if was == now {
-                continue;
-            }
-            let parent = p[..p.len() - 1].to_vec();
-            if section.as_ref() != Some(&parent) {
-                out.push_str(&if parent.is_empty() { "[edit]\n".to_string() } else { format!("[edit {}]\n", parent.join(" ")) });
-                section = Some(parent);
-            }
-            let leaf = p.last().unwrap();
-            if let Some(v) = was {
-                out.push_str(&format!("-   {};\n", statement(leaf, v)));
-            }
-            if let Some(v) = now {
-                out.push_str(&format!("+   {};\n", statement(leaf, v)));
+        compare_entries(self.entries(old), self.entries(new))
+    }
+}
+
+/// `| display set` of any entries (path, value): one `set` command per value.
+pub fn display_set_entries(entries: &[(Vec<String>, Val)]) -> String {
+    let mut out = String::new();
+    for (words, val) in entries {
+        let path = words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
+        match val {
+            Val::One(v) => out.push_str(&format!("set {path} {}\n", quote(v))),
+            Val::Many(vs) => {
+                for v in vs {
+                    out.push_str(&format!("set {path} {}\n", quote(v)));
+                }
             }
         }
-        out
     }
+    out
+}
+
+/// `show | compare` of any two sets of entries: what `new` changes from `old`.
+pub fn compare_entries(old: Vec<(Vec<String>, Val)>, new: Vec<(Vec<String>, Val)>) -> String {
+    let (a, b): (BTreeMap<_, _>, BTreeMap<_, _>) = (old.into_iter().collect(), new.into_iter().collect());
+    let paths: BTreeSet<&Vec<String>> = a.keys().chain(b.keys()).collect();
+    let mut out = String::new();
+    let mut section: Option<Vec<String>> = None;
+    for p in paths {
+        let (was, now) = (a.get(p), b.get(p));
+        if was == now {
+            continue;
+        }
+        let parent = p[..p.len() - 1].to_vec();
+        if section.as_ref() != Some(&parent) {
+            out.push_str(&if parent.is_empty() { "[edit]\n".to_string() } else { format!("[edit {}]\n", parent.join(" ")) });
+            section = Some(parent);
+        }
+        let leaf = p.last().unwrap();
+        if let Some(v) = was {
+            out.push_str(&format!("-   {};\n", statement(leaf, v)));
+        }
+        if let Some(v) = now {
+            out.push_str(&format!("+   {};\n", statement(leaf, v)));
+        }
+    }
+    out
+}
+
+/// Any entries (path, value), sorted, in the brace format `show configuration` prints.
+#[cfg_attr(not(test), allow(dead_code))] // the session renders with it in S3c
+pub fn render_entries(entries: &[(Vec<String>, Val)]) -> String {
+    let mut out = String::new();
+    render(entries, 0, &mut out);
+    out
 }
 
 /// `name` names a list entry of `list` (at `key`): its type, and one of its values if it has them

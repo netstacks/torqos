@@ -113,7 +113,10 @@ fn read_from<R: Read + Send + 'static>(r: Option<R>, max: u64) -> std::thread::J
 }
 
 fn run(f: &Filter, input: Vec<u8>, max_time: Duration, max_output: u64) -> Result<Vec<u8>> {
-    let mut child = command(f)?
+    // Its own process group: a stop must reach bubblewrap's own child too. Killed in the first
+    // moments, before that child has armed --die-with-parent, it would live on as an orphan holding the
+    // filter's pipes (seen: a test waiting forever); it is still in this group then.
+    let mut child = std::os::unix::process::CommandExt::process_group(&mut command(f)?, 0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -132,6 +135,10 @@ fn run(f: &Filter, input: Vec<u8>, max_time: Duration, max_output: u64) -> Resul
             break Some(s);
         }
         if Instant::now() >= deadline {
+            // SAFETY: a signal to the process group this filter was started in (its id is the group's).
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -283,6 +290,26 @@ mod tests {
         assert!(tmp.is_some(), "{args:?}");
         assert!(tmp < args.iter().position(|a| *a == "--"), "a sandbox option, not the tool's");
     }
+    /// Stopped at once, again and again, no sandbox is left behind (an orphan would hold the filter's
+    /// pipes, and whatever waits on them would wait forever).
+    #[cfg(target_os = "linux")] // the sandbox
+    #[test]
+    fn a_stopped_filter_leaves_nothing_running() {
+        let marker = format!("torq-race-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos());
+        let probe = Filter { tool: "grep".into(), args: vec![marker.clone()] };
+        for _ in 0..200 {
+            let _ = run(&probe, b"x\n".to_vec(), Duration::ZERO, MAX_OUTPUT);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let left: Vec<String> = std::fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|e| std::fs::read(e.ok()?.path().join("cmdline")).ok())
+            .map(|c| String::from_utf8_lossy(&c).replace('\0', " "))
+            .filter(|c| c.contains(&marker))
+            .collect();
+        assert!(left.is_empty(), "left running: {left:?}");
+    }
+
     #[cfg(target_os = "linux")] // the sandbox
     #[test]
     fn a_filter_is_stopped_at_its_limits() {

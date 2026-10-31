@@ -30,10 +30,8 @@ let
   # The tree may not change what reaches the broker's own guard (settings-fence.nix): refused here,
   # when the system is evaluated, whoever proposed it.
   checked = name: v:
-    let hit = fence.firstFenced [ name ] v; in
-    if hit != null then
-      throw "torq: ${lib.concatStringsSep "." hit} is not settable in the configuration tree (it reaches the broker or TorqOS itself)"
-    else v;
+    let p = fence.problem [ name ] v; in
+    if p != null then throw "torq: ${p}" else v;
 
   package = name:
     lib.attrByPath (lib.splitString "." name) (throw "torq: '${name}' is not a package in this machine's nixpkgs") pkgs;

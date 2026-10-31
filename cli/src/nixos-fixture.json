@@ -1,5 +1,68 @@
 {
   "version": 1,
+  "fence": [
+    [
+      "torq",
+      "broker"
+    ],
+    [
+      "torq",
+      "packages"
+    ],
+    [
+      "torq",
+      "cli",
+      "package"
+    ],
+    [
+      "torq",
+      "schema"
+    ],
+    [
+      "torq",
+      "nixosSchema"
+    ],
+    [
+      "nixpkgs"
+    ],
+    [
+      "nix",
+      "package"
+    ],
+    [
+      "systemd",
+      "package"
+    ],
+    [
+      "system",
+      "build"
+    ],
+    [
+      "environment",
+      "etc",
+      "torq/*"
+    ],
+    [
+      "environment",
+      "etc",
+      "torq"
+    ],
+    [
+      "systemd",
+      "services",
+      "torq-*"
+    ],
+    [
+      "systemd",
+      "timers",
+      "torq-*"
+    ],
+    [
+      "systemd",
+      "units",
+      "torq-*"
+    ]
+  ],
   "settings": [
     {
       "help": "Runtime parameters of the Linux kernel, as set by {manpage}`sysctl(8)`.  Note that sysctl parameters names must be enclosed in quotes (e.g. `\"vm.swappiness\"` in",
@@ -10,6 +73,34 @@
       ],
       "type": {
         "name": "submodule"
+      }
+    },
+    {
+      "help": "Set of files that have to be linked in {file}`/etc`.",
+      "loc": [
+        "environment",
+        "etc"
+      ],
+      "type": {
+        "elem": {
+          "name": "submodule"
+        },
+        "name": "attrsOf"
+      }
+    },
+    {
+      "help": "Text of the file.",
+      "loc": [
+        "environment",
+        "etc",
+        "<name>",
+        "text"
+      ],
+      "type": {
+        "elem": {
+          "name": "separatedString"
+        },
+        "name": "nullOr"
       }
     },
     {
@@ -250,6 +341,18 @@
       }
     },
     {
+      "help": "If set to false, this unit will be a symlink to /dev/null. This is primarily useful to prevent specific template instances (e.g. `serial-getty@ttyS0`) from bein",
+      "loc": [
+        "systemd",
+        "services",
+        "<name>",
+        "enable"
+      ],
+      "type": {
+        "name": "bool"
+      }
+    },
+    {
       "help": "The time zone used when displaying times and dates. See <https://en.wikipedia.org/wiki/List_of_tz_database_time_zones> for a comprehensive list of possible valu",
       "loc": [
         "time",
@@ -260,6 +363,17 @@
           "name": "str"
         },
         "name": "nullOr"
+      }
+    },
+    {
+      "help": "What the broker runs after each commit; `{repo}` is replaced with the config repo's path. Part of the broker's fixed settings (/etc/torq/broker.json): a root br",
+      "loc": [
+        "torq",
+        "broker",
+        "rebuildCommand"
+      ],
+      "type": {
+        "name": "str"
       }
     },
     {
@@ -296,45 +410,5 @@
         "name": "bool"
       }
     }
-  ],
-  "fence": [
-    [
-      "torq",
-      "broker"
-    ],
-    [
-      "torq",
-      "packages",
-      "configDir"
-    ],
-    [
-      "torq",
-      "schema"
-    ],
-    [
-      "torq",
-      "nixosSchema"
-    ],
-    [
-      "_module"
-    ],
-    [
-      "nixpkgs"
-    ],
-    [
-      "environment",
-      "etc",
-      "torq/*"
-    ],
-    [
-      "systemd",
-      "services",
-      "torq-*"
-    ],
-    [
-      "systemd",
-      "timers",
-      "torq-*"
-    ]
   ]
 }
