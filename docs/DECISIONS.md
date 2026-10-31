@@ -129,7 +129,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   asserted (a `mkForce` elsewhere fails the build), and SSH enabled outside the catalog with
   passwords is a build warning and is reported by `torq service list`. No `fwupd` yet: firmware
   must go through the broker. `torq service list|enable|disable` changes
-  it through the broker like packages (ADR-011). Unknown names are a type error listing the
+  it through the broker like packages (ADR-011). (Since 4g, 2026-10-31: torqcli's `show services`
+  reports it, and `set services <name>` / `delete services <name>` change it.) Unknown names are a type error listing the
   catalog. Enabling SSH lists the owner's keys (both `~/.ssh/authorized_keys` and
   `/etc/ssh/authorized_keys.d`) for the person approving, and refuses when there are none.
 - **Consequences:** Common services are one confirmed, ledgered, undoable command. Anything outside

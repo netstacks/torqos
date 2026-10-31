@@ -1,12 +1,12 @@
 //! `torqcli` (ADR-016): the shell itself — the real `Machine` behind a session (Nix evaluation and
-//! the broker, the same way `torq pkg` reaches them) and the entry point. The commands are in
+//! the broker) and the entry point. The commands are in
 //! session.rs, the tree in tree.rs, the candidate in candidate.rs.
 
 use crate::candidate::{Candidate, Repo};
 use crate::session::{Configuration, History, Machine, Mode, Session, Waiting};
 use crate::syntax::Style;
 use crate::tree::Schema;
-use crate::{broker, check_repo, config_name, evaluate, history, me, run, scratch_dir, Cli, Cmd, BROKER, REPO};
+use crate::{broker, check_repo, config_name, evaluate, history, me, run, scratch_dir, Cli, BROKER, REPO};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
@@ -20,7 +20,59 @@ struct Real<'a> {
 }
 
 impl Real<'_> {
-    /// The broker's status as `torq status` reports it — without colour (the shell cleans its
+    /// The committed configuration at `base`, as the broker will build it (not the repo's working
+    /// copy), with `files` changed (None: deleted), in a scratch folder (kept while the first is).
+    fn changed_copy(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(tempfile::TempDir, PathBuf)> {
+        let scratch = scratch_dir()?;
+        let copy = scratch.path().join("config");
+        fs::create_dir(&copy)?;
+        Repo::new(&self.cli.repo).archive(base, &copy)?;
+        for (path, content) in files {
+            no_link_on_the_way(&copy, path)?;
+            let f = copy.join(path);
+            match content {
+                Some(c) => {
+                    fs::create_dir_all(f.parent().context("a tree file has a folder")?)?;
+                    fs::write(&f, c)?;
+                }
+                None => {
+                    let _ = fs::remove_file(&f);
+                }
+            }
+        }
+        Ok((scratch, copy))
+    }
+
+    /// If reverting `target` turns SSH back on (it turned it off), the keys that would then get in —
+    /// as at a commit: none refuses. After the revert, services.json is as it was before the change
+    /// (later changes to it conflict, and are refused by the broker).
+    fn revert_ssh_keys(&self, target: &history::Entry) -> Result<String> {
+        let changed = target.data["files"].as_array().is_some_and(|f| f.iter().any(|v| v.as_str() == Some("services.json")));
+        let Some(after) = target.data["commit"].as_str().filter(|_| changed) else { return Ok(String::new()) };
+        let repo = Repo::new(&self.cli.repo);
+        let head = repo.head()?;
+        let Some(before) = repo.parent_of(after)? else { return Ok(String::new()) };
+        let has_ssh = |rev: &str| -> Result<(bool, Option<String>)> {
+            let text = repo.file_at(rev, "services.json")?.map(|b| String::from_utf8_lossy(&b).into_owned());
+            let on = text.as_deref().and_then(|t| serde_json::from_str::<Vec<String>>(t).ok()).is_some_and(|l| l.iter().any(|s| s == "ssh"));
+            Ok((on, text))
+        };
+        let ((was_on, was), (now_on, _)) = (has_ssh(&before)?, has_ssh(&head)?);
+        if !was_on || now_on {
+            return Ok(String::new());
+        }
+        let (owner, keys) = self.ssh_keys(&head, &[("services.json".to_string(), was)])?;
+        if keys.is_empty() {
+            bail!(
+                "not reverted: this turns SSH back on, and SSH here lets in {owner}'s keys only — they have none, so nobody \
+                 could log in; add a public key to ~/.ssh/authorized_keys first"
+            );
+        }
+        Ok(format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")))
+    }
+
+
+    /// The broker's status as `show system alarms` reports it — without colour (the shell cleans its
     /// output, which would show colour codes as text), naming the shell's own commands.
     fn status_report(&self) -> Result<(serde_json::Value, crate::status::Report)> {
         let log = run::start_log()?;
@@ -29,8 +81,8 @@ impl Real<'_> {
             Err(why) => bail!("couldn't check this machine: {why}"),
         };
         let last = crate::read_ledger(self.cli).ok().and_then(|l| history::last_change(&l));
-        let mut report = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &crate::ui::Ui::plain());
-        report.text = report.text.replace("torq status --repair", "request system repair");
+        let report = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &crate::ui::Ui::plain());
+
         Ok((v, report))
     }
 }
@@ -47,29 +99,20 @@ fn done(o: run::Outcome, what: &str) -> Result<serde_json::Value> {
 
 impl Machine for Real<'_> {
     fn check(&self, base: &str, files: &[(String, Option<String>)]) -> Result<()> {
-        let scratch = scratch_dir()?;
-        let copy = scratch.path().join("config");
-        fs::create_dir(&copy)?;
-        // The committed configuration the change is based on, as the broker will build it — not the
-        // repo's working copy.
-        Repo::new(&self.cli.repo).archive(base, &copy)?;
-        for (path, content) in files {
-            no_link_on_the_way(&copy, path)?;
-            let f = copy.join(path);
-            match content {
-                Some(c) => {
-                    fs::create_dir_all(f.parent().context("a tree file has a folder")?)?;
-                    fs::write(&f, c)?;
-                }
-                None => {
-                    let _ = fs::remove_file(&f);
-                }
-            }
-        }
+        let (_scratch, copy) = self.changed_copy(base, files)?;
         let log = run::start_log()?;
         let _p = run::Progress::start("Checking");
         let host = config_name(&copy)?;
-        evaluate(&copy, &host, &log)
+        evaluate(&copy, &host, &log)?;
+        // A tree file the configuration does not read would commit and change nothing: a flake.nix
+        // that does not pass `configDir` to torq.lib.mkSystem (as `torq pkg` checked).
+        if files.iter().any(|(p, _)| p != "flake.lock") && !crate::reads_tree(&copy, &host)? {
+            bail!(
+                "this machine's config does not read its settings files yet: its flake.nix must call \
+                 torq.lib.mkSystem with `configDir = ./.;` (a system change, made as Nix)"
+            );
+        }
+        Ok(())
     }
 
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64> {
@@ -172,7 +215,7 @@ impl Machine for Real<'_> {
         Ok(String::new())
     }
 
-    /// As `torq status --repair`: only when the report says a repair can fix what is wrong, and only
+    /// Only when the report says a repair can fix what is wrong, and only
     /// with a person's yes — it rebuilds and switches the whole system.
     fn repair(&self) -> Result<String> {
         let (_, report) = self.status_report()?;
@@ -191,6 +234,110 @@ impl Machine for Real<'_> {
             done(run::broker_json(broker(self.cli, &["repair", "--approved-by", &me()?]), &log)?, "repair")?
         };
         Ok(format!("repaired: the machine is back at its last ledgered configuration (#{})\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
+    /// As `torq service enable ssh` did: the catalog's SSH lets in the owner's keys only, so these —
+    /// as the changed configuration will have them — are exactly what approving it approves.
+    fn ssh_keys(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)> {
+        let (_scratch, copy) = self.changed_copy(base, files)?;
+        let _p = run::Progress::start("Reading the SSH keys");
+        let host = config_name(&copy)?;
+        let owner = crate::owner(&copy, &host)?;
+        let mut rows = Vec::new();
+        for (note, id, place) in crate::owner_keys(&copy, &host, &owner)? {
+            if !note.is_empty() {
+                rows.push(format!("  ! {}", history::one_line(note.trim_end_matches(": "), 120)));
+            }
+            // Never truncated: a key is approved by what it is.
+            rows.push(format!("    {}  (from {})", history::clean(&id), history::one_line(&place, 80)));
+        }
+        Ok((owner, rows))
+    }
+
+    /// As `torq service list` did, of the active configuration as committed.
+    fn ssh_outside(&self) -> Result<bool> {
+        let head = Repo::new(&self.cli.repo).head()?;
+        let (_scratch, copy) = self.changed_copy(&head, &[])?;
+        let host = config_name(&copy)?;
+        let out = std::process::Command::new("nix")
+            .args(["eval", "--json"])
+            .arg(format!("{}#nixosConfigurations.{host}.config", crate::flake_ref(&copy)))
+            .args([
+                "--apply",
+                "c: c.services.openssh.enable && !(builtins.elem \"ssh\" c.torq.services.enabled) \
+                 && c.services.openssh.settings.PasswordAuthentication != false",
+            ])
+            .output()
+            .context("running nix eval")?;
+        if !out.status.success() {
+            bail!("cannot read this machine's services: {}", history::one_line(&crate::last_error(&out.stderr), 200));
+        }
+        Ok(serde_json::from_slice::<bool>(&out.stdout)?)
+    }
+
+    fn ledger(&self, count: usize) -> Result<String> {
+        let entries = crate::read_ledger(self.cli)?;
+        Ok(history::render(&entries, count, &crate::ui::Ui::plain(), &history::Clock::system()))
+    }
+
+    /// As `torq undo` did, with a commit's rule for asking: a change only to your own folder goes
+    /// ahead; anything else (the system, someone else's folder) needs a person at a terminal.
+    fn revert(&self, seq: u64, me: &str) -> Result<String> {
+        let entries = crate::read_ledger(self.cli)?;
+        let target = history::undo_target(&entries, Some(seq))?;
+        let files: Vec<String> =
+            target.data["files"].as_array().map(|f| f.iter().filter_map(|v| v.as_str()).map(|s| history::one_line(s, 80)).collect()).unwrap_or_default();
+        let mine = only_own_folder(&target.tier, &files, me);
+        let what = format!(
+            "Revert change #{} \"{}\" ({}, by {}{})\n  files: {}\n",
+            target.seq,
+            history::one_line(&target.reason, 60),
+            history::one_line(&target.ts, 25),
+            history::one_line(target.approved_by.as_deref().unwrap_or(&target.actor), 20),
+            if target.tainted { ", from a session that read untrusted content" } else { "" },
+            if files.is_empty() { "-".to_string() } else { files.join(", ") }
+        );
+        let what = format!("{what}{}", self.revert_ssh_keys(target)?);
+        if !mine {
+            let why = if target.tier == "user" { "This changes someone else's settings." } else { "This changes the system (all users)." };
+            if !self.ask(&format!("{what}{why} Revert? ")) {
+                bail!("not reverted: this needs a person to approve it at a terminal");
+            }
+        }
+        let log = run::start_log()?;
+        let outcome = {
+            let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Reverting")) };
+            run::broker_json(broker(self.cli, &["revert", &target.seq.to_string(), &format!("--approved-by={me}")]), &log)
+        };
+        match outcome {
+            Ok(run::Outcome::Refused(m)) if m.contains("later changes conflict") => {
+                // Name what stands in the way, from the ledger, rather than git's view of it.
+                let conflicts = history::later_conflicts(&entries, target.seq);
+                let later: Vec<String> = conflicts.iter().map(|s| format!("#{s}")).collect();
+                // A revert cannot itself be reverted: then only the opposite change helps.
+                let reverted = conflicts.iter().any(|s| entries.iter().any(|e| e.seq == *s && e.kind == "reverted"));
+                let advice = if reverted {
+                    "make the opposite change in configuration mode"
+                } else {
+                    "revert those first (newest first), or make the opposite change in configuration mode"
+                };
+                bail!(
+                    "change #{} cannot be reverted on its own: later changes ({}) changed the same files; {advice}",
+                    target.seq,
+                    if later.is_empty() { "?".to_string() } else { later.join(", ") }
+                )
+            }
+            o => match o.and_then(|o| done(o, "revert")) {
+                Ok(v) => Ok(format!("{what}reverted: change #{} undone (change #{})\n", target.seq, v["seq"].as_u64().unwrap_or(0))),
+                // The answer was lost, or unclear: the ledger says whether it was reverted.
+                Err(e) => match crate::read_ledger(self.cli).ok().and_then(|l| {
+                    l.iter().find(|x| x.kind == "reverted" && x.data["applied"].as_u64() == Some(target.seq)).map(|x| x.seq)
+                }) {
+                    Some(n) => Ok(format!("{what}reverted: change #{} undone (change #{n}; the broker's answer was lost)\n", target.seq)),
+                    None => Err(e),
+                },
+            },
+        }
     }
 
     /// The ledger's entries that produced a configuration (as the broker's `ledgered_commit` counts
@@ -318,6 +465,10 @@ fn scripts_split_outside_quotes() {
 /// The shell: `torqcli` (interactive), `torqcli -c "<command>; <command>…"` (a private candidate,
 /// stops at the first error) or `torqcli <command>` (one operational command). Returns the exit code.
 pub fn main(args: &[String]) -> i32 {
+    if matches!(args, [v] if v == "--version" || v == "-V") {
+        println!("torqcli {}", env!("CARGO_PKG_VERSION"));
+        return 0;
+    }
     match run_shell(args) {
         Ok(code) => code,
         Err(e) => {
@@ -392,8 +543,6 @@ fn run_shell(args: &[String]) -> Result<i32> {
     let cli = Cli {
         repo: PathBuf::from(env("TORQ_CONFIG_REPO", REPO)),
         broker: env("TORQ_BROKER", BROKER),
-        diff: false,
-        cmd: Cmd::Status { repair: false },
     };
     check_repo(&cli)?;
     let schema = Schema::parse(&fs::read_to_string(SCHEMA).with_context(|| format!("reading {SCHEMA} (is this TorqOS?)"))?)?;
@@ -646,6 +795,25 @@ mod editor {
             }
         }
     }
+}
+
+/// Whether a change touches only `me`'s own folder (user tier, every file under `users/<me>/`): the
+/// one kind a revert or a commit makes without asking.
+fn only_own_folder(tier: &str, files: &[String], me: &str) -> bool {
+    let own = format!("users/{me}/");
+    tier == "user" && !files.is_empty() && files.iter().all(|f| f.starts_with(&own) && !f[own.len()..].contains(".."))
+}
+
+#[cfg(test)]
+#[test]
+fn only_ones_own_folder_goes_without_asking() {
+    let f = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(only_own_folder("user", &f(&["users/viper/packages.json", "users/viper/cli.json"]), "viper"));
+    assert!(!only_own_folder("user", &f(&["users/viper/packages.json", "users/eve/cli.json"]), "viper"), "someone else's");
+    assert!(!only_own_folder("user", &f(&["users/viperx/packages.json"]), "viper"), "a longer name is not yours");
+    assert!(!only_own_folder("user", &f(&["users/viper/../eve/cli.json"]), "viper"));
+    assert!(!only_own_folder("system", &f(&["users/viper/packages.json"]), "viper"), "the system tier always asks");
+    assert!(!only_own_folder("user", &[], "viper"), "no files: nothing known, ask");
 }
 
 /// Where the ledger says the config repo is: the commit of its last entry that moved it — the

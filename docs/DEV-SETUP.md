@@ -53,36 +53,39 @@ sudo torq-broker verify
 ```
 (Producing diffs by hand is temporary — the agent and the Activity UI will do this in M2/M3.)
 
-Software has its own command, which writes the diff for you (ADR-011):
+Everything else is `torqcli` (`torq` is the same program), driven like a network device
+(ADR-016, docs/CLI-DESIGN.md): edit a candidate, look at it, commit it as one ledgered change.
 ```bash
-torq pkg search ripgrep
-torq pkg add ripgrep            # for you (user tier); --system for everyone (system tier)
-torq pkg remove ripgrep
-torq pkg list
+torqcli                                  # the shell; `?` and Tab say what may come next
+torqcli show packages available ripgrep  # one command, from your shell
+torqcli -c "configure; set users $USER packages ripgrep; commit"
+#   set system packages <name>           # for everyone (system tier: asks at a terminal)
+#   delete users <you> packages <name>
+torqcli show configuration
 ```
-History and undo, without the broker's sequence-number plumbing:
+History and undo:
 ```bash
-torq log                        # what changed, and `torq undo N` for each change
-torq undo                       # the latest change (asks; system changes always ask)
-torq undo 23                    # a specific one (the applied number, or its proposal number)
-torq status                     # is the machine as its ledger says?
+torqcli show system commit               # the configurations, numbered for rollback
+torqcli show system ledger               # every change, refused and failed ones too
+torqcli request system revert 23         # undo one change (a change forward; asks unless it is your own)
+torqcli -c "configure; rollback 2; commit"   # back to a whole earlier configuration
+torqcli show system alarms               # is the machine as its ledger says? (request system repair)
 ```
 Services come from a small catalog, each with TorqOS's defaults (e.g. SSH: keys only, no root
 login). Always system changes, so always confirmed:
 ```bash
-torq service list               # what there is, and what is on
-torq service enable podman      # rootless containers, with a `docker` command
-torq service disable podman
+torqcli show services                    # what there is, and what is on
+torqcli -c "configure; set services podman; commit"      # rootless containers, with `docker`
 ```
 SSH is off on a new machine (it would only be listening: nobody has a key yet). To SSH in from the
 Mac, put your public key in `~/.ssh/authorized_keys` in the VM (paste it in the UTM console, or
-`ssh-copy-id` if you enabled SSH in the installer), then `torq service enable ssh`: it shows
-exactly which keys will be able to log in.
+`ssh-copy-id` if you enabled SSH in the installer), then `set services ssh` and `commit`: it shows
+exactly which keys will be able to log in, and refuses if there are none.
 To move the machine to the newest TorqOS (and so nixpkgs) — one ledgered, undoable `flake.lock`
-change: `torq update`. `sudo torq-broker status` says whether the machine is as its ledger
-says; it is also checked at boot and every 15 minutes, and a new shell warns if not.
-It checks the change against the whole system first, then proposes and applies it through the
-broker, so it is ledgered and `torq-broker revert` undoes it.
+change: `request system update`, then `configure`, `show | compare`, `commit`.
+`show system alarms` says whether the machine is as its ledger says; it is also checked at boot and
+every 15 minutes, and a new shell warns if not. Every commit is checked against the whole system
+first, then proposed and applied through the broker, so it is ledgered and can be undone.
 
 Do not run `nixos-rebuild` against `/etc/nixos`: on TorqOS those files are stubs that refuse to
 build (`torq.broker.guardEtcNixos`), because building them replaces the whole system outside

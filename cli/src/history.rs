@@ -1,4 +1,4 @@
-//! `torq log` and `torq undo`: the ledger, as the broker prints it (`log --json`; the ledger
+//! `show system ledger` and `request system revert`: the ledger, as the broker prints it (`log --json`; the ledger
 //! itself is root-only). Pure parts here; main.rs talks to the broker.
 
 use anyhow::{bail, Context, Result};
@@ -280,36 +280,9 @@ pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock
     if shown.is_empty() {
         out.push_str("  Nothing has changed yet.\n");
     } else {
-        out.push_str(&format!("{}\n", ui.dim("\n  undo the latest: torq undo · one change in detail: torq log <number>")));
+        out.push_str(&format!("{}\n", ui.dim("\n  undo one change: request system revert <change>")));
     }
     out
-}
-
-/// One change in detail (`torq log 25`): what, when, by whom, its tier, the files, and whether it
-/// is still in effect.
-pub fn render_one(entries: &[Entry], seq: u64, ui: &crate::ui::Ui, clock: &Clock) -> anyhow::Result<String> {
-    let e = entries.iter().find(|e| e.seq == seq).with_context(|| format!("there is no change {seq}"))?;
-    let (symbol, text) = describe(entries, e);
-    let when = parse_ts(&e.ts)
-        .map(|t| t + clock.offset)
-        .map(|t| format!("{} {:02}:{:02}", crate::pkg::ymd(t as u64), t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60))
-        .unwrap_or_else(|| clean(&e.ts));
-    let mut out = format!("  {} {}\n", symbol, ui.bold(&format!("Change {seq} · {}", one_line(&text, 60))));
-    out.push_str(&format!("    {:<10}{when}\n", "When"));
-    out.push_str(&format!("    {:<10}{}{}\n", "By", one_line(asked_by(entries, e), 20), if e.tainted { " ⚠ (from a session that read untrusted content)" } else { "" }));
-    out.push_str(&format!("    {:<10}{}\n", "Affects", if e.tier == "system" { "the whole machine (system change)" } else { "one user's apps" }));
-    if let Some(files) = e.data["files"].as_array() {
-        let f: Vec<String> = files.iter().filter_map(|f| f.as_str()).map(|f| one_line(f, 60)).collect();
-        out.push_str(&format!("    {:<10}{}\n", "Files", f.join(", ")));
-    }
-    if e.kind == "applied" {
-        let state = match undone_by(entries, e.seq) {
-            Some(by) => format!("undone by change {by}"),
-            None => format!("in effect · undo: torq undo {}", e.seq),
-        };
-        out.push_str(&format!("    {:<10}{state}\n", "Status"));
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -398,7 +371,7 @@ mod tests {
         assert_eq!(parse_offset("UTC"), None);
     }
 
-    /// Snapshot of `torq log`: proposals folded into their results, undos named, local times,
+    /// Snapshot of `show system ledger`: proposals folded into their results, undos named, local times,
     /// system changes tagged, a proposal never applied shown as such.
     #[test]
     fn log_snapshot() {
@@ -411,7 +384,7 @@ mod tests {
             "    08:03   ↶ Undid \"Install jq system-wide\"                         6  (system)",
             "    08:04   · Proposed, not applied: Install vim for viper                     7",
             "",
-            "  undo the latest: torq undo · one change in detail: torq log <number>",
+            "  undo one change: request system revert <change>",
         ]
         .join("\n");
         assert_eq!(out.trim_end(), expected, "\n{out}");
@@ -445,21 +418,10 @@ mod tests {
         let out = render(&parse(&lines.join("\n")).unwrap(), 10, &Ui::plain(), &clock());
         assert!(out.contains("✗ Failed: Install x (nothing changed) — by agent"), "an agent's failure stays the agent's:\n{out}");
         assert!(!out.contains("by broker"), "{out}");
-        let one = render_one(&parse(&lines.join("\n")).unwrap(), 9, &Ui::plain(), &clock()).unwrap();
         lines.push(r#"{"seq":10,"ts":"2026-10-30T12:06:00Z","kind":"proposal","actor":"agent","tier":"user","reason":"Install y","data":{}}"#.into());
         lines.push(r#"{"seq":11,"ts":"2026-10-30T12:07:00Z","kind":"interrupted","actor":"broker","tier":"user","reason":"...","data":{"op":"apply","target":10}}"#.into());
         let out = render(&parse(&lines.join("\n")).unwrap(), 10, &Ui::plain(), &clock());
         assert!(out.contains("⚠ Interrupted: Install y — by agent") && !out.contains("Proposed, not applied"), "{out}");
-        assert!(one.contains("By        agent"), "{one}");
     }
 
-    #[test]
-    fn one_change_in_detail() {
-        let out = render_one(&ledger(), 5, &Ui::plain(), &clock()).unwrap();
-        assert!(out.contains("Change 5 · Install jq system-wide"), "{out}");
-        assert!(out.contains("When      2026-10-30 08:02"), "{out}");
-        assert!(out.contains("the whole machine (system change)"), "{out}");
-        assert!(out.contains("Status    undone by change 6"), "{out}");
-        assert!(render_one(&ledger(), 99, &Ui::plain(), &clock()).is_err());
-    }
 }

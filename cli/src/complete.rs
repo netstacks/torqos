@@ -191,10 +191,12 @@ fn choices_juniper(schema: &Schema, at: &At, words: &[String], partial: &str) ->
             [] => table(&[("system", "This machine")]),
             ["system"] => table(&[
                 ("repair", "Return a machine changed outside TorqOS to its last configuration"),
+                ("revert", "Undo one change (a new change forward)"),
                 ("software", "This machine's software"),
                 ("update", "Load the newest TorqOS into the candidate"),
             ]),
             ["system", "update"] => table(&[("all", "Every input, nixpkgs too")]),
+            ["system", "revert"] => vec![Choice::new("<change>", "The change number (show system ledger)")],
             ["system", "software"] => table(&[("rollback", "Load an earlier configuration's software into the candidate (a downgrade)")]),
             ["system", "software", "rollback"] => vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")],
             _ => vec![],
@@ -240,9 +242,11 @@ fn operational_show(style: Style, rest: &[String]) -> Vec<Choice> {
         ["system"] => table(&[
             ("alarms", "Is this machine as its history says?"),
             ("commit", "The configurations so far, newest first"),
+            ("ledger", "Every change, as the ledger has it (refused and failed ones too)"),
             ("rollback", "An earlier configuration, or how two differ"),
         ]),
         ["system", "rollback"] => vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")],
+        ["system", "ledger"] => vec![Choice::new("<count>", "How many entries (20)")],
         ["system", "rollback", _] => table(&[("compare", "How it differs from another one")]),
         ["system", "rollback", _, "compare"] => vec![Choice::new("<number>", "The configuration to compare with")],
         ["packages"] => table(&[("available", "Search nixpkgs")]),
@@ -352,9 +356,9 @@ mod tests {
         let s = schema();
         assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "rollback"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["compare"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "revert", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["set", "show", "switch"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
@@ -420,8 +424,10 @@ mod tests {
     #[test]
     fn requests_for_the_software() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "revert", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["all"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system revert"), "")), ["<change>"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system ledger"), "")), ["<count>"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system software"), "")), ["rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run request system software rollback"), "")), ["<number>"]);
         assert!(choices(&s, Mode::Operational, &w("request system update all"), "").is_empty());

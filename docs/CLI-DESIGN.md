@@ -52,6 +52,10 @@ $ torqcli -c "configure; set users viper packages htop; commit"
 | show the configuration | `show` (candidate) / `show configuration` (operational) | `show configuration` (candidate) / `show running-config` (operational) |
 | leave configuration | `exit` at the top, or `exit configuration-mode` | `exit` at the top, or `end` |
 
+Turning SSH on (`set services ssh`) shows at `commit` exactly which keys will be able to log in, as
+the changed configuration has them, and refuses if there are none (nobody could log in) — 4g, as
+`torq service enable ssh` did.
+
 The same in both: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`,
 `rollback <n>`, `show system commit`, `switch cli`, `?` help, Tab completion, history (↑).
 
@@ -197,7 +201,7 @@ viper@torq-utm# commit
 As built (3c/3d): `commit check` evaluates the candidate on the committed base (`git archive`, as
 the broker builds it). A system change, or a change to another user's folder, shows the
 comparison and needs a person's yes at a terminal; a change to your own folder does not (as
-`torq pkg --yes`; KNOWN-GAPS #4). Every value reaches the broker as `--name=value`. If the broker's
+`torq pkg --yes` did; KNOWN-GAPS #4). Every value reaches the broker as `--name=value`. If the broker's
 answer to a commit is lost, the ledger decides whether it was made (the candidate is discarded
 only if it was). On a terminal the shell has history, Tab and `?`; a pasted block of commands runs
 line by line.
@@ -210,11 +214,13 @@ line by line.
 | `show system commit` | the commit history, numbered for `rollback` |
 | `show system rollback <n> [compare <m>]` | commit <n>'s configuration, or its difference to <m> |
 | `show system alarms` | is this machine exactly as its history says? (and any pending confirmed commit) |
+| `show system ledger [<count>]` | every change as the ledger has it, refused and failed ones too |
 | `show packages available <term>` | search this machine's nixpkgs |
 | `show services` | the catalog, and what is on |
 | `request system update [all]` | load the newest TorqOS (and its nixpkgs) into the candidate |
 | `request system software rollback <n>` | load commit <n>'s software into the candidate (a downgrade) |
 | `request system repair` | return a machine changed outside TorqOS to its last commit |
+| `request system revert <change>` | undo one change (a new change forward; asks unless it is only your own folder) |
 | `configure` / `config` | enter configuration mode |
 | `switch cli` | Juniper ↔ Cisco style for this session |
 

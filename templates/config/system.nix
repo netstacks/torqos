@@ -6,7 +6,7 @@
   # setup: sudo sed -i "s/CHANGE-ME/$USER/" /var/lib/torq/config/system.nix
   torq.user = "CHANGE-ME";
 
-  # Services are in services.json: `torq service list`. All off by default — SSH included: a new
+  # Services are in services.json: `show services` in torqcli. All off by default — SSH included: a new
   # machine has no keys yet, so it would only be listening. Install your key, then
-  # `torq service enable ssh` (keys only, only you).
+  # `set services ssh` in torqcli (keys only, only you).
 }

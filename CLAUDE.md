@@ -108,12 +108,9 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
   on the next operation (ADR-010); `torq-broker status` reports any drift from the ledger.
   `tests/trust-loop.nix` passes inside the UTM VM (no `/dev/kvm`: QEMU falls back to TCG, ~2.5 min).
   Broker: 40 tests green (`cargo test`, also run in the Nix build sandbox).
-- **Package system works** (ADR-011): `torq pkg add|remove|list|search` writes
-  `users/<name>/packages.json` (user tier) or `system/packages.json` (`--system`, system tier) and goes
-  through the broker. Verified live (`ripgrep` for viper, ledger #23).
-- **Services, updates, history work** (ADR-012, ADR-013): `torq service`, `torq update`,
-  `torq log`, `torq undo`, `torq status`; drift checked at boot and every 15 min. Verified
-  live: Podman enabled, a rootless container run, then undone (ledger #33–#35).
+- **Packages, services, updates, history** (ADR-011–013) are torqcli commands now (4g): the earlier
+  `torq pkg/service/update/log/undo/status` are gone and say what replaced each; `torq` is torqcli.
+  Drift is checked at boot and every 15 min.
 - **A stray `nixos-rebuild` cannot switch the machine away** from its ledgered config:
   `/etc/nixos` holds stubs that refuse (`torq.broker.guardEtcNixos`). This happened once from
   another tool on this VM; never build `/etc/nixos` or any config other than the broker's.
@@ -127,7 +124,11 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
 - **Filters and `torqcli <command>` (4b, 4c; ADR-017):** `show … | grep -i x | wc -l` runs the real
   coreutils/grep, sandboxed in bubblewrap (no files, network, environment or inherited descriptors);
   `torqcli show system alarms` runs one command. Covered in `tests/trust-loop.nix`.
-- `| display detail` / `| display diff` (4d). Next: retiring `torq pkg/service/undo`, then M2 (`docs/ROADMAP.md`). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
+- `| display detail` / `| display diff` (4d); the software in the candidate (`request system update`,
+  4e); configuration numbers from the ledger (4f); `request system revert`, `show system ledger`, the
+  SSH key check at commit, and the old commands retired (4g). Next: M2 (`docs/ROADMAP.md`); what is
+  left of M1.5 needs a person (usability check, terminal look) or its own design (environment
+  variables). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
 ### You are probably running inside the dev VM
 - Host `torq-utm`, user **`viper`** (the template no longer names a user; `torq.user` in
@@ -136,9 +137,13 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
 - `/var/lib/torq/config` = the machine's config repo; its `torq` input is
   `path:/home/viper/torq`.
 - **Ship a distribution change to the running VM through the broker**, so it is ledgered. Commit
-  in `~/torq` first (the config repo's `torq` input is that working tree), then:
-  ```bash
-  torq update          # evaluates, shows the diff, asks, applies; needs a terminal (use tmux)
+  in `~/torq` first (the config repo's `torq` input is that working tree), then in `torqcli` (needs
+  a terminal: use tmux):
+  ```
+  request system update     # loads the new flake.lock into the candidate
+  configure
+  show | compare            # [edit system software]
+  commit                    # shows it, asks y/N, applies
   ```
   To change the machine's config repo itself (not just bump inputs), do it by hand:
   ```bash

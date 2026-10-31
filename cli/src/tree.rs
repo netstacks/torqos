@@ -58,7 +58,7 @@ pub enum Data {
 
 impl Data {
     /// The file's content as TorqOS writes it: keys sorted, lists sorted and de-duplicated, one item
-    /// per line (as `torq pkg` does, so diffs stay small), a final newline.
+    /// per line (so diffs stay small), a final newline.
     pub fn render(&self) -> String {
         let v = match self {
             Data::Object(o) => serde_json::to_value(o),

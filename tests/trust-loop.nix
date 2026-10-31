@@ -175,6 +175,18 @@ pkgs.testers.runNixOSTest {
         out = machine.succeed(dev_sh("torqcli 'show configuration | display detail'"))
         assert "## commit " in out and "## system/host.json: system host-name\n" in out, out
         assert "##" not in machine.succeed(dev_sh("torqcli show configuration")), "no internals unless asked"
+        # The commands before torqcli say what replaced them.
+        out = machine.fail(dev_sh("torq pkg add htop 2>&1"))
+        assert "is gone" in out and "set users <you> packages <name>" in out, out
+        # The ledger as a person reads it, through the broker (root here, as sudo would be).
+        out = machine.succeed("torqcli show system ledger")
+        assert "host" in out, out
+        # Reverting a system change needs a person at a terminal: a script cannot.
+        applied = json.loads(machine.succeed("torq-broker --json log --brief | grep '\"kind\":\"applied\"' | tail -n 1"))["seq"]
+        before = machine.succeed("git -C /var/lib/torq/config rev-parse HEAD")
+        out = machine.fail(f"torqcli request system revert {applied} < /dev/null 2>&1")
+        assert "needs a person to approve it at a terminal" in out, out
+        assert machine.succeed("git -C /var/lib/torq/config rev-parse HEAD") == before, "nothing changed"
         # One command, no -c: a configuration change is refused, and says how.
         out = machine.fail(dev_sh("torqcli configure 2>&1"))
         assert "torqcli -c" in out, out

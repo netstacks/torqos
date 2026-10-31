@@ -46,6 +46,9 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       the change and need a terminal. Not yet run end to end against a real broker: the cutover.
 - [x] `rollback <n>`, `request system repair`; `request system update [all]` and `request system
       software rollback <n>` load the software (`flake.lock`) into the candidate (4e).
+- [x] Configuration numbers from the ledger (4f); `request system revert <change>`, `show system
+      ledger`, the SSH key check at commit; `torq pkg/service/update/log/undo/status` retired, each
+      saying what replaced it (4g).
 - [ ] Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 
 **First round** (done with the earlier command names; carried over):

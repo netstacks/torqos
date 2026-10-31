@@ -29,6 +29,18 @@ pub trait Machine {
     fn search(&self, terms: &[String]) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
     fn repair(&self) -> Result<String>;
+    /// Turning SSH on: who it admits, and the keys that will be able to log in as them — read from
+    /// the configuration at `base` with `files` changed, as it will be. One line per key (and a
+    /// warning line above a key with options); none: nobody could log in.
+    fn ssh_keys(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)>;
+    /// Whether sshd is on outside the catalog with password logins allowed (`services.openssh.enable`
+    /// in a .nix file): `show services` must not say SSH is off then.
+    fn ssh_outside(&self) -> Result<bool>;
+    /// `show system ledger <count>`: the ledger's last entries, as a person reads them.
+    fn ledger(&self, count: usize) -> Result<String>;
+    /// `request system revert <change>`: undo that one change (a new change forward), asked as a
+    /// commit is (`me`: who is asking; their own folder needs no question).
+    fn revert(&self, seq: u64, me: &str) -> Result<String>;
     /// The configurations so far, newest first (at most `count`): the numbers of `rollback <n>` and
     /// `show system commit`. From the ledger (ADR-016): its entries that produced a configuration.
     fn configurations(&self, repo: &Repo, count: usize) -> Result<History>;
@@ -259,7 +271,7 @@ impl<'a> Session<'a> {
                 let active = self.configuration_of(&head)?;
                 self.view(&active, &path, display, &format!("commit {head}"))
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } => {
                 self.show_operational(op)
             }
             Op::Request { words } => self.request(&words),
@@ -481,12 +493,18 @@ impl<'a> Session<'a> {
                 };
                 let catalog = self.schema.nodes.get("services").and_then(|n| n.values.clone()).unwrap_or_default();
                 let width = catalog.keys().map(|k| k.len()).max().unwrap_or(0);
-                Ok(catalog
+                let mut out: String = catalog
                     .iter()
                     .map(|(name, what)| format!("{} {name:<width$}  {what}\n", if on.contains(name) { "on " } else { "off" }))
-                    .collect())
+                    .collect();
+                if !on.iter().any(|s| s == "ssh") && self.machine.ssh_outside()? {
+                    out.push_str("! SSH is on anyway, outside the catalog, with password logins allowed (a .nix file sets \
+                                  services.openssh.enable): `set services ssh` makes it keys only, once that line is gone\n");
+                }
+                Ok(out)
             }
             Op::ShowPackages { terms } => self.machine.search(&terms),
+            Op::ShowLedger { count } => self.machine.ledger(count.unwrap_or(20)),
             other => bail!("not an operational show: {other:?}"),
         }
     }
@@ -514,10 +532,14 @@ impl<'a> Session<'a> {
     fn request(&mut self, w: &[String]) -> Result<String> {
         match w.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["system", "repair"] => self.machine.repair(),
+            ["system", "revert", n] => {
+                let seq: u64 = n.parse().with_context(|| format!("request system revert <change>: '{n}' is not a change number"))?;
+                self.machine.revert(seq, &self.me)
+            }
             ["system", "update"] => self.update(false),
             ["system", "update", "all"] => self.update(true),
             ["system", "software", "rollback", n] => self.software_rollback(syntax::number(n)?),
-            _ => bail!("request: one of: system repair, system update [all], system software rollback <n>"),
+            _ => bail!("request: one of: system repair, system revert <change>, system update [all], system software rollback <n>"),
         }
     }
 
@@ -656,7 +678,19 @@ impl<'a> Session<'a> {
         let others = self.others_folders(&changes);
         self.machine.check(&base, &files)?;
         let compare = a.compare(&s)?;
-        let shown: String = compare.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
+        let mut shown: String = compare.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
+        // The catalog's SSH admits its owner's keys only: with none, nobody could log in; with some,
+        // approving it approves exactly those (as the changed configuration has them).
+        if a.turns_on(&s, "ssh")? {
+            let (owner, keys) = self.machine.ssh_keys(&base, &files)?;
+            if keys.is_empty() {
+                bail!(
+                    "not committed: SSH here lets in {owner}'s keys only, and they have none, so nobody could \
+                     log in; add a public key to ~/.ssh/authorized_keys first"
+                );
+            }
+            shown.push_str(&format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")));
+        }
         let why = match (tier, others.is_empty()) {
             ("system", _) => Some("This changes the system (all users).".to_string()),
             (_, false) => Some(format!("This changes the settings of: {}.", others.join(", "))),
@@ -724,6 +758,13 @@ struct Against {
 }
 
 impl Against {
+    /// Whether the candidate turns service `name` on (it was off in the base).
+    fn turns_on(&self, s: &Schema, name: &str) -> Result<bool> {
+        let on = |c: &Config| matches!(c.files.get("services.json"), Some(crate::tree::Data::List(l)) if l.iter().any(|x| x == name));
+        let before = s.load(self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
+        Ok(!on(&before) && on(&self.config))
+    }
+
     /// What the candidate changes: the tree's files, then the software.
     fn changes(&self, s: &Schema) -> Result<Vec<candidate::Change<'_>>> {
         let mut c = candidate::changes(s, &self.files, &self.config)?;
@@ -791,10 +832,13 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    /// Tree files a change writes (None: deletes), as the machine is given them.
+    type Files = Vec<(String, Option<String>)>;
+
     #[derive(Default)]
     struct Fake {
         commits: RefCell<Vec<(String, String, String, String, Option<u32>)>>,
-        checks: RefCell<Vec<Vec<(String, Option<String>)>>>,
+        checks: RefCell<Vec<Files>>,
         answer: bool,
         pending: Option<Waiting>,
         confirmed: RefCell<u32>,
@@ -807,6 +851,11 @@ mod tests {
         ledger: Option<Vec<Configuration>>,
         /// Where the ledger says the repo is, if a test says (else: its newest configuration).
         ledger_at: Option<String>,
+        /// sshd on outside the catalog.
+        ssh_outside: bool,
+        /// The keys turning SSH on would admit, and what was asked about.
+        keys: Vec<String>,
+        ssh_asked: RefCell<Vec<Files>>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<()> {
@@ -839,6 +888,19 @@ mod tests {
         }
         fn repair(&self) -> Result<String> {
             Ok("repaired\n".into())
+        }
+        fn ledger(&self, count: usize) -> Result<String> {
+            Ok(format!("ledger {count}\n"))
+        }
+        fn ssh_outside(&self) -> Result<bool> {
+            Ok(self.ssh_outside)
+        }
+        fn ssh_keys(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)> {
+            self.ssh_asked.borrow_mut().push(files.to_vec());
+            Ok(("dev".into(), self.keys.clone()))
+        }
+        fn revert(&self, seq: u64, me: &str) -> Result<String> {
+            Ok(format!("reverted {seq} for {me}\n"))
         }
         fn configurations(&self, repo: &Repo, count: usize) -> Result<History> {
             let configurations: Vec<Configuration> = match &self.ledger {
@@ -1112,6 +1174,57 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         let e = format!("{:#}", s.exec("show system rollback 1").unwrap_err());
         assert!(e.contains("configuration 1 (commit 0123456789ab) is no longer in the config repo"), "{e}");
+    }
+
+    #[test]
+    fn the_ledger_and_reverting_one_change() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("show system ledger").unwrap(), "ledger 20\n");
+        assert_eq!(s.exec("show system ledger 5 | wc -l").unwrap(), "1\n");
+        assert!(format!("{:#}", s.exec("show system ledger 0").unwrap_err()).contains("1 to 10000"));
+        assert_eq!(s.exec("request system revert 7").unwrap(), "reverted 7 for dev\n");
+        assert!(format!("{:#}", s.exec("request system revert x").unwrap_err()).contains("not a change number"));
+        s.exec("configure").unwrap();
+        assert_eq!(s.exec("run request system revert 3").unwrap(), "reverted 3 for dev\n");
+    }
+
+    #[test]
+    fn turning_ssh_on_shows_the_keys_it_admits_and_needs_one() {
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set services ssh"]);
+        let e = format!("{:#}", s.exec("commit").unwrap_err());
+        assert!(e.contains("lets in dev's keys only, and they have none"), "{e}");
+        assert!(m.commits.borrow().is_empty() && m.asked.borrow().is_empty(), "nothing asked, nothing committed");
+        assert_eq!(m.ssh_asked.borrow()[0], vec![("services.json".to_string(), Some("[\n  \"ssh\"\n]\n".to_string()))], "as the change will have it");
+
+        let m = Fake { answer: true, keys: vec!["    256 SHA256:abc dev@mac (ED25519)  (from /home/dev/.ssh/authorized_keys)".into()], ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set services ssh"]);
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
+        let q = m.asked.borrow()[0].clone();
+        assert!(q.contains("Keys that will be able to log in as dev:\n    256 SHA256:abc dev@mac (ED25519)  (from /home/dev/.ssh/authorized_keys)\n"), "{q}");
+    }
+
+    #[test]
+    fn ssh_already_on_asks_no_keys() {
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        sh(d.path(), "printf '[\\n  \"ssh\"\\n]\\n' > services.json && git add -A && git commit -qm ssh");
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system host-name three"]);
+        s.exec("commit").unwrap();
+        assert!(m.ssh_asked.borrow().is_empty());
+    }
+
+    #[test]
+    fn show_services_says_when_ssh_runs_outside_the_catalog() {
+        let (d, m) = (repo(), Fake { ssh_outside: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("show services").unwrap();
+        assert!(out.lines().any(|l| l.starts_with("off ssh")) && out.contains("! SSH is on anyway, outside the catalog"), "{out}");
+        let (d, m) = (repo(), Fake::default());
+        assert!(!session(d.path(), None, &m).exec("show services").unwrap().contains('!'));
     }
 
     #[test]

@@ -111,6 +111,16 @@ impl Repo {
         Ok(self.git(&["cat-file", "-e", "--end-of-options", &format!("{id}^{{commit}}")]).is_ok())
     }
 
+    /// The commit before `id` (its first parent), if there is one.
+    pub fn parent_of(&self, id: &str) -> Result<Option<String>> {
+        if !self.has_commit(id)? {
+            bail!("commit {id} is not in the config repo");
+        }
+        let out = self.git(&["rev-list", "--parents", "-n1", "--end-of-options", id]).unwrap_or_default();
+        let ids: Vec<String> = String::from_utf8_lossy(&out).split_whitespace().map(String::from).collect();
+        Ok(ids.get(1).cloned())
+    }
+
     /// The entries of commit `rev`: (mode, kind, object id, path), every file.
     fn listing(&self, rev: &str) -> Result<Vec<(String, String, String, String)>> {
         // A commit id (from head() or history()) or HEAD — never anything git could read as an

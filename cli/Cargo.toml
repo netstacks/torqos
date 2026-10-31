@@ -7,7 +7,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
 rustyline = { version = "17", default-features = false, features = ["custom-bindings"] }
 serde = { version = "1", features = ["derive"] }

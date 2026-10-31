@@ -23,12 +23,11 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    (Configuration no longer is: a root broker takes its repo, state directory, rebuild command and
    PATH/HOME only from `/etc/torq/broker.json`, refuses a flag or `TORQ_*` variable that differs,
    and clears its caller's environment — ADR-016, piece 1e.) Fine under sudo in M1; the M3 socket
-   must take identity from `SO_PEERCRED`. `torq pkg` inherits
-   this: it passes `--actor user --approved-by $(id -un)` itself, so anything running as the user
-   (a script, an AI tool in their terminal) can approve a user-tier change with `--yes`; it does
-   refuse `--yes` for system tier and asks first, but that prompt is in the same process. It also
-   needs `sudo` for the broker, so only wheel users can use it until the socket exists.
-   Under `torqcli` (ADR-016) the same holds for `commit`: a system-tier commit needs a terminal,
+   must take identity from `SO_PEERCRED`. `torqcli` inherits this: it passes `--actor user
+   --approved-by $(id -un)` itself, so anything running as the user (a script, an AI tool in their
+   terminal) can commit a change to their own folder (`torqcli -c`) or revert one; it needs `sudo`
+   for the broker, so only wheel users can use it until the socket exists. A system-tier commit
+   (or revert) needs a terminal,
    which stops background jobs but not anything started from the user's terminal. The per-user
    candidate is user-writable, so its integrity between `show | compare` and `commit` rests on the
    user's account; the agent must never write a user's candidate (it proposes as `actor=agent`).
@@ -53,8 +52,8 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    built would close that.
 6e. **OPEN (high): an outside commit made while a change is interrupted is discarded untraced.**
    If HEAD has moved past the interrupted operation's own commit (someone committed on top of it),
-   `torq status` shows only "a change was interrupted" (the CLI hides head findings while
-   interrupted) and `--repair` → `reconcile_locked` keeps and ledgers only `pending.commit`, then
+   `show system alarms` shows only "a change was interrupted" (the CLI hides head findings while
+   interrupted) and `request system repair` → `reconcile_locked` keeps and ledgers only `pending.commit`, then
    resets: the outside commit survives only in the reflog. Fix: broker `keep(head)` and ledger it
    (`discarded_head`) when `head != pending.commit`, with a test; expose `interrupted.commit` in
    `status --json`; the CLI hides the head finding only when HEAD is `before` or that commit.
@@ -102,7 +101,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    loader's entry: a profile set while the boot-loader install failed counts as restored. The
    activation is not run under `systemd-run` as `nixos-rebuild` does: a change that kills the
    user's session kills the broker mid-switch (recovered by reconcile, but noisy).
-6c. **`torq update` trusts the user's fetch:** `nix flake update` runs as the user, so their
+6c. **`request system update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds
    that store path without re-fetching. The ledgered rev may then not identify what was built.
    Fix: the broker re-fetches changed locked inputs as root and compares narHashes.
@@ -143,3 +142,8 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
   `modules/dev.nix` pins the version by overriding nixpkgs' release manifest with
   `modules/claude-code-manifest.json`. To update, fetch a newer manifest (the commands are in
   `dev.nix`) and ship it through the broker. Running sessions keep their old code until relaunched.
+6l. **`show system alarms` has no exit code of its own.** `torq status` exited 1 when the machine was
+   not as its ledger says and 75 while a change was being made; `torqcli show system alarms` says it
+   in words and exits 0. Scripts and monitoring use `sudo torq-broker --json status` (its `ok`,
+   `busy`, exit codes), which is what `torq status` read. Pending-change detail (`torq log <n>`) has
+   no torqcli view yet beyond `show system ledger`. (Found by review of 4g.)

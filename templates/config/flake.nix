@@ -13,7 +13,7 @@
     nixosConfigurations.torq = torq.lib.mkSystem {
       system = "aarch64-linux";
       # Installed software is read from system/packages.json and users/<name>/packages.json here
-      # (`torq pkg add`; ADR-011).
+      # (torqcli: `set users <you> packages <name>`; ADR-011).
       configDir = ./.;
       modules = [
         ./machine.nix

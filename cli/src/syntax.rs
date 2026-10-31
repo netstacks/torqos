@@ -94,6 +94,8 @@ pub enum Op {
     ShowRollback { n: usize, compare: Option<usize>, display: Option<Display> },
     ShowAlarms { display: Option<Display> },
     ShowServices,
+    /// `show system ledger [<count>]`: the ledger itself — every change, refused and failed ones too.
+    ShowLedger { count: Option<usize> },
     ShowPackages { terms: Vec<String> },
     Request { words: Vec<String> },
     // Configuration mode.
@@ -205,7 +207,7 @@ fn split_filters(w: &[String]) -> Result<(Vec<String>, Vec<Filter>)> {
 /// Whether `op` prints output a filter can work on.
 fn shows(op: &Op) -> bool {
     match op {
-        Op::ShowActive { .. } | Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices => true,
+        Op::ShowActive { .. } | Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowLedger { .. } => true,
         Op::ShowCandidate { .. } | Op::Compare { .. } => true,
         Op::Run(op) => shows(op),
         _ => false,
@@ -292,6 +294,8 @@ fn parse_operational(style: Style, w: &[String]) -> Result<Op> {
         }
         ["show", "system", "alarms", ..] => Op::ShowAlarms { display: view_pipes("show system alarms", &w[3..], OF_DETAIL)? },
         ["show", "services"] => Op::ShowServices,
+        ["show", "system", "ledger"] => Op::ShowLedger { count: None },
+        ["show", "system", "ledger", n] => Op::ShowLedger { count: Some(n.parse().ok().filter(|n| (1..=10_000).contains(n)).with_context(|| format!("show system ledger <count>: 1 to 10000, not '{n}'"))?) },
         ["show", "packages", "available", terms @ ..] if !terms.is_empty() => Op::ShowPackages { terms: w[3..].to_vec() },
         ["request", ..] => Op::Request { words: w[1..].to_vec() },
         [] => bail!("empty command"),
@@ -421,6 +425,8 @@ pub fn render(style: Style, op: &Op) -> String {
         (_, Op::ShowRollback { n, compare: Some(m), display }) => format!("show system rollback {n} compare {m}{}", display_text(display)),
         (_, Op::ShowAlarms { display }) => format!("show system alarms{}", display_text(display)),
         (_, Op::ShowServices) => "show services".into(),
+        (_, Op::ShowLedger { count: None }) => "show system ledger".into(),
+        (_, Op::ShowLedger { count: Some(n) }) => format!("show system ledger {n}"),
         (_, Op::ShowPackages { terms }) => sep("show packages available", terms),
         (_, Op::Request { words }) => sep("request", words),
         (Style::Juniper, Op::Set { words }) => sep("set", words),
@@ -482,6 +488,8 @@ mod tests {
             (Mode::Operational, Op::ShowAlarms { display: None }),
             (Mode::Operational, Op::ShowAlarms { display: detail }),
             (Mode::Operational, Op::ShowServices),
+            (Mode::Operational, Op::ShowLedger { count: None }),
+            (Mode::Operational, Op::ShowLedger { count: Some(5) }),
             (Mode::Operational, Op::ShowPackages { terms: v("rip grep") }),
             (Mode::Operational, Op::Request { words: v("system repair") }),
             (Mode::Operational, Op::Exit),

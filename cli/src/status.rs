@@ -1,11 +1,11 @@
-//! `torq status`: is this machine as its history says — in words (docs/CLI-DESIGN.md), from the
+//! `show system alarms`: is this machine as its history says — in words (docs/CLI-DESIGN.md), from the
 //! broker's `status --json` facts, never its problem text. Pure, for snapshot tests.
 
 use crate::history::one_line;
 use crate::ui::Ui;
 use serde_json::Value;
 
-/// What `torq status --repair` can do about what was found.
+/// What `request system repair` can do about what was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fix {
     /// Nothing to do.
@@ -89,8 +89,8 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
         text.push_str(&format!("    · {what}\n"));
     }
     text.push_str(&match fix {
-        Fix::Repair => format!("    To return it to its history:  torq status --repair   {}\n", ui.dim("(asks first)")),
-        _ => format!("    This needs a person: look at {} (--repair won't touch it).\n", one_line(repo, 40)),
+        Fix::Repair => format!("    To return it to its history:  request system repair   {}\n", ui.dim("(asks first)")),
+        _ => format!("    This needs a person: look at {} (request system repair won't touch it).\n", one_line(repo, 40)),
     });
     Report { text, exit: 1, fix }
 }
@@ -120,7 +120,7 @@ mod tests {
         v["next_boot"] = json!("/nix/store/stock-nixos");
         let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (1, Fix::Repair));
-        let expected = "  ⚠ This machine is not as its history says.\n    · It is running a system TorqOS didn't build (switched outside TorqOS).\n    · The next boot would start a system TorqOS didn't build.\n    To return it to its history:  torq status --repair   (asks first)\n";
+        let expected = "  ⚠ This machine is not as its history says.\n    · It is running a system TorqOS didn't build (switched outside TorqOS).\n    · The next boot would start a system TorqOS didn't build.\n    To return it to its history:  request system repair   (asks first)\n";
         assert_eq!(r.text, expected);
     }
 

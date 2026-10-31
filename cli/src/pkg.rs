@@ -1,32 +1,7 @@
-//! `torq pkg`: installed software is JSON in the config repo (ADR-011). The pure parts live
+//! Packages: installed software is JSON in the config repo (ADR-011). The pure parts live
 //! here; `main.rs` does the I/O (reading the repo, evaluating, talking to the broker).
 
-use anyhow::{Context, Result};
-
-/// Which package list a command changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    System,
-    User(String),
-}
-
-impl Target {
-    /// Path in the config repo. `users/<name>/packages.json` is one of the exact shapes the broker
-    /// treats as user tier; `system/packages.json` is system tier.
-    pub fn path(&self) -> String {
-        match self {
-            Target::System => "system/packages.json".into(),
-            Target::User(u) => format!("users/{u}/packages.json"),
-        }
-    }
-
-    pub fn describe(&self) -> String {
-        match self {
-            Target::System => "system-wide".into(),
-            Target::User(u) => format!("for {u}"),
-        }
-    }
-}
+use anyhow::Result;
 
 /// The user names the broker accepts as user tier (broker/src/policy.rs, `is_user_data`).
 pub fn valid_user(name: &str) -> bool {
@@ -34,125 +9,18 @@ pub fn valid_user(name: &str) -> bool {
     matches!(c.next(), Some('a'..='z' | '_')) && c.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
 }
 
-/// What the CLI accepts as a package name: nixpkgs attribute characters, at most one dot. Which
-/// package sets are allowed, and whether the package exists and is available here, is decided by
-/// the system's own module when the change is evaluated — one rule, not two copies of it.
-pub fn valid_package(name: &str) -> bool {
-    let parts: Vec<&str> = name.split('.').collect();
-    parts.len() <= 2
-        && parts.iter().all(|p| {
-            let mut c = p.chars();
-            matches!(c.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-                && c.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '\'' | '+' | '-'))
-        })
-}
-
-pub fn parse_list(text: &str) -> Result<Vec<String>> {
-    serde_json::from_str(text).context("not a JSON list of package names")
-}
-
-/// One name per line, sorted and de-duplicated, so every change is a minimal, readable diff.
-pub fn render(list: &[String]) -> String {
-    let mut v = list.to_vec();
-    v.sort();
-    v.dedup();
-    if v.is_empty() {
-        return "[]\n".into();
-    }
-    format!("{}\n", serde_json::to_string_pretty(&v).expect("a list of strings serialises"))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Edit {
-    Add,
-    Remove,
-}
-
-/// The new list, and the names that actually change it (adding what is there, or removing what
-/// is not, is skipped).
-pub fn edit(current: &[String], names: &[String], how: Edit) -> (Vec<String>, Vec<String>) {
-    let mut list = current.to_vec();
-    let mut changed = Vec::new();
-    for n in names {
-        let present = list.contains(n);
-        match how {
-            Edit::Add if !present => list.push(n.clone()),
-            Edit::Remove if present => list.retain(|x| x != n),
-            _ => continue,
-        }
-        if !changed.contains(n) {
-            changed.push(n.clone());
-        }
-    }
-    (list, changed)
-}
-
 /// A failed pre-check (the Nix evaluation of the changed configuration), as a person needs it:
 /// what is wrong and what to do. Nothing has been proposed at this point.
 pub fn explain_check_error(msg: &str) -> String {
     let name = msg.split('\'').nth(1).unwrap_or_default();
     if msg.contains("is not a package in nixpkgs") {
-        format!("\"{name}\" isn't a package. Find the right name: torq pkg search {name}")
+        format!("\"{name}\" isn't a package. Find the right name: show packages available {name}")
     } else if msg.contains("is not available here") {
         format!("{name} can't be installed here: it is unfree, broken, insecure, or not built for this machine.")
     } else if msg.contains("is not a package name") {
-        format!("\"{name}\" isn't a package name. Find one: torq pkg search <words>")
+        format!("\"{name}\" isn't a package name. Find one: show packages available <words>")
     } else {
         format!("This change wouldn't work, so nothing was changed: {msg}")
-    }
-}
-
-/// Up to three names close to a misspelt one ("htpo" → "htop"): case-insensitive edit distance of at
-/// most 2 (1 for short names), closest first.
-pub fn suggest(name: &str, candidates: &[String]) -> Vec<String> {
-    let wanted = name.to_lowercase();
-    let max = if wanted.chars().count() <= 4 { 1 } else { 2 };
-    let mut close: Vec<(usize, &String)> = candidates
-        .iter()
-        .filter(|c| c.len().abs_diff(name.len()) <= max)
-        .filter_map(|c| {
-            let d = edit_distance(&wanted, &c.to_lowercase());
-            (d <= max && d > 0 || (d == 0 && c.as_str() != name)).then_some((d, c))
-        })
-        .collect();
-    close.sort();
-    close.into_iter().take(3).map(|(_, c)| c.clone()).collect()
-}
-
-/// Levenshtein distance, counting a swap of two neighbours as one edit (htpo → htop).
-fn edit_distance(a: &str, b: &str) -> usize {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for (i, row) in d.iter_mut().enumerate() {
-        row[0] = i;
-    }
-    for j in 0..=b.len() {
-        d[0][j] = j;
-    }
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            let cost = usize::from(a[i - 1] != b[j - 1]);
-            d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
-            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
-            }
-        }
-    }
-    d[a.len()][b.len()]
-}
-
-/// What a broker refusal while proposing or applying means. `what` is the change in words
-/// ("install htop"); whether the machine is as it was is decided by the caller from `status`.
-pub fn explain_apply_error(what: &str, msg: &str) -> String {
-    // Specific phrases first: the interrupted-change message also mentions "rebuilds".
-    if msg.contains("interrupted and must be reconciled") {
-        format!("Couldn't {what}: an earlier change was interrupted. Finish it first: torq status")
-    } else if msg.contains("does not apply cleanly") {
-        format!("Couldn't {what}: the configuration changed in the meantime. Try again.")
-    } else if msg.contains("rebuild") {
-        format!("Couldn't {what}: building the new system failed.")
-    } else {
-        format!("Couldn't {what}: {msg}")
     }
 }
 
@@ -258,19 +126,6 @@ pub fn move_dates(m: &Move) -> (String, String) {
     (when(m.before), when(m.after))
 }
 
-/// What an update moves, from the old and new flake.lock: each changed input still there, with its
-/// date before and after ("torq", "2026-10-29", "2026-11-04"). Unknown dates are "?".
-pub fn lock_changes(old: &str, new: &str) -> Vec<(String, String, String)> {
-    lock_moves(old, new)
-        .iter()
-        .filter(|m| m.is)
-        .map(|m| {
-            let (a, b) = move_dates(m);
-            (m.name.clone(), a, b)
-        })
-        .collect()
-}
-
 /// A Unix time as a UTC date, "2026-10-30" (civil-from-days, no time-zone database needed).
 pub fn ymd(secs: u64) -> String {
     let z = (secs / 86_400) as i64 + 719_468;
@@ -285,37 +140,9 @@ pub fn ymd(secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// The inputs `nix flake update` reports ("• Updated|Added|Removed input 'x': ..." plus detail
-/// lines), for the change's reason. Only a summary: the diff the person approves is what matters.
-pub fn moved_inputs(nix_stderr: &str) -> Vec<String> {
-    nix_stderr
-        .lines()
-        .filter_map(|l| {
-            let l = l.trim().strip_prefix("• ")?;
-            let (verb, rest) = l.split_once(" input '")?;
-            let name = rest.split('\'').next()?;
-            match verb {
-                "Updated" => Some(name.to_string()),
-                "Added" | "Removed" => Some(format!("{name} ({})", verb.to_lowercase())),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn v(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn paths_match_the_broker_tiers() {
-        assert_eq!(Target::System.path(), "system/packages.json");
-        assert_eq!(Target::User("viper".into()).path(), "users/viper/packages.json");
-    }
 
     #[test]
     fn user_names() {
@@ -328,41 +155,6 @@ mod tests {
     }
 
     #[test]
-    fn package_names() {
-        for ok in ["htop", "python3Packages.requests", "gcc13", "g++", "vim_configurable", "font-awesome", "xorg'"] {
-            assert!(valid_package(ok), "{ok}");
-        }
-        // Injection into the nix expression, path tricks, too deep: refused before anything runs.
-        for bad in ["", "a.b.c", "\"htop\"", "htop;", "${x}", "a b", "../x", ".htop", "htop.", "1password"] {
-            assert!(!valid_package(bad), "{bad}");
-        }
-    }
-
-    #[test]
-    fn render_is_sorted_deduplicated_one_per_line() {
-        assert_eq!(render(&v(&["ripgrep", "htop", "htop"])), "[\n  \"htop\",\n  \"ripgrep\"\n]\n");
-        assert_eq!(render(&[]), "[]\n");
-        assert_eq!(parse_list(&render(&v(&["b", "a"]))).unwrap(), v(&["a", "b"]));
-    }
-
-    #[test]
-    fn parse_rejects_non_lists() {
-        assert!(parse_list("{\"htop\": true}").is_err());
-        assert!(parse_list("[1, 2]").is_err());
-        assert_eq!(parse_list("[]").unwrap(), Vec::<String>::new());
-    }
-
-    #[test]
-    fn edit_reports_only_real_changes() {
-        let (l, c) = edit(&v(&["htop"]), &v(&["htop", "ripgrep", "ripgrep"]), Edit::Add);
-        assert_eq!((l, c), (v(&["htop", "ripgrep"]), v(&["ripgrep"])));
-        let (l, c) = edit(&v(&["htop", "ripgrep"]), &v(&["htop", "nope"]), Edit::Remove);
-        assert_eq!((l, c), (v(&["ripgrep"]), v(&["htop"])));
-        let (_, c) = edit(&v(&["htop"]), &v(&["htop"]), Edit::Add);
-        assert!(c.is_empty());
-    }
-
-    #[test]
     fn dates_and_lock_changes() {
         assert_eq!(ymd(0), "1970-01-01");
         assert_eq!(ymd(1_793_386_952), "2026-10-30");
@@ -370,41 +162,23 @@ mod tests {
         let lock = |kt: u64, nt: u64| {
             format!(r#"{{"nodes":{{"torq":{{"locked":{{"lastModified":{kt},"narHash":"a{kt}"}}}},"nixpkgs":{{"locked":{{"lastModified":{nt}}}}},"root":{{}}}}}}"#)
         };
-        let moved = lock_changes(&lock(1_793_000_000, 1_790_000_000), &lock(1_793_386_952, 1_790_000_000));
-        assert_eq!(moved, vec![("torq".to_string(), "2026-10-26".to_string(), "2026-10-30".to_string())]);
-        let same = lock_changes(&lock(1_793_380_000, 1), &lock(1_793_386_952, 1));
-        assert_eq!(same[0].1, "2026-10-30 17:06"); // date -u -d @1793380000
-        assert_eq!(same[0].2, "2026-10-30 19:02");
-    }
-
-    #[test]
-    fn did_you_mean() {
-        let names = v(&["htop", "btop", "atop", "ripgrep", "firefox", "Firefox-esr", "git", "gitg", "neovim"]);
-        assert_eq!(suggest("htpo", &names), v(&["htop"]), "a swap is one edit");
-        assert_eq!(suggest("ripgerp", &names), v(&["ripgrep"]));
-        assert_eq!(suggest("firefx", &names), v(&["firefox"]));
-        assert_eq!(suggest("neovin", &names), v(&["neovim"]));
-        assert!(suggest("zzzzzz", &names).is_empty());
-        assert_eq!(suggest("gti", &names), v(&["git"]), "short names: one edit at most");
-        assert_eq!(suggest("FIREFOX", &names), v(&["firefox"]), "case differences count as a match");
+        let moved = lock_moves(&lock(1_793_000_000, 1_790_000_000), &lock(1_793_386_952, 1_790_000_000));
+        assert_eq!(moved.iter().map(|m| (m.name.as_str(), move_dates(m))).collect::<Vec<_>>(), [("torq", ("2026-10-26".to_string(), "2026-10-30".to_string()))]);
+        let same = lock_moves(&lock(1_793_380_000, 1), &lock(1_793_386_952, 1));
+        assert_eq!(move_dates(&same[0]), ("2026-10-30 17:06".to_string(), "2026-10-30 19:02".to_string())); // date -u -d @1793380000
+        let gone = lock_moves(&lock(1, 1), r#"{"nodes":{"root":{},"torq":{"locked":{"lastModified":1,"narHash":"a1"}}}}"#);
+        assert!(gone.iter().any(|m| m.name == "nixpkgs" && m.was && !m.is), "an input removed is a move too");
     }
 
     #[test]
     fn errors_say_what_to_do() {
         assert_eq!(
             explain_check_error("torq.packages: 'htpo' (user viper) is not a package in nixpkgs"),
-            "\"htpo\" isn't a package. Find the right name: torq pkg search htpo"
+            "\"htpo\" isn't a package. Find the right name: show packages available htpo"
         );
         assert!(explain_check_error("torq.packages: 'vscode' (user viper) is not available here: unfree, ...")
             .starts_with("vscode can't be installed here"));
         assert!(explain_check_error("something else").starts_with("This change wouldn't work"));
-        assert_eq!(
-            explain_apply_error("install htop", "apply undone because the rebuild failed: rebuild command failed"),
-            "Couldn't install htop: building the new system failed."
-        );
-        assert!(explain_apply_error("x", "diff does not apply cleanly to the current config").contains("Try again"));
-        let interrupted = "the apply of #2 was interrupted and must be reconciled first: run `torq-broker reconcile --approved-by <name>` (it resets the config to the last ledgered commit and rebuilds)";
-        assert!(explain_apply_error("x", interrupted).contains("an earlier change was interrupted"));
     }
 
     #[test]
@@ -438,14 +212,4 @@ mod tests {
         assert!(key_options_note("no-touch-required sk-ssh-ed25519@openssh.com AAAA").starts_with("no touch"));
     }
 
-    #[test]
-    fn summarises_moved_inputs() {
-        let out = "fetching...\n\
-                   • Updated input 'torq':\n    'path:/a?narHash=x' (2026-10-30)\n  → 'path:/a?narHash=y'\n\
-                   • Added input 'torq/hw':\n    'github:x/y'\n\
-                   • Removed input 'old'\n\
-                   warning: something\n";
-        assert_eq!(moved_inputs(out), v(&["torq", "torq/hw (added)", "old (removed)"]));
-        assert!(moved_inputs("nothing to see").is_empty());
-    }
 }

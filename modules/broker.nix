@@ -143,7 +143,7 @@ in
     };
     environment.interactiveShellInit = ''
       if [ -s /run/torq/drift ]; then
-        echo "TorqOS: this machine is not as its ledger says (details: sudo torq-broker status):" >&2
+        echo "TorqOS: this machine is not as its ledger says (details: torqcli show system alarms):" >&2
         sed 's/^PROBLEM: /  - /' /run/torq/drift >&2
       fi
     '';
@@ -187,7 +187,7 @@ in
         message = ''
           This machine is managed by TorqOS. Its configuration is ${cfg.configRepo}, and only
           torq-broker changes it, so that every change is ledgered and can be undone:
-            torq pkg add <package>      (software)
+            torqcli                     (configure; set …; commit — software, services, settings)
             sudo torq-broker propose --diff change.diff --reason "..."   (anything else)
           Do not build /etc/nixos or any other configuration with nixos-rebuild: it would replace
           this whole system with a stock NixOS one, outside the ledger.
