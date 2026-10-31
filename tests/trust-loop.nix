@@ -139,6 +139,9 @@ pkgs.testers.runNixOSTest {
         assert " host" in out.splitlines()[0], out
         out = machine.fail("su - dev -c 'torqcli -c \"configure; set system host-name my_laptop\"' 2>&1")
         assert "is not a valid system host-name" in out, out
+        # Piped input is a script: it stops at its first error (exit 1) and runs nothing after it.
+        out = machine.fail("su - dev -c 'printf \"configure\\nset system host-name my_laptop\\nshow | compare\\n\" | torqcli' 2>&1")
+        assert "is not a valid system host-name" in out and "[edit" not in out.split("my_laptop")[-1], out
         # The Cisco style says the same: a bare path sets, `show configuration diff` compares.
         out = machine.succeed("su - dev -c 'torqcli --style cisco -c \"config; system; time-zone UTC; end; config; show configuration diff\"'")
         assert "[edit system]\n+   time-zone UTC;" in out, out

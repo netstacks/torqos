@@ -299,9 +299,12 @@ fn run_shell(args: &[String]) -> Result<i32> {
     let who = me()?;
     // Scripts speak Juniper unless told otherwise (a script must not change meaning with a setting);
     // the interactive shell speaks your style (users <you> cli style, else system cli style).
+    // Piped input is a script too: the same rule (and it stops at its first error, below).
+    let piped = !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
     let style = match (style, &script) {
         (Some(s), _) => s,
         (None, Some(_)) => Style::Juniper,
+        (None, None) if piped => Style::Juniper,
         (None, None) => configured_style(&who),
     };
     let saved = if script.is_some() { None } else { Some(Candidate::default_path()?) };
@@ -379,7 +382,11 @@ fn interactive(s: &mut Session) -> Result<i32> {
             println!();
             return Ok(0);
         }
-        run_line(s, line.trim());
+        // Piped lines are a script: stop at the first error, so a later `commit` cannot commit
+        // what an earlier failed line did not change.
+        if !run_line(s, line.trim()) {
+            return Ok(1);
+        }
         if s.done {
             return Ok(0);
         }

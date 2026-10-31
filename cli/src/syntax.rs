@@ -32,7 +32,7 @@ impl Style {
 /// (Schema::parse refuses it), so a command word is never also a path.
 pub const RESERVED: &[&str] = &[
     "no", "do", "exit", "end", "top", "up", "show", "commit", "rollback", "set", "delete", "edit", "configure", "config",
-    "run", "switch", "quit", "request", "all", "help",
+    "run", "switch", "quit", "request", "all", "help", "diff",
 ];
 
 /// The pipes after a `show`.

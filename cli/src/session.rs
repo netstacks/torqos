@@ -153,6 +153,10 @@ impl<'a> Session<'a> {
         if w.is_empty() {
             return Ok(String::new());
         }
+        // A Cisco bare path is read against the candidate it will change: load it first.
+        if self.mode == Mode::Configuration {
+            self.candidate()?;
+        }
         let op = syntax::parse(self.style, self.mode, &w, &|ws| self.is_place(ws))?;
         self.run(op)
     }
@@ -222,6 +226,9 @@ impl<'a> Session<'a> {
                 if !t.values.is_empty() || !matches!(kind, Some(Kind::Container | Kind::List)) {
                     bail!("{}: not somewhere to go (a setting takes a value)", full.join(" "));
                 }
+                if kind == Some(Kind::List) {
+                    bail!("{}: name an entry ({} <name>)", full.join(" "), full.join(" "));
+                }
                 self.edit = t.words;
                 Ok(String::new())
             }
@@ -237,16 +244,25 @@ impl<'a> Session<'a> {
                 let full = self.here(&words);
                 let cfg = self.candidate()?.config.clone();
                 let t = s.resolve_in(&full, Some(&cfg))?;
-                let whole = t.node.is_empty() || matches!(s.nodes[&t.node].kind, Kind::Container | Kind::List);
-                let (del, no) = match self.style {
-                    Style::Juniper => ("delete", "delete"),
-                    Style::Cisco => ("no", "no"),
+                // Everything below a container or list entry, or a whole list of values, goes only
+                // with `all`: an Enter pressed before the value must not take them all.
+                let kind = (!t.node.is_empty()).then(|| s.nodes[&t.node].kind);
+                let whole = match kind {
+                    None | Some(Kind::Container | Kind::List) => true,
+                    Some(Kind::LeafList) => t.values.is_empty(),
+                    Some(Kind::Leaf) => false,
                 };
+                let del = match self.style {
+                    Style::Juniper => "delete",
+                    Style::Cisco => "no",
+                };
+                let typed = words.iter().map(|w| syntax::quote(w)).collect::<Vec<_>>().join(" ");
+                let typed = if typed.is_empty() { String::new() } else { format!("{typed} ") };
                 if whole && !all {
-                    bail!("{del} {}: deletes everything below it — say `{no} {} all`", full.join(" "), full.join(" "));
+                    bail!("{del} {}: deletes everything below it — say `{del} {typed}all`", full.join(" "));
                 }
                 if all && !whole {
-                    bail!("{del} {}: `all` is for a whole container", full.join(" "));
+                    bail!("{del} {}: `all` is for a whole container or list", full.join(" "));
                 }
                 s.delete(&mut self.candidate()?.config, &full)?;
                 self.save()?;
@@ -269,7 +285,15 @@ impl<'a> Session<'a> {
 
     /// Up one level: out of a list entry (its name and the list), else one word.
     fn up(&mut self) {
+        // Out of a list entry means out of the list too (`users dev` → the top), as in Junos and NSO.
+        let entry = self.edit.len() >= 2 && {
+            let key = self.schema.resolve_in(&self.edit, self.candidate.as_ref().map(|c| &c.config)).ok().map(|t| t.node);
+            key.is_some_and(|k| k.ends_with("<name>"))
+        };
         self.edit.pop();
+        if entry {
+            self.edit.pop();
+        }
     }
 
     /// Out of configuration mode, saying if the candidate holds changes.
@@ -793,11 +817,37 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set users dev cli style cisco"]);
-        for (bad, why) in [("delete users dev", "say `delete users dev all`"), ("delete system", "say `delete system all`"), ("delete system host-name all", "`all` is for a whole container")] {
+        run(&mut s, &["set system packages [ htop vim ]"]);
+        for (bad, why) in [
+            ("delete users dev", "say `delete users dev all`"),
+            ("delete system", "say `delete system all`"),
+            ("delete system host-name all", "`all` is for a whole container"),
+            // A whole list of values too: Enter pressed before the value (review of f705cc8).
+            ("delete system packages", "say `delete system packages all`"),
+        ] {
             assert!(format!("{:#}", s.exec(bad).unwrap_err()).contains(why), "{bad}");
         }
-        run(&mut s, &["delete users dev all"]);
-        assert!(!s.exec("show | compare").unwrap().contains("style"));
+        // The hint is relative to where you are.
+        run(&mut s, &["edit system"]);
+        assert!(format!("{:#}", s.exec("delete packages").unwrap_err()).contains("say `delete packages all`"));
+        run(&mut s, &["delete packages htop", "delete packages all", "top", "delete users dev all"]);
+        let c = s.exec("show | compare").unwrap();
+        assert!(!c.contains("style") && !c.contains("packages"), "{c}");
+    }
+
+    /// Out of a list entry is out of the list; a bare list is nowhere to stand; a command word cannot
+    /// name an entry (review of f705cc8).
+    #[test]
+    fn up_leaves_a_list_entry_whole() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "edit users dev cli", "up"]);
+        assert_eq!(s.edit_path(), ["users", "dev"]);
+        run(&mut s, &["up"]);
+        assert!(s.edit_path().is_empty());
+        assert!(format!("{:#}", s.exec("edit users").unwrap_err()).contains("name an entry"));
+        s.schema.nodes.get_mut("users").unwrap().values.as_mut().unwrap().insert("all".into(), String::new());
+        assert!(format!("{:#}", s.exec("set users all packages vim").unwrap_err()).contains("keeps the word for a command"));
     }
 
     /// The same session in Cisco style: bare paths set, a container path is a submode, `no`
@@ -806,8 +856,11 @@ mod tests {
     fn a_session_in_cisco_style() {
         let (d, m) = (repo(), Fake { answer: true, ..Fake::default() });
         let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), Repo::new(d.path()), None, &m, "dev", Style::Cisco);
-        run(&mut s, &["config", "system host-name three", "users dev", "cli style juniper", "exit", "exit"]);
-        assert!(s.edit_path().is_empty());
+        run(&mut s, &["config", "system host-name three", "users dev", "cli style juniper"]);
+        assert_eq!(s.edit_path(), ["users", "dev"]);
+        run(&mut s, &["exit"]);
+        assert!(s.edit_path().is_empty(), "out of a list entry is out of the list (review of f705cc8)");
+        assert_eq!(s.mode, Mode::Configuration);
         assert_eq!(
             s.exec("show configuration diff").unwrap(),
             "[edit system]\n-   host-name two;\n+   host-name three;\n[edit users dev cli]\n+   style juniper;\n"

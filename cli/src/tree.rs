@@ -551,6 +551,10 @@ fn check_name(key: &str, list: &Node, name: &str, existing: bool) -> Result<()> 
     if !shaped {
         bail!("'{name}' is not a valid name in {key}");
     }
+    // A command word as an entry name would be ambiguous (`users all`, Cisco `top` inside `users`).
+    if crate::syntax::RESERVED.contains(&name) {
+        bail!("'{name}' cannot be named in {key}: torqcli keeps the word for a command");
+    }
     if existing {
         return Ok(());
     }
