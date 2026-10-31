@@ -177,6 +177,12 @@ pkgs.testers.runNixOSTest {
         out = machine.succeed(dev_sh("torqcli 'show configuration | display detail'"))
         assert "## commit " in out and "## system/host.json: system host-name\n" in out, out
         assert "## commit " not in machine.succeed(dev_sh("torqcli show configuration")), "no internals unless asked"
+        # Every NixOS setting of the system, TorqOS's too, generated with it for torqcli.
+        schema = json.loads(machine.succeed("cat /etc/torq/nixos-schema.json"))
+        locs = {".".join(s["loc"]): s["type"] for s in schema["settings"]}
+        assert locs["virtualisation.docker.enable"] == {"name": "bool"}, locs.get("virtualisation.docker.enable")
+        assert "torq.dev.enable" in locs and "services.httpd.virtualHosts.<name>.forceSSL" in locs
+        assert len(locs) > 10000, len(locs)
         # The commands before torqcli say what replaced them.
         out = machine.fail(dev_sh("torq pkg add htop 2>&1"))
         assert "is gone" in out and "set users <you> packages <name>" in out, out

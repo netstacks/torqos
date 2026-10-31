@@ -10,6 +10,7 @@
     ./host.nix
     ./cli.nix
     ./schema.nix
+    ./nixos-schema.nix
     ./services.nix
   ];
 }

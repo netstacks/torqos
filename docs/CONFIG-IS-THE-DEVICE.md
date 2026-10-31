@@ -151,7 +151,10 @@ torq.desktop.enable = true;       →  torq desktop enable true
 ## How it would be built (each step reviewed, tested, shipped through the broker)
 
 1. Generate the tree's schema from the machine's NixOS options, installed with the system; read it
-   in torqcli (help, completion, types).
+   in torqcli (help, completion, types). **Built (S1):** modules/nixos-schema.nix writes
+   /etc/torq/nixos-schema.json (all 24,603 settings here, 4.4 MB, ~9 s more per system build);
+   cli/src/nixos.rs reads it (17 ms), resolves paths with named entries, checks values against
+   NixOS's types, offers what may come next. Not yet editable in `configure` (S3).
 2. One generic module applies the tree's values to NixOS; values stored as data in the repo.
 3. `config <file>` and `edit`, through the candidate and `commit`.
 4. The TorqOS layer: users, groups, applications, permissions; TorqOS-default warnings at commit.
