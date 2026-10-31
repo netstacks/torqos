@@ -155,3 +155,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    may propose has to be a default-deny allow-list at the broker, by top-level and subtree, keyed on
    the agent's identity (#4, M3). (Found by review of S3a, which also showed the bypasses now
    tested in tests/tree.nix.)
+   Config files (`file edit`, `set <place> config <file>`, S3e) are plain Nix and are not fenced at
+   all: like system.nix always was, they can set anything, the broker's settings included. A person
+   approves each one as its raw diff; an agent proposing one is for the same M3 allow-list (a
+   config file is a whole module, so the allow-list will have to refuse them to agents outright).

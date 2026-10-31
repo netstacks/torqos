@@ -33,7 +33,7 @@ impl Style {
 /// (Schema::parse refuses it), so a command word is never also a path.
 pub const RESERVED: &[&str] = &[
     "no", "do", "exit", "end", "top", "up", "show", "commit", "rollback", "set", "delete", "edit", "configure", "config",
-    "run", "switch", "quit", "request", "all", "help", "diff",
+    "run", "switch", "quit", "request", "all", "help", "diff", "file",
 ];
 
 /// `| display …` after a `show`: what each view offers (CLI-DESIGN principle 5: internals only when
@@ -98,6 +98,9 @@ pub enum Op {
     ShowLedger { count: Option<usize> },
     ShowPackages { terms: Vec<String> },
     Request { words: Vec<String> },
+    /// `file show|edit|delete <path>`, `file list`: the config repo's config files (in configuration
+    /// mode, the candidate's; in operational mode, the active ones; `edit` and `delete` only there).
+    File { action: FileAction, path: Option<String> },
     // Configuration mode.
     /// A leaf's value or leaf-list elements: the words after `set` (Cisco: the bare path).
     Set { words: Vec<String> },
@@ -121,6 +124,28 @@ pub enum Op {
     /// Out of configuration mode from anywhere (Cisco `end`, Juniper `exit configuration-mode`).
     End,
     SwitchCli,
+}
+
+/// What `file` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileAction {
+    Show,
+    Edit,
+    Delete,
+    List,
+}
+
+fn parse_file(w: &[String], mode: Mode) -> Result<Op> {
+    let s: Vec<&str> = w.iter().map(String::as_str).collect();
+    let (action, path) = match s.as_slice() {
+        ["show", p] => (FileAction::Show, Some(p.to_string())),
+        ["edit", p] if mode == Mode::Configuration => (FileAction::Edit, Some(p.to_string())),
+        ["delete", p] if mode == Mode::Configuration => (FileAction::Delete, Some(p.to_string())),
+        ["list"] => (FileAction::List, None),
+        ["edit" | "delete", _] => bail!("file edit and file delete change the candidate: in configuration mode"),
+        _ => bail!("file: one of: file list, file show <path>, file edit <path>, file delete <path>"),
+    };
+    Ok(Op::File { action, path })
 }
 
 /// The highest rollback number (how far back `rollback` and `show system rollback` reach).
@@ -298,6 +323,7 @@ fn parse_operational(style: Style, w: &[String]) -> Result<Op> {
         ["show", "system", "ledger", n] => Op::ShowLedger { count: Some(n.parse().ok().filter(|n| (1..=10_000).contains(n)).with_context(|| format!("show system ledger <count>: 1 to 10000, not '{n}'"))?) },
         ["show", "packages", "available", terms @ ..] if !terms.is_empty() => Op::ShowPackages { terms: w[3..].to_vec() },
         ["request", ..] => Op::Request { words: w[1..].to_vec() },
+        ["file", ..] => parse_file(&w[1..], Mode::Operational)?,
         [] => bail!("empty command"),
         [other, ..] => {
             let show = if style == Style::Cisco { "show running-config" } else { "show configuration" };
@@ -333,6 +359,7 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
                     (false, _) => Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? },
                 }
             }
+            ["file", ..] => parse_file(&w[1..], mode)?,
             ["rollback"] => Op::Rollback { n: 0 },
             ["rollback", n] => Op::Rollback { n: number(n)? },
             ["commit", ..] => Op::Commit(parse_commit(&w[1..])?),
@@ -357,6 +384,7 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
                 }
                 Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
             }
+            ["file", ..] => parse_file(&w[1..], mode)?,
             ["rollback", "configuration"] => Op::Rollback { n: 0 },
             ["rollback", "configuration", n] => Op::Rollback { n: number(n)? },
             ["commit", ..] => Op::Commit(parse_commit(&w[1..])?),
@@ -429,6 +457,15 @@ pub fn render(style: Style, op: &Op) -> String {
         (_, Op::ShowLedger { count: Some(n) }) => format!("show system ledger {n}"),
         (_, Op::ShowPackages { terms }) => sep("show packages available", terms),
         (_, Op::Request { words }) => sep("request", words),
+        (_, Op::File { action, path }) => {
+            let a = match action {
+                FileAction::Show => "show",
+                FileAction::Edit => "edit",
+                FileAction::Delete => "delete",
+                FileAction::List => "list",
+            };
+            sep(&format!("file {a}"), &path.iter().cloned().collect::<Vec<_>>())
+        }
         (Style::Juniper, Op::Set { words }) => sep("set", words),
         (Style::Cisco, Op::Set { words }) => join(words),
         (Style::Juniper, Op::Delete { words, all }) => format!("{}{}", sep("delete", words), if *all { " all" } else { "" }),

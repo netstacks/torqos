@@ -72,6 +72,15 @@ let
     nixos-fence-etc-target = c: c.environment.etc.innocent.target;
     # A setting TorqOS keeps in its own file is not also in nixos/ (one setting, one place).
     nixos-elsewhere = c: c.networking.hostName;
+    # Config files: only .nix files inside the config repo (config-files.json).
+    config-bad-dotdot = c: c.networking.hostName;
+    config-bad-abs = c: c.networking.hostName;
+    config-bad-missing = c: c.networking.hostName;
+    config-bad-type = c: c.networking.hostName;
+    config-bad-dot = c: c.networking.hostName;
+    config-bad-space = c: c.networking.hostName;
+    config-bad-flake = c: c.networking.hostName;
+    config-bad-set = c: c.networking.hostName;
   };
   # torqcli's tests read the fence from cli/src/nixos-fixture.json: it must be the modules' own.
   fenceFixture = (builtins.fromJSON (builtins.readFile ../cli/src/nixos-fixture.json)).fence
@@ -84,6 +93,7 @@ let
     ++ lib.optional ((configOf "host-empty").virtualisation.docker.enable) "host-empty: docker on without a nixos/ file"
     ++ lib.optional (fenceOk != "hi") "nixos-fence-ok: motd-torq/x is not fenced, got ${builtins.toJSON fenceOk}"
     ++ lib.optional (!fenceFixture) "cli/src/nixos-fixture.json: its fence is not modules/settings-fence.nix's"
+    ++ lib.optional (tryValue (configOf "config-good").services.httpd.virtualHosts."from-a-file".documentRoot != "/srv/file") "config-good: the attached file did not take effect"
     ++ lib.concatLists (lib.mapAttrsToList (case: probe:
       lib.optional (tryValue (probe (configOf case)) != null) "${case}: evaluated, but must be refused") nixosInvalid);
 

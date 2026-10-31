@@ -173,6 +173,24 @@ before `system`), and `| compare` shows changes under the innermost `[edit …]`
 them, a whole leaf-list as one `-`/`+` pair, a new container as its leaves (`[edit users dev cli]
 + style cisco;`, where Junos would show `+ cli { … }` under `[edit users dev]`).
 
+Config files, for what is not a value (docs/CONFIG-IS-THE-DEVICE.md, S3e):
+
+```
+[edit]
+you# file edit services/httpd.nix          # $EDITOR; waits in the candidate
+you# set services httpd config services/httpd.nix
+you# show | compare
+[edit services httpd]
++   config services/httpd.nix;
+[edit config files]
+--- /dev/null
++++ b/services/httpd.nix
+…
+```
+
+`file list`, `file show <file>` (also in operational mode, of the active configuration), `file
+delete <file>`; `delete <place> config` unattaches.
+
 ## The commit model
 
 - **Active configuration:** the config repo at its last commit. **Candidate:** your private copy

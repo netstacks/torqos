@@ -175,6 +175,18 @@ torq.desktop.enable = true;       →  torq desktop enable true
    into nixos/torq.json and nixos/services.json (ledger #35); the migrated repo built the very
    system that was running (same store path), so it changed nothing but what is visible.
 3. `config <file>` and `edit`, through the candidate and `commit`.
+   **Built (S3e):** `set <place> config <file>` attaches an ordinary NixOS module file of the config
+   repo (a `.nix` file inside it: relative, no `..`; not flake.nix or hardware-configuration.nix)
+   at any place of the tree, kept in `config-files.json` and imported by modules/nixos-settings.nix.
+   The place is where it is shown and found; the file is a whole NixOS module, and may set anything
+   (system tier; KNOWN-GAPS 6m). `file edit <file>` opens your `$EDITOR` (`$VISUAL`, else nano or
+   vi) in configuration mode, and the result waits in the candidate; `file show`, `file list` (where
+   each is attached, what the candidate changed), `file delete` (refused while attached; `delete
+   <place> config` unattaches). `show | compare` shows each edited file as its raw diff, under
+   `[edit config files]`, and that is what a person approves; a commit touching any Nix file has
+   its SSH state evaluated like any other. Where NixOS has its own `config` (`containers <name>
+   config`) or below named entries, the word is NixOS's. An attached file is part of the
+   configuration: `show configuration` no longer lists it as set outside it.
 4. The TorqOS layer: users, groups, applications, permissions; TorqOS-default warnings at commit.
 5. `hardware` and `system software` branches; fixed `flake.nix`/`machine.nix`; migrate this machine.
 6. `save` / `load override|merge|set`: a saved configuration recreates a device.

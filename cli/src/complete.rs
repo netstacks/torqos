@@ -26,6 +26,7 @@ impl Choice {
 
 const OPERATIONAL: &[(&str, &str)] = &[
     ("configure", "Edit the configuration (a candidate, until you commit it)"),
+    ("file", "The configuration's Nix files (list, show)"),
     ("request", "Ask the machine to do something"),
     ("show", "Show information about the machine"),
     ("exit", "Leave torqcli"),
@@ -34,6 +35,7 @@ const CONFIGURATION: &[(&str, &str)] = &[
     ("commit", "Make the candidate the machine's configuration"),
     ("delete", "Remove a setting"),
     ("edit", "Go down to a part of the configuration"),
+    ("file", "The configuration's Nix files (list, show, edit, delete)"),
     ("exit", "Up one level (out of configuration mode at the top; the candidate is kept)"),
     ("quit", "Up one level (out of configuration mode at the top; the candidate is kept)"),
     ("rollback", "Load an earlier configuration into the candidate"),
@@ -209,6 +211,15 @@ fn choices_juniper(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Ch
         (Mode::Configuration, Some("exit")) if words.len() == 1 => {
             table(&[("configuration-mode", "Leave configuration mode from anywhere")])
         }
+        (_, Some("file")) if words.len() == 1 => {
+            let mut t = vec![("list", "Every Nix file of the configuration"), ("show", "Print one")];
+            if mode == Mode::Configuration {
+                t.extend([("delete", "Delete one, in the candidate"), ("edit", "Edit one (or a new one) in your editor, in the candidate")]);
+            }
+            t.sort();
+            table(&t)
+        }
+        (_, Some("file")) if words.len() == 2 && words[1] != "list" => vec![Choice::new("<file>", "A .nix file of the config repo (file list)")],
         (_, Some("switch")) if words.len() == 1 => table(&[("cli", "Switch between the Juniper and Cisco styles")]),
         _ => vec![],
     }
@@ -296,9 +307,19 @@ fn tree_choices(k: &Know, rest: &[String], cmd: &str) -> Vec<Choice> {
     if cmd == "show" && !at_place {
         return vec![];
     }
+    // A config file, attached at a place (attach.rs) — unless NixOS has its own `config` there.
+    if let [place @ .., last] = rest {
+        if last == "config" && (place.is_empty() || matches!(k.tree.locate(place), Ok((_, None, _)))) && !k.tree.next(place).iter().any(|(w, _)| w == "config" || w.starts_with('<')) {
+            return vec![Choice::new("<file>", "A .nix file of the config repo (like services/httpd.nix); `file edit <file>` writes it")];
+        }
+    }
     let mut c: Vec<Choice> = k.tree.next(rest).into_iter().map(|(w, h)| Choice::new(&w, &h)).collect();
     if cmd == "show" {
         c.push(Choice::new("|", "Pipe the output (compare, display set, grep, wc, …)"));
+    }
+    if at_place && cmd != "show" && !c.iter().any(|x| x.word == "config" || x.is_placeholder()) {
+        c.push(Choice::new("config", "Attach a NixOS file here, for what is not a value"));
+        c.sort_by(|a, b| a.word.cmp(&b.word));
     }
     c
 }
@@ -381,13 +402,13 @@ mod tests {
     #[test]
     fn commands_of_each_mode() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "request", "show", "exit"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "file", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["compare"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "revert", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["set", "show", "switch"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "request", "show", "exit"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "file", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
     }
 
@@ -395,9 +416,9 @@ mod tests {
     fn the_tree_from_the_schema() {
         let s = schema();
         let c = choices(&s, Mode::Configuration, &w("set"), "");
-        assert_eq!(words_of(&c), ["boot", "environment", "networking", "services", "specialisation", "system", "systemd", "time", "torq", "users", "virtualisation"], "NixOS's top level");
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set virtualisation docker"), "")), ["enable", "rootless"]);
-        assert!(choices(&s, Mode::Configuration, &w("set virtualisation docker"), "")[0].help.starts_with("This option enables docker"), "NixOS's own help");
+        assert_eq!(words_of(&c), ["boot", "config", "environment", "networking", "services", "specialisation", "system", "systemd", "time", "torq", "users", "virtualisation"], "NixOS's top level");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set virtualisation docker"), "")), ["config", "enable", "rootless"]);
+        assert!(choices(&s, Mode::Configuration, &w("set virtualisation docker"), "")[1].help.starts_with("This option enables docker"), "NixOS's own help");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd virtualHosts"), "")), ["<name>"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking firewall allowedTCPPorts"), "")), ["<[ a number … ]>"]);
         // The settings TorqOS keeps in its own files: their values, as before.
@@ -407,6 +428,12 @@ mod tests {
         assert!(choices(&s, Mode::Configuration, &w("set networking hostName torq"), "").is_empty(), "a leaf has its value");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set time timeZone"), "Europe/Be")), ["Europe/Belfast", "Europe/Belgrade", "Europe/Berlin"]);
         assert!(choices(&s, Mode::Configuration, &w("set nonsense"), "").is_empty());
+        // Config files: `config` at a place, then a file.
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd"), "c")), ["config"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd config"), "")), ["<file>"]);
+        assert!(choices(&s, Mode::Configuration, &w("show services httpd"), "c").is_empty(), "show has no config to attach");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("file"), "")), ["delete", "edit", "list", "show"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("file"), "")), ["list", "show"]);
     }
 
     #[test]
@@ -488,7 +515,7 @@ mod tests {
         assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("show configuration"), "")), ["diff"]);
         assert_eq!(words_of(&choices_at(&s, &at(Mode::Operational, ""), &w("show"), "r")), ["running-config"]);
         let j = At { mode: Mode::Configuration, style: Style::Juniper, edit: w("virtualisation docker") };
-        assert_eq!(words_of(&choices_at(&s, &j, &w("set"), "")), ["enable", "rootless"], "Juniper, from where you are");
+        assert_eq!(words_of(&choices_at(&s, &j, &w("set"), "")), ["config", "enable", "rootless"], "Juniper, from where you are");
     }
 
     #[test]

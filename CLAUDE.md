@@ -124,15 +124,15 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
 - **Filters and `torqcli <command>` (4b, 4c; ADR-017):** `show … | grep -i x | wc -l` runs the real
   coreutils/grep, sandboxed in bubblewrap (no files, network, environment or inherited descriptors);
   `torqcli show system alarms` runs one command. Covered in `tests/trust-loop.nix`.
-- **The tree is every NixOS setting (S1–S3c, docs/CONFIG-IS-THE-DEVICE.md):** `set virtualisation docker enable true`; old names are aliases. `| display detail` / `| display diff` (4d); the software in the candidate (`request system update`,
+- **The tree is every NixOS setting (S1–S3e, docs/CONFIG-IS-THE-DEVICE.md):** `set virtualisation docker enable true`; old names are aliases; `file edit` + `set <place> config <file>` attach plain Nix files. `| display detail` / `| display diff` (4d); the software in the candidate (`request system update`,
   4e); configuration numbers from the ledger (4f); `request system revert`, `show system ledger`, the
   SSH key check at commit, and the old commands retired (4g). Next: M2 (`docs/ROADMAP.md`); what is
   left of M1.5 needs a person (usability check, terminal look) or its own design (environment
   variables). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
 ### You are probably running inside the dev VM
-- Host `torq-utm`, user **`viper`** (the template no longer names a user; `torq.user` in
-  the config repo's `system.nix` is the one place). `torq.dev.enable = true` there: passwordless sudo, you have root (ADR-009).
+- Host `torq-utm`, user **`viper`** (the template no longer names a user; `torq user` in
+  the config repo's `nixos/torq.json` is the one place, since S3d). `torq dev enable true` there: passwordless sudo, you have root (ADR-009).
 - `~/torq` = this repo (working copy; push to `github.com/netstacks/torqos`, branch `main`).
 - `/var/lib/torq/config` = the machine's config repo; its `torq` input is
   `path:/home/viper/torq`.

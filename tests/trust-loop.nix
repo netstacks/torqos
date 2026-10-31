@@ -248,6 +248,23 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(last_line + ' | grep -q \"dev@machine>\"')}", timeout=30)
         as_dev("tmux send-keys -t t exit Enter")
         machine.wait_until_fails(f"su - dev -c {shlex.quote('tmux has-session -t t')}", timeout=30)
+        # A config file: `file edit` opens $EDITOR (here a script that writes a module) at the
+        # terminal; it waits in the candidate, attached, and shows as its raw diff.
+        machine.succeed("printf '{ ... }:\\n{\\n  environment.etc.greeting.text = \"hi\";\\n}\\n' > /home/dev/greeting.nix")
+        machine.succeed("printf '#!/bin/sh\\ncp /home/dev/greeting.nix \"$1\"\\n' > /home/dev/ed.sh && chmod 755 /home/dev/ed.sh /home/dev/greeting.nix")
+        as_dev("tmux new-session -d -s f -x 160 -y 50 'EDITOR=/home/dev/ed.sh torqcli'")
+        as_dev("tmux send-keys -t f configure Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote('tmux capture-pane -p -t f | grep -q \"configuration mode\"')}", timeout=30)
+        as_dev("tmux send-keys -t f 'file edit custom/greeting.nix' Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote('tmux capture-pane -p -t f | grep -q \"custom/greeting.nix: changed in the candidate\"')}", timeout=30)
+        as_dev("printf 'set environment config custom/greeting.nix\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -p -t f")
+        as_dev("tmux send-keys -t f Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote('tmux capture-pane -p -t f -S -100 | grep -qF \"+  environment.etc.greeting.text\"')}", timeout=30)
+        out = as_dev("tmux capture-pane -p -t f -S -100")
+        assert "+   config custom/greeting.nix;" in out and "+++ b/custom/greeting.nix" in out, out
+        as_dev("tmux send-keys -t f 'rollback 0' Enter")
+        as_dev("tmux kill-session -t f")
+        machine.succeed("test ! -e /var/lib/torq/config/custom")  # nothing committed
 
     with subtest("a stray nixos-rebuild cannot switch away from the ledgered config"):
         # The owner's files are moved aside, never overwritten or opened: a config that merely

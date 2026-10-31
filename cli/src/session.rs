@@ -3,9 +3,9 @@
 //! through `Machine`, so the whole command layer is testable without either.
 
 use crate::candidate::{self, Candidate, Repo};
-use crate::syntax::{self, CommitOptions, Display, Op, Style};
-use crate::settings::Settings;
-use crate::tree::{Config, Schema};
+use crate::syntax::{self, CommitOptions, Display, FileAction, Op, Style};
+use crate::whole::Data;
+use crate::tree::Schema;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
@@ -23,6 +23,8 @@ pub trait Machine {
     fn confirm(&self) -> Result<u64>;
     /// Ask a person (a system-tier commit); false when there is no one to ask.
     fn ask(&self, question: &str) -> bool;
+    /// A person edits `text` (the config file `path`) in their editor; None: they left it unchanged.
+    fn edit(&self, path: &str, text: &str) -> Result<Option<String>>;
     /// `show system alarms`: what is not as the ledger says (and a commit confirmed waiting); with
     /// `detail`, the broker's facts behind it (commits, store paths).
     fn alarms(&self, detail: bool) -> Result<String>;
@@ -278,8 +280,8 @@ impl<'a> Session<'a> {
             Op::ShowActive { path, display } => {
                 // The commit named is the one shown: read at that id, not at HEAD again.
                 let head = self.repo.head()?;
-                let (active, st) = self.configuration_of(&head)?;
-                let mut out = self.view(&active, &st, &path, display, &format!("commit {head}"))?;
+                let active = self.configuration_of(&head)?;
+                let mut out = self.view(&active, &path, display, &format!("commit {head}"))?;
                 if path.is_empty() {
                     out.push_str(&self.footer(&head, None)?);
                 }
@@ -289,6 +291,7 @@ impl<'a> Session<'a> {
                 self.show_operational(op)
             }
             Op::Request { words } => self.request(&words),
+            Op::File { action, path } => self.file(action, path),
             Op::SwitchCli => {
                 self.style = match self.style {
                     Style::Juniper => Style::Cisco,
@@ -327,13 +330,9 @@ impl<'a> Session<'a> {
             }
             Op::Set { words } => {
                 let full = self.here(&words);
-                let (mut cfg, mut st) = {
-                    let c = self.candidate()?;
-                    (c.config.clone(), c.settings.clone())
-                };
-                self.whole().set(&mut cfg, &mut st, &full)?;
-                let c = self.candidate()?;
-                (c.config, c.settings) = (cfg, st);
+                let mut d = self.candidate_data()?;
+                self.whole().set(&mut d, &full)?;
+                self.put_data(d)?;
                 self.save()?;
                 Ok(String::new())
             }
@@ -345,21 +344,18 @@ impl<'a> Session<'a> {
                     Style::Juniper => "delete",
                     Style::Cisco => "no",
                 };
-                let (mut cfg, mut st) = {
-                    let c = self.candidate()?;
-                    (c.config.clone(), c.settings.clone())
-                };
-                self.whole().delete(&mut cfg, &mut st, &full, all, del, &words)?;
-                let c = self.candidate()?;
-                (c.config, c.settings) = (cfg, st);
+                let mut d = self.candidate_data()?;
+                self.whole().delete(&mut d, &full, all, del, &words)?;
+                self.put_data(d)?;
                 self.save()?;
                 Ok(String::new())
             }
             Op::ShowCandidate { path, display } => {
+                let d = self.candidate_data()?;
                 let c = self.candidate()?;
-                let (cfg, st, base, lock) = (c.config.clone(), c.settings.clone(), c.base.clone(), c.lock.clone());
+                let (base, lock) = (c.base.clone(), c.lock.clone());
                 let here = self.here(&path);
-                let mut out = self.view(&cfg, &st, &here, display, &format!("the candidate, from commit {base}"))?;
+                let mut out = self.view(&d, &here, display, &format!("the candidate, from commit {base}"))?;
                 if here.is_empty() {
                     out.push_str(&self.footer(&base, lock.as_deref())?);
                 }
@@ -429,8 +425,14 @@ impl<'a> Session<'a> {
                 out.push_str(&format!("## software: {}\n", shown.join(", ")));
             }
         }
-        let outside: Vec<String> =
-            self.repo.paths(rev)?.into_iter().filter(|p| p != "flake.lock" && !self.schema.describes(p) && crate::settings::top_of(p).is_none()).map(|p| crate::history::one_line(&p, 60)).collect();
+        // A config file attached in the tree is part of the configuration (shown as `<place> config <file>`).
+        let attached = self.configuration_of(rev)?.attached;
+        let outside: Vec<String> = self
+            .repo
+            .paths(rev)?
+            .into_iter()
+            .filter(|p| p != "flake.lock" && p != crate::attach::FILE && !self.schema.describes(p) && crate::settings::top_of(p).is_none())
+            .filter(|p| !attached.values().any(|f| f == p)).map(|p| crate::history::one_line(&p, 60)).collect();
         if !outside.is_empty() {
             out.push_str(&format!("## also set outside this configuration, in Nix: {}\n", outside.join(", ")));
         }
@@ -439,17 +441,17 @@ impl<'a> Session<'a> {
 
     /// A configuration, or the part below `path`, as `display` asks. `origin`: where it comes from
     /// (`| display detail`).
-    fn view(&self, cfg: &Config, st: &Settings, path: &[String], display: Option<Display>, origin: &str) -> Result<String> {
+    fn view(&self, d: &Data, path: &[String], display: Option<Display>, origin: &str) -> Result<String> {
         let w = self.whole();
         match display {
-            None => w.show(cfg, st, path),
-            Some(Display::Set) => w.display_set(cfg, st, path),
+            None => w.show(d, path),
+            Some(Display::Set) => w.display_set(d, path),
             Some(Display::Detail) => {
-                let mut out = w.show(cfg, st, path)?;
+                let mut out = w.show(d, path)?;
                 out.push_str(&format!("## {origin}\n"));
                 // Each file behind what is shown, with the settings it holds.
                 let mut by_file: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-                for (words, file) in w.files(cfg, st) {
+                for (words, file) in w.files(d) {
                     if words.starts_with(path) {
                         by_file.entry(file).or_default().push(words.join(" "));
                     }
@@ -504,9 +506,9 @@ impl<'a> Session<'a> {
             }
             Op::ShowRollback { n, compare, display } => {
                 let n_id = self.commit_at(n)?;
-                let (n_cfg, n_st) = self.configuration_of(&n_id)?;
+                let n_data = self.configuration_of(&n_id)?;
                 match compare {
-                    None => Ok(self.view(&n_cfg, &n_st, &[], display, &format!("commit {n_id} (rollback {n})"))? + &self.footer(&n_id, None)?),
+                    None => Ok(self.view(&n_data, &[], display, &format!("commit {n_id} (rollback {n})"))? + &self.footer(&n_id, None)?),
                     // What going from configuration m to configuration n changes.
                     Some(m) => {
                         let m_id = self.commit_at(m)?;
@@ -516,8 +518,8 @@ impl<'a> Session<'a> {
                                 commits_diff(&old, &new)
                             }
                             _ => {
-                                let (m_cfg, m_st) = self.configuration_of(&m_id)?;
-                                Ok(self.whole().compare((&m_cfg, &m_st), (&n_cfg, &n_st)))
+                                let m_data = self.configuration_of(&m_id)?;
+                                Ok(self.whole().compare(&m_data, &n_data))
                             }
                         }
                     }
@@ -525,7 +527,7 @@ impl<'a> Session<'a> {
             }
             Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail)),
             Op::ShowServices => {
-                let (active, _) = self.configuration_of("HEAD")?;
+                let active = self.configuration_of("HEAD")?.config;
                 let on: Vec<String> = match active.files.get("services.json") {
                     Some(crate::tree::Data::List(l)) => l.clone(),
                     _ => vec![],
@@ -563,11 +565,22 @@ impl<'a> Session<'a> {
     }
 
     /// The configuration at commit `id`.
-    fn configuration_of(&self, id: &str) -> Result<(Config, Settings)> {
+    fn configuration_of(&self, id: &str) -> Result<Data> {
         let files = self.repo.tree_files(&self.schema, id)?;
-        let cfg = self.schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        let st = crate::settings::load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        Ok((cfg, st))
+        data_of(&self.schema, &files)
+    }
+
+    /// The candidate's tree data.
+    fn candidate_data(&mut self) -> Result<Data> {
+        let c = self.candidate()?;
+        Ok(Data { config: c.config.clone(), settings: c.settings.clone(), attached: c.attached.clone() })
+    }
+
+    /// Put the tree data back into the candidate (not saved yet).
+    fn put_data(&mut self, d: Data) -> Result<()> {
+        let c = self.candidate()?;
+        (c.config, c.settings, c.attached) = (d.config, d.settings, d.attached);
+        Ok(())
     }
 
     fn request(&mut self, w: &[String]) -> Result<String> {
@@ -661,13 +674,15 @@ impl<'a> Session<'a> {
 
     /// The candidate and what it is based on, read once.
     fn against(&mut self) -> Result<Against> {
-        let (base, config, settings, new_lock) = {
+        let data = self.candidate_data()?;
+        let (base, new_lock, nix) = {
             let c = self.candidate()?;
-            (c.base.clone(), c.config.clone(), c.settings.clone(), c.lock.clone())
+            (c.base.clone(), c.lock.clone(), c.nix.clone())
         };
         let files = self.repo.tree_files(&self.schema, &base)?;
         let lock = self.repo.file_at(&base, "flake.lock")?;
-        Ok(Against { base, files, lock, config, settings, new_lock })
+        let base_nix = nix.keys().map(|p| Ok((p.clone(), self.repo.file_at(&base, p)?))).collect::<Result<_>>()?;
+        Ok(Against { base, files, lock, data, new_lock, nix, base_nix })
     }
 
     fn commit(&mut self, o: CommitOptions) -> Result<String> {
@@ -723,8 +738,8 @@ impl<'a> Session<'a> {
         // The catalog's SSH admits its owner's keys only: with none, nobody could log in; with some,
         // approving it approves exactly those (as the changed configuration has them).
         // Whether this turns SSH on is read from the evaluated configurations, before and after: every
-        // way counts (the catalog, `services openssh`, its `sshd` alias). Only tree files can.
-        let ssh_relevant = files.iter().any(|(p, _)| p == "services.json" || p.starts_with(crate::settings::DIR));
+        // way counts (the catalog, `services openssh`, its `sshd` alias, a config file). Only tree and Nix files can.
+        let ssh_relevant = files.iter().any(|(p, _)| p == "services.json" || p.starts_with(crate::settings::DIR) || p == crate::attach::FILE || p.ends_with(".nix"));
         let (was, now) = if ssh_relevant { self.machine.ssh(&base, &files)? } else { Default::default() };
         if now.on && !was.on {
             let (owner, keys) = self.machine.ssh_keys(&base, &files)?;
@@ -772,6 +787,86 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// `file list|show|edit|delete`: the config repo's own Nix files, the escape hatch for what is
+    /// not a value (docs/CONFIG-IS-THE-DEVICE.md). In configuration mode, the candidate's (edits
+    /// included); otherwise, the active configuration's. Edits wait in the candidate for `commit`.
+    fn file(&mut self, action: FileAction, path: Option<String>) -> Result<String> {
+        let editing = self.mode == Mode::Configuration;
+        let (rev, nix, attached) = if editing {
+            let d = self.candidate_data()?;
+            let c = self.candidate()?;
+            (c.base.clone(), c.nix.clone(), d.attached)
+        } else {
+            let head = self.repo.head()?;
+            let attached = self.configuration_of(&head)?.attached;
+            (head, Default::default(), attached)
+        };
+        let text_of = |s: &Self, p: &str| -> Result<Option<String>> {
+            match nix.get(p) {
+                Some(t) => Ok(t.clone()),
+                None => s.repo.file_at(&rev, p)?.map(|b| String::from_utf8(b).with_context(|| format!("{p}: not text"))).transpose(),
+            }
+        };
+        let Some(path) = path else {
+            // `file list`: every Nix file, where each is attached, and what the candidate changed.
+            let mut all: std::collections::BTreeSet<String> = self.repo.paths(&rev)?.into_iter().filter(|p| p.ends_with(".nix")).collect();
+            all.extend(nix.keys().cloned());
+            let mut out = String::new();
+            for p in all {
+                let state = match nix.get(&p) {
+                    Some(None) => " (deleted in the candidate)",
+                    Some(Some(_)) if self.repo.file_at(&rev, &p)?.is_none() => " (new in the candidate)",
+                    Some(Some(_)) => " (edited in the candidate)",
+                    None => "",
+                };
+                let at: Vec<&str> = attached.iter().filter(|(_, f)| **f == p).map(|(a, _)| a.as_str()).collect();
+                let at = if at.is_empty() { String::new() } else { format!("  [attached at: {}]", at.join("; ")) };
+                out.push_str(&format!("{p}{state}{at}\n"));
+            }
+            return Ok(out);
+        };
+        crate::attach::valid(&path)?;
+        match action {
+            FileAction::Show => match text_of(self, &path)? {
+                Some(t) => Ok(if t.ends_with('\n') || t.is_empty() { t } else { t + "\n" }),
+                None => bail!("{path}: no such file in the configuration"),
+            },
+            FileAction::Edit => {
+                let was = text_of(self, &path)?;
+                let start = was.clone().unwrap_or_else(|| "{ ... }:\n{\n}\n".into());
+                let Some(now) = self.machine.edit(&path, &start)? else { return Ok(format!("{path}: unchanged\n")) };
+                if Some(&now) == was.as_ref() {
+                    return Ok(format!("{path}: unchanged\n"));
+                }
+                if now.contains('\0') {
+                    bail!("{path}: not text; not kept");
+                }
+                self.candidate()?.nix.insert(path.clone(), Some(now));
+                self.save()?;
+                let hint = if attached.values().any(|f| *f == path) || self.repo.file_at(&rev, &path)?.is_some() {
+                    String::new()
+                } else {
+                    format!(" (not attached anywhere yet: `set <place> config {path}`)")
+                };
+                Ok(format!("{path}: changed in the candidate{hint}; `show | compare` shows it, `commit` makes it so\n"))
+            }
+            FileAction::Delete => {
+                if text_of(self, &path)?.is_none() {
+                    bail!("{path}: no such file in the configuration");
+                }
+                if let Some((at, _)) = attached.iter().find(|(_, f)| **f == path) {
+                    bail!("{path} is attached at `{at}`: `delete {at} config` first");
+                }
+                let exists = self.repo.file_at(&rev, &path)?.is_some();
+                let c = self.candidate()?;
+                if exists { c.nix.insert(path.clone(), None) } else { c.nix.remove(&path) };
+                self.save()?;
+                Ok(format!("{path}: deleted in the candidate\n"))
+            }
+            FileAction::List => unreachable!("file list has no path"),
+        }
+    }
+
     /// The tier a set of changed files is: user if every one is a user-tier node's file.
     fn tier_of(&self, changes: &[(String, Option<&[u8]>, Option<String>)]) -> &'static str {
         let user = changes.iter().all(|(p, _, _)| self.schema.tier_of(p) == Some("user"));
@@ -789,6 +884,14 @@ impl<'a> Session<'a> {
         names.dedup();
         names
     }
+}
+
+/// The tree data in a commit's files: the kept files, nixos/*.json, config-files.json.
+fn data_of(s: &Schema, files: &std::collections::BTreeMap<String, Vec<u8>>) -> Result<Data> {
+    let config = s.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
+    let settings = crate::settings::load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
+    let attached = crate::attach::load(files.get(crate::attach::FILE).map(Vec::as_slice))?;
+    Ok(Data { config, settings, attached })
 }
 
 /// The raw change between two commits: every file (the tree's, the Nix files, `flake.lock`), byte
@@ -809,41 +912,62 @@ struct Against {
     base: String,
     files: std::collections::BTreeMap<String, Vec<u8>>,
     lock: Option<Vec<u8>>,
-    config: Config,
-    settings: Settings,
+    data: Data,
     new_lock: Option<String>,
+    /// Config files as edited in the candidate, and as they are at the base (None: not there).
+    nix: std::collections::BTreeMap<String, Option<String>>,
+    base_nix: std::collections::BTreeMap<String, Option<Vec<u8>>>,
 }
 
 impl Against {
-    /// The base's NixOS settings (nixos/*.json, parsed).
-    fn base_settings(&self) -> Result<Settings> {
-        crate::settings::load(self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))
+    fn base_data(&self, s: &Schema) -> Result<Data> {
+        data_of(s, &self.files)
     }
 
-    /// What the candidate changes: the tree's files (both kinds), then the software. A NixOS settings
-    /// file changes when its values do, not its formatting.
+    /// What the candidate changes: the tree's files (every kind), the config files edited, then the
+    /// software. A NixOS settings file changes when its values do, not its formatting.
     fn changes(&self, s: &Schema) -> Result<Vec<candidate::Change<'_>>> {
-        let mut c = candidate::changes(s, &self.files, &self.config)?;
-        let (base, new) = (self.base_settings()?, crate::settings::files(&self.settings));
-        let tops: std::collections::BTreeSet<&String> = base.keys().chain(self.settings.keys()).collect();
+        let mut c = candidate::changes(s, &self.files, &self.data.config)?;
+        let base = self.base_data(s)?;
+        let new = crate::settings::files(&self.data.settings);
+        let tops: std::collections::BTreeSet<&String> = base.settings.keys().chain(self.data.settings.keys()).collect();
         for top in tops {
             let empty = |v: Option<&serde_json::Value>| v.is_none_or(|v| v.as_object().is_some_and(|o| o.is_empty()));
-            let (was, now) = (base.get(top), self.settings.get(top));
+            let (was, now) = (base.settings.get(top), self.data.settings.get(top));
             if was == now || (empty(was) && empty(now)) {
                 continue;
             }
             let path = format!("{}{top}.json", crate::settings::DIR);
             c.push((path.clone(), self.files.get(&path).map(Vec::as_slice), new.get(&path).cloned()));
         }
+        if base.attached != self.data.attached {
+            let path = crate::attach::FILE.to_string();
+            c.push((path.clone(), self.files.get(&path).map(Vec::as_slice), crate::attach::render(&self.data.attached)));
+        }
+        for (path, text) in &self.nix {
+            let was = self.base_nix.get(path).cloned().flatten();
+            if was.as_deref() != text.as_deref().map(str::as_bytes) {
+                c.push((path.clone(), self.base_nix.get(path).and_then(|b| b.as_deref()), text.clone()));
+            }
+        }
         c.extend(candidate::lock_change(self.lock.as_deref(), &self.new_lock));
         Ok(c)
     }
 
-    /// `show | compare`: the tree's changes by NixOS path, then the software's.
+    /// `show | compare`: the tree's changes by NixOS path, the config files edited as their raw diffs
+    /// (as written: Nix is shown, never interpreted), then the software's.
     fn compare(&self, w: &crate::whole::Whole) -> Result<String> {
-        let before = w.schema.load(self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        let base = self.base_settings()?;
-        let mut out = w.compare((&before, &base), (&self.config, &self.settings));
+        let mut out = w.compare(&self.base_data(w.schema)?, &self.data);
+        let edited: Vec<candidate::Change> = self
+            .nix
+            .iter()
+            .filter(|(p, t)| self.base_nix.get(*p).cloned().flatten().as_deref() != t.as_deref().map(str::as_bytes))
+            .map(|(p, t)| (p.clone(), self.base_nix.get(p).and_then(|b| b.as_deref()), t.clone()))
+            .collect();
+        if !edited.is_empty() {
+            let scratch = tempfile::tempdir()?;
+            out.push_str(&format!("[edit config files]\n{}", candidate::unified_diff(scratch.path(), &edited)?));
+        }
         out.push_str(&software_compare(self.lock.as_deref(), &self.new_lock));
         Ok(out)
     }
@@ -888,9 +1012,21 @@ fn summary(compare: &str) -> String {
     // `+ torq cli userStyles dev cisco;`): a ledger reason is read on its own.
     let mut section = String::new();
     let mut lines: Vec<String> = Vec::new();
+    let mut was = String::new();
     for l in compare.lines() {
         if let Some(s) = l.strip_prefix("[edit").and_then(|s| s.strip_suffix(']')) {
             section = s.trim().to_string();
+        } else if section == "config files" {
+            // A raw diff: just which file, and how.
+            if let Some(p) = l.strip_prefix("--- ") {
+                was = p.strip_prefix("a/").unwrap_or(p).to_string();
+            } else if let Some(p) = l.strip_prefix("+++ ") {
+                lines.push(match p.strip_prefix("b/") {
+                    Some(p) if was == "/dev/null" => format!("+ config file {p}"),
+                    Some(p) => format!("~ config file {p}"),
+                    None => format!("- config file {was}"),
+                });
+            }
         } else if let Some((sign, rest)) = l.split_at_checked(1).filter(|(s, _)| *s == "+" || *s == "-") {
             let at = if section.is_empty() { String::new() } else { format!("{section} ") };
             lines.push(format!("{sign} {at}{}", rest.trim()));
@@ -939,6 +1075,10 @@ mod tests {
         /// The keys turning SSH on would admit, and what was asked about.
         keys: Vec<String>,
         ssh_asked: RefCell<Vec<Files>>,
+        /// What `file edit` leaves a file as (None: unchanged), and what it was given.
+        edit_to: Option<String>,
+        edited: RefCell<Vec<(String, String)>>,
+        ssh_calls: RefCell<usize>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<()> {
@@ -963,6 +1103,10 @@ mod tests {
             self.asked.borrow_mut().push(q.into());
             self.answer
         }
+        fn edit(&self, path: &str, text: &str) -> Result<Option<String>> {
+            self.edited.borrow_mut().push((path.into(), text.into()));
+            Ok(self.edit_to.clone())
+        }
         fn alarms(&self, detail: bool) -> Result<String> {
             Ok(if detail { "all well\n  running system /nix/store/x\n".into() } else { "all well\n".into() })
         }
@@ -981,6 +1125,7 @@ mod tests {
         /// As the evaluator would: the catalog's `ssh`, or `services openssh|sshd enable true` in the
         /// changed files (a test may say otherwise).
         fn ssh(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)> {
+            *self.ssh_calls.borrow_mut() += 1;
             if let Some(s) = self.ssh_state {
                 return Ok(s);
             }
@@ -1380,6 +1525,87 @@ mod tests {
         assert_eq!(m.commits.borrow()[0].2, "user");
         assert!(m.commits.borrow()[0].0.contains("+++ b/users/dev/packages.json"));
         assert!(m.asked.borrow().is_empty());
+    }
+
+    /// Config files: attached in the tree, edited in the candidate, shown as their raw diff, committed
+    /// as the files they are (system tier, asked), kept across sessions; SSH counted however it is set.
+    #[test]
+    fn config_files_are_part_of_the_configuration() {
+        let (d, m) = (repo(), Fake { answer: true, edit_to: Some("{ ... }:\n{\n  services.httpd.enable = true;\n}\n".into()), ..Default::default() });
+        let saved = d.path().join("candidate.json");
+        let mut s = session(d.path(), Some(saved.clone()), &m);
+        run(&mut s, &["configure", "file edit services/httpd.nix"]);
+        assert_eq!(m.edited.borrow()[0], ("services/httpd.nix".into(), "{ ... }:\n{\n}\n".into()), "a new file starts as an empty module");
+        run(&mut s, &["set services httpd config services/httpd.nix"]);
+        assert_eq!(s.exec("show services httpd").unwrap(), "config services/httpd.nix;\n");
+        assert_eq!(s.exec("show services | display set").unwrap(), "set httpd config services/httpd.nix\n");
+        // Another session (the candidate as saved) sees the same.
+        let mut s2 = session(d.path(), Some(saved), &m);
+        s2.exec("configure").unwrap();
+        assert_eq!(s2.exec("file show services/httpd.nix").unwrap(), "{ ... }:\n{\n  services.httpd.enable = true;\n}\n");
+        assert_eq!(s2.exec("file list").unwrap(), "services/httpd.nix (new in the candidate)  [attached at: services httpd]\n");
+        let compare = s.exec("show | compare").unwrap();
+        assert!(compare.starts_with("[edit services httpd]\n+   config services/httpd.nix;\n[edit config files]\n"), "{compare}");
+        assert!(compare.contains("+++ b/services/httpd.nix") && compare.contains("+  services.httpd.enable = true;"), "{compare}");
+        // Deleting an attached file is refused until it is not attached.
+        assert!(s.exec("file delete services/httpd.nix").unwrap_err().to_string().contains("`delete services httpd config` first"));
+        assert!(s.exec("file edit ../x.nix").is_err() && s.exec("set services httpd config /etc/x.nix").is_err());
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
+        let (diff, _, tier, _, _) = m.commits.borrow()[0].clone();
+        assert!(diff.contains("+++ b/config-files.json") && diff.contains("\"services httpd\": \"services/httpd.nix\""), "{diff}");
+        assert!(diff.contains("+++ b/services/httpd.nix"), "{diff}");
+        assert_eq!(tier, "system");
+        assert!(m.asked.borrow()[0].contains("services.httpd.enable = true"), "the person approves the Nix as written");
+        assert_eq!(*m.ssh_calls.borrow(), 1, "a config file may turn SSH on: SSH is evaluated");
+        // Only a Nix file changed: SSH is still evaluated.
+        let (d, m) = (repo(), Fake { answer: true, edit_to: Some("{ ... }: { }\n".into()), ..Default::default() });
+        sh(d.path(), "printf '{ ... }:\\n{\\n}\\n' > system.nix && git add -A && git commit -qm nix");
+        let saved = d.path().join("c2.json");
+        let mut s = session(d.path(), Some(saved.clone()), &m);
+        run(&mut s, &["configure", "file edit system.nix"]);
+        // Kept as it is edited: another session sees it, with nothing else done.
+        let mut s2 = session(d.path(), Some(saved), &m);
+        assert_eq!(run(&mut s2, &["configure", "file list"]).lines().last(), Some("system.nix (edited in the candidate)"));
+        run(&mut s, &["commit"]);
+        assert_eq!(*m.ssh_calls.borrow(), 1);
+        let (diff, _, _, reason, _) = m.commits.borrow()[0].clone();
+        assert!(diff.contains("+++ b/system.nix"));
+        assert_eq!(reason, "~ config file system.nix", "the ledger says which file");
+        // A deletion is kept too, and said as one.
+        let saved = d.path().join("c3.json");
+        run(&mut session(d.path(), Some(saved.clone()), &m), &["configure", "file delete system.nix"]);
+        assert_eq!(run(&mut session(d.path(), Some(saved), &m), &["configure", "file list"]).lines().last(), Some("system.nix (deleted in the candidate)"));
+        // Unattaching: `delete <place> config`; `delete <place> all` takes it too.
+        let mut d2 = crate::whole::Data::default();
+        d2.attached.insert("services httpd".into(), "a.nix".into());
+        let x = s.whole();
+        x.delete(&mut d2.clone(), &w("services httpd config"), false, "delete", &[]).unwrap();
+        let mut d3 = d2.clone();
+        x.delete(&mut d3, &w("services httpd"), true, "delete", &[]).unwrap();
+        assert!(d3.attached.is_empty());
+        assert!(x.delete(&mut crate::whole::Data::default(), &w("services httpd config"), false, "delete", &[]).is_err());
+        // Below named entries, `config` is no name (a reserved word), and no place to attach.
+        let mut d4 = crate::whole::Data::default();
+        assert!(x.set(&mut d4, &w("services httpd virtualHosts config documentRoot /srv")).unwrap_err().to_string().contains("keeps the word"));
+        assert!(x.set(&mut d4, &w("services httpd virtualHosts config x.nix")).is_err() && d4 == Default::default(), "not attached there either");
+    }
+
+    /// In operational mode, the active configuration's files; editing is configuration mode's.
+    #[test]
+    fn file_outside_configuration_mode_only_reads() {
+        let (d, m) = (repo(), Fake::default());
+        sh(d.path(), "printf '{ ... }: { }\\n' > system.nix && git add -A && git commit -qm nix");
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("file show system.nix").unwrap(), "{ ... }: { }\n");
+        assert_eq!(s.exec("file list").unwrap(), "system.nix\n");
+        assert!(s.exec("file edit system.nix").unwrap_err().to_string().contains("configuration mode"));
+        assert!(s.exec("file show flake.nix").is_err(), "the repo's own structure is not a config file");
+        assert!(s.exec("show configuration").unwrap().contains("in Nix: system.nix"));
+        // Once attached, it is part of the configuration: shown there, not as outside it.
+        sh(d.path(), "printf '{ \"services httpd\": \"system.nix\" }\\n' > config-files.json && git add -A && git commit -qm attach");
+        let shown = s.exec("show configuration").unwrap();
+        assert!(shown.contains("httpd {\n        config system.nix;") && !shown.contains("in Nix"), "{shown}");
+        assert_eq!(s.exec("file list").unwrap(), "system.nix  [attached at: services httpd]\n");
     }
 
     #[test]

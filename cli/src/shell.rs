@@ -410,6 +410,26 @@ impl Machine for Real<'_> {
         let mut answer = String::new();
         std::io::stdin().lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
     }
+    fn edit(&self, path: &str, text: &str) -> Result<Option<String>> {
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            bail!("file edit opens your editor: at a terminal (`file show {path}` prints it)");
+        }
+        // A private folder of this user's, named as the file, so the editor knows it is Nix.
+        let scratch = scratch_dir()?;
+        let name = Path::new(path).file_name().context("a config file has a name")?;
+        let f = scratch.path().join(name);
+        fs::write(&f, text)?;
+        let editor = ["VISUAL", "EDITOR"].iter().find_map(|v| std::env::var(v).ok().filter(|e| !e.trim().is_empty()));
+        let editor = editor.unwrap_or_else(|| if which("nano") { "nano".into() } else { "vi".into() });
+        // As the shell would run $EDITOR (it may carry options: `code --wait`).
+        let status = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(&f).status()?;
+        if !status.success() {
+            bail!("{path}: the editor ({editor}) failed; nothing changed");
+        }
+        let now = fs::read_to_string(&f).with_context(|| format!("{path}: not text; nothing changed"))?;
+        Ok((now != text).then_some(now))
+    }
+
 }
 
 /// Refuse to write `path` under `root` if any folder on the way is a link (or the file itself is):
@@ -900,4 +920,9 @@ fn configurations_are_the_ledger_entries_that_made_one() {
     assert_eq!(ledgered_commit(&entries).as_deref(), Some("aaaa"), "the repair is the newest entry that moved it");
     let more = format!("{ledger}\n{}", r#"{"seq":8,"ts":"t","actor":"broker","approved_by":null,"kind":"interrupted","tier":"user","reason":"i","data":{"commit":"cccc"}}"#);
     assert_eq!(ledgered_commit(&history::parse(&more).unwrap()).as_deref(), Some("cccc"), "as the broker counts: interrupted too");
+}
+
+/// Whether `prog` is a program on PATH.
+fn which(prog: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(prog).is_file()))
 }

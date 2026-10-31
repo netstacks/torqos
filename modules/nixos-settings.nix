@@ -55,7 +55,30 @@ let
     if lib.isOption opts then byType opts.type v
     else if builtins.isAttrs v then lib.mapAttrs (k: x: if builtins.isAttrs opts && opts ? ${k} then under opts.${k} x else x) v
     else v;
+  # The tree's config files (docs/CONFIG-IS-THE-DEVICE.md): `config-files.json` maps where each is
+  # attached in the tree (its path, words separated by spaces) to an ordinary NixOS module file in the
+  # config repo. Inside the repo only — relative, no `..`, a `.nix` file — so the machine never depends
+  # on a file nothing tracks. A config file is plain NixOS and may set anything: it is system tier, and
+  # shown as its raw diff before anyone commits it.
+  attached =
+    let f = if configDir != null then configDir + "/config-files.json" else null; in
+    if f != null && builtins.pathExists f then builtins.fromJSON (builtins.readFile f) else { };
+  # The same rule as torqcli's (cli/src/attach.rs `valid`): plain path characters, no empty, `.` or
+  # `..` part, not the repo's own flake.nix or hardware-configuration.nix.
+  configFile = at: rel:
+    let
+      ok = builtins.isString rel && lib.hasSuffix ".nix" rel
+        && builtins.match "[A-Za-z0-9._/-]+" rel != null
+        && !(lib.any (p: p == "" || p == "." || p == "..") (lib.splitString "/" rel))
+        && !(builtins.elem rel [ "flake.nix" "hardware-configuration.nix" ]);
+      path = configDir + "/${rel}";
+      shown = if builtins.isString rel then rel else "(not a file name)";
+    in
+    if !ok then throw "torq: config file for `${at}`: '${shown}' must be a .nix file inside the config repo (like services/httpd.nix: relative, no ..)"
+    else if !builtins.pathExists path then throw "torq: config file for `${at}`: ${rel} is not in the config repo"
+    else path;
 in
 {
+  imports = lib.mapAttrsToList configFile attached;
   config = lib.genAttrs names (name: under (options.${name} or { }) (checked name (read name)));
 }

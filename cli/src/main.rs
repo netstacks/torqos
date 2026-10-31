@@ -12,6 +12,7 @@ mod filter;
 mod nixos;
 mod settings;
 mod whole;
+mod attach;
 mod pkg;
 mod run;
 mod status;

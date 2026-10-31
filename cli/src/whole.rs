@@ -10,7 +10,8 @@
 use crate::nixos::Tree;
 use crate::settings::{self, Settings};
 use crate::tree::{Config, Kind, Schema, Val};
-use anyhow::{bail, Result};
+use crate::attach::{self, Attached};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 
 /// (NixOS path, the hand-made schema's path to the file that holds it, whether the old name still
@@ -69,10 +70,19 @@ pub struct Whole<'a> {
     pub tree: &'a Tree,
 }
 
+/// The tree's data: the files TorqOS keeps (the hand-made schema's), nixos/*.json, and the config
+/// files attached (config-files.json).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Data {
+    pub config: Config,
+    pub settings: Settings,
+    pub attached: Attached,
+}
+
 impl Whole<'_> {
     /// Words as the hand-made schema's, if they name a file-backed setting: by its NixOS path, or by
-    /// its old name (an alias the hand-made schema accepts).
-    /// Words that match an old name are the hand-made schema's to decide: its error, if it refuses them.
+    /// its old name. Words that match an old name are the hand-made schema's to decide: its error, if
+    /// it refuses them.
     fn hand(&self, words: &[String], cfg: &Config) -> Result<Option<Vec<String>>> {
         if let Some(h) = translate(words, 0, false) {
             return Ok(Some(h));
@@ -84,55 +94,86 @@ impl Whole<'_> {
         Ok(Some(words.to_vec()))
     }
 
-    /// Every value, by NixOS path, sorted: the files TorqOS kept, and nixos/*.json.
-    pub fn entries(&self, cfg: &Config, s: &Settings) -> Vec<(Vec<String>, Val)> {
+    /// `<place> config [<file>]`: the place a config file is (to be) attached at, and the file. None if
+    /// the words are not that — and where NixOS has a setting named `config` (`containers <name>
+    /// config`), they are NixOS's.
+    fn attachment<'w>(&self, words: &'w [String]) -> Option<(&'w [String], Option<&'w String>)> {
+        let i = words.iter().rposition(|w| w == "config")?;
+        let (place, rest) = (&words[..i], &words[i + 1..]);
+        // Below a set of named entries (`virtualHosts`), `config` is an entry's name.
+        if rest.len() > 1 || self.tree.next(place).iter().any(|(w, _)| w == "config" || w.starts_with('<')) {
+            return None;
+        }
+        let somewhere = place.is_empty() || self.is_place(place) || self.tree.locate(place).is_ok();
+        somewhere.then(|| (place, rest.first()))
+    }
+
+    /// Every value, by NixOS path, sorted: the files TorqOS kept, nixos/*.json, the config files.
+    pub fn entries(&self, d: &Data) -> Vec<(Vec<String>, Val)> {
         let mut all: Vec<(Vec<String>, Val)> = self
             .schema
-            .entries(cfg)
+            .entries(&d.config)
             .into_iter()
             .map(|(w, v)| (translate(&w, 1, false).unwrap_or(w), v))
             .collect();
-        all.extend(settings::entries(s));
+        all.extend(settings::entries(&d.settings));
+        all.extend(attach::entries(&d.attached));
         all.sort_by(|a, b| a.0.cmp(&b.0));
         all
     }
 
     /// The config repo file each entry comes from, by NixOS path.
-    pub fn files(&self, cfg: &Config, s: &Settings) -> BTreeMap<Vec<String>, String> {
+    pub fn files(&self, d: &Data) -> BTreeMap<Vec<String>, String> {
         let mut out = BTreeMap::new();
-        for (file, held) in self.schema.files_of(cfg, &[]) {
+        for (file, held) in self.schema.files_of(&d.config, &[]) {
             for h in held {
                 let w: Vec<String> = h.split(' ').map(String::from).collect();
                 out.insert(translate(&w, 1, false).unwrap_or(w), file.clone());
             }
         }
-        for (w, _) in settings::entries(s) {
+        for (w, _) in settings::entries(&d.settings) {
             let file = format!("{}{}.json", settings::DIR, w[0]);
             out.insert(w, file);
+        }
+        for (w, _) in attach::entries(&d.attached) {
+            out.insert(w, attach::FILE.to_string());
         }
         out
     }
 
-    /// `set <words>` (NixOS path, or an old name).
-    pub fn set(&self, cfg: &mut Config, s: &mut Settings, words: &[String]) -> Result<()> {
-        if let Some(h) = self.hand(words, cfg)? {
-            return self.schema.set(cfg, &h);
+    /// `set <words>` (NixOS path, or an old name; `<place> config <file>` attaches a config file).
+    pub fn set(&self, d: &mut Data, words: &[String]) -> Result<()> {
+        if let Some((place, file)) = self.attachment(words) {
+            let file = file.context("config <file>: which file (a .nix file of the config repo, like services/httpd.nix)")?;
+            attach::valid(file)?;
+            d.attached.insert(place.join(" "), file.clone());
+            return Ok(());
         }
-        settings::set(self.tree, s, words).map_err(|e| self.hint(words, e))
+        if let Some(h) = self.hand(words, &d.config)? {
+            return self.schema.set(&mut d.config, &h);
+        }
+        settings::set(self.tree, &mut d.settings, words).map_err(|e| self.hint(words, e))
     }
 
-    /// `delete <words> [all]`: a setting, one value of a list, or (with `all`) everything shown below a
-    /// place — from both kinds of files — or an old name's place (`delete users dev all`).
-    pub fn delete(&self, cfg: &mut Config, s: &mut Settings, words: &[String], all: bool, del: &str, typed: &[String]) -> Result<()> {
+    /// `delete <words> [all]`: a setting, one value of a list, an attached config file (`<place>
+    /// config`), or (with `all`) everything shown below a place — from every kind of file — or an old
+    /// name's place (`delete users dev all`).
+    pub fn delete(&self, d: &mut Data, words: &[String], all: bool, del: &str, typed: &[String]) -> Result<()> {
+        if let Some((place, _)) = self.attachment(words).filter(|_| !all) {
+            return match d.attached.remove(&place.join(" ")) {
+                Some(_) => Ok(()),
+                None => bail!("{}: no config file attached there", if place.is_empty() { "the top".into() } else { place.join(" ") }),
+            };
+        }
         // (`typed`: the words as typed, from where configuration mode is, for the hint.)
         let typed = typed.iter().map(|w| crate::syntax::quote(w)).collect::<Vec<_>>().join(" ");
-        let hand = self.hand(words, cfg).ok().flatten();
+        let hand = self.hand(words, &d.config).ok().flatten();
         // An old name's place (`users dev`, `system`): the hand-made schema's container or entry.
-        let old_place = self.schema.resolve_in(words, Some(cfg)).ok().filter(|t| {
+        let old_place = self.schema.resolve_in(words, Some(&d.config)).ok().filter(|t| {
             t.values.is_empty() && !t.node.is_empty() && matches!(self.schema.nodes[&t.node].kind, Kind::Container | Kind::List)
         });
         let whole = if let Some(h) = &hand {
-            let t = self.schema.resolve_in(h, Some(cfg))?;
+            let t = self.schema.resolve_in(h, Some(&d.config))?;
             let kind = (!t.node.is_empty()).then(|| self.schema.nodes[&t.node].kind);
             match kind {
                 None | Some(Kind::Container | Kind::List) => true,
@@ -149,24 +190,28 @@ impl Whole<'_> {
         self.check_all(whole, all, del, &typed)?;
         if !all {
             return match hand {
-                Some(h) => self.schema.delete(cfg, &h),
-                None => settings::delete(self.tree, s, words),
+                Some(h) => self.schema.delete(&mut d.config, &h),
+                None => settings::delete(self.tree, &mut d.settings, words),
             };
         }
-        // Everything below: what TorqOS keeps in its own files, by each entry's NixOS path, and the rest.
+        // Everything below: what TorqOS keeps in its own files, by each entry's NixOS path, the rest,
+        // and the config files attached there.
         let mut gone = 0;
-        let below: Vec<Vec<String>> = self.schema.entries(cfg).into_iter().map(|(w, _)| w).collect();
+        let below: Vec<Vec<String>> = self.schema.entries(&d.config).into_iter().map(|(w, _)| w).collect();
         for h in below {
             let nixos = translate(&h, 1, false).unwrap_or_else(|| h.clone());
             if nixos.starts_with(words) || old_place.is_some() && h.starts_with(words) {
-                self.schema.delete(cfg, &h)?;
+                self.schema.delete(&mut d.config, &h)?;
                 gone += 1;
             }
         }
-        if settings::entries(s).iter().any(|(w, _)| w.starts_with(words)) {
-            settings::delete(self.tree, s, words)?;
+        if settings::entries(&d.settings).iter().any(|(w, _)| w.starts_with(words)) {
+            settings::delete(self.tree, &mut d.settings, words)?;
             gone += 1;
         }
+        let before = d.attached.len();
+        d.attached.retain(|at, _| !at.split(' ').map(String::from).collect::<Vec<_>>().starts_with(words));
+        gone += before - d.attached.len();
         if gone == 0 {
             bail!("{}: nothing set below it", words.join(" "));
         }
@@ -190,20 +235,20 @@ impl Whole<'_> {
     }
 
     /// The configuration below `path` in the brace format. An unknown path is an error, not nothing.
-    pub fn show(&self, cfg: &Config, s: &Settings, path: &[String]) -> Result<String> {
-        let below = self.below(cfg, s, path)?;
+    pub fn show(&self, d: &Data, path: &[String]) -> Result<String> {
+        let below = self.below(d, path)?;
         Ok(crate::tree::render_entries(&below))
     }
 
     /// `| display set` below `path`.
-    pub fn display_set(&self, cfg: &Config, s: &Settings, path: &[String]) -> Result<String> {
-        Ok(crate::tree::display_set_entries(&self.below(cfg, s, path)?))
+    pub fn display_set(&self, d: &Data, path: &[String]) -> Result<String> {
+        Ok(crate::tree::display_set_entries(&self.below(d, path)?))
     }
 
     /// The entries below `path`, the path taken off (the brace format starts where you are).
-    fn below(&self, cfg: &Config, s: &Settings, path: &[String]) -> Result<Vec<(Vec<String>, Val)>> {
-        let path = translate(path, 1, true).filter(|_| self.schema.resolve_in(path, Some(cfg)).is_ok()).unwrap_or_else(|| path.to_vec());
-        let all = self.entries(cfg, s);
+    fn below(&self, d: &Data, path: &[String]) -> Result<Vec<(Vec<String>, Val)>> {
+        let path = translate(path, 1, true).filter(|_| self.schema.resolve_in(path, Some(&d.config)).is_ok()).unwrap_or_else(|| path.to_vec());
+        let all = self.entries(d);
         let below: Vec<(Vec<String>, Val)> =
             all.into_iter().filter(|(w, _)| w.starts_with(&path)).map(|(w, v)| (w[path.len()..].to_vec(), v)).collect();
         if below.is_empty() && !path.is_empty() && self.tree.locate(&path).is_err() && translate(&path, 0, false).is_none() {
@@ -214,8 +259,8 @@ impl Whole<'_> {
     }
 
     /// What going from `old` to `new` changes, `show | compare` style, by NixOS paths.
-    pub fn compare(&self, old: (&Config, &Settings), new: (&Config, &Settings)) -> String {
-        crate::tree::compare_entries(self.entries(old.0, old.1), self.entries(new.0, new.1))
+    pub fn compare(&self, old: &Data, new: &Data) -> String {
+        crate::tree::compare_entries(self.entries(old), self.entries(new))
     }
 
     /// A NixOS-tree error, with what the old name of the catalog is now.
@@ -249,7 +294,7 @@ mod tests {
     fn one_tree_of_nixos_paths_over_both_kinds_of_files() {
         let t = t();
         let x = Whole { schema: &t.schema, tree: &t.tree };
-        let (mut cfg, mut s) = (Config::default(), Settings::new());
+        let mut d = Data::default();
         for line in [
             "networking hostName laptop",
             "system time-zone UTC",
@@ -259,47 +304,47 @@ mod tests {
             "networking firewall allowedTCPPorts [ 22 ]",
             "torq services enabled ssh",
         ] {
-            x.set(&mut cfg, &mut s, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+            x.set(&mut d, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
-        assert_eq!(cfg.files.len(), 4, "host.json, the user's packages and cli, services.json: {:?}", cfg.files.keys());
-        assert_eq!(settings::files(&s).keys().collect::<Vec<_>>(), ["nixos/networking.json", "nixos/virtualisation.json"]);
+        assert_eq!(d.config.files.len(), 4, "host.json, the user's packages and cli, services.json: {:?}", d.config.files.keys());
+        assert_eq!(settings::files(&d.settings).keys().collect::<Vec<_>>(), ["nixos/networking.json", "nixos/virtualisation.json"]);
         assert_eq!(
-            x.show(&cfg, &s, &[]).unwrap(),
+            x.show(&d, &[]).unwrap(),
             "networking {\n    firewall {\n        allowedTCPPorts [ 22 ];\n    }\n    hostName laptop;\n}\ntime {\n    timeZone UTC;\n}\ntorq {\n    cli {\n        userStyles {\n            dev cisco;\n        }\n    }\n    packages {\n        user {\n            dev [ htop ];\n        }\n    }\n    services {\n        enabled [ ssh ];\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
         );
-        assert_eq!(x.show(&cfg, &s, &w("networking hostName")).unwrap(), "hostName laptop;\n", "one setting");
-        assert_eq!(x.show(&cfg, &s, &w("system host-name")).unwrap(), "hostName laptop;\n", "by its old name too");
-        let files = x.files(&cfg, &s);
+        assert_eq!(x.show(&d, &w("networking hostName")).unwrap(), "hostName laptop;\n", "one setting");
+        assert_eq!(x.show(&d, &w("system host-name")).unwrap(), "hostName laptop;\n", "by its old name too");
+        let files = x.files(&d);
         assert_eq!(files[&w("networking hostName")], "system/host.json");
         assert_eq!(files[&w("networking firewall allowedTCPPorts")], "nixos/networking.json");
         assert_eq!(files[&w("torq packages user dev")], "users/dev/packages.json", "a person's own packages: user tier, as before");
         // `| display set` reads back to the same configuration.
-        let (mut c2, mut s2) = (Config::default(), Settings::new());
-        for line in x.display_set(&cfg, &s, &[]).unwrap().lines() {
-            x.set(&mut c2, &mut s2, &w(line.strip_prefix("set ").unwrap())).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        let mut d2 = Data::default();
+        for line in x.display_set(&d, &[]).unwrap().lines() {
+            x.set(&mut d2, &w(line.strip_prefix("set ").unwrap())).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
-        assert_eq!((c2, s2), (cfg, s));
+        assert_eq!(d2, d);
     }
 
     #[test]
     fn deleting_needs_all_for_a_whole_place_and_the_catalog_says_its_new_name() {
         let t = t();
         let x = Whole { schema: &t.schema, tree: &t.tree };
-        let (mut cfg, mut s) = (Config::default(), Settings::new());
+        let mut d = Data::default();
         for line in ["virtualisation docker enable true", "virtualisation docker rootless enable true", "networking firewall allowedTCPPorts [ 22 80 ]", "torq packages user dev [ htop jq ]"] {
-            x.set(&mut cfg, &mut s, &w(line)).unwrap();
+            x.set(&mut d, &w(line)).unwrap();
         }
-        let e = format!("{:#}", x.delete(&mut cfg, &mut s, &w("virtualisation docker"), false, "delete", &w("virtualisation docker")).unwrap_err());
+        let e = format!("{:#}", x.delete(&mut d, &w("virtualisation docker"), false, "delete", &w("virtualisation docker")).unwrap_err());
         assert!(e.contains("say `delete virtualisation docker all`"), "{e}");
-        let e = format!("{:#}", x.delete(&mut cfg, &mut s, &w("networking firewall allowedTCPPorts"), false, "delete", &w("networking firewall allowedTCPPorts")).unwrap_err());
+        let e = format!("{:#}", x.delete(&mut d, &w("networking firewall allowedTCPPorts"), false, "delete", &w("networking firewall allowedTCPPorts")).unwrap_err());
         assert!(e.contains("all`"), "a whole list too: {e}");
-        x.delete(&mut cfg, &mut s, &w("networking firewall allowedTCPPorts 80"), false, "delete", &w("networking firewall allowedTCPPorts 80")).unwrap();
-        x.delete(&mut cfg, &mut s, &w("virtualisation docker rootless"), true, "delete", &w("virtualisation docker rootless")).unwrap();
-        x.delete(&mut cfg, &mut s, &w("torq packages user dev jq"), false, "delete", &w("torq packages user dev jq")).unwrap();
-        assert_eq!(x.display_set(&cfg, &s, &[]).unwrap(), "set networking firewall allowedTCPPorts 22\nset torq packages user dev htop\nset virtualisation docker enable true\n");
-        let e = format!("{:#}", x.set(&mut cfg, &mut s, &w("services ssh")).unwrap_err());
+        x.delete(&mut d, &w("networking firewall allowedTCPPorts 80"), false, "delete", &w("networking firewall allowedTCPPorts 80")).unwrap();
+        x.delete(&mut d, &w("virtualisation docker rootless"), true, "delete", &w("virtualisation docker rootless")).unwrap();
+        x.delete(&mut d, &w("torq packages user dev jq"), false, "delete", &w("torq packages user dev jq")).unwrap();
+        assert_eq!(x.display_set(&d, &[]).unwrap(), "set networking firewall allowedTCPPorts 22\nset torq packages user dev htop\nset virtualisation docker enable true\n");
+        let e = format!("{:#}", x.set(&mut d, &w("services ssh")).unwrap_err());
         assert!(e.contains("`torq services enabled ssh`"), "{e}");
-        assert!(x.set(&mut cfg, &mut s, &w("services printing enable true")).is_ok(), "NixOS's own services are NixOS's");
+        assert!(x.set(&mut d, &w("services printing enable true")).is_ok(), "NixOS's own services are NixOS's");
         assert!(x.is_place(&w("virtualisation docker")) && x.is_place(&w("services httpd virtualHosts example.com")));
         assert!(!x.is_place(&w("virtualisation docker enable")));
     }
@@ -343,22 +388,22 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     let (schema, tree) = (Schema::parse(include_str!("schema-fixture.json")).unwrap(), Tree::parse(include_str!("nixos-fixture.json")).unwrap());
     let x = Whole { schema: &schema, tree: &tree };
     let w = |s: &str| crate::session::words(s).unwrap();
-    let (mut cfg, mut s) = (Config::default(), Settings::new());
+    let mut d = Data::default();
     for line in ["networking hostName laptop", "networking firewall allowedTCPPorts [ 22 ]", "torq packages user dev [ htop ]", "users dev cli style cisco", "system time-zone UTC"] {
-        x.set(&mut cfg, &mut s, &w(line)).unwrap();
+        x.set(&mut d, &w(line)).unwrap();
     }
     // `delete networking all`: everything shown below it, from both kinds of files.
-    x.delete(&mut cfg, &mut s, &w("networking"), true, "delete", &w("networking")).unwrap();
-    assert!(!x.show(&cfg, &s, &[]).unwrap().contains("networking"), "{}", x.show(&cfg, &s, &[]).unwrap());
+    x.delete(&mut d, &w("networking"), true, "delete", &w("networking")).unwrap();
+    assert!(!x.show(&d, &[]).unwrap().contains("networking"), "{}", x.show(&d, &[]).unwrap());
     // An old name's place deletes what it always did.
-    x.delete(&mut cfg, &mut s, &w("users dev"), true, "delete", &w("users dev")).unwrap();
-    assert!(!x.show(&cfg, &s, &[]).unwrap().contains("dev"));
-    x.delete(&mut cfg, &mut s, &w("system"), true, "delete", &w("system")).unwrap();
-    assert_eq!(x.show(&cfg, &s, &[]).unwrap(), "");
-    let e = format!("{:#}", x.delete(&mut cfg, &mut s, &w("virtualisation"), true, "delete", &w("virtualisation")).unwrap_err());
+    x.delete(&mut d, &w("users dev"), true, "delete", &w("users dev")).unwrap();
+    assert!(!x.show(&d, &[]).unwrap().contains("dev"));
+    x.delete(&mut d, &w("system"), true, "delete", &w("system")).unwrap();
+    assert_eq!(x.show(&d, &[]).unwrap(), "");
+    let e = format!("{:#}", x.delete(&mut d, &w("virtualisation"), true, "delete", &w("virtualisation")).unwrap_err());
     assert!(e.contains("nothing set below it"), "{e}");
     // Text that would draw lines of its own: refused when set, and when read.
-    let e = format!("{:#}", x.set(&mut cfg, &mut s, &[w("services httpd virtualHosts a documentRoot"), vec!["/x\nKeys that will".into()]].concat()).unwrap_err());
+    let e = format!("{:#}", x.set(&mut d, &[w("services httpd virtualHosts a documentRoot"), vec!["/x\nKeys that will".into()]].concat()).unwrap_err());
     assert!(e.contains("multi-line text goes in a config file"), "{e}");
     let e = format!("{:#}", settings::load([("nixos/environment.json", br#"{"variables":{"X":"a\nb"}}"# as &[u8])]).unwrap_err());
     assert!(e.contains("line break or another control character"), "{e}");
