@@ -81,7 +81,7 @@ sudo torq-broker log && sudo torq-broker verify
 A shell with operational and configuration modes, Juniper and Cisco syntax (`switch cli`), a
 candidate configuration, `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`, and a
 configuration tree that is the config repo's files (ADR-016, `docs/CLI-DESIGN.md`). Built in small,
-reviewed steps, broker first. Next: the rest of M1.5 (`docs/ROADMAP.md`); the AI layers are later.
+reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 image, then an ISO (`docs/ROADMAP.md`); the AI layers are later.
 
 ## Engineering principles
 

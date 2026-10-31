@@ -72,6 +72,25 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [ ] Terminal look (prompt, colours) in torqcli itself.
 - [ ] Usability check: someone new to TorqOS installs, removes, undoes and reads the log unaided.
 
+### M2 — Install: TorqOS as a ready image, never compiled by its users
+Nobody compiles TorqOS: releases are built once (CI), shipped as images, updated from a signed
+binary cache. Ease of use first.
+
+- [ ] **qcow2 image** (aarch64 first, testable here; then x86_64): download, boot in any VM (UTM,
+      QEMU, Proxmox), log in. The config repo and ledger are created on first boot.
+- [ ] **First-boot setup**, like a network device's initial configuration dialog: host name,
+      time zone, user, password or SSH key, asked once at the console, written as tree files and
+      committed as change #1. No default password ships.
+- [ ] **Customer-safe defaults:** dev mode off, SSH keys-only, the /etc/nixos guard on, nothing
+      installed that is not needed.
+- [ ] **Releases** (`v0.1.0`, …) at one URL machines fetch from; `request system update` moves to
+      the newest one. (The repo is private: where releases are published is decided before any
+      machine outside this VM needs updates.)
+- [ ] **Signed binary cache** of every release, so an update downloads instead of compiling
+      (only the machine's own small config files are built locally).
+- [ ] **ISO installer** for real hardware: the same image and first-boot setup, plus disk choice.
+- [ ] **VM tests:** the image boots on a blank VM, first-boot setup, a commit, a rollback, an update.
+
 ## Later: the AI layers (not planned now; everything built keeps them possible)
 
 ### M2 — The agent sees
