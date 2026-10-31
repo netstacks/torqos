@@ -235,5 +235,5 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   tree keeps NixOS's own paths, without a TorqOS shorthand for users, groups and applications.
 - **Consequences:** VISION, README, ARCHITECTURE, ROADMAP, HARDWARE, SECURITY-MODEL, AI-LAYER
   and CLAUDE.md rewritten to match; earlier ADRs (002, 006, 007) stand as history, their laptop
-  and UI parts superseded here. Code is not removed yet: modules/desktop.nix and the dev VM's
-  `torq desktop enable true` stay until removed by a commit of their own.
+  and UI parts superseded here. The desktop is kept, off by default (modules/desktop.nix), to bring back later; the dev VM
+  turned it off with `set torq desktop enable false` (2026-10-31).

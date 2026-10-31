@@ -38,7 +38,7 @@ flake.nix              entry point: VMs, ISO, checks, packages
 modules/               the distribution, as NixOS modules (torq.* options)
   base.nix             nix settings, users, locale, core packages
   security.nix         hardening (boot chain and TPM: later)
-  desktop.nix          a desktop, from before ADR-019: out of scope, still on the dev VM
+  desktop.nix          a desktop (niri), off by default since ADR-019; kept to bring back later
   broker.nix           the privileged change broker service + config repo
   ai.nix               local model runtime + agent service (a stub: the AI layers are later)
 hosts/

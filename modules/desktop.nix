@@ -7,8 +7,9 @@ in
 {
   options.torq.desktop.enable = lib.mkOption {
     type = lib.types.bool;
-    default = true;
-    description = "TorqOS desktop: niri (Wayland) + Quickshell shell.";
+    # Off: TorqOS is CLI only for now (ADR-019); kept to bring a desktop back later.
+    default = false;
+    description = "A desktop: niri (Wayland) + Quickshell. Out of scope for now (ADR-019); off by default.";
   };
 
   config = lib.mkIf cfg.enable {

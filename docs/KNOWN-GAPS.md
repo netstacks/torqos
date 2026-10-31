@@ -121,7 +121,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing
    is not built into the kernel either, so "signed modules only" (SECURITY-MODEL.md) is not true.
 
-## Desktop (out of scope since ADR-019; the dev VM still runs it)
+## Desktop (off since ADR-019; kept for later)
 7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
    `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a TorqOS niri config.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq.user` in `system.nix` is the one place

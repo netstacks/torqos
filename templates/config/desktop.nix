@@ -1,5 +1,5 @@
-# Desktop settings (system tier). The trust-loop demo change flips a setting in this file.
+# Desktop settings (system tier). TorqOS is CLI only for now (ADR-019): the desktop is off by
+# default; `set torq desktop enable true` brings it back.
 { ... }:
 {
-  torq.desktop.enable = true;
 }
