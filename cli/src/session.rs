@@ -66,27 +66,50 @@ pub struct Session<'a> {
     pub done: bool,
 }
 
-/// Split a command line into words: whitespace-separated, "double quotes" for a word with spaces,
-/// `|` always its own word.
+/// Split a command line into words as a shell does: whitespace-separated, "double" or 'single'
+/// quotes for a word with spaces, `|` always its own word.
 pub fn words(line: &str) -> Result<Vec<String>> {
-    let (mut out, mut cur, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
+    let (mut out, mut cur, mut any) = (Vec::new(), String::new(), false);
+    // The quote open, if one is: `"` or `'`.
+    let mut open: Option<char> = None;
     let mut chars = line.chars();
     while let Some(c) = chars.next() {
+        let quoted = open == Some('"');
         match c {
+            // Inside single quotes everything is itself, up to the next one.
+            _ if open == Some('\'') => {
+                if c == '\'' {
+                    open = None;
+                } else {
+                    cur.push(c);
+                }
+            }
             '"' => {
-                quoted = !quoted;
+                open = if quoted { None } else { Some('"') };
                 any = true;
             }
-            '\\' if quoted => cur.push(chars.next().context("a line cannot end in \\")?),
+            '\'' if !quoted => {
+                open = Some('\'');
+                any = true;
+            }
+            // As in a shell's double quotes: `\"` and `\\` are escapes, any other `\` is itself (so a
+            // `grep "\d+"` pattern arrives whole).
+            '\\' if quoted => match chars.next().context("a line cannot end in \\")? {
+                c @ ('"' | '\\') => cur.push(c),
+                c => {
+                    cur.push('\\');
+                    cur.push(c);
+                }
+            },
             c if c.is_whitespace() && !quoted => {
                 if any {
-                    out.push(std::mem::take(&mut cur));
+                    word(&mut out, std::mem::take(&mut cur))?;
                     any = false;
                 }
             }
             '|' if !quoted => {
                 if any {
-                    out.push(std::mem::take(&mut cur));
+                    word(&mut out, std::mem::take(&mut cur))?;
                     any = false;
                 }
                 out.push("|".into());
@@ -97,13 +120,24 @@ pub fn words(line: &str) -> Result<Vec<String>> {
             }
         }
     }
-    if quoted {
-        bail!("missing closing \"");
+    match open {
+        Some('\'') => bail!("missing closing ' (an apostrophe in text: put the text in \"double quotes\")"),
+        Some(q) => bail!("missing closing {q}"),
+        None => {}
     }
     if any {
-        out.push(cur);
+        word(&mut out, cur)?;
     }
     Ok(out)
+}
+
+/// A word from the text (not a pipe): a quoted `"|"` alone would read as one, so it is refused.
+fn word(out: &mut Vec<String>, w: String) -> Result<()> {
+    if w == "|" {
+        bail!("\"|\" alone cannot be a word: it would read as a pipe");
+    }
+    out.push(w);
+    Ok(())
 }
 
 impl<'a> Session<'a> {
@@ -149,7 +183,12 @@ impl<'a> Session<'a> {
 
     /// Run one command line; returns what to print.
     pub fn exec(&mut self, line: &str) -> Result<String> {
-        let w = words(line)?;
+        self.exec_words(&words(line)?)
+    }
+
+    /// Run one command, already split into words (`torqcli <command>`: as the calling shell split
+    /// them; a word that is exactly `|` is a pipe).
+    pub fn exec_words(&mut self, w: &[String]) -> Result<String> {
         if w.is_empty() {
             return Ok(String::new());
         }
@@ -157,8 +196,8 @@ impl<'a> Session<'a> {
         if self.mode == Mode::Configuration {
             self.candidate()?;
         }
-        let op = syntax::parse(self.style, self.mode, &w, &|ws| self.is_place(ws))?;
-        self.run(op)
+        let (op, filters) = syntax::parse_line(self.style, self.mode, w, &|ws| self.is_place(ws))?;
+        crate::filter::apply(&filters, self.run(op)?)
     }
 
     /// Whether `words`, from where configuration mode is, name a container or list entry.
@@ -614,6 +653,40 @@ mod tests {
         assert_eq!(words(r#"set a "say \"hi\"""#).unwrap(), ["set", "a", "say \"hi\""]);
         assert_eq!(words(r#"set a """#).unwrap(), ["set", "a", ""]);
         assert!(words(r#"set "open"#).is_err());
+    }
+
+    #[test]
+    fn a_quoted_bar_alone_is_never_a_pipe() {
+        let e = format!("{:#}", words(r#"show "|" compare"#).unwrap_err());
+        assert!(e.contains("cannot be a word"), "{e}");
+        assert!(words(r#"commit comment "a | b""#).is_ok(), "inside other text it is text");
+        assert_eq!(words("grep 'a \\d '\"\"").unwrap(), ["grep", "a \\d "], "single quotes: all literal");
+        assert_eq!(words(r#"grep "\d\"\\""#).unwrap(), ["grep", r#"\d"\"#], "double quotes: only \" and \\ escape");
+        assert_eq!(words(r#"commit comment "it's""#).unwrap(), ["commit", "comment", "it's"]);
+        assert!(words("grep 'open").is_err());
+        let e = format!("{:#}", words("commit comment it's fine").unwrap_err());
+        assert!(e.contains("put the text in \"double quotes\""), "an apostrophe opens a quote, as in a shell: {e}");
+    }
+
+    #[cfg(target_os = "linux")] // the filters' sandbox
+    #[test]
+    fn filters_work_on_what_a_show_prints() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("show configuration | grep host").unwrap(), "    host-name two;\n");
+        assert_eq!(s.exec("show configuration | grep -v host | wc -l").unwrap(), "2\n");
+        assert_eq!(s.exec("show configuration | grep nothing").unwrap(), "", "nothing matched: no error");
+        assert_eq!(s.exec("show system commit | wc -l").unwrap(), "2\n");
+        assert_eq!(s.exec("show configuration | display set | grep -o 'host-name [a-z]*'").unwrap(), "host-name two\n");
+        run(&mut s, &["configure", "set system host-name three", "set system time-zone UTC"]);
+        assert_eq!(s.exec("show | compare | grep '^+'").unwrap(), "+   host-name three;\n+   time-zone UTC;\n");
+        assert_eq!(s.exec("show system | grep -o '^ *[a-z-]*' | tr -d ' ' | sort -r | head -n 1").unwrap(), "time-zone\n");
+        assert_eq!(s.exec("run show configuration | grep host").unwrap(), "    host-name two;\n", "run: the active one, filtered");
+        s.exec("switch cli").unwrap();
+        assert_eq!(s.exec("do show running-config | grep -c host").unwrap(), "1\n");
+        assert!(format!("{:#}", s.exec("show configuration diff | grep -Q x").unwrap_err()).starts_with("| grep: "));
+        assert!(s.exec("system host-name four | wc -l").is_err());
+        assert_eq!(s.exec("show configuration | grep host").unwrap(), "    host-name three;\n", "the refused line changed nothing");
     }
 
     #[test]

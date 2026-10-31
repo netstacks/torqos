@@ -8,6 +8,7 @@ mod session;
 mod shell;
 mod complete;
 mod syntax;
+mod filter;
 mod pkg;
 mod run;
 mod status;

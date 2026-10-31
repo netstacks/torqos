@@ -146,6 +146,31 @@ pkgs.testers.runNixOSTest {
         out = machine.succeed("su - dev -c 'torqcli --style cisco -c \"config; system; time-zone UTC; end; config; show configuration diff\"'")
         assert "[edit system]\n+   time-zone UTC;" in out, out
 
+    with subtest("torqcli filters: the real tools, in a sandbox that reaches nothing"):
+        import shlex
+        def dev_sh(cmd):
+            return f"su - dev -c {shlex.quote(cmd)}"
+        # The tools are the system's own: a grep first on PATH is not the one that runs.
+        machine.succeed("mkdir -p /tmp/evil && printf '#!/bin/sh\\necho evil\\n' > /tmp/evil/grep && chmod 755 /tmp/evil /tmp/evil/grep")
+        out = machine.succeed(dev_sh("PATH=/tmp/evil:$PATH torqcli -c 'show configuration | grep -c host-name'"))
+        assert out == "1\n", out
+        out = machine.succeed(dev_sh("torqcli 'show configuration | grep -o \"host-name [a-z]*\"'"))
+        assert out == "host-name machine\n", out
+        out = machine.succeed(dev_sh("torqcli show system commit '|' head -n 1 '|' wc -l"))
+        assert out == "1\n", out
+        # Their own options cannot read, write or run anything outside the output they filter.
+        machine.succeed(dev_sh("echo hidden > ~/secret"))
+        out = machine.fail(dev_sh("torqcli -c 'show configuration | head -n 1 /home/dev/secret' 2>&1"))
+        assert "No such file" in out and "hidden" not in out, out
+        machine.fail(dev_sh("torqcli -c 'show configuration | sort -o /home/dev/written' 2>&1"))
+        machine.succeed("test ! -e /home/dev/written")
+        # What a filter prints reaches the terminal cleaned, like everything else.
+        out = machine.succeed(dev_sh("torqcli -c \"show configuration | tr s '\\\\033'\""))
+        assert "\x1b" not in out and "\\u{1b}y\\u{1b}tem {" in out, repr(out)
+        # One command, no -c: a configuration change is refused, and says how.
+        out = machine.fail(dev_sh("torqcli configure 2>&1"))
+        assert "torqcli -c" in out, out
+
     with subtest("torqcli on a terminal: ? lists what may come next, Tab completes"):
         import shlex
         def as_dev(cmd, ok=True):

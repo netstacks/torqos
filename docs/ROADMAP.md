@@ -34,8 +34,10 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [x] `torqcli` shell: operational + configuration modes, Juniper style, pipes, `?`, Tab, history
       (3a–3d; a pasted block runs line by line).
 - [x] Cisco style and `switch cli` (4a: one command model, both syntaxes, round-trip tested; edit
-      / up / top; `delete … all`; reserved words). Still to come: the extra pipes (`match`,
-      `except`, `count`, `no-more`, `display detail`), `torqcli <command>` without `-c`.
+      / up / top; `delete … all`; reserved words).
+- [x] Filters after any `show`: the real Linux tools (`grep`, `wc`, `head`, `tail`, `sort`, `uniq`,
+      `cut`, `tr`; ADR-017, 4b); shell-style quoting; `torqcli <command>` without `-c` (4c).
+      Still to come: `| display detail`, `| display diff`.
 - [x] Candidate per user with its base commit; `set` / `delete` on the tree; `rollback 0`.
 - [x] `show configuration`, `show | compare`, `show system commit`, `show system rollback <n>
       [compare <m>]`, `show packages available`, `show services`, `show system alarms` (3e).

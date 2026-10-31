@@ -55,8 +55,12 @@ $ torqcli -c "configure; set users viper packages htop; commit"
 The same in both: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`,
 `rollback <n>`, `show system commit`, `switch cli`, `?` help, Tab completion, history (↑).
 
-**Pipes** (our own, not the shell's): `| compare`, `| display set`, `| display detail`,
-`| display diff`, `| match <text>`, `| except <text>`, `| count`, `| no-more`.
+**Pipes**: `| compare` and `| display set` (`| display detail`, `| display diff` later), then any
+number of **filters**, the real Linux tools with their own options (ADR-017): `| grep`, `| wc`, `| head`,
+`| tail`, `| sort`, `| uniq`, `| cut`, `| tr`, after any `show` in either style — e.g.
+`show configuration | grep -i host`, `show system commit | head -n 5 | wc -l`. They read the show's
+output inside a sandbox that has nothing else (no files, no network), from the system's own
+coreutils and grep; words are split as a shell does (`'single'` quotes are literal).
 
 **One grammar, two renderings.** Both styles parse to one set of operations; a property test renders
 every operation in one style and parses it in the other. Words a Cisco-style bare path could collide
@@ -74,7 +78,10 @@ for the session. `?` and Tab follow the style and where you are.
 **Scripts (`torqcli -c`)** use a private candidate that exists only for that invocation — never your
 interactive candidate, so a script cannot commit your half-done edits or leave edits behind. They
 stop at the first error, always use the Juniper style unless `--style cisco` is given, and quote
-values containing `;` or `|` with double quotes. Interactive sessions of the same user share one
+values containing `;` or `|` with double quotes. `torqcli <command>` runs one operational command
+the same way (`torqcli show system alarms`, `torqcli show configuration '|' grep host`): its words as
+your shell split them, or one argument read as a whole line (`torqcli "show configuration | grep
+host"`); its exit code says whether it worked. Configuration needs `-c`. Interactive sessions of the same user share one
 candidate (Junos `configure`); `configure private` is for later.
 
 ## The configuration tree

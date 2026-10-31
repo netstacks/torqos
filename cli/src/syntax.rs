@@ -4,6 +4,7 @@
 //! rendering in one style and parsing in the other gives the same `Op`.
 
 use crate::session::Mode;
+use crate::filter::Filter;
 use anyhow::{bail, Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,10 +109,65 @@ fn split_pipes(w: &[String]) -> Result<(Vec<String>, Pipes)> {
         match part.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["compare"] => p.compare = true,
             ["display", "set"] => p.display_set = true,
-            other => bail!("unknown pipe: | {}; one of: compare, display set", other.join(" ")),
+            other => bail!("unknown pipe: | {}; one of: compare, display set, or a filter: {}", other.join(" "), crate::filter::names()),
         }
     }
     Ok((head, p))
+}
+
+/// The most filters one line may chain (each runs in its own sandbox).
+const MAX_FILTERS: usize = 16;
+
+/// Split the filters off the end of a line: the rest is the command and its own pipes. A filter
+/// works on output text, so only another filter may follow it.
+fn split_filters(w: &[String]) -> Result<(Vec<String>, Vec<Filter>)> {
+    let bars: Vec<usize> = w.iter().enumerate().filter(|(_, x)| *x == "|").map(|(i, _)| i).collect();
+    let (mut head_end, mut filters) = (w.len(), Vec::new());
+    for (n, &bar) in bars.iter().enumerate() {
+        let seg = &w[bar + 1..bars.get(n + 1).copied().unwrap_or(w.len())];
+        if seg.is_empty() {
+            bail!("a | needs something after it: compare, display set, or a filter: {}", crate::filter::names());
+        }
+        match crate::filter::parse(seg) {
+            Some(f) => {
+                head_end = head_end.min(bar);
+                filters.push(f);
+                if filters.len() > MAX_FILTERS {
+                    bail!("at most {MAX_FILTERS} filters on one line");
+                }
+            }
+            None if head_end < w.len() => {
+                bail!("| {} must come before | {}: filters work on the output, last", seg.join(" "), w[head_end + 1])
+            }
+            None => {}
+        }
+    }
+    Ok((w[..head_end].to_vec(), filters))
+}
+
+/// Whether `op` prints output a filter can work on.
+fn shows(op: &Op) -> bool {
+    match op {
+        Op::ShowActive { .. } | Op::ShowCommits | Op::ShowRollback { .. } | Op::ShowAlarms | Op::ShowServices => true,
+        Op::ShowCandidate { .. } | Op::Compare => true,
+        Op::Run(op) => shows(op),
+        _ => false,
+    }
+}
+
+/// Parse one line: the command (`parse`) and the filters after it.
+pub fn parse_line(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]) -> bool) -> Result<(Op, Vec<Filter>)> {
+    let (head, filters) = split_filters(w)?;
+    let op = parse(style, mode, &head, is_place)?;
+    if !filters.is_empty() && !shows(&op) {
+        let tool = &w[head.len() + 1];
+        let packages = |o: &Op| matches!(o, Op::ShowPackages { .. });
+        if packages(&op) || matches!(&op, Op::Run(o) if packages(o)) {
+            bail!("| {tool}: show packages available prints as it searches and cannot be filtered; add search terms instead");
+        }
+        bail!("| {tool}: only the output of a show command can be filtered");
+    }
+    Ok((op, filters))
 }
 
 pub fn parse_commit(w: &[String]) -> Result<CommitOptions> {
@@ -270,7 +326,7 @@ fn join(w: &[String]) -> String {
 
 /// A word as it must be typed: quoted if it has a space or a character the line syntax uses.
 pub fn quote(w: &str) -> String {
-    if w.is_empty() || w.chars().any(|c| c.is_whitespace() || "\"|;\\".contains(c)) {
+    if w.is_empty() || w.chars().any(|c| c.is_whitespace() || "\"'|;\\".contains(c)) {
         format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         w.to_string()
@@ -430,5 +486,64 @@ mod tests {
         }
         let e = format!("{:#}", parse(Style::Juniper, Mode::Configuration, &w("system host-name x"), &is_place).unwrap_err());
         assert!(e.contains("unknown command: system"), "{e}");
+    }
+
+    fn pl(style: Style, mode: Mode, line: &str) -> Result<(Op, Vec<Filter>)> {
+        parse_line(style, mode, &w(line), &is_place)
+    }
+    fn err(style: Style, mode: Mode, line: &str) -> String {
+        format!("{:#}", pl(style, mode, line).unwrap_err())
+    }
+    fn f(tool: &str, args: &str) -> Filter {
+        Filter { tool: tool.into(), args: w(args) }
+    }
+
+    /// Every show, with filters after it, in either style parses back to itself and its filters.
+    #[test]
+    fn filters_follow_every_show_in_both_styles() {
+        let filters = vec![f("grep", "-Ei \"host|name\""), f("sort", "-r"), f("wc", "-l")];
+        let mut n = 0;
+        for (mode, op) in ops().into_iter().filter(|(_, op)| shows(op)) {
+            for style in [Style::Juniper, Style::Cisco] {
+                let line = format!("{} | grep -Ei \"host|name\" | sort -r | wc -l", render(style, &op));
+                assert_eq!(pl(style, mode, &line).unwrap_or_else(|e| panic!("{line}: {e:#}")), (op.clone(), filters.clone()), "{line}");
+                n += 1;
+            }
+        }
+        assert!(n >= 16, "the shows are all there ({n})");
+    }
+
+    #[test]
+    fn filters_come_after_the_commands_own_pipes() {
+        let (j, o, c) = (Style::Juniper, Mode::Operational, Mode::Configuration);
+        assert_eq!(pl(j, o, "show configuration | grep 'a b'").unwrap().1, [f("grep", "\"a b\"")]);
+        assert_eq!(pl(j, o, "show configuration | grep \"a|b\"").unwrap().1, [f("grep", "\"a|b\"")], "a quoted | is the pattern's");
+        assert_eq!(pl(j, c, "show | compare | grep x").unwrap(), (Op::Compare, vec![f("grep", "x")]));
+        let (op, fs) = pl(j, c, "show system | display set | wc -l").unwrap();
+        assert_eq!((op, fs), (Op::ShowCandidate { path: w("system"), pipes: Pipes { compare: false, display_set: true } }, vec![f("wc", "-l")]));
+        assert_eq!(pl(Style::Cisco, c, "show configuration diff | grep x").unwrap().0, Op::Compare);
+        assert_eq!(pl(Style::Cisco, c, "do show system alarms | wc -l").unwrap().0, Op::Run(Box::new(Op::ShowAlarms)));
+        assert_eq!(pl(j, c, "show").unwrap().1, [], "no pipe, no filter");
+        for (line, want) in [
+            ("show configuration | grep a | display set", "| display set must come before | grep"),
+            ("show configuration | grep x |", "a | needs something after it"),
+            ("show configuration |", "a | needs something after it"),
+            ("show configuration | sed s/a/b/", "unknown pipe: | sed s/a/b/; one of: compare, display set, or a filter: cut, grep"),
+            ("show configuration | sh -c x", "unknown pipe: | sh -c x"),
+            ("show packages available rg | grep x", "cannot be filtered"),
+        ] {
+            let e = err(j, o, line);
+            assert!(e.contains(want), "{line}: {e}");
+        }
+        for line in ["set system host-name a | wc -l", "commit | grep x", "rollback 1 | head", "run show packages available x | wc -l"] {
+            let e = err(j, c, line);
+            assert!(e.contains("filtered"), "{line}: {e}");
+        }
+        let e = err(Style::Cisco, c, "system host-name a | grep a");
+        assert!(e.contains("only the output of a show command"), "{e}");
+        let many = format!("show configuration{}", " | wc -l".repeat(MAX_FILTERS));
+        assert!(pl(j, o, &many).is_ok());
+        let e = err(j, o, &format!("{many} | wc -l"));
+        assert!(e.contains("at most 16 filters"), "{e}");
     }
 }

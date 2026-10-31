@@ -224,9 +224,10 @@ fn propose_args(diff: &str, base: &str, reason: &str) -> Vec<String> {
     vec!["propose".into(), format!("--diff={diff}"), format!("--base={base}"), format!("--reason={reason}"), "--actor=user".into()]
 }
 
-/// A `-c` script's commands: split at `;` and newlines, but not inside "quotes".
+/// A `-c` script's commands: split at `;` and newlines, but not inside "double" or 'single' quotes
+/// (as `words` reads them).
 fn script_lines(script: &str) -> Vec<String> {
-    let (mut out, mut cur, mut quoted, mut escaped) = (Vec::new(), String::new(), false, false);
+    let (mut out, mut cur, mut open, mut escaped) = (Vec::new(), String::new(), None, false);
     for c in script.chars() {
         match c {
             _ if escaped => {
@@ -234,9 +235,10 @@ fn script_lines(script: &str) -> Vec<String> {
                 escaped = false;
                 continue;
             }
-            '\\' if quoted => escaped = true,
-            '"' => quoted = !quoted,
-            ';' | '\n' if !quoted => {
+            '\\' if open == Some('"') => escaped = true,
+            '"' | '\'' if open.is_none() => open = Some(c),
+            _ if open == Some(c) => open = None,
+            ';' | '\n' if open.is_none() => {
                 out.push(std::mem::take(&mut cur));
                 continue;
             }
@@ -261,10 +263,12 @@ fn propose_values_are_never_options() {
 fn scripts_split_outside_quotes() {
     assert_eq!(script_lines("configure; set a b\ncommit comment \"a; b\" ;"), ["configure", "set a b", "commit comment \"a; b\""]);
     assert_eq!(script_lines(r#"commit comment "say \"x; y\"""#), [r#"commit comment "say \"x; y\"""#]);
+    assert_eq!(script_lines("show configuration | grep 'a;b'; show | cut -d';' -f1"), ["show configuration | grep 'a;b'", "show | cut -d';' -f1"]);
+    assert_eq!(script_lines(r#"commit comment "it's; fine""#), [r#"commit comment "it's; fine""#], "a ' inside \" is text");
 }
 
-/// The shell: `torqcli` (interactive) or `torqcli -c "<command>; <command>…"` (a private candidate,
-/// stops at the first error). Returns the exit code.
+/// The shell: `torqcli` (interactive), `torqcli -c "<command>; <command>…"` (a private candidate,
+/// stops at the first error) or `torqcli <command>` (one operational command). Returns the exit code.
 pub fn main(args: &[String]) -> i32 {
     match run_shell(args) {
         Ok(code) => code,
@@ -275,7 +279,67 @@ pub fn main(args: &[String]) -> i32 {
     }
 }
 
+/// How torqcli was asked to run.
+#[derive(Debug, PartialEq)]
+enum Invocation {
+    /// The shell.
+    Interactive,
+    /// `-c "<command>; <command>…"`.
+    Script(String),
+    /// `torqcli <command>`: one operational command, its words as the calling shell split them (one
+    /// argument: a whole line, split here).
+    Command(Vec<String>),
+}
+
+const USAGE: &str = "usage: torqcli [--style juniper|cisco] [-c \"<command>; <command>…\" | <command>]";
+
+fn parse_args(args: &[String]) -> Result<(Invocation, Option<Style>)> {
+    let usage = || anyhow::anyhow!(USAGE);
+    let (mut run, mut style) = (Invocation::Interactive, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-c" if run == Invocation::Interactive => run = Invocation::Script(it.next().ok_or_else(usage)?.clone()),
+            "--style" if style.is_none() => style = Some(Style::parse(it.next().ok_or_else(usage)?).ok_or_else(usage)?),
+            "-h" | "--help" => return Err(usage()),
+            o if o.starts_with('-') => return Err(usage()),
+            _ if run == Invocation::Interactive => {
+                let rest: Vec<String> = std::iter::once(a).chain(it).cloned().collect();
+                let w = if rest.len() == 1 { crate::session::words(&rest[0])? } else { rest };
+                if matches!(w.first().map(String::as_str), Some("configure" | "config")) {
+                    bail!("torqcli <command> runs one operational command; to change the configuration: torqcli -c \"configure; set …; commit\"");
+                }
+                if w.is_empty() {
+                    return Err(usage());
+                }
+                return Ok((Invocation::Command(w), style));
+            }
+            _ => return Err(usage()),
+        }
+    }
+    Ok((run, style))
+}
+
+#[cfg(test)]
+#[test]
+fn a_command_on_the_command_line() {
+    let a = |s: &[&str]| parse_args(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+    let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert_eq!(a(&[]).unwrap(), (Invocation::Interactive, None));
+    assert_eq!(a(&["show", "system", "alarms"]).unwrap().0, Invocation::Command(w(&["show", "system", "alarms"])));
+    assert_eq!(a(&["show configuration | grep 'a b'"]).unwrap().0, Invocation::Command(w(&["show", "configuration", "|", "grep", "a b"])), "one argument: a line");
+    assert_eq!(a(&["show", "configuration", "|", "grep", "a b"]).unwrap().0, Invocation::Command(w(&["show", "configuration", "|", "grep", "a b"])), "words as given");
+    assert_eq!(a(&["--style", "cisco", "show", "running-config"]).unwrap(), (Invocation::Command(w(&["show", "running-config"])), Some(Style::Cisco)));
+    assert_eq!(a(&["show", "--style", "cisco"]).unwrap().0, Invocation::Command(w(&["show", "--style", "cisco"])), "options come first");
+    assert_eq!(a(&["-c", "show; show"]).unwrap().0, Invocation::Script("show; show".into()));
+    for bad in [&["-c", "x", "show"][..], &["-c", "x", "-c", "y"], &["-x"], &["-c"], &["--style", "vi", "show"], &[""]] {
+        assert!(a(bad).is_err(), "{bad:?}");
+    }
+    let e = format!("{:#}", a(&["configure"]).unwrap_err());
+    assert!(e.contains("torqcli -c"), "{e}");
+}
 fn run_shell(args: &[String]) -> Result<i32> {
+    let (run, style) = parse_args(args)?;
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
     let cli = Cli {
         repo: PathBuf::from(env("TORQ_CONFIG_REPO", REPO)),
@@ -286,44 +350,45 @@ fn run_shell(args: &[String]) -> Result<i32> {
     check_repo(&cli)?;
     let schema = Schema::parse(&fs::read_to_string(SCHEMA).with_context(|| format!("reading {SCHEMA} (is this TorqOS?)"))?)?;
     let machine = Real { cli: &cli };
-    let usage = || anyhow::anyhow!("usage: torqcli [--style juniper|cisco] [-c \"<command>; <command>…\"]");
-    let (mut script, mut style) = (None, None);
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "-c" if script.is_none() => script = Some(it.next().ok_or_else(usage)?.clone()),
-            "--style" if style.is_none() => style = Some(Style::parse(it.next().ok_or_else(usage)?).ok_or_else(usage)?),
-            _ => return Err(usage()),
-        }
-    }
     let who = me()?;
-    // Scripts speak Juniper unless told otherwise (a script must not change meaning with a setting);
-    // the interactive shell speaks your style (users <you> cli style, else system cli style).
-    // Piped input is a script too: the same rule (and it stops at its first error, below).
+    // Scripts and commands speak Juniper unless told otherwise (they must not change meaning with a
+    // setting); the interactive shell speaks your style (users <you> cli style, else system cli
+    // style). Piped input is a script too: the same rule (and it stops at its first error, below).
     let piped = !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
-    let style = match (style, &script) {
+    let style = match (style, &run) {
         (Some(s), _) => s,
-        (None, Some(_)) => Style::Juniper,
-        (None, None) if piped => Style::Juniper,
-        (None, None) => configured_style(&who),
+        (None, Invocation::Script(_) | Invocation::Command(_)) => Style::Juniper,
+        (None, Invocation::Interactive) if piped => Style::Juniper,
+        (None, Invocation::Interactive) => configured_style(&who),
     };
-    let saved = if script.is_some() { None } else { Some(Candidate::default_path()?) };
+    // Only the interactive shell keeps a candidate between runs; a script's is its own.
+    let saved = if run == Invocation::Interactive { Some(Candidate::default_path()?) } else { None };
     let mut s = Session::new(schema, Repo::new(&cli.repo), saved, &machine, &who, style);
-    match script {
-        Some(script) => {
+    let fail = |line: &str, e: anyhow::Error| {
+        eprintln!("error: {}: {}", history::one_line(line, 80), history::one_line(&format!("{e:#}"), 300));
+        Ok(1)
+    };
+    match run {
+        Invocation::Script(script) => {
             for line in script_lines(&script) {
-                let line = line.as_str();
-                match s.exec(line) {
+                match s.exec(&line) {
                     Ok(out) => print_clean(&out),
-                    Err(e) => {
-                        eprintln!("error: {}: {}", history::one_line(line, 80), history::one_line(&format!("{e:#}"), 300));
-                        return Ok(1);
-                    }
+                    Err(e) => return fail(&line, e),
                 }
             }
             Ok(0)
         }
-        None => interactive(&mut s),
+        Invocation::Command(w) => {
+            let shown = w.iter().map(|x| crate::syntax::quote(x)).collect::<Vec<_>>().join(" ");
+            match s.exec_words(&w) {
+                Ok(out) => {
+                    print_clean(&out);
+                    Ok(0)
+                }
+                Err(e) => fail(&shown, e),
+            }
+        }
+        Invocation::Interactive => interactive(&mut s),
     }
 }
 
@@ -432,7 +497,8 @@ mod editor {
 
     /// The complete words before the cursor, and the one being typed. None inside a quoted string.
     fn at_cursor(before: &str) -> Option<(Vec<String>, String)> {
-        if before.matches('"').count() % 2 == 1 {
+        // Inside an open quote (or a line that does not split): `?` is a character.
+        if words(before).is_err() {
             return None;
         }
         let partial = if before.ends_with(char::is_whitespace) { "" } else { before.rsplit(char::is_whitespace).next().unwrap_or("") };
@@ -483,6 +549,7 @@ mod editor {
         assert_eq!(at_cursor(""), Some((vec![], "".into())));
         assert_eq!(at_cursor("commit comment \"why"), None, "inside quotes: `?` is a character");
         assert_eq!(at_cursor("commit comment \"why\" "), Some((vec!["commit".into(), "comment".into(), "why".into()], "".into())));
+        assert_eq!(at_cursor("show | grep 'a b"), None, "inside single quotes too");
     }
 
     pub fn run(s: &mut Session, user: &str, host: &str) -> Result<i32> {

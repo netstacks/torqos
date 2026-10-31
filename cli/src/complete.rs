@@ -117,7 +117,37 @@ pub fn choices_at(schema: &Schema, at: &At, words: &[String], partial: &str) -> 
         }
         _ => choices_juniper(schema, at, words, partial),
     };
+    let all = with_filters(words, all);
     all.into_iter().filter(|c| c.is_placeholder() || c.word.starts_with(partial)).collect()
+}
+
+/// After a `|` in a `show`: the filters (filter.rs), which work on any show's output and, once one is
+/// used, are the only pipes left. Their own options are theirs (`grep --help`).
+fn with_filters(words: &[String], mut all: Vec<Choice>) -> Vec<Choice> {
+    // (`run show …` and `do show …` get theirs from the operational choices.)
+    if words.first().map(String::as_str) != Some("show") {
+        return all;
+    }
+    if words.get(1).map(String::as_str) == Some("packages") {
+        // A search prints as it goes: nothing follows its `|`.
+        return if words.iter().any(|x| x == "|") { vec![] } else { all };
+    }
+    let Some(bar) = words.iter().rposition(|x| x == "|") else { return all };
+    let is_filter = |x: &String| crate::filter::FILTERS.iter().any(|(f, _)| f == x);
+    let after_filter = words[..bar].windows(2).any(|p| p[0] == "|" && is_filter(&p[1]));
+    match words.get(bar + 1) {
+        None => {
+            if after_filter {
+                all.clear();
+            }
+            all.extend(table(crate::filter::FILTERS));
+        }
+        Some(f) if is_filter(f) => all.clear(),
+        // After a filter only filters may follow (`| display` there is refused).
+        Some(_) if after_filter => all.clear(),
+        Some(_) => {}
+    }
+    all
 }
 
 fn commit_choices(rest: &[String]) -> Vec<Choice> {
@@ -222,7 +252,7 @@ fn tree_choices(schema: &Schema, rest: &[String], cmd: &str) -> Vec<Choice> {
         None | Some(Kind::Container) => {
             let mut c: Vec<Choice> = schema.children(&t.node).into_iter().map(|(w, k)| Choice::new(&w, &schema.nodes[&k].help)).collect();
             if cmd == "show" {
-                c.push(Choice::new("|", "Pipe the output (compare, display set)"));
+                c.push(Choice::new("|", "Pipe the output (compare, display set, grep, wc, …)"));
             }
             c
         }
@@ -320,9 +350,28 @@ mod tests {
     fn pipes_after_show() {
         let s = schema();
         assert!(words_of(&choices(&s, Mode::Configuration, &w("show"), "")).contains(&"|"));
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show |"), "")), ["compare", "display"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show |"), "")), ["compare", "display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show system | display"), "")), ["set"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "")), ["display"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "")), ["display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"]);
+    }
+
+    #[test]
+    fn filters_after_any_show() {
+        let s = schema();
+        let filters = ["cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"];
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system commit |"), "")), filters);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run show system alarms |"), "")), filters);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | grep x |"), "")), filters, "after a filter, only filters");
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "g")), ["grep"]);
+        assert!(choices(&s, Mode::Operational, &w("show configuration | grep"), "").is_empty(), "grep's options are grep's");
+        assert!(choices(&s, Mode::Configuration, &w("show | grep x | display"), "").is_empty(), "after a filter, no display");
+        assert!(choices(&s, Mode::Operational, &w("show packages available x |"), "").is_empty(), "a search cannot be filtered");
+        assert!(choices(&s, Mode::Configuration, &w("set system |"), "").is_empty(), "only a show");
+        let cisco = At { mode: Mode::Configuration, style: Style::Cisco, edit: vec![] };
+        assert_eq!(words_of(&choices_at(&s, &cisco, &w("show configuration |"), "")), filters);
+        let mut with_display = vec!["display"];
+        with_display.extend(filters);
+        assert_eq!(words_of(&choices_at(&s, &cisco, &w("do show running-config |"), "")), with_display);
     }
 
     #[test]

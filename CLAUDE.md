@@ -124,8 +124,10 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
   time-zone / packages / cli style`, `services`, `users <name> packages / cli style`) from
   `/etc/torq/schema.json`. On 2026-10-30 the VM was cut over to TorqOS (fresh ledger); there the
   first real `torqcli` commit, a confirmed commit, and an expired one rolling back all worked.
-- Next: the remaining shell bits (pipes, `torqcli <command>`), retiring `torq pkg/service/undo`,
-  then M2 (`docs/ROADMAP.md`). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
+- **Filters and `torqcli <command>` (4b, 4c; ADR-017):** `show … | grep -i x | wc -l` runs the real
+  coreutils/grep, sandboxed in bubblewrap (no files, network, environment or inherited descriptors);
+  `torqcli show system alarms` runs one command. Covered in `tests/trust-loop.nix`.
+- Next: `| display detail` / `| display diff`, retiring `torq pkg/service/undo`, then M2 (`docs/ROADMAP.md`). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
 ### You are probably running inside the dev VM
 - Host `torq-utm`, user **`viper`** (the template no longer names a user; `torq.user` in

@@ -66,9 +66,9 @@
 
       # ── Dev shell (works on the Mac too) ─────────────────────────────────────
       devShells = forSystems allSystems (pkgs: {
-        default = pkgs.mkShell {
+        default = pkgs.mkShell ({
           packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer git nixfmt-rfc-style ];
-        };
+        } // self.packages.${pkgs.stdenv.hostPlatform.system}.torq.filterEnv);
       });
     };
 }

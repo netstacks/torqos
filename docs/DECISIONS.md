@@ -190,3 +190,28 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   single-change undo to `revert`. Rollback is always a new change forward, so it cannot conflict.
   An automatic rollback of an unconfirmed commit is consented to in advance by `commit confirmed`
   and ledgered; it is not the silent drift correction ADR-012 rules out.
+
+## ADR-017 — Output filters are the real Linux tools, not our own
+- **Status:** accepted (2026-10-31)
+- **Context:** Junos filters `show` output with `| match`/`| except`/`| count`, Cisco with `| include`/
+  `| exclude`. TorqOS users are Linux users; the owner's call: "it should just work like any Linux
+  CLI filtering", not a reimplementation of grep.
+- **Decision:** After a `show` (and its own `| compare` / `| display set`), `| <tool> <args>` runs a
+  real tool from a short allow-list of text filters (`cut grep head sort tail tr uniq wc`) with the
+  output on its standard input and the arguments exactly as typed; filters chain left to right and
+  only filters may follow a filter. A pipe filters output and must not be a way to run programs or
+  touch files: torqcli is what scripts, and later the agent, are given, and the tools' own options
+  can do both (`sort --compress-program=`, `sort -o`, `head ~/.ssh/…`; found in review). So each filter
+  runs in bubblewrap — no network, no home, nothing but the read-only Nix store and an empty `/tmp`,
+  an environment of the locale only — from a coreutils + gnugrep folder fixed at build time
+  (`TORQ_FILTER_BIN`, `TORQ_BWRAP`, cli/package.nix), never from PATH; no descriptor torqcli was
+  given reaches inside (close-on-exec past stderr; a second review's escape); 30 s, 64 MiB of output,
+  a 64 MiB `/tmp` and at most 16 filters a line. A build without the sandbox (a Mac) runs no filter.
+  Whatever a tool's option starts (`sort --compress-program=`) runs inside the same sandbox. The same words in both styles. The shell's word splitting follows a shell's: `'single'` quotes are literal,
+  inside `"double"` quotes only `\"` and `\\` escape, and a quoted lone `"|"` is refused.
+- **Consequences:** Every option works as in a terminal (`grep -Ei`, `sort -k2`, `uniq -c`) on the
+  output, and the tools' own errors are shown; options that name files find none (`head /etc/passwd`:
+  no such file). Unprivileged user namespaces must be available (NixOS: on by default). No
+  `| no-more`: there is no pager. Results follow the tools, so `sort` order follows the locale. A
+  `grep` that matches nothing is an empty answer, not an error (a script cannot tell them apart).
+  An apostrophe now opens a quote, as in a shell: text with one goes in "double quotes".
