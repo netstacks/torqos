@@ -119,13 +119,15 @@ reviewed steps, broker first. Next: M2, the agent (`docs/ROADMAP.md`).
   another tool on this VM; never build `/etc/nixos` or any config other than the broker's.
 - **Way of working:** small steps; an independent reviewer agent behind every meaningful change;
   mutation-check new guards (break them, see a test fail); verify in the Nix sandbox and VM test.
-- Next: M1.5, CLI polish (`docs/CLI-DESIGN.md`, ADR-014), then M2 (`docs/ROADMAP.md`). Open
-  issues and VM quirks: `docs/KNOWN-GAPS.md`.
+- **M1.5 `torqcli` (ADR-016) is built and live:** both syntaxes, candidate, `commit check`,
+  `commit confirmed` (timer, reboot rollback), `rollback <n>`, the tree (`system host-name /
+  time-zone / packages / cli style`, `services`, `users <name> packages / cli style`) from
+  `/etc/torq/schema.json`. On 2026-10-30 the VM was cut over to TorqOS (fresh ledger); there the
+  first real `torqcli` commit, a confirmed commit, and an expired one rolling back all worked.
+- Next: the remaining shell bits (pipes, `torqcli <command>`), retiring `torq pkg/service/undo`,
+  then M2 (`docs/ROADMAP.md`). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
 
 ### You are probably running inside the dev VM
-> Until the VM cutover to the new name is done (see ADR-015), the live machine still uses the old
-> paths: `~/kestrel`, `/var/lib/kestrel/{config,state}`, host `kestrel-utm`, `kestrel.*` options in
-> its config repo, and the old `kestrel`/`kestrel-broker` commands. This note goes away then.
 - Host `torq-utm`, user **`viper`** (the template no longer names a user; `torq.user` in
   the config repo's `system.nix` is the one place). `torq.dev.enable = true` there: passwordless sudo, you have root (ADR-009).
 - `~/torq` = this repo (working copy; push to `github.com/netstacks/torqos`, branch `main`).

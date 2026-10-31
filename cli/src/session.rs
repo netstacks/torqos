@@ -495,7 +495,10 @@ impl<'a> Session<'a> {
         let seq = self.machine.commit(&diff, &base, tier, &reason, confirm)?;
         self.discard()?;
         Ok(match confirm {
-            Some(m) => format!("commit confirmed will be automatically rolled back in {m} minutes unless confirmed (change #{seq})\ncommit complete\n"),
+            Some(m) => format!(
+                "commit confirmed will be automatically rolled back in {m} minute{} unless confirmed (change #{seq})\ncommit complete\n",
+                if m == 1 { "" } else { "s" }
+            ),
             None => format!("commit complete (change #{seq})\n"),
         })
     }
