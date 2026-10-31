@@ -29,6 +29,9 @@ pub trait Machine {
     fn search(&self, terms: &[String]) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
     fn repair(&self) -> Result<String>;
+    /// `request system update [all]`: the `flake.lock` that `nix flake update` (of `torq`, or with
+    /// `all` every input) makes from the configuration at commit `base`.
+    fn update_lock(&self, base: &str, all: bool) -> Result<String>;
 }
 
 
@@ -378,13 +381,6 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// The raw change from `base` (tree files) to `cfg`, as the broker records it (`| display diff`).
-    fn raw_diff(&self, base: &std::collections::BTreeMap<String, Vec<u8>>, cfg: &Config) -> Result<String> {
-        let changes = candidate::changes(&self.schema, base, cfg)?;
-        let scratch = tempfile::tempdir()?;
-        candidate::unified_diff(scratch.path(), &changes)
-    }
-
     /// `| display set`, of the whole configuration or the part below `path`.
     fn display_set(&self, cfg: &Config, path: &[String]) -> Result<String> {
         let all = self.schema.display_set(cfg);
@@ -478,32 +474,78 @@ impl<'a> Session<'a> {
     fn request(&mut self, w: &[String]) -> Result<String> {
         match w.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["system", "repair"] => self.machine.repair(),
-            ["system", "update", ..] | ["system", "software", "rollback", ..] => bail!(
-                "not in torqcli yet: the software (flake.lock) is not part of the candidate — use `torq update` for now"
-            ),
-            _ => bail!("request: one of: system repair"),
+            ["system", "update"] => self.update(false),
+            ["system", "update", "all"] => self.update(true),
+            ["system", "software", "rollback", n] => self.software_rollback(syntax::number(n)?),
+            _ => bail!("request: one of: system repair, system update [all], system software rollback <n>"),
         }
+    }
+
+    /// `request system update [all]`: the newest TorqOS (with `all`, every input) into the candidate.
+    fn update(&mut self, all: bool) -> Result<String> {
+        let base = self.candidate()?.base.clone();
+        let new = self.machine.update_lock(&base, all)?;
+        self.load_software(new, "This machine has the newest software: nothing to load.\n")
+    }
+
+    /// `request system software rollback <n>`: commit n's software into the candidate.
+    fn software_rollback(&mut self, n: usize) -> Result<String> {
+        let id = self.commit_at(n)?;
+        let lock = self.repo.file_at(&id, "flake.lock")?.with_context(|| format!("configuration {n} has no flake.lock"))?;
+        let lock = String::from_utf8(lock).with_context(|| format!("configuration {n}'s flake.lock is not text"))?;
+        self.load_software(lock, &format!("Configuration {n} has this machine's software already: nothing to load.\n"))
+    }
+
+    /// Put `lock` in the candidate as its software and say what it changes (or `same`, if nothing).
+    fn load_software(&mut self, lock: String, same: &str) -> Result<String> {
+        if serde_json::from_str::<serde_json::Value>(&lock).map_or(true, |v| !v.is_object()) {
+            bail!("that flake.lock is not JSON; nothing loaded");
+        }
+        let head = self.repo.head()?;
+        let base = self.candidate()?.base.clone();
+        let base_lock = self.repo.file_at(&base, "flake.lock")?;
+        let shown = software_compare(base_lock.as_deref(), &Some(lock.clone()));
+        let c = self.candidate()?;
+        let had = c.lock.is_some();
+        c.lock = (!shown.is_empty()).then_some(lock);
+        self.save()?;
+        let mut out = match (shown.is_empty(), had) {
+            (true, false) => same.to_string(),
+            (true, true) => format!("{}The software loaded into the candidate before is dropped.\n", same.replace(": nothing to load", "")),
+            (false, _) => format!("{shown}Loaded into the candidate: `commit` (in configuration mode) installs it.\n"),
+        };
+        if base != head {
+            out.push_str(&format!(
+                "The configuration has changed since your candidate was started ({} → {}): `commit` will be \
+                 refused; `rollback 0` starts over (without this software), then load it again.\n",
+                short(&base),
+                short(&head)
+            ));
+        }
+        Ok(out)
     }
 
     /// What the candidate changes from its base (`| display diff`: as the raw diff of the files).
     fn compare(&mut self, display: Option<Display>) -> Result<String> {
-        let s = self.schema.clone();
-        let base = self.candidate()?.base.clone();
-        let base_files = self.repo.tree_files(&s, &base)?;
-        let cfg = self.candidate()?.config.clone();
+        let a = self.against()?;
         if display == Some(Display::Diff) {
-            return self.raw_diff(&base_files, &cfg);
+            let scratch = tempfile::tempdir()?;
+            return candidate::unified_diff(scratch.path(), &a.changes(&self.schema)?);
         }
-        let before = s.load(base_files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        Ok(s.compare(&before, &cfg))
+        a.compare(&self.schema)
     }
 
     fn rollback(&mut self, n: usize) -> Result<String> {
         let history = self.repo.history(n + 1)?;
         let commit = history.get(n).with_context(|| format!("rollback {n}: there are only {} configurations", history.len()))?;
-        self.candidate = Some(Candidate::from_repo(&self.repo, &self.schema, &commit.id)?);
+        // A configuration, not software: what the candidate had loaded (`request system update`) stays —
+        // except for `rollback 0`, which starts over.
+        let kept = if n == 0 { None } else { self.candidate()?.lock.clone() };
+        let mut c = Candidate::from_repo(&self.repo, &self.schema, &commit.id)?;
+        c.lock = kept.clone();
+        self.candidate = Some(c);
         self.save()?;
-        Ok("load complete\n".into())
+        Ok(if kept.is_some() { "load complete (the software loaded into the candidate is kept)\n".into() } else { "load complete\n".into() })
     }
 
     /// Whether the candidate differs from its base.
@@ -511,21 +553,27 @@ impl<'a> Session<'a> {
         if self.candidate.is_none() && self.saved.as_ref().is_none_or(|p| !p.exists()) {
             return Ok(false);
         }
-        let s = self.schema.clone();
-        let base = self.candidate()?.base.clone();
-        let base_files = self.repo.tree_files(&s, &base)?;
-        Ok(!candidate::changes(&s, &base_files, &self.candidate()?.config)?.is_empty())
+        let a = self.against()?;
+        Ok(!a.changes(&self.schema)?.is_empty())
+    }
+
+    /// The candidate and what it is based on, read once.
+    fn against(&mut self) -> Result<Against> {
+        let (base, config, new_lock) = {
+            let c = self.candidate()?;
+            (c.base.clone(), c.config.clone(), c.lock.clone())
+        };
+        let files = self.repo.tree_files(&self.schema, &base)?;
+        let lock = self.repo.file_at(&base, "flake.lock")?;
+        Ok(Against { base, files, lock, config, new_lock })
     }
 
     fn commit(&mut self, o: CommitOptions) -> Result<String> {
         let s = self.schema.clone();
         let head = self.repo.head()?;
-        let (base, config) = {
-            let c = self.candidate()?;
-            (c.base.clone(), c.config.clone())
-        };
-        let base_files = self.repo.tree_files(&s, &base)?;
-        let changes = candidate::changes(&s, &base_files, &config)?;
+        let a = self.against()?;
+        let base = a.base.clone();
+        let changes = a.changes(&s)?;
         let files: Vec<(String, Option<String>)> = changes.iter().map(|(p, _, n)| (p.clone(), n.clone())).collect();
         if o.check {
             if base != head {
@@ -568,8 +616,7 @@ impl<'a> Session<'a> {
         // A person approves at a terminal: a system change, and a change to someone else's folder.
         let others = self.others_folders(&changes);
         self.machine.check(&base, &files)?;
-        let base_config = s.load(base_files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        let compare = s.compare(&base_config, &config);
+        let compare = a.compare(&s)?;
         let shown: String = compare.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
         let why = match (tier, others.is_empty()) {
             ("system", _) => Some("This changes the system (all users).".to_string()),
@@ -628,9 +675,68 @@ fn commits_diff(old: &std::collections::BTreeMap<String, Vec<u8>>, new: &std::co
     candidate::unified_diff_bytes(scratch.path(), &changes)
 }
 
+/// The candidate and its base, read once: the base's tree files and `flake.lock`, the candidate's.
+struct Against {
+    base: String,
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+    lock: Option<Vec<u8>>,
+    config: Config,
+    new_lock: Option<String>,
+}
+
+impl Against {
+    /// What the candidate changes: the tree's files, then the software.
+    fn changes(&self, s: &Schema) -> Result<Vec<candidate::Change<'_>>> {
+        let mut c = candidate::changes(s, &self.files, &self.config)?;
+        c.extend(candidate::lock_change(self.lock.as_deref(), &self.new_lock));
+        Ok(c)
+    }
+
+    /// `show | compare`: the tree's changes, then the software's.
+    fn compare(&self, s: &Schema) -> Result<String> {
+        let before = s.load(self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
+        let mut out = s.compare(&before, &self.config);
+        out.push_str(&software_compare(self.lock.as_deref(), &self.new_lock));
+        Ok(out)
+    }
+}
+
+/// The software a candidate changes, as `show | compare` shows it: each input moved, and a
+/// downgrade said so.
+fn software_compare(old: Option<&[u8]>, new: &Option<String>) -> String {
+    let Some(new) = new else { return String::new() };
+    let old = old.map(|o| String::from_utf8_lossy(o).into_owned()).unwrap_or_default();
+    if old == *new {
+        return String::new();
+    }
+    let mut out = String::from("[edit system software]\n");
+    let moves = crate::pkg::lock_moves(&old, new);
+    if moves.is_empty() {
+        out.push_str("    flake.lock changes (`| display diff` shows how)\n");
+    }
+    let mut older = false;
+    for m in &moves {
+        // Names come from upstream flakes: one line each, cleaned, so none can draw a line of its own.
+        let name = crate::history::one_line(&m.name, 40);
+        let (before, after) = crate::pkg::move_dates(m);
+        if m.was {
+            out.push_str(&format!("-   {name} {before};\n"));
+        }
+        if m.is {
+            out.push_str(&format!("+   {name} {after};\n"));
+        }
+        // Older to the second; an input whose date is unknown on either side says nothing.
+        older |= matches!((m.before, m.after), (Some(b), Some(a)) if a < b);
+    }
+    if older {
+        out.push_str("## older software than now: a downgrade\n");
+    }
+    out
+}
+
 /// A ledger reason from the comparison: its `+`/`-` lines, short.
 fn summary(compare: &str) -> String {
-    let lines: Vec<&str> = compare.lines().filter(|l| !l.starts_with('[')).map(|l| l.trim()).collect();
+    let lines: Vec<&str> = compare.lines().filter(|l| !l.starts_with('[') && !l.starts_with('#')).map(|l| l.trim()).collect();
     let s = lines.join(" ");
     if s.chars().count() > 120 { format!("{}…", s.chars().take(119).collect::<String>()) } else { s }
 }
@@ -656,6 +762,8 @@ mod tests {
         asked: RefCell<Vec<String>>,
         /// The broker refuses the commit.
         refuse: bool,
+        /// The bases `request system update` was asked about.
+        bases: RefCell<Vec<String>>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<()> {
@@ -688,6 +796,10 @@ mod tests {
         }
         fn repair(&self) -> Result<String> {
             Ok("repaired\n".into())
+        }
+        fn update_lock(&self, base: &str, all: bool) -> Result<String> {
+            self.bases.borrow_mut().push(base.into());
+            Ok(lock(if all { NEWER_ALL } else { NEWER }))
         }
     }
 
@@ -733,6 +845,158 @@ mod tests {
         assert!(words("grep 'open").is_err());
         let e = format!("{:#}", words("commit comment it's fine").unwrap_err());
         assert!(e.contains("put the text in \"double quotes\""), "an apostrophe opens a quote, as in a shell: {e}");
+    }
+
+    /// A `flake.lock` whose `torq` input was last changed at `t` (seconds).
+    fn lock(t: u64) -> String {
+        format!(r#"{{"nodes":{{"root":{{}},"torq":{{"locked":{{"lastModified":{t},"narHash":"h{t}"}}}}}},"version":7}}"#)
+    }
+    /// The software the fake machine finds newer (`request system update`), and with `all`.
+    const NEWER: u64 = 1_793_400_000;
+    const NEWER_ALL: u64 = 1_793_500_000;
+    /// The test repo, then two commits of software: `OLD` (rollback 1), then `NOW` (rollback 0).
+    const OLD: u64 = 1_790_000_000;
+    const NOW: u64 = 1_793_000_000;
+    fn repo_with_software() -> tempfile::TempDir {
+        let d = repo();
+        sh(d.path(), &format!("printf '%s' '{}' > flake.lock && git add -A && git commit -qm old-software", lock(OLD)));
+        sh(d.path(), &format!("printf '%s' '{}' > flake.lock && git commit -qam software", lock(NOW)));
+        d
+    }
+
+    #[test]
+    fn request_system_update_loads_the_software_into_the_candidate() {
+        let (d, m) = (repo_with_software(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("request system update").unwrap();
+        let (now, newer) = (crate::pkg::ymd(NOW), crate::pkg::ymd(NEWER));
+        assert_eq!(
+            out,
+            format!("[edit system software]\n-   torq {now};\n+   torq {newer};\nLoaded into the candidate: `commit` (in configuration mode) installs it.\n")
+        );
+        s.exec("configure").unwrap();
+        assert!(s.exec("show | compare").unwrap().starts_with(&format!("[edit system software]\n-   torq {now};")), "nothing else changed");
+        let raw = s.exec("show | compare | display diff").unwrap();
+        assert!(raw.contains("+++ b/flake.lock") && raw.contains(&format!("h{NEWER}")), "{raw}");
+        s.exec("commit check").unwrap();
+        assert_eq!(m.checks.borrow().last().unwrap(), &vec![("flake.lock".to_string(), Some(lock(NEWER)))], "checked with the new software");
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
+        let (diff, _, tier, reason, _) = m.commits.borrow()[0].clone();
+        assert_eq!(diff, raw, "commit proposes what | display diff showed");
+        assert_eq!(tier, "system", "software is the system's");
+        assert!(reason.contains(&format!("+   torq {newer};")), "{reason}");
+        assert!(m.asked.borrow()[0].contains("[edit system software]"), "a person sees it before it is committed");
+        // `all`: every input.
+        let out = s.exec("run request system update all").unwrap();
+        assert!(out.contains(&format!("+   torq {};", crate::pkg::ymd(NEWER_ALL))) && out.ends_with("Loaded into the candidate: `commit` (in configuration mode) installs it.\n"), "{out}");
+    }
+
+    #[test]
+    fn up_to_date_software_loads_nothing() {
+        let (d, m) = (repo(), Fake::default());
+        sh(d.path(), &format!("printf '%s' '{}' > flake.lock && git add -A && git commit -qm newest", lock(NEWER)));
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("request system update").unwrap(), "This machine has the newest software: nothing to load.\n");
+        assert_eq!(s.exec("configure").unwrap(), "Entering configuration mode\n");
+        assert_eq!(s.exec("show | compare").unwrap(), "");
+    }
+
+    #[test]
+    fn software_rollback_loads_an_earlier_commits_software_as_a_downgrade() {
+        let (d, m) = (repo_with_software(), Fake::default());
+        let saved = d.path().join("saved.json");
+        let mut s = session(d.path(), Some(saved.clone()), &m);
+        let out = s.exec("request system software rollback 1").unwrap();
+        let (now, old) = (crate::pkg::ymd(NOW), crate::pkg::ymd(OLD));
+        assert!(out.starts_with(&format!("[edit system software]\n-   torq {now};\n+   torq {old};\n## older software than now: a downgrade\n")), "{out}");
+        assert_eq!(
+            s.exec("request system software rollback 0").unwrap(),
+            "Configuration 0 has this machine's software already.\nThe software loaded into the candidate before is dropped.\n",
+            "going back to the base's software drops the downgrade, and says so"
+        );
+        let e = format!("{:#}", s.exec("request system software rollback 2").unwrap_err());
+        assert!(e.contains("configuration 2 has no flake.lock"), "{e}");
+        // Software that is not a flake.lock is never loaded.
+        let (d2, m2) = (repo_with_software(), Fake::default());
+        sh(d2.path(), "printf 'not json' > flake.lock && git commit -qam broken");
+        let mut s2 = session(d2.path(), None, &m2);
+        let e = format!("{:#}", s2.exec("request system software rollback 0").unwrap_err());
+        assert!(e.contains("not JSON; nothing loaded"), "{e}");
+        // Loading the same software again leaves nothing to commit; another session sees what is kept.
+        s.exec("request system software rollback 1").unwrap();
+        let mut again = session(d.path(), Some(saved.clone()), &m);
+        again.exec("configure").unwrap();
+        assert!(again.exec("show | compare").unwrap().contains(&format!("+   torq {old};")), "the candidate keeps its software");
+        assert_eq!(again.exec("exit").unwrap(), "The configuration has been changed but not committed (it is kept: `configure` returns to it).\n");
+        again.exec("configure").unwrap();
+        assert_eq!(again.exec("rollback 0").unwrap(), "load complete\n");
+        assert_eq!(again.exec("show | compare").unwrap(), "", "rollback 0 discards the software too");
+        // `rollback <n>` loads a configuration, never its software.
+        again.exec("rollback 1").unwrap();
+        assert!(!again.exec("show | compare").unwrap().contains("software"), "rollback n leaves the software alone");
+    }
+
+    #[test]
+    fn the_software_is_loaded_against_the_candidates_base() {
+        let (d, m) = (repo_with_software(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        s.exec("configure").unwrap();
+        s.exec("set system time-zone UTC").unwrap();
+        let base = s.repo.head().unwrap();
+        sh(d.path(), "printf '{ \"host-name\": \"other\" }\\n' > system/host.json && git commit -qam other");
+        let out = s.exec("run request system update").unwrap();
+        assert_eq!(m.bases.borrow().as_slice(), [base], "the candidate's base, not HEAD");
+        assert!(out.contains("has changed since your candidate was started") && out.contains("`rollback 0` starts over"), "{out}");
+    }
+
+    #[test]
+    fn rollback_n_keeps_the_loaded_software_rollback_0_drops_it() {
+        let (d, m) = (repo_with_software(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        s.exec("request system update").unwrap();
+        s.exec("configure").unwrap();
+        assert_eq!(s.exec("rollback 3").unwrap(), "load complete (the software loaded into the candidate is kept)\n");
+        let c = s.exec("show | compare").unwrap();
+        assert!(c.contains("host-name one;") && c.contains("[edit system software]"), "{c}");
+        assert_eq!(s.exec("rollback 0").unwrap(), "load complete\n");
+        assert_eq!(s.exec("show | compare").unwrap(), "");
+    }
+
+    #[test]
+    fn the_software_comparison_shows_every_move_safely() {
+        let node = |t: u64| format!(r#"{{"locked":{{"lastModified":{t},"narHash":"h{t}"}}}}"#);
+        let lock = |nodes: &[(&str, String)]| {
+            let n: Vec<String> = nodes.iter().map(|(k, v)| format!("{}:{v}", serde_json::to_string(k).unwrap())).collect();
+            format!(r#"{{"nodes":{{"root":{{}},{}}},"version":7}}"#, n.join(","))
+        };
+        let (a, b) = (lock(&[("torq", node(NOW)), ("extra", node(OLD))]), lock(&[("torq", node(NOW - 10))]));
+        let out = software_compare(Some(a.as_bytes()), &Some(b.clone()));
+        assert!(out.contains("-   extra ") && !out.contains("+   extra"), "a removed input shows: {out}");
+        assert!(out.contains("## older software than now: a downgrade"), "ten seconds older, in the same minute, is older: {out}");
+        let evil = lock(&[("torq", node(NOW)), ("x;\n+   fine", node(NEWER))]);
+        let out = software_compare(Some(b.as_bytes()), &Some(evil));
+        assert!(!out.lines().any(|l| l.starts_with("+   fine")), "a name draws no line of its own: {out}");
+    }
+
+    #[test]
+    fn loading_the_bases_software_says_it_drops_what_was_loaded() {
+        let (d, m) = (repo(), Fake::default());
+        sh(d.path(), &format!("printf '%s' '{}' > flake.lock && git add -A && git commit -qm old", lock(OLD)));
+        sh(d.path(), &format!("printf '%s' '{}' > flake.lock && git commit -qam newest", lock(NEWER)));
+        let mut s = session(d.path(), None, &m);
+        s.exec("request system software rollback 1").unwrap();
+        assert_eq!(s.exec("request system update").unwrap(), "This machine has the newest software.\nThe software loaded into the candidate before is dropped.\n");
+        assert_eq!(s.exec("configure").unwrap(), "Entering configuration mode\n");
+        assert_eq!(s.exec("show | compare").unwrap(), "");
+    }
+
+    #[test]
+    fn a_linked_flake_lock_is_never_followed() {
+        let (d, m) = (repo(), Fake::default());
+        sh(d.path(), "printf '{}' > real.lock && ln -s real.lock flake.lock && git add -A && git commit -qm link");
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", s.exec("request system software rollback 0").unwrap_err());
+        assert!(e.contains("flake.lock at") && e.contains("is not a plain file"), "{e}");
     }
 
     #[test]
@@ -1103,7 +1367,10 @@ mod tests {
         assert_eq!(s.exec("show system alarms").unwrap(), "all well\n");
         assert_eq!(s.exec("show packages available ripgrep").unwrap(), "searched ripgrep\n");
         assert_eq!(s.exec("request system repair").unwrap(), "repaired\n");
-        assert!(format!("{:#}", s.exec("request system update").unwrap_err()).contains("use `torq update`"));
+        let e = format!("{:#}", s.exec("request system software rollback 0").unwrap_err());
+        assert!(e.contains("configuration 0 has no flake.lock"), "{e}");
+        let out = s.exec("request system update").unwrap();
+        assert!(out.contains("+   torq ") && !out.contains("-   torq") && !out.contains("downgrade"), "a repo without a flake.lock: torq comes, nothing goes, no downgrade claimed: {out}");
         assert_eq!(s.exec("config").unwrap().lines().next(), Some("Entering configuration mode"));
     }
 

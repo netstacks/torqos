@@ -220,9 +220,13 @@ line by line.
 
 Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 
-As built (3e): all of the above except `request system update` and `request system software
-rollback` (they change `flake.lock`, which the candidate does not hold yet — `torq update` does it
-for now) and `switch cli` (with the Cisco syntax). `show system commit` lists the config repo's
+As built (3e, 4a, 4e): all of the above. The candidate holds the software too (4e): `request system
+update [all]` runs `nix flake update` on the commit the candidate is based on and loads the new
+`flake.lock`; `request system software rollback <n>` loads commit <n>'s; `show | compare` shows it as
+`[edit system software]` (each input's date, a downgrade said so), `| display diff` as the raw
+`flake.lock` diff, and `commit` (system tier: it asks) installs it. `rollback <n>` loads a configuration and keeps the
+software loaded into the candidate (and says so); `rollback 0` starts over without it. Loading onto a
+candidate whose base is no longer the active configuration warns that `commit` will be refused. `show system commit` lists the config repo's
 history (KNOWN-GAPS 6k); `show packages available` is `nix search` on this machine's nixpkgs.
 
 ## How it is built

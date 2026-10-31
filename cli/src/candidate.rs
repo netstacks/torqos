@@ -136,6 +136,16 @@ impl Repo {
         Ok(files)
     }
 
+    /// One plain file of commit `rev` (None: not there), e.g. its `flake.lock`; a link or anything
+    /// else there is refused, never followed (its "content" would be where it points).
+    pub fn file_at(&self, rev: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        match self.listing(rev)?.into_iter().find(|(_, _, _, p)| p == path) {
+            Some((mode, kind, id, _)) if mode == "100644" && kind == "blob" => Ok(Some(self.git(&["cat-file", "blob", &id])?)),
+            Some((mode, ..)) => bail!("{path} at {rev} is not a plain file (git mode {mode})"),
+            None => Ok(None),
+        }
+    }
+
     /// Every file of commit `rev` as committed — the tree's, the Nix files, `flake.lock` (a link:
     /// its target) — for a raw diff between two commits.
     pub fn all_files(&self, rev: &str) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -154,6 +164,9 @@ impl Repo {
 pub struct Candidate {
     pub base: String,
     pub config: Config,
+    /// The software (`flake.lock`) the candidate installs, if it changes it (`request system update`,
+    /// `request system software rollback`); None: its base's.
+    pub lock: Option<String>,
 }
 
 impl Candidate {
@@ -164,7 +177,7 @@ impl Candidate {
         // HEAD read once: a commit landing in between must not mix two configurations.
         let files = repo.tree_files(schema, if rev == "HEAD" { &base } else { rev })?;
         let config = schema.load(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))?;
-        Ok(Candidate { base, config })
+        Ok(Candidate { base, config, lock: None })
     }
 
     /// Where a user keeps their candidate: their own state directory, never shared.
@@ -191,7 +204,9 @@ impl Candidate {
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         let v: serde_json::Value = serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))?;
-        if v["version"] != 1 {
+        // 2: with its software (`lock`); 1: written before it had any — read as none. An older
+        // torqcli refuses a 2 rather than silently drop the software.
+        if v["version"] != 1 && v["version"] != 2 {
             bail!("{}: not a candidate this torqcli reads; `rollback 0` starts a new one", path.display());
         }
         let base = v["base"].as_str().context("candidate without a base")?.to_string();
@@ -199,7 +214,12 @@ impl Candidate {
         let rendered: Vec<(String, String)> =
             files.iter().map(|(p, c)| Ok((p.clone(), c.as_str().context("candidate file")?.to_string()))).collect::<Result<_>>()?;
         let config = schema.load(rendered.iter().map(|(p, c)| (p.as_str(), c.as_bytes())))?;
-        Ok(Some(Candidate { base, config }))
+        let lock = match &v["lock"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(l) if serde_json::from_str::<serde_json::Value>(l).is_ok_and(|j| j.is_object()) => Some(l.clone()),
+            _ => bail!("{}: its software (flake.lock) is not JSON; `rollback 0` starts a new candidate", path.display()),
+        };
+        Ok(Some(Candidate { base, config, lock }))
     }
 
     /// Save it atomically, readable by its owner only, in a folder only its owner can write: anyone
@@ -209,7 +229,7 @@ impl Candidate {
         private_dir(dir)?;
         let files: serde_json::Map<String, serde_json::Value> =
             self.config.files.iter().map(|(p, d)| (p.clone(), d.render().into())).collect();
-        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 1, "base": self.base, "files": files }))?;
+        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 2, "base": self.base, "files": files, "lock": self.lock }))?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?; // created 0600
         tmp.write_all(&body)?;
         tmp.as_file().sync_all()?;
@@ -261,6 +281,15 @@ pub fn changes<'a>(schema: &Schema, base: &'a BTreeMap<String, Vec<u8>>, candida
 
 /// The changes as one unified diff for `torq-broker propose` (git apply reads it): new files from
 /// /dev/null, deleted ones to /dev/null.
+/// One file's change: its path, its bytes in the base (None: absent), its new content (None: deleted).
+pub type Change<'a> = (String, Option<&'a [u8]>, Option<String>);
+
+/// The candidate's software as a change to its base's `flake.lock`, if it is one.
+pub fn lock_change<'a>(base_lock: Option<&'a [u8]>, lock: &Option<String>) -> Option<Change<'a>> {
+    let new = lock.as_ref()?;
+    (base_lock != Some(new.as_bytes())).then(|| ("flake.lock".to_string(), base_lock, Some(new.clone())))
+}
+
 pub fn unified_diff(scratch: &Path, changes: &[(String, Option<&[u8]>, Option<String>)]) -> Result<String> {
     let bytes: Vec<RawChange> = changes.iter().map(|(p, o, n)| (p.clone(), *o, n.as_deref().map(str::as_bytes))).collect();
     unified_diff_bytes(scratch, &bytes)
@@ -367,12 +396,22 @@ mod tests {
         c.save(&path).unwrap();
         let mode = std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&path).unwrap().permissions()) & 0o777;
         assert_eq!(mode, 0o600);
-        assert_eq!(Candidate::load(&path, &s).unwrap(), Some(c));
+        assert_eq!(Candidate::load(&path, &s).unwrap(), Some(c.clone()));
         Candidate::discard(&path).unwrap();
         assert_eq!(Candidate::load(&path, &s).unwrap(), None);
         Candidate::discard(&path).unwrap(); // twice is fine
-        fs::write(&path, r#"{"version":2,"base":"x","files":{}}"#).unwrap();
+        fs::write(&path, r#"{"version":3,"base":"x","files":{}}"#).unwrap();
         assert!(format!("{:#}", Candidate::load(&path, &s).unwrap_err()).contains("rollback 0"));
+        // Its software is kept too; a saved one without (an older torqcli's) has none; one that is
+        // not JSON is refused.
+        c.lock = Some(r#"{"nodes":{}}"#.into());
+        c.save(&path).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("\"version\": 2"), "an older torqcli refuses it, not drop its software");
+        assert_eq!(Candidate::load(&path, &s).unwrap(), Some(c.clone()));
+        fs::write(&path, format!(r#"{{"version":1,"base":"{}","files":{{}}}}"#, c.base)).unwrap();
+        assert_eq!(Candidate::load(&path, &s).unwrap().unwrap().lock, None);
+        fs::write(&path, format!(r#"{{"version":1,"base":"{}","files":{{}},"lock":"nope"}}"#, c.base)).unwrap();
+        assert!(format!("{:#}", Candidate::load(&path, &s).unwrap_err()).contains("is not JSON"));
     }
 
     /// The diff for the broker: only files whose data changed, from their exact text, and it
@@ -436,7 +475,7 @@ mod review_tests {
         use std::os::unix::fs::PermissionsExt;
         let state = tempfile::tempdir().unwrap();
         let dir = state.path().join("torq");
-        let c = Candidate { base: "x".into(), config: Config::default() };
+        let c = Candidate { base: "x".into(), config: Config::default(), lock: None };
         c.save(&dir.join("candidate.json")).unwrap();
         assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "created private");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();

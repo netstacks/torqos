@@ -219,30 +219,56 @@ pub fn key_options_note(line: &str) -> String {
     }
 }
 
-/// What an update moves, from the old and new flake.lock: each changed input with its date before
-/// and after ("torq", "2026-10-29", "2026-11-04"). Unknown dates are "?".
-pub fn lock_changes(old: &str, new: &str) -> Vec<(String, String, String)> {
+/// One input a `flake.lock` change moves: its name, and when it was last changed before and after
+/// (seconds; None: not there, or no date). Inputs added and removed are moves too.
+pub struct Move {
+    pub name: String,
+    pub before: Option<u64>,
+    pub after: Option<u64>,
+    /// In the lock before / after.
+    pub was: bool,
+    pub is: bool,
+}
+
+pub fn lock_moves(old: &str, new: &str) -> Vec<Move> {
     let parse = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap_or_default();
     let (old, new) = (parse(old), parse(new));
     let secs = |v: &serde_json::Value| v["locked"]["lastModified"].as_u64();
-    // Same day before and after (a path input during development): the time tells them apart.
-    let when = |v: Option<u64>, same_day: bool| match v {
+    let names = |v: &serde_json::Value| v["nodes"].as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+    let mut all: Vec<String> = names(&new).into_iter().chain(names(&old)).filter(|n| n != "root").collect();
+    all.sort();
+    all.dedup();
+    all.into_iter()
+        .filter_map(|name| {
+            let (a, b) = (&old["nodes"][&name], &new["nodes"][&name]);
+            (a["locked"] != b["locked"]).then(|| Move { before: secs(a), after: secs(b), was: !a.is_null(), is: !b.is_null(), name })
+        })
+        .collect()
+}
+
+/// A move's dates as shown: the day, and the time too when both fall on the same day (a path input
+/// during development); `?` without a date.
+pub fn move_dates(m: &Move) -> (String, String) {
+    let same_day = matches!((m.before, m.after), (Some(a), Some(b)) if ymd(a) == ymd(b));
+    let when = |v: Option<u64>| match v {
         Some(s) if same_day => format!("{} {:02}:{:02}", ymd(s), s % 86_400 / 3_600, s % 3_600 / 60),
         Some(s) => ymd(s),
         None => "?".into(),
     };
-    let mut out = Vec::new();
-    if let Some(nodes) = new["nodes"].as_object() {
-        for (name, node) in nodes {
-            let before = &old["nodes"][name];
-            if name != "root" && node["locked"] != before["locked"] {
-                let (a, b) = (secs(before), secs(node));
-                let same_day = matches!((a, b), (Some(a), Some(b)) if ymd(a) == ymd(b));
-                out.push((name.clone(), when(a, same_day), when(b, same_day)));
-            }
-        }
-    }
-    out
+    (when(m.before), when(m.after))
+}
+
+/// What an update moves, from the old and new flake.lock: each changed input still there, with its
+/// date before and after ("torq", "2026-10-29", "2026-11-04"). Unknown dates are "?".
+pub fn lock_changes(old: &str, new: &str) -> Vec<(String, String, String)> {
+    lock_moves(old, new)
+        .iter()
+        .filter(|m| m.is)
+        .map(|m| {
+            let (a, b) = move_dates(m);
+            (m.name.clone(), a, b)
+        })
+        .collect()
 }
 
 /// A Unix time as a UTC date, "2026-10-30" (civil-from-days, no time-zone database needed).

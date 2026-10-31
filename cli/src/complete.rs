@@ -187,9 +187,16 @@ fn choices_juniper(schema: &Schema, at: &At, words: &[String], partial: &str) ->
         (Mode::Operational, None) => table(OPERATIONAL),
         (Mode::Configuration, None) => table(CONFIGURATION),
         (Mode::Operational, Some("show")) => operational_show(at.style, &words[1..]),
-        (Mode::Operational, Some("request")) => match words.len() {
-            1 => table(&[("system", "This machine")]),
-            2 => table(&[("repair", "Return a machine changed outside TorqOS to its last configuration")]),
+        (Mode::Operational, Some("request")) => match words[1..].iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            [] => table(&[("system", "This machine")]),
+            ["system"] => table(&[
+                ("repair", "Return a machine changed outside TorqOS to its last configuration"),
+                ("software", "This machine's software"),
+                ("update", "Load the newest TorqOS into the candidate"),
+            ]),
+            ["system", "update"] => table(&[("all", "Every input, nixpkgs too")]),
+            ["system", "software"] => table(&[("rollback", "Load an earlier configuration's software into the candidate (a downgrade)")]),
+            ["system", "software", "rollback"] => vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")],
             _ => vec![],
         },
         (Mode::Configuration, Some("run")) => choices_at(schema, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial),
@@ -347,7 +354,7 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["compare"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["set", "show", "switch"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
@@ -408,6 +415,16 @@ mod tests {
         let cisco = At { mode: Mode::Configuration, style: Style::Cisco, edit: vec![] };
         assert_eq!(words_of(&choices_at(&s, &cisco, &w("show configuration |"), "")), with_display);
         assert_eq!(words_of(&choices_at(&s, &cisco, &w("do show running-config |"), "")), with_display);
+    }
+
+    #[test]
+    fn requests_for_the_software() {
+        let s = schema();
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["all"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system software"), "")), ["rollback"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run request system software rollback"), "")), ["<number>"]);
+        assert!(choices(&s, Mode::Operational, &w("request system update all"), "").is_empty());
     }
 
     #[test]

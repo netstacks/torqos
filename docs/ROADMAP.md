@@ -44,8 +44,8 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [x] `commit check` (evaluates the committed base; building is left to the commit); `commit
       [comment]`; `commit confirmed [<minutes>]`; system-tier commits (and others' folders) print
       the change and need a terminal. Not yet run end to end against a real broker: the cutover.
-- [ ] `rollback <n>` and `request system repair` are done; `request system software rollback <n>`
-      and `request system update [all]` wait for `flake.lock` in the candidate (`torq update` now).
+- [x] `rollback <n>`, `request system repair`; `request system update [all]` and `request system
+      software rollback <n>` load the software (`flake.lock`) into the candidate (4e).
 - [ ] Later: `commit at <time>`, `load override <file>`, `configure exclusive`.
 
 **First round** (done with the earlier command names; carried over):

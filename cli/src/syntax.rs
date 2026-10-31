@@ -124,7 +124,7 @@ pub enum Op {
 /// The highest rollback number (how far back `rollback` and `show system rollback` reach).
 pub const MAX_ROLLBACK: usize = 10_000;
 
-fn number(n: &str) -> Result<usize> {
+pub fn number(n: &str) -> Result<usize> {
     let n: usize = n.parse().with_context(|| format!("'{n}' is not a number"))?;
     if n > MAX_ROLLBACK {
         bail!("rollback numbers go up to {MAX_ROLLBACK}");

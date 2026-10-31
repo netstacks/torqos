@@ -193,6 +193,28 @@ impl Machine for Real<'_> {
         Ok(format!("repaired: the machine is back at its last ledgered configuration (#{})\n", v["seq"].as_u64().unwrap_or(0)))
     }
 
+    /// As `torq update` does it, but on the committed configuration the candidate is based on (as
+    /// the broker builds it), not the repo's working copy; nothing is proposed here.
+    fn update_lock(&self, base: &str, all: bool) -> Result<String> {
+        let scratch = scratch_dir()?;
+        let copy = scratch.path().join("config");
+        fs::create_dir(&copy)?;
+        Repo::new(&self.cli.repo).archive(base, &copy)?;
+        let out = {
+            let _p = run::Progress::start("Looking for updates");
+            let mut cmd = std::process::Command::new("nix");
+            cmd.args(["flake", "update", "--flake"]).arg(crate::flake_ref(&copy));
+            if !all {
+                cmd.arg("torq");
+            }
+            cmd.output().context("running nix flake update")?
+        };
+        if !out.status.success() {
+            bail!("couldn't look for updates: {}", history::one_line(&crate::last_error(&out.stderr), 200));
+        }
+        fs::read_to_string(copy.join("flake.lock")).context("reading the updated flake.lock")
+    }
+
     fn ask(&self, question: &str) -> bool {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             return false;
@@ -398,7 +420,8 @@ fn run_shell(args: &[String]) -> Result<i32> {
             Ok(0)
         }
         Invocation::Command(w) => {
-            let shown = w.iter().map(|x| crate::syntax::quote(x)).collect::<Vec<_>>().join(" ");
+            // A `|` word is the pipe: shown as one, not quoted.
+            let shown = w.iter().map(|x| if x == "|" { x.clone() } else { crate::syntax::quote(x) }).collect::<Vec<_>>().join(" ");
             match s.exec_words(&w) {
                 Ok(out) => {
                     print_clean(&out);
