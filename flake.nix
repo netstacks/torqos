@@ -25,8 +25,17 @@
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
       })) (forSystems linuxSystems (pkgs: {
         # The TorqOS image (docs/INSTALL.md): a qcow2 to download and boot; first-boot setup on its
-        # console. `nix build .#image`.
-        image = self.nixosConfigurations."image-${pkgs.stdenv.hostPlatform.system}".config.system.build.images.qemu-efi;
+        # console. `nix build .#image`. Compressed (a download a third the size or less; UTM and
+        # QEMU run it as it is): NixOS's image builder makes it whole, qemu-img compresses it.
+        image =
+          let
+            system = pkgs.stdenv.hostPlatform.system;
+            whole = self.nixosConfigurations."image-${system}".config.system.build.images.qemu-efi;
+          in
+          pkgs.runCommand "torqos-image-${system}" { nativeBuildInputs = [ pkgs.qemu-utils ]; } ''
+            mkdir $out
+            qemu-img convert -c -O qcow2 ${whole}/*.qcow2 $out/torqos-${system}.qcow2
+          '';
       }));
 
       # ── The distribution, as one NixOS module ────────────────────────────────

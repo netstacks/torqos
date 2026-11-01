@@ -31,6 +31,13 @@ boot.
 6. **The console shows a login prompt.** From here it is TorqOS as everywhere: `torqcli`, every
    change through the broker.
 
+## What is in the image
+
+Only what a TorqOS machine needs: Linux and systemd; Nix, git and nixpkgs's source, with which the
+machine builds itself from its configuration (ADR-019); TorqOS (torqcli, the broker, the shell); and
+a few tools (curl, htop, jq, nano). No NetworkManager (systemd-networkd, DHCP on wired interfaces),
+no manuals but man pages. About 1.5 GB installed; the download is compressed (about 730 MB).
+
 ## Where a machine's TorqOS comes from
 
 The config repo's `flake.nix` names TorqOS's source (`system software torq source`). An image's

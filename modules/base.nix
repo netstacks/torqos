@@ -54,15 +54,29 @@ in
     users.users = lib.mkIf (cfg.user != null) {
       ${cfg.user} = {
         isNormalUser = true;
-        extraGroups = [ "wheel" "networkmanager" "video" "audio" ];
+        extraGroups = [ "wheel" "video" "audio" ];
       };
     };
 
-    networking.networkmanager.enable = lib.mkDefault true;
+    # Thin (CLAUDE.md): the network as systemd does it, DHCP on every wired interface, rather than
+    # NetworkManager, which brings Wi-Fi and mobile-modem support a server-like machine does not use
+    # (~110 MB). The desktop, when it comes back, brings NetworkManager with it (desktop.nix).
+    networking.useNetworkd = lib.mkDefault true;
+    services.resolved.enable = lib.mkDefault true;
     time.timeZone = lib.mkDefault "America/New_York";
     i18n.defaultLocale = lib.mkDefault "en_US.UTF-8";
 
-    environment.systemPackages = with pkgs; [ git vim curl htop jq ];
+    # The tools a person at the shell expects. The editor is nano (NixOS's, small: `file edit` uses
+    # it unless $EDITOR says otherwise); anything else is a package to install.
+    environment.systemPackages = with pkgs; [ git curl htop jq ];
+    # Nothing NixOS adds unasked (perl, rsync, strace on the shell's path); no manuals but the man
+    # pages (the NixOS and Nix manuals, info, /share/doc: ~70 MB).
+    environment.defaultPackages = lib.mkDefault [ ];
+    documentation = {
+      nixos.enable = lib.mkDefault false;
+      info.enable = lib.mkDefault false;
+      doc.enable = lib.mkDefault false;
+    };
 
     system.stateVersion = lib.mkDefault "26.05";
   };

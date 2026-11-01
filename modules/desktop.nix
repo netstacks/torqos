@@ -13,6 +13,9 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # A desktop's network: Wi-Fi and the rest, with its own applet (base.nix uses systemd's).
+    networking.networkmanager.enable = true;
+    networking.useNetworkd = false;
     # Wayland only — no X server.
     services.xserver.enable = false;
 

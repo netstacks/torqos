@@ -3,7 +3,7 @@
 # owner's account and password, how to log in remotely — writes the config repo and hands it to the
 # broker. Once the repo exists this never runs again, and the machine it switches to is built from
 # the repo, where setup is off.
-{ config, lib, pkgs, ... }:
+{ config, lib, ... }:
 
 let
   cfg = config.torq.setup;
@@ -55,8 +55,8 @@ in
       "torq/image/flake.lock".text = lock;
       "torq/image/hardware-configuration.nix".source = ../hosts/image/hardware-configuration.nix;
     };
-    # Evaluating the new machine reads both sources: they are in the image, not fetched.
-    system.extraDependencies = [ src.outPath pkgs.path ];
+    # Evaluating the new machine reads both its sources, TorqOS and nixpkgs: in the image, not
+    # fetched (every system keeps them: lib.mkSystem, flake.nix).
 
     # Setup is the only way in: the image never takes over a repo by itself (`init` would ledger
     # files an interrupted setup left, unbuilt, as the machine's, with no account to log in to).

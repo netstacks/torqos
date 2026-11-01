@@ -27,7 +27,7 @@ in
     torq.unfree.packages = [ "claude-code" ];
     # tmux: run Claude Code inside it (`tmux new -A -s claude`) so a dropped SSH connection — the
     # Mac sleeping, UTM pausing, the network restarting during a switch — does not kill the session.
-    environment.systemPackages = with pkgs; [ claude-code gh tmux ];
+    environment.systemPackages = with pkgs; [ claude-code gh tmux vim ];
 
     # Claude Code ships a new build most days; nixpkgs lags it by weeks, and the upstream
     # native installer is useless here (its binary is a plain dynamically-linked ELF — it
