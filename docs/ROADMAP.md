@@ -44,7 +44,7 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       `| display detail` and `| display diff` (4d).
 - [x] Candidate per user with its base commit; `set` / `delete` on the tree; `rollback 0`.
 - [x] `show configuration`, `show | compare`, `show system commit`, `show system rollback <n>
-      [compare <m>]`, `show packages available`, `show services`, `show system alarms` (3e).
+      [compare <m>]`, `show packages` (was `show packages available`), `show services`, `show system alarms` (3e).
 - [x] `commit check` (evaluates the committed base; building is left to the commit); `commit
       [comment]`; `commit confirmed [<minutes>]`; system-tier commits (and others' folders) print
       the change and need a terminal. Not yet run end to end against a real broker: the cutover.
@@ -57,6 +57,12 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [x] The rest of the machine in the tree: hardware and boot as NixOS paths, a fixed `flake.nix`,
       `system software torq source` (S4a, S4b); `save` / `load override|merge|set` (S5)
       (CONFIG-IS-THE-DEVICE.md 5–6).
+- [x] ADR-025, torqcli on six single sources (2026-11-01): one grammar (`?`, Tab, abbreviations,
+      refusals, `help`), each setting's rules from NixOS, one output path (a pager, `| no-more`),
+      one message form, every command saying what it did, one place per setting (software and
+      services at NixOS's paths, the catalog folded in); `show version`, `show system uptime`,
+      `show interfaces`, `show system storage` (CLI-DESIGN.md). Acceptance still to do: the walk of
+      every `?` and fresh usability reviews.
 - [ ] Later: `commit at <time>`, `configure exclusive`.
 
 **First round** (done with the earlier command names; carried over):
@@ -106,8 +112,9 @@ first.
 - [ ] **VM tests:** the image boots on a blank VM, first-boot setup, a commit, a rollback, an update.
 - [ ] **Designs to settle first** (audits of 2026-10-31; KNOWN-GAPS 6r): where first-boot passwords
       live, since the config repo is readable by every user (a hash there can be cracked offline);
-      checksums or signatures for the qcow2 and ISO themselves; whether "SSH keys-only" is the
-      catalog's default or an invariant of every TorqOS machine.
+      checksums or signatures for the qcow2 and ISO themselves. (Decided, ADR-025: "SSH keys only"
+      is a default TorqOS applies however SSH is turned on; root never logging in over SSH is an
+      invariant.)
 
 ## Later: the AI layers (not planned now; everything built keeps them possible)
 

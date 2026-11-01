@@ -137,6 +137,11 @@ reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 
   SSH key check at commit, and the old commands retired (4g). Next: the rest of M1.5 (`docs/ROADMAP.md`); what is
   left of M1.5 needs a person (usability check, terminal look) or its own design (environment
   variables). Open issues and VM quirks: `docs/KNOWN-GAPS.md`.
+- **ADR-025 rebuilt torqcli on six single sources** (2026-11-01): one grammar (`cli/src/grammar.rs`:
+  parsing, `?`, Tab, abbreviations, refusals, `help`), each setting's rules from NixOS, a pager,
+  every command saying what it did, one place per setting (software at `environment systemPackages`
+  / `users users <name> packages`, services NixOS's own with TorqOS's protections however they are
+  on; the catalog folded in). Acceptance (a walk of every `?`, fresh usability reviews) still to do.
 
 ### You are probably running inside the dev VM
 - Host `torq-utm`, user **`viper`** (the template no longer names a user; `torq user` in

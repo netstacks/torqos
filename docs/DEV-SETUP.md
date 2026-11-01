@@ -60,30 +60,31 @@ Everything else is `torqcli` (`torq` is the same program), driven like a network
 (ADR-016, docs/CLI-DESIGN.md): edit a candidate, look at it, commit it as one ledgered change.
 ```bash
 torqcli                                  # the shell; `?` and Tab say what may come next
-torqcli show packages available ripgrep  # one command, from your shell
-torqcli -c "configure; set users $USER packages ripgrep; commit"
-#   set system packages <name>           # for everyone (system tier: asks at a terminal)
-#   delete users <you> packages <name>
+torqcli show packages ripgrep            # one command, from your shell (* marks what is installed)
+torqcli -c "configure; set users users $USER packages ripgrep; commit"
+#   set environment systemPackages <name>   # for everyone (system tier: asks at a terminal)
+#   delete users users <you> packages <name>
 torqcli show configuration
 ```
 History and undo:
 ```bash
 torqcli show system commit               # the configurations, numbered for rollback
 torqcli show system ledger               # every change, refused and failed ones too
-torqcli request system revert 23         # undo one change (a change forward; asks unless it is your own)
+torqcli request system revert '#23'      # undo one change (a change forward; asks unless it is your own)
 torqcli -c "configure; rollback 2; commit"   # back to a whole earlier configuration
 torqcli show system alarms               # is the machine as its ledger says? (request system repair)
 ```
-Services come from a small catalog, each with TorqOS's defaults (e.g. SSH: keys only, no root
-login). Always system changes, so always confirmed:
+Services are NixOS's own settings, with TorqOS's protections applied however they are turned on
+(e.g. SSH: keys only, only the owner, no root login; modules/services.nix). Always system changes,
+so always confirmed:
 ```bash
-torqcli show services                    # what there is, and what is on
-torqcli -c "configure; set services podman; commit"      # rootless containers, with `docker`
+torqcli show services                    # what the configuration turns on
+torqcli -c "configure; set virtualisation podman enable true; commit"   # rootless containers
 ```
-SSH is off on a new machine (it would only be listening: nobody has a key yet). To SSH in from the
-Mac, put your public key in `~/.ssh/authorized_keys` in the VM (paste it in the UTM console, or
-`ssh-copy-id` if you enabled SSH in the installer), then `set services ssh` and `commit`: it shows
-exactly which keys will be able to log in, and refuses if there are none.
+SSH is off on a new machine unless setup turned it on. To SSH in from the Mac, put your public key in
+`~/.ssh/authorized_keys` in the VM (paste it in the UTM console), then `set services openssh enable
+true` and `commit`: it shows exactly which keys will be able to log in, and refuses if there are
+none (with keys only).
 To move the machine to the newest TorqOS (and so nixpkgs) — one ledgered, undoable `flake.lock`
 change: `request system update`, then `configure`, `show | compare`, `commit`.
 `show system alarms` says whether the machine is as its ledger says; it is also checked at boot and

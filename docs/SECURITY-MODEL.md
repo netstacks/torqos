@@ -44,7 +44,7 @@ machine with UEFI and a TPM.
 - **Dev mode** (the machine TorqOS is built on) is the labelled exception: passwordless `sudo` and an
   AI coding agent with root. Customer images ship with it off.
 
-## Accounts and passwords (proposed for M2, 2026-11-01; to confirm before building)
+## Accounts and passwords (agreed for M2, 2026-11-01; built: INSTALL.md)
 
 - A new image has no user account: only the locked `root`. **First-boot setup** creates the owner's
   account (name and password), asks how to log in remotely — **password, SSH key, or both** — and
@@ -53,10 +53,19 @@ machine with UEFI and a TPM.
   there can be cracked offline): the configuration declares the account and points at a file only
   the system can read (NixOS `hashedPasswordFile`, outside the repo). A TorqOS command (e.g.
   `request system password`) changes it through the broker; the ledger records *that* it changed,
-  when and by whom — never the secret. More users get theirs the same way.
-- **SSH with passwords** is allowed when chosen, protected: repeated wrong guesses slowed down, few
-  attempts per connection, `root` never logs in remotely; `show system alarms` notes that SSH
-  accepts passwords. Keys only stays one `set` away.
+  when and by whom — never the secret. More users get theirs the same way. Built: the
+  configuration tree refuses a person's password in any of NixOS's forms (`users users <name>
+  password`, `hashedPassword`, `initialPassword`, `initialHashedPassword`, `hashedPasswordFile`,
+  `passwordFile`), in torqcli and at evaluation (modules/settings-fence.nix, rule 3), saying to use
+  `request system password <user>`.
+- **SSH is NixOS's own** (`services openssh enable true`; ADR-025), and TorqOS's protections apply
+  however it is turned on (modules/services.nix): keys only unless
+  `services.openssh.settings.PasswordAuthentication` is set, and then repeated wrong guesses are
+  blocked (sshguard); 3 tries a connection; only the owner may log in (`AllowUsers`). These are
+  defaults a person can change. `root` never logs in over SSH: an assertion refuses any
+  `PermitRootLogin` but `no`. `show system alarms` notes that SSH accepts passwords. A commit (or
+  revert) that turns SSH on shows the keys that will be able to log in, and is refused if SSH is keys
+  only and there are none. Keys only stays one `set` away.
 - **Images** carry a checksum signed with a TorqOS release key, and the one command that checks it.
 
 ## Threat model

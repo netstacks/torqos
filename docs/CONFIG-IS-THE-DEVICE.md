@@ -142,7 +142,7 @@ This machine today, moved over without changing what it does:
 ```
 torq.user = "viper";              →  user viper group [ admin ]      (and the machine's owner)
 torq.dev.enable = true;           →  torq dev enable true            (visible, and flagged)
-services.openssh.enable = true;   →  services openssh enable true    (flagged: allows passwords)
+services.openssh.enable = true;   →  services openssh enable true    (TorqOS's protections: keys only)
 torq.desktop.enable = true;       →  torq desktop enable true
 ```
 
@@ -151,8 +151,11 @@ torq.desktop.enable = true;       →  torq desktop enable true
 1. **Size.** NixOS has ~20,000 settings; the generated description is tens of MB. Measure the
    cost of building it with the system and of torqcli reading it.
 2. **How far the AI's fences go**, area by area.
-3. **Today's `services ssh` catalog**: keep as a TorqOS shortcut, or fold into `services openssh`
-   with TorqOS's defaults and warnings.
+3. ~~**Today's `services ssh` catalog**: keep as a TorqOS shortcut, or fold into `services openssh`
+   with TorqOS's defaults and warnings.~~ Decided (ADR-025 #6): folded in. Services are NixOS's own
+   (`set services openssh enable true`), with TorqOS's protections applied however they are turned on
+   (modules/services.nix); the old catalog keeps working on machines that have it, with a warning
+   saying what to move to, and torqcli never adds to it.
 4. **Unmanaged mode**: whether anyone needs to edit the repo outside torqcli at all, given
    `config` files and `edit`.
 

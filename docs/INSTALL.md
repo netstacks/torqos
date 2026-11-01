@@ -19,8 +19,11 @@ boot.
    - the owner's user name and password (twice);
    - how to log in remotely: not at all, by password, by SSH key (pasted), or both.
 5. **Setup writes the machine's configuration** — the config repo at `/var/lib/torq/config`, from the
-   template, with those answers as tree files — and the owner's password to a file only the system
-   can read (`/var/lib/torq/secrets/passwords/<user>`, never in the repo). The broker then takes the
+   template, with those answers as tree files (`system/host.json`: name and time zone;
+   `nixos/torq.json`: the owner; for remote login, `nixos/services.json` with NixOS's
+   `services.openssh` settings, and a pasted key in `nixos/users.json` as the owner's
+   `openssh.authorizedKeys.keys`, since a public key is not a secret) — and the owner's password to
+   a file only the system can read (`/var/lib/torq/secrets/passwords/<user>`, never in the repo). The broker then takes the
    repo over: it builds it first (a configuration that does not build changes nothing, and setup
    asks again), switches to it, and records change #1, "TorqOS set up", with the system it switched
    to. The broker runs as a service of its own, so the switch (which brings back the console's
@@ -68,9 +71,14 @@ needs only what differs from the image (the host name, the user): usually nothin
 
 ## SSH
 
-- Setup's choice becomes the catalog's SSH: keys only (as today), or passwords allowed too
-  (`torq ssh passwords true`), with guessing slowed down (sshguard), few attempts per connection, and
-  root never logging in remotely. `show system alarms` notes when SSH accepts passwords.
+- Setup's choice becomes NixOS's own SSH (`services openssh enable true`; ADR-025): keys only, or
+  passwords allowed too (`services openssh settings PasswordAuthentication true`). TorqOS's
+  protections apply however SSH is turned on (modules/services.nix): with passwords, repeated wrong
+  guesses are blocked (sshguard); 3 tries a connection; only the owner may log in (`AllowUsers`);
+  root never logs in remotely. `show system alarms` notes when SSH accepts passwords; `show
+  services` says how SSH is protected.
+- A password is never in the configuration: setting one there (`users users <name>
+  hashedPassword`, …) is refused; `request system password` is the way.
 
 ## Steps
 

@@ -118,16 +118,19 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    that store path without re-fetching. The ledgered rev may then not identify what was built.
    Fix: the broker re-fetches changed locked inputs as root and compares narHashes.
 
-6d. **Service catalog limits** (ADR-013): the SSH key check and the key listing run in the CLI only;
-   an agent proposing `+ "ssh"` skips them (the broker cannot see home directories) — keep
+6d. **Service limits** (ADR-013; services are NixOS's own since ADR-025): the SSH key check and the
+   key listing run in the CLI only (at commit and revert); an agent proposing
+   `services.openssh.enable` skips them (the broker cannot see home directories) — keep
    `~/.ssh` out of any future user-tier dotfiles, or "plant a key, then enable ssh" becomes
    possible. Tailscale keeps its own settings (Tailscale SSH, exit node) in `/var/lib/tailscale`,
    outside the ledger, and re-enabling it rejoins with the old identity. Firmware updates (fwupd)
    are not offered until they can go through the broker (SECURITY-MODEL.md). The terminal-safe
    printing is duplicated in the broker and the CLI (`printable` / `history::clean`). The SSH key
    listing shows authorized_keys files and declared keys only, not other ways sshd can admit
-   someone (`AuthorizedKeysCommand`, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile`), which the
-   catalog does not pin either.
+   someone (`AuthorizedKeysCommand`, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile`), which TorqOS
+   does not pin either (modules/services.nix sets only defaults, root's login excepted).
+   The old catalog (`services.json`, `torq ssh passwords`) still works with a warning; it goes
+   once no machine has it.
 
 6n. **A mistake in how the machine starts shows only at the next restart** (review of S4a). The
    tree sets `fileSystems`, `boot` (loader, initrd modules) and `swapDevices` like any setting, and
@@ -168,6 +171,19 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    manual: remove `/root/.cache/nix` (only a cache; rebuilt as needed). The broker could do that
    itself when a build fails that way, with a test that damages the cache.
    (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
+6u. **Packages cannot be found by the command they install** (`rg` → ripgrep, `nvim` → neovim).
+   `show packages <words>` searches names and descriptions (`nix search` on this machine's
+   nixpkgs); which package holds a command needs an index that is not on the machine (nixpkgs'
+   `programs.sqlite` comes with channels, not flakes; nix-index downloads one). Offline it is not
+   possible today.
+6v. **Package names are checked only as far as the schema has them.** The schema holds nixpkgs'
+   top-level names (`builtins.attrNames pkgs`, nothing evaluated): a name in a set is checked by
+   the set only (`python3Packages.nosuch` passes `set` and fails at `commit check`), and a top-level
+   name that is not a package (a function such as `fetchurl`) passes too. The names are the running
+   system's nixpkgs, not the candidate's after `request system update`.
+6w. **Entries of a list without names renumber on delete.** `delete networking interfaces eth0 ipv4
+   addresses 1` makes 2 the new 1: a pasted script that deletes one and then sets another by its old
+   number changes the wrong entry. `show | compare` shows what each number now holds before commit.
 
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is

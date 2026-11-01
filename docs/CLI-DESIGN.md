@@ -36,39 +36,65 @@ $ torqcli                                   # interactive
 viper@torq-utm> show system alarms          # operational mode
 viper@torq-utm> configure                   # configuration mode
 $ torqcli show system alarms                # one command, for scripts
-$ torqcli -c "configure; set users viper packages htop; commit"
+$ torqcli -c "configure; set users users viper packages htop; commit"
 ```
 
 | | |
 |---|---|
 | operational prompt | `viper@torq-utm>` |
 | enter configuration | `configure` (or `config`) |
-| configuration prompt | `[edit system]` line, then `viper@torq-utm#` |
-| add / change | `set system packages jq` |
-| remove | `delete system packages jq` (one value); `delete system packages`, `delete networking` (everything below); not set: a warning |
-| go down / up / to the top | `edit system` · `up` (or `exit`) · `top` |
+| configuration prompt | `[edit networking]` line, then `viper@torq-utm#` |
+| add / change | `set environment systemPackages jq` |
+| remove | `delete environment systemPackages jq` (one value); `delete environment systemPackages`, `delete networking` (everything below); not set: a warning |
+| go down / up / to the top | `edit networking` · `up` (or `exit`) · `top` |
 | compare with the active configuration | `show \| compare` |
 | show the configuration | `show` (candidate) / `show configuration` (operational) |
 | run an operational command | `run <command>` |
-| leave configuration | `exit` at the top, or `exit configuration-mode` |
+| leave configuration | `exit` at the top, `exit configuration-mode`, or Ctrl-D from anywhere |
+| help | `help`, `help <command>`, `help <words>` |
 
-Turning SSH on (`set services ssh`) shows at `commit` exactly which keys will be able to log in, as
-the changed configuration has them, and refuses if there are none (nobody could log in) — 4g, as
-`torq service enable ssh` did.
+`up` goes one level at a time. A set of named entries is a level of its own (`services httpd
+virtualHosts`, as a network device's `interfaces` is above `ge-0/0/0`): `up` from an entry goes into
+its set, where entries can be set and shown. `up ?` offers `<n>`.
+
+Turning SSH on (`set services openssh enable true`, or any other way: whether a commit turns it on is
+read from the evaluated configuration) shows at `commit` exactly which keys will be able to log in,
+as the changed configuration has them. If SSH lets in keys only and there are none, the commit is
+refused (nobody could log in), saying to add a key or allow passwords; with passwords allowed it says
+so. `request system revert` checks the same.
 
 And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`, `commit
-and-quit`, `rollback <n>`, `up [<n>]`, `top [<command>]` (a command from the top, then back where
-you were — unless it moves), `show system commit`, `?` help, Tab completion, history (↑). `?` lists
-what may come next, `|` after any whole `show`, and `<[Enter]>` when the line would run as it is
-(decided as the session decides it: the line is dry-run on a copy of the candidate).
+and-quit`, `rollback <n> [<place>]`, `up [<n>]`, `top [<command>]` (a command from the top, then
+back where you were — unless it moves), `show system commit`, `?` help, Tab completion, history (↑).
+`?` lists what may come next, `|` after any whole `show`, and `<[Enter]>` when the line would run as
+it is (decided as the session decides it: the line is dry-run on a copy of the candidate).
 
-**One grammar for `?`, abbreviations and errors** (complete.rs): a word of the command language
-that begins exactly one word that may stand there is that word (`sh conf | gr host` is `show
-configuration | grep host`); one that begins several is ambiguous; one that begins none is named,
-with what may stand there (and a near one: "did you mean configuration?"). A line of command words
-that is not whole says what may follow (`show system`). Configuration paths (old names, entries
-people name) and values are never read against it: the configuration's own check reads them, with
-its hints. `?` offers only what can be set: not NixOS's `_module`, nor what the fence keeps out.
+**One grammar** (cli/src/grammar.rs, ADR-025 #1): the command language is declared once — each
+command's words, help, values (checked, with their range), the pipes its output takes, and how a
+whole line becomes an operation. One walk over it parses a line, expands abbreviations, lists what may
+come next for `?` and Tab, answers `help`, and says why a line is refused, so these cannot disagree.
+
+- A word that begins exactly one word that may stand there is that word (`sh conf | gr host` is
+  `show configuration | grep host`; pipe words too); one that begins several is ambiguous, naming
+  them; one that begins none is named, with what may stand there, and a word one letter off is
+  suggested ("did you mean configuration?").
+- Every refusal says why, in one form, naming the line once: what may follow (`show system`), the
+  value needed (`needs <change> (…)`), that nothing may follow, a value out of range (`'2000' is out
+  of range: minutes go from 1 to 1440`).
+- A command of the other mode says so, wherever it stands ("'edit' is a configuration-mode command
+  (after `file`): `configure` first").
+- Words from other CLIs and shells say what to use here: `| count` → `| wc -l`, `| match` and `|
+  find` → `| grep`, `| except` → `| grep -v`, `| last` → `| tail -n`, `| trim` → `| cut`, `| save` →
+  `save <file>`; `copy`, `rename`, `annotate`, `deactivate` say what TorqOS does instead; `ping`,
+  `traceroute`, `ssh` are shell commands, run outside torqcli.
+- `help` lists the mode's commands; `help <command>` says what it is and what may follow it
+  (abbreviated as anywhere: `help sh sys`); `help <words>` searches the commands of both modes and
+  the settings for those words, whole words first (`mountPoint` is *mount* and *point*).
+
+Configuration paths (old names, entries people name) and values are not the grammar's: the tree reads
+them, with the setting's own rules (below). `?` offers only what can be set: not NixOS's `_module`,
+nor read-only settings, nor what the fence keeps out. Where a value is a file, `?` and Tab offer the
+configuration's Nix files (`file show|edit|delete <nix-file>`); `save` and `load` take any `<file>`.
 
 **Pipes**: `| compare`, and one `| display`: `set` (a configuration as `set` commands), `detail` (what
 is behind a view: the config repo files and commit of a configuration, the commit ids of `show system
@@ -79,7 +105,15 @@ number of **filters**, the real Linux tools with their own options (ADR-017): `|
 `| tail`, `| sort`, `| uniq`, `| cut`, `| tr`, after any `show` — e.g.
 `show configuration | grep -i host`, `show system commit | head -n 5 | wc -l`. They read the show's
 output inside a sandbox that has nothing else (no files, no network), from the system's own
-coreutils and grep; words are split as a shell does (`'single'` quotes are literal).
+coreutils and grep; words are split as a shell does (`'single'` quotes are literal). `help` and
+`file show` take filters too.
+
+**The pager.** Output taller than the window, from a line typed at the prompt, is shown a screenful
+at a time, as on a network device: `---(more N%)---`, Space for the next screenful, Enter for one
+more line, `n` for the rest at once, `q` (or Ctrl-C, or any other key) to stop. Lines that wrap count
+as the rows they take. Never for a script, piped output, or a paste's later lines (they come at once;
+the first line of a paste may page, the rest wait for it). `| no-more`, anywhere among the pipes,
+shows it all at once.
 
 **One grammar.** Every line parses to one operation; a property test renders every operation as it
 is typed and parses it back. `config` is reserved: it can never name a list entry, since `<place>
@@ -95,14 +129,25 @@ everything at this level, and asks first.
 configuration, never line by line, where their order would decide: a change that breaks one is
 said at once (`! … — commit refuses until then`), and `commit` refuses until it holds.
 
-As built (4a, cli/src/syntax.rs; C style removed by ADR-021): the line editor's `?` and Tab follow
-where you are. In a `?` list each help is its setting's first sentence (NixOS's doc markup taken
-out, `…` where it was cut), at most three lines (see "Layout" below).
+The line editor's `?` and Tab follow where you are. In a `?` list each help is its setting's first
+sentence (NixOS's doc markup taken out, `…` where it was cut), at most three lines (see "Layout"
+below).
+
+**Every command says what it did** (ADR-025 #5). `rollback` says what it loaded or discarded,
+counting changes as settings (a changed value is one change): "Loaded configuration 3: 2 changes from
+the configuration in effect", "Discarded 1 change", "No changes to discard". `show | compare` with
+nothing pending, two configurations with the same settings, and `show` of a place with nothing set
+say so. Every way out says what is kept: `configure` with changes left from before says so (and how
+to list or discard them); `exit` from torqcli keeps the candidate and says so; Ctrl-D is `exit`, from
+wherever you are; `-c` ends saying its uncommitted changes are discarded. `save` and `load` read a
+relative file name as in the home folder, as on a network device, wherever torqcli was started; `save`
+says the full path.
 
 **Scripts (`torqcli -c`)** use a private candidate that exists only for that invocation — never your
 interactive candidate, so a script cannot commit your half-done edits or leave edits behind. They
-stop at the first error, and quote
-values containing `;` or `|` with double quotes. `torqcli <command>` runs one operational command
+stop at the first command that fails, saying how many after it did not run, and quote
+values containing `;` or `|` with double quotes. `torqcli --help` prints how torqcli is run and
+exits 0. `torqcli <command>` runs one operational command
 the same way (`torqcli show system alarms`, `torqcli show configuration '|' grep host`): its words as
 your shell split them, or one argument read as a whole line (`torqcli "show configuration | grep
 host"`); its exit code says whether it worked. Configuration needs `-c`. Interactive sessions of the same user share one
@@ -113,37 +158,87 @@ candidate (as `configure` on a network device); `configure private` is for later
 **Since S3c (docs/CONFIG-IS-THE-DEVICE.md) the tree is every NixOS setting of the system, one to one**
 (`set virtualisation docker enable true`, `set services httpd virtualHosts example.com forceSSL
 true`), generated from the system's own options (/etc/torq/nixos-schema.json) and kept in
-`nixos/<top-level>.json`. Seven settings keep the files described below — for their own checks,
-and for the user tier of a person's own folder — at their NixOS paths; the old names still work for
-setting them, and the tree shows the NixOS one:
+`nixos/<top-level>.json`. A few settings are kept in files of TorqOS's own — for their own checks,
+and for the user tier of a person's own folder — at their NixOS paths (ADR-025 #6: one place per
+setting); the old names still work for setting them, and the tree shows the NixOS one:
 
 | NixOS path | Old name | File |
 |---|---|---|
 | `networking hostName` | `system host-name` | `system/host.json` |
 | `time timeZone` | `system time-zone` | `system/host.json` |
-| `torq packages system` | `system packages` | `system/packages.json` |
-| `torq services enabled` | (`services`: now NixOS's own) | `services.json` |
-| `torq packages user <name>` | `users <name> packages` | `users/<name>/packages.json` (user tier) |
+| `environment systemPackages` | `system packages` | `system/packages.json` |
+| `users users <name> packages` | `users <name> packages` | `users/<name>/packages.json` (user tier) |
+| `torq services enabled` | `services` (the old list) | `services.json` |
 
-Old names set and delete (and `delete users dev`, `delete system` take what they always did), but the old *places* are not places to go: `edit users dev` is gone, as the tree now groups
-by NixOS. A setting lives in exactly one place: the five above are refused inside `nixos/` files (by
-torqcli on reading, and by the evaluation). Text with a line break or another control character is
-refused in the tree: multi-line text goes in a config file. Whether a commit turns SSH on is read
-from the evaluated configuration, before and after, so every way counts; outside the catalog the
-question says its rules do not apply, and whether passwords are allowed.
-Everything else in `nixos/` is system tier. What the tree may never change is fenced
-(modules/settings-fence.nix). Ledger reasons carry each change's section (`+ virtualisation docker
-enable true;`). The rest of this section describes the files TorqOS keeps, as first designed.
+Software is set and shown at NixOS's own places, with TorqOS's unfree checks and messages; a person
+added in the candidate (`set users users alice …`) can be given software in the same candidate.
+Old names set and delete (and `delete users dev`, `delete system` take what they always did), but
+the old *places* are not places to go: `edit users dev` is gone, as the tree now groups by NixOS. A
+setting lives in exactly one place: those above are refused inside `nixos/` files, by torqcli and by
+the evaluation (settings-fence.nix), naming the setting ("users users dev packages is kept in its own
+file"). An error about one names it as it was typed (`networking hostName`, not the file's `system
+host-name`). Text with a line break or another control character is refused in the tree: multi-line
+text goes in a config file. Everything else in `nixos/` is system tier. What the tree may never
+change is fenced (modules/settings-fence.nix), and **a person's password is never in the
+configuration** (the fence's rule 3): `users users <name> password`, `hashedPassword`,
+`initialPassword`, `initialHashedPassword`, `hashedPasswordFile` and `passwordFile` are refused, never
+offered by `?`, saying why (everyone can read the configuration, and its history keeps every value)
+and what to do (`request system password <user>`). Ledger reasons carry each change's section (`+
+virtualisation docker enable true;`).
+
+**Services are NixOS's own** (`set services openssh enable true`; modules/services.nix). TorqOS's
+protections apply however a service is turned on, so there is no second, safer name for it. SSH: keys
+only unless `services openssh settings PasswordAuthentication true`, and then repeated wrong guesses
+are blocked (sshguard); 3 tries a connection (`MaxAuthTries`); only the owner may log in
+(`AllowUsers`); root never logs in over SSH (an assertion: `PermitRootLogin` must be `no`). The
+others are defaults a person can change in the tree. Podman's root API socket stays off. The old
+catalog (`services.json`, a list such as `[ "ssh" ]`, and `torq ssh passwords`) keeps working on
+machines that have it, mapped onto NixOS's settings, with a warning naming the settings to move to;
+torqcli never adds to it, and `set services ssh` says what to set instead.
+
+**Each setting's rules come from NixOS's own description of it** (ADR-025 #2), so `set` refuses what
+commit would:
+
+- Closed sets (true/false, an enum) are listed in `?` one by one, so Tab completes them; `set`
+  refuses any other value.
+- `set` checks what NixOS would: patterns (`strMatching`, the whole value), ranges (`intBetween`,
+  `numberBetween` and every fixed-width integer), paths from `/`, non-empty text, account fields
+  without `:`. `?` says the form ("a number from 1 to 100", "text matching …"); a refusal says it,
+  with the setting's own help. A host name, user name or package name that is not one says what one
+  is ("letters, digits and -, at most 63, …").
+- Read-only settings (`networking fqdnOrHostName` and 88 more) are left out of the tree: never
+  offered, never settable.
+- Setting names abbreviate as command words do (a unique beginning is the name, stored as the name;
+  several are named). An entry's name is never guessed at.
+- A section NixOS does not describe says what it holds ("Settings: enable, rootless"); where entries
+  are named, `?` offers the configuration's own first.
+- **Sections that take any key** (285 of them: RFC 42's `settings`, nginx `upstreams`, …) take a key
+  as written, with that section's value type: `set services openssh settings ClientAliveInterval 60`.
+  `?` offers `<key>` beside the section's own settings. Inside such a section names are exact (a
+  beginning of one of its own is a key of its own: `Port` does not become `Ports`); the section itself
+  still abbreviates.
+- **Lists of entries with no names** (an interface's addresses) are set by number: `set networking
+  interfaces eth0 ipv4 addresses 1 address 10.0.0.1`, `… addresses 1 prefixLength 24`; `… addresses 2
+  address …` adds another. One past the end is refused, saying how many there are; `?` offers the
+  numbers there are and the next. `show` and `| compare` say `addresses 1 { … }`; `delete … addresses
+  1` removes it, the ones after it renumbering. In the files they are a JSON list, as NixOS reads it.
+- **Package names** are checked and offered as they are set, in TorqOS's software lists and in any
+  NixOS setting that takes a package: the schema carries this machine's nixpkgs names (only the
+  names: nothing is evaluated). A name it does not have is refused with the closest ("'btopp' is not
+  a package in this machine's nixpkgs (did you mean btop?): `show packages <word>` searches them");
+  `?` and Tab offer the names, narrowed by what is typed. A name in a set of nixpkgs
+  (`python3Packages.rich`) is one.
+
+The rest of this section describes the files TorqOS keeps, as first designed.
 
 Each container is a folder of the config repo; each leaf set is one small data file. The first
 settings (more are added one schema entry at a time):
 
 | Path in the tree | File in the config repo | Tier |
 |---|---|---|
-| `system packages <name>` | `system/packages.json` | system |
+| `system packages <name>` (now `environment systemPackages`) | `system/packages.json` | system |
 | `system host-name <name>` · `system time-zone <tz>` | `system/host.json` (done: `modules/host.nix`) | system |
-| `services <name>` (catalog: ssh, …) | `services.json` | system |
-| `users <name> packages <pkg>` | `users/<name>/packages.json` | user |
+| `users <name> packages <pkg>` (now `users users <name> packages`) | `users/<name>/packages.json` | user |
 
 Validation (enforced by the NixOS modules' types, the authority — the shell's schema only gives early
 errors and help): host names are RFC 1123 labels of at most 63 characters; time zones must exist in
@@ -164,25 +259,35 @@ any change to one is shown as its raw diff in `show | compare` and in `commit`.
 
 ```
 viper@torq-utm> show configuration
-system {
-    host-name torq-utm;
-    time-zone America/New_York;
-    software TorqOS 2026-10-30, nixpkgs 26.05 (6f06d20);
+environment {
+    systemPackages [ vim ];
+}
+networking {
+    hostName torq-utm;
 }
 services {
-    ssh;
+    openssh {
+        enable true;
+    }
+}
+time {
+    timeZone America/New_York;
 }
 users {
-    viper {
-        packages [ htop opencode ripgrep ];
+    users {
+        viper {
+            packages [ htop ripgrep ];
+        }
     }
 }
 ```
 
-As built (cli/src/tree.rs): statements are sorted by name at each level (so `services` comes
-before `system`), and `| compare` shows changes under the innermost `[edit …]` section that holds
-them, a whole leaf-list as one `-`/`+` pair, a new container as its leaves (`[edit users dev cli]
-+ style c;`, where a network device would show `+ cli { … }` under `[edit users dev]`).
+As built (cli/src/tree.rs, whole.rs): statements are sorted by name at each level, and `| compare`
+shows changes under the innermost `[edit …]` section that holds them, a whole leaf-list as one
+`-`/`+` pair, a new container as its leaves (`[edit virtualisation docker] + enable true;`, where a
+network device would show `+ docker { … }` under `[edit virtualisation]`). A section's own settings
+come together, before its sub-sections: `[edit networking]` once, not reopened after `[edit
+networking firewall]`.
 
 Config files, for what is not a value (docs/CONFIG-IS-THE-DEVICE.md, S3e):
 
@@ -221,7 +326,15 @@ per place (one name, the first form, still reads as a list of one).
 - **`rollback <n>`** loads commit <n>'s *configuration* into the candidate — every file except
   `flake.lock`, so it never downgrades the software (network devices keep the two apart, too). That
   includes `.nix` files (e.g. turning development mode back on): `show | compare` shows each one as
-  a raw diff, flagged. `rollback 0` discards the candidate.
+  a raw diff, flagged. `rollback 0` discards the candidate. `rollback ?` (and Tab) lists the
+  configurations themselves, newest first, each with when, who and what.
+- **`rollback <n> <place>`** undoes one part: that place goes back to how configuration <n> has it,
+  the rest of the candidate stays as it is (`rollback 0 networking hostName`; any place, from where
+  `edit` is, abbreviated). It says what it put back.
+- **Change numbers** (the ledger's) are written `#85` everywhere: `show system ledger`, `show system
+  commit` (beside each configuration's rollback number: `0 #85 …`), and `request system revert`
+  takes them as written (`#85` or `85`). `show system ledger` names who made each change (the person
+  who approved it, else who asked).
 - **`request system software rollback <n>`** is the separate, explicit way to go back to commit
   <n>'s software (its `flake.lock`), marked as a downgrade.
 - **`commit confirmed <minutes>`** (1–1440, default 10; with `comment "…"` in either order) is for
@@ -246,18 +359,17 @@ per place (one name, the first form, still reads as a list of one).
     by committing their own; a second `commit confirmed` is refused until the first is settled.
 
 ```
-viper@torq-utm# set services ssh
+viper@torq-utm# set services openssh enable true
 viper@torq-utm# show | compare
-[edit services]                                                  system change
-+   ssh;            log in from other computers as viper, keys only; opens port 22
-      keys that will be able to log in as viper:
-        256 SHA256:Xq…k4 viper@mac (ED25519)   from ~/.ssh/authorized_keys
+[edit services openssh]
++   enable true;
 viper@torq-utm# commit confirmed 5 comment "ssh, keys only"
-  committing: services ssh (system change)
-  ✓ commit complete — rolls back at 15:12 unless confirmed with: commit
 viper@torq-utm# commit
-  ✓ commit confirmed
 ```
+
+The first `commit` shows the comparison and the keys that will be able to log in as viper (it
+refuses if there are none), asks, and says when the change rolls back unless confirmed; the second
+confirms it.
 
 As built (3c/3d): `commit check` evaluates the candidate on the committed base (`git archive`, as
 the broker builds it). A system change, or a change to another user's folder, shows the
@@ -285,18 +397,24 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `show system commit` | the commit history, numbered for `rollback`, in local time (as the ledger) |
 | `show system rollback <n> [compare <m>]` | commit <n>'s configuration, or what going from <n> to <m> changes (<n> is the base, as on a network device) |
 | `show system alarms` | is this machine exactly as its history says? (and any pending confirmed commit) |
-| `show system ledger [<count>]` | every change as the ledger has it, refused and failed ones too |
-| `show packages available <term>` | search this machine's nixpkgs: each package as it is typed (`htop`, `python3Packages.rich`), its version and description; filterable like any `show` |
+| `show system ledger [<count>]` | every change as the ledger has it (`#85`, who made it), refused and failed ones too |
+| `show version` | what this machine runs: TorqOS (and where it comes from, from the lock), NixOS, the kernel, torqcli |
+| `show system uptime` | how long the machine has run, its load, and its last change |
+| `show interfaces` | each network interface's state, addresses and hardware address |
+| `show system storage` | each disk's size and use, and the system versions kept |
+| `show packages <words>` | search this machine's nixpkgs: each package as it is typed (`htop`, `python3Packages.rich`), its version and description, closest first (the name itself, a set's package of that name, names beginning with the words, names holding them, then descriptions); `*` marks what the configuration installs |
 | `set torq unfree packages [ <name> … ]` · `set torq unfree all true` | (configuration mode) allow unfree software (Postman, VS Code, …): by name, or all of it; refused otherwise, saying so (modules/unfree.nix) |
-| `show services` | the catalog, and what is on |
-| `request system update [all]` | load the newest TorqOS (and its nixpkgs) into the candidate |
+| `show services` | the services the configuration turns on (NixOS's `services <name> enable` and `virtualisation <name> enable`, and the old list), SSH with how it is protected |
+| `request system password [<user>]` | change a person's password (kept in /var/lib/torq/secrets, never in the configuration) |
+| `request system update [all]` | load the newest TorqOS (and its nixpkgs) into the candidate (nothing changes until it is committed) |
 | `request system software rollback <n>` | load commit <n>'s software into the candidate (a downgrade) |
 | `set system software torq source <source>` | (configuration mode) where TorqOS comes from: locks that source into the candidate |
 | `save <file>` | (configuration mode) the whole candidate and its config files' content to a file, private |
 | `load override\|merge\|set <file>\|terminal` | (configuration mode) a saved configuration into the candidate, all or nothing; `terminal`: what you paste next, ended by Ctrl-D (brace format, or `set` lines; `#` and `/* … */` comments are left out) |
-| `request system repair` | return a machine changed outside TorqOS to its last commit |
-| `request system revert <change>` | undo one change (a new change forward; asks unless it is only your own folder) |
+| `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
+| `request system revert <change>` | undo one change, `#85` or `85` (a new change that reverses it; asks unless it only touches your own settings) |
 | `configure` / `config` | enter configuration mode |
+| `help [<command> \| <words>]` | (both modes) the commands; one command; or a search of commands and settings |
 
 Later: `commit at <time>`, `configure exclusive`. (`save` / `load`: built, S5.)
 
@@ -311,7 +429,9 @@ candidate whose base is no longer the active configuration warns that `commit` w
 `show system commit` reads the ledger (4f) — through the broker, as a commit does (`sudo`: the
 ledger is root's, and stays unreadable to users) — its configurations, newest first, with who
 approved each; without the broker there are no numbers, rather than git's; `rollback <n>`, `show system rollback <n>`
-and `request system software rollback <n>` use the same numbers (`rollback 0`: what is active). `show packages available` is `nix search` on this machine's nixpkgs.
+and `request system software rollback <n>` use the same numbers (`rollback 0`: what is active). `show packages` searches this machine's nixpkgs.
+`show version`, `show system uptime`, `show interfaces` and `show system storage` read the running
+machine (/proc, `ip -j addr`, `df`, the system profiles; cli/src/facts.rs).
 
 ## How it is built
 
@@ -320,8 +440,10 @@ and `request system software rollback <n>` use the same numbers (`rollback 0`: w
 - **The schema** is defined next to each setting's NixOS module (`torq.schema."<path>"`; the node
   format is documented in `modules/schema.nix`) and installed as `/etc/torq/schema.json`, so the
   shell reads it instantly for parsing, `?` and Tab. Closed sets carry their values (time zones from
-  tzdata's index, catalog services, styles, the machine's users); open ones a type (`package`,
-  `host-name`). `tests/tree.nix` keeps it consistent: parents exist, files and keys fit the kind,
+  tzdata's index, the old list's service names, the machine's users); open ones a type (`package`,
+  `host-name`). NixOS's settings are described in `/etc/torq/nixos-schema.json`
+  (modules/nixos-schema.nix): each setting's type, values and range (read-only settings left out),
+  the sections that take any key and their values' type, and this machine's nixpkgs package names. `tests/tree.nix` keeps it consistent: parents exist, files and keys fit the kind,
   `users <name> …` is user tier and nothing else is, and its user-tier files are exactly the
   allowed user leaves. Syntax is checked as you type; meaning (does the package exist, is it free)
   at `commit check`.
@@ -469,7 +591,10 @@ and never with NO_COLOR, TERM=dumb, or when the output is not a terminal. There 
   a commit's date and author), never back at the left edge. Beside a lead wider than 4 with under
   20 columns left, the text goes on the lines after it, indented 4. Nothing guesses at print time
   which lines are sentences.
-- **Tables** (`show system ledger`, the `?` list) lay out to the same width.
+- **Tables** (`show system ledger`, the `?` list, `help`) lay out to the same width, in one layout
+  (`complete::table`): a word wider than the column has its help on the next line, in the same
+  column, not pushed right; in a window too narrow for that, under the word.
+- **Taller than the window:** the pager (above); `| no-more` skips it.
 - **Data is never wrapped or cut:** a configuration, `show | compare`, a diff, `| display set`;
   the terminal wraps a long line itself.
 - **No window, nothing wrapped:** when a filter reads the output (`| grep`, `| wc -l` count lines)
