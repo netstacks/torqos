@@ -2066,9 +2066,8 @@ fn setup_builds_switches_then_ledgers_once() {
 fn a_password_is_kept_outside_the_repo_and_ledgered_without_it() {
     let (dir, b) = setup("true");
     let pw = dir.path().join("passwords");
-    let passwd = dir.path().join("passwd");
-    fs::write(&passwd, "root:x:0:0::/root:/bin/sh\nsshd:x:993:993::/var/empty:/bin/false\ncasey:x:1000:100::/home/casey:/bin/zsh\n").unwrap();
-    let b = b.with_passwords(&pw, "cat").with_passwd(&passwd);
+    let people = ["casey".to_string()];
+    let b = b.with_passwords(&pw, "cat").with_people(&people);
     let hash = "$6$saltsalt$abcdefghijklmnopqrstuvwxyz0123456789";
     let e = b.set_password("casey", hash, "casey").unwrap();
     assert_eq!((e.body.kind.as_str(), e.body.reason.as_str(), e.body.data["user"].as_str()), ("password", "Password changed for casey", Some("casey")));
@@ -2079,11 +2078,11 @@ fn a_password_is_kept_outside_the_repo_and_ledgered_without_it() {
     let ledger = fs::read_to_string(dir.path().join("state/ledger.jsonl")).unwrap();
     assert!(!ledger.contains("$6$"), "never the hash");
     assert!(!b.repo.root().join("casey").exists() && b.repo.ensure_clean().is_ok(), "nothing in the repo");
-    for (user, bad) in [("casey", "plaintext"), ("casey", "$6$a:b"), ("casey", "$6$a\nroot:$6$x"), ("../x", hash), ("Casey", hash), ("root", hash), ("sshd", hash), ("nobody", hash)] {
+    for (user, bad) in [("casey", "plaintext"), ("casey", "$6$a:b"), ("casey", "$6$a\nroot:$6$x"), ("../x", hash), ("Casey", hash), ("root", hash), ("sshd", hash), ("nixbld1", hash), ("nobody", hash)] {
         assert!(b.set_password(user, bad, "casey").is_err(), "{user} {bad:?}");
     }
     // Not set in the running system (no such account): nothing kept, nothing ledgered.
-    let failing = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_passwords(&pw, "false").with_passwd(&passwd);
+    let failing = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_passwords(&pw, "false").with_people(&people);
     let before = b.ledger.read_all().unwrap().len();
     assert!(failing.set_password("casey", "$6$other$hash", "casey").is_err());
     assert_eq!(fs::read_to_string(pw.join("casey")).unwrap(), format!("{hash}\n"), "kept as it was");

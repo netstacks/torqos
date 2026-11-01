@@ -24,9 +24,10 @@ boot.
    repo over: it builds it first (a configuration that does not build changes nothing, and setup
    asks again), switches to it, and records change #1, "TorqOS set up", with the system it switched
    to. The broker runs as a service of its own, so the switch (which brings back the console's
-   login prompt) cannot cut it short. A machine is set up once its repo has a history: a setup cut
-   short before that, by a power cut say, simply runs again at the next boot; the image never
-   takes over a repo by itself. Setup never runs again.
+   login prompt) cannot cut it short. A machine is set up once its history has change #1: a setup
+   cut short before that, by a power cut mid-build say, runs again at the next boot and starts
+   clean; the image never takes over a repo by itself. Setup never runs again, and runs nowhere
+   but the image.
 6. **The console shows a login prompt.** From here it is TorqOS as everywhere: `torqcli`, every
    change through the broker.
 
@@ -49,12 +50,14 @@ needs only what differs from the image (the host name, the user): usually nothin
   `/var/lib/torq/secrets/passwords/<user>` (0600, root), which their account points at
   (`hashedPasswordFile`). No file: no password (an account that logs in by key only, or not at all).
 - Changing a password is a TorqOS command (`request system password [<user>]`): the broker writes the
-  file and the ledger records that it changed, when and by whom — never the hash. People's accounts
-  only (uid 1000 up): never root's or a system account's.
-- A machine from before this (passwords set with `passwd`, in `/etc/shadow` only) keeps them: on the
-  switch, each person's password is carried into their file before the accounts are written. Only
-  for someone with no file yet and a real password (a locked account stays locked); a file once
-  there is never replaced. (`tests/accounts.nix`.)
+  file and the ledger records that it changed, when and by whom — never the hash. Only the people
+  the configuration declares (`torq.accounts.people`, in the broker's fixed settings): never root's
+  or a system account's.
+- A machine from before this (passwords set with `passwd`, in `/etc/shadow` only) keeps them: on its
+  first switch to it, each person's password is carried into their file before the accounts are
+  written. Only for someone with no file yet and a real password (a locked account stays locked);
+  a file there is never replaced. Once only: from then on the files are what counts, and removing
+  someone's file removes their password. (`tests/accounts.nix`.)
 
 ## SSH
 
@@ -68,7 +71,7 @@ Done (2026-11-01; tried end to end in QEMU: the image boots to setup, setup swit
 logs in, change #1 is in the history and `show system alarms` is clean):
 
 1. The image: a qcow2 of the factory system that boots in UTM/QEMU (aarch64 first).
-2. Setup on the console (`torqcli setup`, as root, only while the repo has no history).
+2. Setup on the console (`torqcli setup`, as root, on the image only, until change #1).
 3. Passwords outside the repo, and `request system password`; existing passwords carried over.
 4. SSH by password, protected, and noted by `show system alarms`.
 5. The image's own TorqOS as the config repo's source (`path:` in the store, locked: exactly

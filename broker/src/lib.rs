@@ -58,8 +58,8 @@ pub struct Broker {
     passwords_dir: PathBuf,
     /// What sets a password in the running system at once: `user:hash` lines on its input.
     password_cmd: String,
-    /// The machine's account list, to tell people from system accounts.
-    passwd: PathBuf,
+    /// The people the configuration declares: the only accounts `set_password` changes.
+    people: Vec<String>,
 }
 
 /// A `commit confirmed` waiting for `confirm`: an `applied` entry with a `confirm` record and no
@@ -406,23 +406,13 @@ impl Broker {
             anchor_settings: false,
             passwords_dir: PathBuf::from("/var/lib/torq/secrets/passwords"),
             password_cmd: "chpasswd -e".into(),
-            passwd: PathBuf::from("/etc/passwd"),
+            people: Vec::new(),
         }
     }
 
-    /// Whether `user` is a person's account in this machine's account list (`/etc/passwd`): uid 1000
-    /// to 59999, as NixOS numbers normal users.
-    fn is_person(&self, user: &str) -> Result<bool> {
-        let list = std::fs::read_to_string(&self.passwd).with_context(|| format!("reading {}", self.passwd.display()))?;
-        Ok(list.lines().any(|l| {
-            let f: Vec<&str> = l.split(':').collect();
-            f.len() >= 3 && f[0] == user && f[2].parse::<u32>().is_ok_and(|uid| (1000..60000).contains(&uid))
-        }))
-    }
-
-    /// The account list people are read from (tests: a file of their own).
-    pub fn with_passwd(mut self, path: impl Into<PathBuf>) -> Self {
-        self.passwd = path.into();
+    /// The people the configuration declares (its normal users, from the broker's fixed settings).
+    pub fn with_people(mut self, people: &[String]) -> Self {
+        self.people = people.to_vec();
         self
     }
 
@@ -661,9 +651,9 @@ impl Broker {
     pub fn set_password(&self, user: &str, hash: &str, by: &str) -> Result<Entry> {
         let _lock = Lock::acquire(&self.state_dir)?;
         self.ledger.verify().context("cannot change a password on a broken ledger")?;
-        // A person's account only (uid 1000 up, as NixOS gives them): never root or a system account,
-        // whose password nothing keeps (accounts.nix points people's accounts at their files only).
-        if !policy::user_name_ok(user) || !self.is_person(user)? {
+        // A person the configuration declares only: never root or a system account, whose password
+        // nothing keeps (accounts.nix points people's accounts at their files only).
+        if !policy::user_name_ok(user) || !self.people.iter().any(|p| p == user) {
             bail!("'{user}' is not a person's account on this machine");
         }
         let shaped = ["$6$", "$y$", "$2b$"].iter().any(|p| hash.starts_with(p)) && hash.len() < 512 && !hash.contains([':', '\n', '\r']);

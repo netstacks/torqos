@@ -177,6 +177,8 @@ in
           config.systemd.package
         ] + ":/run/current-system/sw/bin";
         home = "/root";
+        # The only accounts whose password the broker sets (modules/accounts.nix).
+        people = config.torq.accounts.people;
       };
      }
 

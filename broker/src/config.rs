@@ -40,6 +40,10 @@ pub struct Settings {
     /// HOME for everything the broker runs: never the caller's, whose `.gitconfig` or `nix.conf`
     /// would then configure git and nix running as root.
     pub home: PathBuf,
+    /// The people this machine's configuration declares (its normal users): the only accounts whose
+    /// password `password` sets. None listed (an older file): no password is set.
+    #[serde(default)]
+    pub people: Vec<String>,
 }
 
 /// What the caller asked for, by flag or `TORQ_*` variable; None where nothing was given.
@@ -97,6 +101,7 @@ impl Settings {
             system_profile: "/nix/var/nix/profiles/system".into(),
             path,
             home,
+            people: Vec::new(),
         }
     }
 
@@ -172,6 +177,7 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             system_profile: asked.system_profile.unwrap_or(defaults.system_profile),
             path: defaults.path,
             home: defaults.home,
+            people: defaults.people,
         }),
     }
 }
@@ -239,6 +245,7 @@ mod tests {
             system_profile: "/nix/var/nix/profiles/system".into(),
             path: "/run/current-system/sw/bin".into(),
             home: "/root".into(),
+            people: vec!["casey".into()],
         }
     }
     fn defaults() -> Settings {

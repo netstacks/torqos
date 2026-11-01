@@ -1,7 +1,8 @@
 # NixOS VM test: accounts are the configuration's (modules/accounts.nix), and moving a machine to
 # that keeps its people's passwords. A machine from before has its passwords in /etc/shadow only
-# (set with `passwd`); activation carries each into its file before writing the accounts, so nobody
-# is locked out. A locked account stays locked, and a file once there is never replaced.
+# (set with `passwd`); its first activation with TorqOS's accounts carries each into its file before
+# writing the accounts, so nobody is locked out. A locked account stays locked, a file once there is
+# never replaced, and from then on the files are what counts: a file removed is a password removed.
 { pkgs, self }:
 
 pkgs.testers.runNixOSTest {
@@ -26,8 +27,19 @@ pkgs.testers.runNixOSTest {
     machine.succeed(f"test ! -e {pw}/alice && test ! -e {pw}/bob")
     assert shadow("alice").startswith("!"), shadow("alice")
     machine.succeed(f"stat -c %a /var/lib/torq/secrets {pw} | grep -qx 700")
+    # The broker sets the passwords of these people only (not root, not a system account).
+    import json
+    assert json.loads(machine.succeed("cat /etc/torq/broker.json"))["people"] == ["alice", "bob", "carol"]
 
-    # A machine from before: alice set a password with `passwd`, bob is locked, carol has a file.
+    # This machine has had its carry-over (at its first boot). A `passwd` now is not carried:
+    machine.succeed("usermod -p '$6$late$late' bob")
+    machine.succeed("/run/current-system/activate")
+    machine.succeed(f"test ! -e {pw}/bob")
+    assert shadow("bob").startswith("!"), shadow("bob")
+
+    # A machine from before (no carry-over yet): alice set a password with `passwd`, bob is locked,
+    # carol has a file.
+    machine.succeed("rm /var/lib/torq/secrets/carried-over")
     old = "$6$saltsalt$" + "x" * 86
     machine.succeed(f"usermod -p '{old}' alice")
     machine.succeed(f"(umask 077; echo '$6$carol$kept' > {pw}/carol)")
@@ -49,5 +61,10 @@ pkgs.testers.runNixOSTest {
     machine.succeed("usermod -p '$6$other$changed' alice")
     machine.succeed("/run/current-system/activate")
     assert shadow("alice") == old, shadow("alice")
+    # A file removed is a password removed: alice is locked (key only, or not at all).
+    machine.succeed(f"rm {pw}/alice")
+    machine.succeed("/run/current-system/activate")
+    machine.succeed(f"test ! -e {pw}/alice")
+    assert shadow("alice").startswith("!"), shadow("alice")
   '';
 }

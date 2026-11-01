@@ -69,10 +69,11 @@ in
       conflicts = [ "getty@tty1.service" ];
       # Setup runs the broker, which switches to the new system — where this unit does not exist. A
       # switch stops units it removes, which would kill setup and the broker mid-switch: this one
-      # finishes instead, and exits by itself. Set up means the broker took the repo over (it has a
-      # history): a setup cut short, its files written or not, runs again at the next boot.
+      # finishes instead, and exits by itself. Set up means the history has its first entry: a setup
+      # cut short before that — its files written, its build begun, or not — runs again at the next
+      # boot, and starts clean.
       unitConfig = {
-        ConditionPathExists = "!${repo}/.git";
+        ConditionFileNotEmpty = "!${config.torq.broker.stateDir}/ledger.jsonl";
         X-StopOnRemoval = false;
       };
       restartIfChanged = false;

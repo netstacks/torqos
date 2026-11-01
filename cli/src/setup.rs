@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 /// What the image keeps for setup (modules/setup.nix): its own TorqOS source, the lock pinning it,
 /// its disk's hardware file.
 const IMAGE: &str = "/etc/torq/image";
+/// The broker's history: set up means it has its first entry (change #1).
+const LEDGER: &str = "/var/lib/torq/state/ledger.jsonl";
 const REPO: &str = "/var/lib/torq/config";
 const PASSWORDS: &str = "/var/lib/torq/secrets/passwords";
 const BROKER: &str = "/run/current-system/sw/bin/torq-broker";
@@ -136,12 +138,17 @@ pub fn run() -> Result<()> {
     if !rustix::process::geteuid().is_root() {
         bail!("setup is the image's first boot, run as root on the console");
     }
-    let repo = Path::new(REPO);
-    // Set up means taken over by the broker (a history), not merely written: a setup cut short
-    // after writing the files starts again.
-    if repo.join(".git").exists() {
-        bail!("this machine is already set up ({REPO})");
+    // The image only: what is in the config repo then is a setup's own, cut short, and starting
+    // clean removes it. Anywhere else it is a machine's configuration.
+    if !Path::new(IMAGE).join("source").exists() {
+        bail!("setup is the TorqOS image's, before its first configuration: this machine is not the image");
     }
+    // Set up means the history has its first entry: a setup cut short before that (its files
+    // written, its build begun) starts again.
+    if std::fs::metadata(LEDGER).is_ok_and(|m| m.len() > 0) {
+        bail!("this machine is already set up (its history: {LEDGER})");
+    }
+    let repo = Path::new(REPO);
     loop {
         // Anything a setup cut short left: gone, to start clean.
         let _ = std::fs::remove_dir_all(repo);
