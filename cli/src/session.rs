@@ -990,11 +990,6 @@ impl<'a> Session<'a> {
         self.file(FileAction::List, None).map(|out| out.lines().map(|l| l.trim().to_string()).filter(|l| l.ends_with(".nix")).collect()).unwrap_or_default()
     }
 
-    /// One line for each configuration `rollback ?` offers, newest first (0, 1, …).
-    pub fn configurations_list(&self) -> Vec<String> {
-        self.machine.configurations(&self.repo, 30).map(|h| h.configurations.iter().map(|c| format!("{} {}: {}", c.date, c.who, crate::history::one_line(&c.what, 80))).collect()).unwrap_or_default()
-    }
-
     /// How many settings the candidate changes, as `show | compare` shows them: each setting added,
     /// removed or changed once (a changed value is a `-` and a `+` of one setting).
     fn pending(&mut self) -> Result<usize> {
@@ -1652,6 +1647,11 @@ fn software_of(lock: &str) -> Option<String> {
     (!shown.is_empty()).then(|| shown.join(", "))
 }
 
+/// One line for each configuration `rollback ?` offers, newest first (0, 1, …).
+pub fn configuration_lines(h: &History) -> Vec<String> {
+    h.configurations.iter().map(|c| format!("{} {}: {}", c.date, c.who, crate::history::one_line(&c.what, 80))).collect()
+}
+
 /// "1 change", "3 changes".
 fn changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
@@ -1865,7 +1865,6 @@ mod tests {
         s.exec("edit time").unwrap();
         assert!(s.exec("rollback 0 timeZone").unwrap().contains("Put back time timeZone"), "from where `edit` is");
         assert_eq!(s.exec("top show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
-        assert!(s.configurations_list().len() <= 30);
     }
 
     /// Every command says what it did, and every way out says what is kept: rollback (what it loaded or

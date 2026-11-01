@@ -793,7 +793,14 @@ fn run_shell(args: &[String]) -> Result<i32> {
                 Err(e) => fail(&shown, e),
             }
         }
-        Invocation::Interactive => interactive(&mut s),
+        Invocation::Interactive => {
+            let history_cli = Cli { repo: cli.repo.clone(), broker: cli.broker.clone() };
+            let history = crate::complete::Later::new(move || {
+                let real = Real { cli: &history_cli };
+                real.configurations(&Repo::new(&history_cli.repo), 30).map(|h| crate::session::configuration_lines(&h)).unwrap_or_default()
+            });
+            interactive(&mut s, history)
+        }
         Invocation::Help => unreachable!("answered before anything is read"),
     }
 }
@@ -917,11 +924,11 @@ fn prompt(s: &Session, user: &str, host: &str) -> (Option<String>, String) {
 
 /// The interactive shell: with a line editor (history, Tab, `?`) on a terminal, one plain line at a
 /// time otherwise (piped input).
-fn interactive(s: &mut Session) -> Result<i32> {
+fn interactive(s: &mut Session, history: crate::complete::Later) -> Result<i32> {
     let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_string();
     let user = me()?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        return editor::run(s, &user, &host);
+        return editor::run(s, &user, &host, history);
     }
     let stdin = std::io::stdin();
     loop {
@@ -1116,11 +1123,11 @@ mod editor {
         assert_eq!(at_cursor("show | grep 'a b"), None, "inside single quotes too");
     }
 
-    pub fn run(s: &mut Session, user: &str, host: &str) -> Result<i32> {
+    pub fn run(s: &mut Session, user: &str, host: &str, history: complete::Later) -> Result<i32> {
         // (Ctrl-C while a command runs: the line editor keeps SIGINT for as long as it lives, so it
         // stops the command's child — nix, the broker — and torqcli says so and stays, its terminal
         // put back by the Echo guard as the command returns.)
-        let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data(), configurations: s.configurations_list(), files: s.nix_files() };
+        let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data(), configurations: history.clone(), files: s.nix_files() };
         let help = Help { know: Arc::new((s.schema.clone(), s.tree.clone())), at: Arc::new(Mutex::new(at(s))) };
         // Bracketed paste off: a paste arrives as typed, each line running at its newline as on a network
         // device (not held as one block until another Enter); the lines after the first were waiting

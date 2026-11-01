@@ -27,7 +27,7 @@ impl Choice {
 /// (the word being typed, possibly empty).
 #[cfg(test)]
 pub fn choices(k: &Know, mode: Mode, words: &[String], partial: &str) -> Vec<Choice> {
-    choices_at(k, &At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: vec![], files: vec![] }, words, partial)
+    choices_at(k, &At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![] }, words, partial)
 }
 
 /// Where the line is typed: the mode, where configuration mode is, and the configuration a line is
@@ -38,10 +38,31 @@ pub struct At {
     pub mode: Mode,
     pub edit: Vec<String>,
     pub data: crate::whole::Data,
-    /// The configurations a rollback number names (0, 1, …), one line each: `?` lists them.
-    pub configurations: Vec<String>,
+    /// The configurations a rollback number names (0, 1, …), one line each: `?` lists them. Read
+    /// only then (the broker reads the history).
+    pub configurations: Later,
     /// The configuration's Nix files (`file show ?` lists them).
     pub files: Vec<String>,
+}
+
+/// Lines read only when they are asked for: the history is the broker's to read (through sudo), not
+/// something to read before every prompt.
+#[derive(Clone)]
+pub struct Later(std::sync::Arc<dyn Fn() -> Vec<String> + Send + Sync>);
+
+impl Later {
+    pub fn new(read: impl Fn() -> Vec<String> + Send + Sync + 'static) -> Self {
+        Later(std::sync::Arc::new(read))
+    }
+    fn get(&self) -> Vec<String> {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for Later {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Later(…)")
+    }
 }
 
 /// `<[Enter]>`, offered when the words so far are already a whole command.
@@ -82,7 +103,7 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
                 out.push(Choice::new(&w, h));
                 match kind {
                     // A configuration number: the configurations themselves, newest first.
-                    Some(crate::grammar::Value::Rollback) => out.extend(at.configurations.iter().enumerate().map(|(n, c)| Choice::new(&n.to_string(), c))),
+                    Some(crate::grammar::Value::Rollback) => out.extend(at.configurations.get().iter().enumerate().map(|(n, c)| Choice::new(&n.to_string(), c))),
                     // A Nix file of the configuration: the ones it has.
                     Some(crate::grammar::Value::NixFile) => out.extend(at.files.iter().map(|f| Choice::new(f, ""))),
                     _ => {}
@@ -524,7 +545,7 @@ mod tests {
         for line in ["networking hostName torq", "system packages [ htop ]", "virtualisation docker enable true", "services httpd config httpd.nix"] {
             x.set(&mut data, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
-        let at = |mode, edit: &str| At { mode, edit: w(edit), data: data.clone(), configurations: vec![], files: vec![] };
+        let at = |mode, edit: &str| At { mode, edit: w(edit), data: data.clone(), configurations: Later::new(Vec::new), files: vec![] };
         let c = |mode, line: &str| words_of(&choices_at(&s, &at(mode, ""), &w(line), "")).iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let enter = |mode, line: &str| c(mode, line).first().is_some_and(|x| x == "<[Enter]>");
         let (o, k) = (Mode::Operational, Mode::Configuration);
@@ -618,7 +639,7 @@ mod tests {
         };
         let mut checked = 0;
         for mode in [Mode::Operational, Mode::Configuration] {
-            let at = At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: vec![], files: vec![] };
+            let at = At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![] };
             let mut todo: Vec<Vec<String>> = vec![vec![]];
             while let Some(line) = todo.pop() {
                 // Configuration paths are the tree's (tested with it), past their first word.
@@ -667,7 +688,7 @@ mod tests {
     #[test]
     fn rollback_lists_the_configurations() {
         let s = schema();
-        let at = At { mode: Mode::Configuration, edit: vec![], data: crate::whole::Data::default(), configurations: vec!["2026-11-01 20:10 viper: ssh".into(), "2026-10-31 09:00 viper: htop".into()], files: vec![] };
+        let at = At { mode: Mode::Configuration, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(|| vec!["2026-11-01 20:10 viper: ssh".into(), "2026-10-31 09:00 viper: htop".into()]), files: vec![] };
         let c = choices_at(&s, &at, &w("rollback"), "");
         assert_eq!(words_of(&c), ["<[Enter]>", "<number>", "0", "1"]);
         assert_eq!(c[2].help, "2026-11-01 20:10 viper: ssh");
@@ -684,7 +705,7 @@ mod tests {
         let mut data = crate::whole::Data::default();
         let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
         whole.set(&mut data, &w("networking interfaces eth0 ipv4 addresses 1 address 10.0.0.1")).unwrap();
-        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: vec![], files: vec![] };
+        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: Later::new(Vec::new), files: vec![] };
         let c = choices_at(&s, &at, &w("set networking interfaces eth0 ipv4 addresses"), "");
         assert_eq!(words_of(&c), ["1", "2", "<n>"]);
         assert_eq!(c[1].help, "A new entry");
@@ -697,7 +718,7 @@ mod tests {
         let mut data = crate::whole::Data::default();
         let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
         whole.set(&mut data, &w("users users alice extraGroups wheel")).unwrap();
-        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: vec![], files: vec![] };
+        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: Later::new(Vec::new), files: vec![] };
         let c = choices_at(&s, &at, &w("set users users"), "");
         assert_eq!(&words_of(&c)[..2], ["alice", "<name>"], "{c:?}");
         assert_eq!(tab(&choices_at(&s, &at, &w("delete users users"), "a")), [("alice".to_string(), "alice ".to_string())]);
@@ -717,7 +738,7 @@ mod tests {
     #[test]
     fn question_mark_says_why_nothing_follows() {
         let s = schema();
-        let at = |mode| At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: vec![], files: vec![] };
+        let at = |mode| At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![] };
         let out = answer(&s, &at(Mode::Operational), &w("show system packages"), "", 80);
         let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(out.contains("'packages' is not a word here (after `show system`)") && out.contains("alarms, commit, ledger, rollback"), "{out}");
