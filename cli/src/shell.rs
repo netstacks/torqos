@@ -748,6 +748,10 @@ fn run_shell(args: &[String]) -> Result<i32> {
                     Err(e) => return fail(&line, e),
                 }
             }
+            // A script's candidate is its own: what it changed and did not commit is gone. Say so.
+            if s.uncommitted().unwrap_or(false) {
+                eprint!("{}", crate::ui::Ui::for_terminal(true).warn("Not committed: the changes these commands made are discarded (-c works on a candidate of its own; end it with `commit` to keep them)."));
+            }
             Ok(0)
         }
         Invocation::Command(w) => {
@@ -992,7 +996,7 @@ mod editor {
     use super::{ask_person, prompt, run_line, say_error, Echo, ASKED};
     use std::sync::atomic::Ordering;
     use crate::complete;
-    use crate::session::{words, Session};
+    use crate::session::{words, Mode, Session};
     use anyhow::Result;
     use rustyline::completion::{Completer, Pair};
     use rustyline::error::ReadlineError;
@@ -1159,8 +1163,14 @@ mod editor {
                 }
                 // Ctrl-C: drop the line, as a shell does.
                 Err(ReadlineError::Interrupted) => continue,
+                // Ctrl-D: as `exit` from wherever it is, out of configuration mode (saying what is
+                // kept) and out of torqcli.
                 Err(ReadlineError::Eof) => {
                     println!();
+                    let way_out = if s.mode == Mode::Configuration { vec!["exit configuration-mode", "exit"] } else { vec!["exit"] };
+                    for line in way_out {
+                        run_line(s, line, false);
+                    }
                     return Ok(0);
                 }
                 Err(e) => return Err(e.into()),

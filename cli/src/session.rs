@@ -341,7 +341,12 @@ impl<'a> Session<'a> {
             Op::Load { how, from } => self.load_from(how, &from),
             Op::Exit if self.mode == Mode::Operational => {
                 self.done = true;
-                Ok(String::new())
+                // The interactive candidate is kept for the next `configure`: say so on the way out.
+                Ok(if self.saved.is_some() && self.uncommitted().unwrap_or(false) {
+                    "The candidate has changes not yet committed: they are kept for your next `configure`.\n".into()
+                } else {
+                    String::new()
+                })
             }
             Op::Exit if !self.edit.is_empty() => {
                 self.up();
@@ -541,7 +546,8 @@ impl<'a> Session<'a> {
     fn view(&self, d: &Data, path: &[String], display: Option<Display>, origin: &str) -> Result<String> {
         let w = self.whole();
         match display {
-            None => w.show(d, path),
+            // Nothing set at a place: said, not an empty answer.
+            None => w.show(d, path).map(|out| if out.is_empty() && !path.is_empty() { format!("Nothing is set at {}.\n", path.join(" ")) } else { out }),
             Some(Display::Set) => w.display_set(d, path),
             Some(Display::Detail) => {
                 let mut out = w.show(d, path)?;
@@ -567,6 +573,11 @@ impl<'a> Session<'a> {
         let head = self.repo.head()?;
         let c = self.candidate()?;
         let mut out = String::from("Entering configuration mode\n");
+        let base = c.base.clone();
+        if base == head && self.pending()? > 0 {
+            out.push_str(&format!("{}\n", self.ui().line("", "The candidate has changes not yet committed: `show | compare` lists them, `rollback 0` discards them.")));
+        }
+        let c = self.candidate()?;
         if c.base != head {
             out.push_str(&format!(
                 "The configuration has been changed since your candidate was started ({} → {}): \
@@ -618,7 +629,8 @@ impl<'a> Session<'a> {
                             }
                             _ => {
                                 let m_data = self.configuration_of(&m_id)?;
-                                Ok(self.whole().compare(&n_data, &m_data))
+                                let out = self.whole().compare(&n_data, &m_data);
+                                Ok(if out.is_empty() { format!("No differences: configurations {n} and {m} have the same settings.\n") } else { out })
                             }
                         }
                     }
@@ -870,7 +882,12 @@ impl<'a> Session<'a> {
             return candidate::unified_diff(scratch.path(), &a.changes(&self.schema)?);
         }
         // As on a network device: from `[edit networking]`, what changes there and below it.
-        Ok(sections_under(&a.compare(&self.whole())?, &self.edit))
+        let out = sections_under(&a.compare(&self.whole())?, &self.edit);
+        if out.is_empty() {
+            let here = if self.edit.is_empty() { String::new() } else { " here".into() };
+            return Ok(format!("No changes{here}: the candidate is the configuration in effect.\n"));
+        }
+        Ok(out)
     }
 
     fn rollback(&mut self, n: usize) -> Result<String> {
@@ -881,15 +898,33 @@ impl<'a> Session<'a> {
         // another source is dropped with it: a lock always belongs to the flake.nix it is committed with.
         let other_source = self.candidate()?.source.clone().is_some_and(|s| Some(s) != self.base_source().ok().flatten());
         let kept = if n == 0 || other_source { None } else { self.candidate()?.lock.clone() };
+        let before = self.pending()?;
         let mut c = Candidate::from_repo(&self.repo, &self.schema, &id)?;
         c.lock = kept.clone();
         self.candidate = Some(c);
         self.save()?;
-        Ok(if kept.is_some() { "load complete (the software loaded into the candidate is kept)\n".into() } else { "load complete\n".into() })
+        let after = self.pending()?;
+        let mut out = match (n, after) {
+            (0, _) if before == 0 => "No changes to discard: the candidate is the configuration in effect.".to_string(),
+            (0, _) => format!("Discarded {}: the candidate is the configuration in effect.", changes(before)),
+            (_, 0) => format!("Loaded configuration {n}: it is the same as the configuration in effect."),
+            (_, a) => format!("Loaded configuration {n}: {} from the configuration in effect (`show | compare` lists them; `commit` makes it the machine's).", changes(a)),
+        };
+        if kept.is_some() {
+            out.push_str(" The software loaded into the candidate is kept.");
+        }
+        Ok(format!("{}\n", self.ui().line("", &out)))
+    }
+
+    /// How many settings the candidate changes, as `show | compare` shows them: each setting added,
+    /// removed or changed once (a changed value is a `-` and a `+` of one setting).
+    fn pending(&mut self) -> Result<usize> {
+        let a = self.against()?;
+        Ok(settings_changed(&a.compare(&self.whole())?))
     }
 
     /// Whether the candidate differs from its base.
-    fn uncommitted(&mut self) -> Result<bool> {
+    pub fn uncommitted(&mut self) -> Result<bool> {
         if self.candidate.is_none() && self.saved.as_ref().is_none_or(|p| !p.exists()) {
             return Ok(false);
         }
@@ -1150,11 +1185,12 @@ impl<'a> Session<'a> {
         }
         let text = crate::saved::render(&tree, &files, &deleted);
         if text.len() > crate::saved::MAX {
-            bail!("save {file}: the configuration is {} bytes; a saved one is at most {}, so it could not be loaded", text.len(), crate::saved::MAX);
+            bail!("the configuration is {} bytes; a saved one is at most {}, so it could not be loaded", text.len(), crate::saved::MAX);
         }
-        write_private(std::path::Path::new(file), text.as_bytes())?;
+        let path = in_home(file);
+        write_private(&path, text.as_bytes())?;
         let n = text.lines().count();
-        Ok(format!("Wrote {n} line{} of configuration to '{file}'\n", if n == 1 { "" } else { "s" }))
+        Ok(format!("Wrote {n} line{} of configuration to {}\n", if n == 1 { "" } else { "s" }, path.display()))
     }
 
     /// `load override|merge|set <file>`: a saved configuration into the candidate, from the top — all
@@ -1165,13 +1201,13 @@ impl<'a> Session<'a> {
         let (file, text) = match from {
             LoadFrom::File(file) => {
                 let mut text = String::new();
-                std::io::Read::read_to_string(&mut std::io::Read::take(std::fs::File::open(file)?, crate::saved::MAX as u64 + 1), &mut text)?;
+                std::io::Read::read_to_string(&mut std::io::Read::take(std::fs::File::open(in_home(file))?, crate::saved::MAX as u64 + 1), &mut text)?;
                 (file.as_str(), text)
             }
             LoadFrom::Terminal => ("terminal", self.machine.read_terminal(crate::saved::MAX + 1).context("load terminal")?),
         };
         if text.len() > crate::saved::MAX {
-            bail!("load {file}: not a saved configuration (bigger than the most, {} bytes)", crate::saved::MAX);
+            bail!("{file} is not a saved configuration (bigger than the most, {} bytes)", crate::saved::MAX);
         }
         // Nothing to load is never a configuration (an override would empty the candidate).
         if text.trim().is_empty() {
@@ -1505,6 +1541,36 @@ fn short(id: &str) -> &str {
     &id[..id.len().min(12)]
 }
 
+/// The settings a comparison changes: its `+` and `-` lines, each setting (its section and name) once.
+fn settings_changed(compare: &str) -> usize {
+    let mut section = "";
+    let mut seen = std::collections::BTreeSet::new();
+    for line in compare.lines() {
+        if line.starts_with('[') {
+            section = line;
+        } else if let Some(rest) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) {
+            let name = rest.split_whitespace().next().unwrap_or_default();
+            seen.insert((section, name));
+        }
+    }
+    seen.len()
+}
+
+/// "1 change", "3 changes".
+fn changes(n: usize) -> String {
+    format!("{n} change{}", if n == 1 { "" } else { "s" })
+}
+
+/// A file named for `save` and `load`: as given if absolute, otherwise in the home folder (as on a
+/// network device), wherever torqcli was started.
+fn in_home(file: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(file);
+    match std::env::var_os("HOME") {
+        Some(home) if path.is_relative() => std::path::Path::new(&home).join(path),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// The words of a text as `help` searches them, small letters: split at anything not a letter or
 /// digit, and inside names where a capital starts a word (`mountPoint`: mount, point).
 fn words_in(text: &str) -> Vec<String> {
@@ -1688,6 +1754,31 @@ mod tests {
     }
 
 
+    /// Every command says what it did, and every way out says what is kept: rollback (what it loaded or
+    /// discarded), an empty comparison, a place with nothing set, configure with changes left from
+    /// before, exit with them kept, save and load in the home folder.
+    #[test]
+    fn every_command_says_what_it_did() {
+        let (d, m) = (repo(), Fake::default());
+        let home = tempfile::tempdir().unwrap();
+        let saved = home.path().join("candidate.json");
+        let mut s = session(d.path(), Some(saved.clone()), &m);
+        assert_eq!(run(&mut s, &["configure", "rollback 0"]), "Entering configuration mode\nNo changes to discard: the candidate is the configuration in effect.\n");
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
+        assert_eq!(s.exec("show time").unwrap(), "Nothing is set at time.\n");
+        s.exec("set time timeZone UTC").unwrap();
+        assert!(s.exec("exit").unwrap().contains("changed but not committed"));
+        assert_eq!(s.exec("exit").unwrap(), "The candidate has changes not yet committed: they are kept for your next `configure`.\n");
+        let mut again = session(d.path(), Some(saved), &m);
+        assert_eq!(again.exec("configure").unwrap(), "Entering configuration mode\nThe candidate has changes not yet committed: `show | compare` lists them, `rollback 0` discards them.\n");
+        assert_eq!(again.exec("rollback 0").unwrap(), "Discarded 1 change: the candidate is the configuration in effect.\n");
+        assert_eq!(settings_changed("[edit networking]\n-   hostName two;\n+   hostName one;\n+   domain x;\n[edit time]\n+   timeZone UTC;\n"), 3, "a changed value is one change");
+        assert_eq!(in_home("/etc/x.conf"), std::path::PathBuf::from("/etc/x.conf"));
+        if let Some(h) = std::env::var_os("HOME") {
+            assert_eq!(in_home("mine.conf"), std::path::Path::new(&h).join("mine.conf"), "as on a network device: the home folder");
+        }
+    }
+
     /// `help`: the commands of the mode; `help <command>`: that command and what may follow it;
     /// `help <words>`: commands and settings with those words, closest first.
     #[test]
@@ -1782,7 +1873,8 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         assert_eq!(s.exec("request system update").unwrap(), "This machine has the newest software: nothing to load.\n");
         assert_eq!(s.exec("configure").unwrap(), "Entering configuration mode\n");
-        assert_eq!(s.exec("show | compare").unwrap(), "");
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
+");
     }
 
     #[test]
@@ -1813,8 +1905,9 @@ mod tests {
         assert!(again.exec("show | compare").unwrap().contains(&format!("+   torq {old};")), "the candidate keeps its software");
         assert_eq!(again.exec("exit").unwrap(), "The configuration has been changed but not committed (it is kept: `configure` returns to it, `rollback 0` discards it).\n");
         again.exec("configure").unwrap();
-        assert_eq!(again.exec("rollback 0").unwrap(), "load complete\n");
-        assert_eq!(again.exec("show | compare").unwrap(), "", "rollback 0 discards the software too");
+        assert_eq!(again.exec("rollback 0").unwrap(), "Discarded 1 change: the candidate is the configuration in effect.\n");
+        assert_eq!(again.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
+", "rollback 0 discards the software too");
         // `rollback <n>` loads a configuration, never its software.
         again.exec("rollback 1").unwrap();
         assert!(!again.exec("show | compare").unwrap().contains("software"), "rollback n leaves the software alone");
@@ -1839,11 +1932,12 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         s.exec("request system update").unwrap();
         s.exec("configure").unwrap();
-        assert_eq!(s.exec("rollback 3").unwrap(), "load complete (the software loaded into the candidate is kept)\n");
+        assert_eq!(s.exec("rollback 3").unwrap(), "Loaded configuration 3: 2 changes from the configuration in effect (`show | compare` lists them; `commit` makes it the machine's). The software loaded into the candidate is kept.\n");
         let c = s.exec("show | compare").unwrap();
         assert!(c.contains("hostName one;") && c.contains("[edit system software]"), "{c}");
-        assert_eq!(s.exec("rollback 0").unwrap(), "load complete\n");
-        assert_eq!(s.exec("show | compare").unwrap(), "");
+        assert_eq!(s.exec("rollback 0").unwrap(), "Discarded 2 changes: the candidate is the configuration in effect.\n");
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
+");
     }
 
     #[test]
@@ -1871,7 +1965,8 @@ mod tests {
         s.exec("request system software rollback 1").unwrap();
         assert_eq!(s.exec("request system update").unwrap(), "This machine has the newest software.\nThe software loaded into the candidate before is dropped.\n");
         assert_eq!(s.exec("configure").unwrap(), "Entering configuration mode\n");
-        assert_eq!(s.exec("show | compare").unwrap(), "");
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
+");
     }
 
     #[test]
@@ -2272,7 +2367,7 @@ mod tests {
         sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && mkdir -p nixos && printf '{ \"dev\": { \"enable\": true } }\\n' > nixos/torq.json && git add -A && git commit -qm flake");
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set system software torq source github:other/torq"]);
-        assert_eq!(s.exec("rollback 1").unwrap(), "load complete\n", "not kept: it was for the other source");
+        assert_eq!(s.exec("rollback 1").unwrap(), "Loaded configuration 1: 1 change from the configuration in effect (`show | compare` lists them; `commit` makes it the machine's).\n", "not kept: it was for the other source");
         assert!(!s.exec("show | compare").unwrap().contains("[edit system software"), "{}", s.exec("show | compare").unwrap());
         // Software loaded for the machine's own source is kept, as before.
         run(&mut s, &["rollback 0", "run request system update"]);
@@ -2494,7 +2589,8 @@ mod tests {
         ] {
             assert!(format!("{:#}", s.exec(line).unwrap_err()).contains(why), "{line}");
         }
-        assert_eq!(s.exec("show | compare").unwrap(), "", "nothing changed");
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
+", "nothing changed");
     }
 
     #[test]
@@ -2506,7 +2602,7 @@ mod tests {
         let raw = s.exec("show system rollback 1 compare 0 | display diff").unwrap();
         assert!(raw.contains("+++ b/flake.lock\n") && raw.contains("+{\"nodes\":{}}") && raw.contains("+++ b/flake.nix\n"), "{raw}");
         assert!(!raw.contains("host.json"), "only what changed: {raw}");
-        assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "", "the tree did not change");
+        assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "No differences: configurations 0 and 1 have the same settings.\n", "the tree did not change");
     }
 
     #[test]
@@ -2588,7 +2684,8 @@ mod tests {
         assert_eq!((base.as_str(), tier.as_str(), reason.as_str(), *confirm), (s.repo.head().unwrap().as_str(), "user", "+ torq packages user dev [ jq ];", None));
         assert!(m.asked.borrow().is_empty(), "user tier: no question");
         assert_eq!(m.checks.borrow().len(), 1, "checked before committing");
-        assert_eq!(s.exec("show | compare").unwrap(), "", "the candidate starts over after a commit");
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
+", "the candidate starts over after a commit");
     }
 
     #[test]
@@ -2626,7 +2723,7 @@ mod tests {
     fn rollback_loads_an_earlier_configuration() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        assert_eq!(run(&mut s, &["configure", "rollback 1"]), "Entering configuration mode\nload complete\n");
+        assert_eq!(run(&mut s, &["configure", "rollback 1"]), "Entering configuration mode\nLoaded configuration 1: 1 change from the configuration in effect (`show | compare` lists them; `commit` makes it the machine's).\n");
         assert_eq!(s.exec("show | compare").unwrap(), "[edit networking]\n-   hostName two;\n+   hostName one;\n");
         assert!(format!("{:#}", s.exec("rollback 9").unwrap_err()).contains("only 2 configurations"));
         assert!(format!("{:#}", s.exec("rollback x").unwrap_err()).contains("not a number"));
@@ -2916,7 +3013,8 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         let e = format!("{:#}", run_err(&mut s, &["configure"], "load set terminal"));
         assert!(e.starts_with("nothing loaded: line 2: set nonsense x"), "the line is named once, by the shell: {e}");
-        assert_eq!(s.exec("show | compare").unwrap(), "", "all or nothing");
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
+", "all or nothing");
         // No terminal (a script): said.
         let m = Fake::default();
         let mut s = session(d.path(), None, &m);

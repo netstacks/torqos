@@ -76,7 +76,7 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
     }
     if found.is_empty() {
         let text = if v["checked_running_system"] == true {
-            let last = last.map(|l| format!("{}\n", ui.dim(&ui.line("    ", &format!("Last change: {}", one_line(l, 60)))))).unwrap_or_default();
+            let last = last.map(|l| format!("{}\n", ui.dim(&ui.line("    ", &format!("Last change: {}", one_line(l, usize::MAX)))))).unwrap_or_default();
             format!("{}\n{last}", ui.ok("This machine is exactly as its history says."))
         } else {
             format!(
