@@ -588,13 +588,16 @@ impl<'a> Session<'a> {
                 let mut out = String::new();
                 let h = self.machine.configurations(&self.repo, 50)?;
                 let all = &h.configurations;
+                // Each configuration: its rollback number (0 is in effect), its change number (the
+                // ledger's, as `request system revert` takes it), when, who, what.
                 let width = all.iter().map(|c| c.who.chars().count()).max().unwrap_or(0);
+                let change = |c: &Configuration| c.seq.map_or("-".to_string(), |s| format!("#{s}"));
+                let cw = all.iter().map(|c| change(c).len()).max().unwrap_or(1);
                 for (n, c) in all.iter().enumerate() {
-                    let row = format!("{n:<3} {}  {:<width$}  ", c.date, c.who);
+                    let row = format!("{n:<3} {:<cw$}  {}  {:<width$}  ", change(c), c.date, c.who);
                     out.push_str(&format!("{}\n", self.ui().line(&row, &c.what)));
                     if display == Some(Display::Detail) {
-                        let seq = c.seq.map(|s| format!("  (ledger #{s})")).unwrap_or_default();
-                        out.push_str(&format!("    commit {}{seq}\n", crate::history::one_line(&c.id, 64)));
+                        out.push_str(&format!("    commit {}\n", crate::history::one_line(&c.id, 64)));
                     }
                 }
                 // The ledger says where the config repo is (by the broker's count); if it is elsewhere, 0 —
@@ -2078,11 +2081,11 @@ mod tests {
         let long = "Install htop and jq for viper, and turn on the firewall";
         let m = Fake { ledger: Some(vec![Configuration { id: head, date: "d".into(), who: "viper".into(), what: long.into(), seq: Some(1) }]), ..Default::default() };
         let mut s = session(d.path(), None, &m);
-        assert_eq!(s.exec("show system commit").unwrap(), format!("0   d  viper  {long}\n"), "no screen (a script): one line");
-        s.screen = || Some(44);
-        assert_eq!(s.exec("show system commit").unwrap(), "0   d  viper  Install htop and jq for viper,\n              and turn on the firewall\n");
+        assert_eq!(s.exec("show system commit").unwrap(), format!("0   #1  d  viper  {long}\n"), "no screen (a script): one line");
+        s.screen = || Some(48);
+        assert_eq!(s.exec("show system commit").unwrap(), "0   #1  d  viper  Install htop and jq for viper,\n                  and turn on the firewall\n");
         s.screen = || Some(30);
-        assert_eq!(s.exec("show system commit").unwrap(), "0   d  viper\n    Install htop and jq for\n    viper, and turn on the\n    firewall\n", "too narrow beside it: under it");
+        assert_eq!(s.exec("show system commit").unwrap(), "0   #1  d  viper\n    Install htop and jq for\n    viper, and turn on the\n    firewall\n", "too narrow beside it: under it");
         #[cfg(target_os = "linux")] // the filters' sandbox
         {
             s.screen = || Some(44);
@@ -2105,8 +2108,9 @@ mod tests {
         };
         let mut s = session(d.path(), None, &m);
         let commits = s.exec("show system commit").unwrap();
-        assert_eq!(commits, "0   d  broker  Change #2 rolled back\n1   d  viper   host two\n2   d  user    init\n");
-        assert!(s.exec("show system commit | display detail").unwrap().contains(&format!("    commit {two}  (ledger #2)\n")));
+        assert_eq!(commits, "0   #3  d  broker  Change #2 rolled back\n1   #2  d  viper   host two\n2   #1  d  user    init\n", "rollback number, change number");
+        assert!(s.exec("show system commit | display detail").unwrap().contains(&format!("    commit {two}\n")));
+        assert_eq!(s.exec("request system revert #2").unwrap(), s.exec("request system revert 2").unwrap(), "a change number as the ledger writes it");
         assert_eq!(s.exec("show system rollback 1").unwrap(), "networking {\n    hostName two;\n}\n", "git's history alone has no 1");
         s.exec("configure").unwrap();
         s.exec("rollback 1").unwrap();

@@ -266,15 +266,15 @@ pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock
         }
         let time = local.map(|t| format!("{:02}:{:02}", t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60)).unwrap_or_else(|| "--:--".into());
         let (symbol, text) = describe(entries, e);
-        let mut right = e.seq.to_string();
-        if e.tier == "system" {
-            right.push_str("  (system)");
-        }
+        // Its change number, as everywhere (`request system revert #85`).
+        let right = format!("#{}", e.seq);
+        // Who made it: the person who approved it, else who asked (an agent, the broker on its own).
         let mut who = String::new();
-        // Who asked for it, when that was not the user.
         let actor = asked_by(entries, e);
-        if !matches!(actor, "user" | "broker" | "") {
-            who.push_str(&format!(" — by {}", one_line(actor, 12)));
+        match (&e.approved_by, actor) {
+            (Some(p), _) => who.push_str(&format!(" — {}", one_line(p, 16))),
+            (None, "user" | "") => {}
+            (None, a) => who.push_str(&format!(" — by {}", one_line(a, 16))),
         }
         if e.tainted {
             who.push_str(" ⚠ tainted");
@@ -292,7 +292,7 @@ pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock
     if shown.is_empty() {
         out.push_str("  Nothing has changed yet.\n");
     } else {
-        out.push_str(&format!("\n{}\n", ui.dim(&ui.line("  ", "undo one change: request system revert <change>"))));
+        out.push_str(&format!("\n{}\n", ui.dim(&ui.line("  ", "To undo one change: request system revert <change> (its number, like #85)."))));
     }
     out
 }
@@ -384,19 +384,19 @@ mod tests {
     }
 
     /// Snapshot of `show system ledger`: proposals folded into their results, undos named, local times,
-    /// system changes tagged, a proposal never applied shown as such.
+    /// each change's number as it is written everywhere (#3), a proposal never applied shown as such.
     #[test]
     fn log_snapshot() {
         let out = render(&ledger(), 100, &Ui::plain(), &clock());
         let expected = [
             "  Today",
-            "    08:00   · TorqOS set up                                          1  (system)",
-            "    08:01   ✓ Install htop for viper                                           3",
-            "    08:02   ✓ Install jq system-wide                                 5  (system)",
-            "    08:03   ↶ Undid \"Install jq system-wide\"                         6  (system)",
-            "    08:04   · Proposed, not applied: Install vim for viper                     7",
+            "    08:00   · TorqOS set up                                                   #1",
+            "    08:01   ✓ Install htop for viper                                          #3",
+            "    08:02   ✓ Install jq system-wide                                          #5",
+            "    08:03   ↶ Undid \"Install jq system-wide\"                                  #6",
+            "    08:04   · Proposed, not applied: Install vim for viper                    #7",
             "",
-            "  undo one change: request system revert <change>",
+            "  To undo one change: request system revert <change> (its number, like #85).",
         ]
         .join("\n");
         assert_eq!(out.trim_end(), expected, "\n{out}");
@@ -406,7 +406,7 @@ mod tests {
         let narrow = render(&ledger(), 100, &Ui { fit: Some(50), ..Ui::plain() }, &clock());
         assert!(narrow.lines().all(|l| crate::ui::width(l) <= 50), "\n{narrow}");
         let row = narrow.lines().find(|l| l.contains("Install htop for viper")).unwrap_or_default();
-        assert!(crate::ui::width(row) == 50 && row.ends_with(" 3"), "right-aligned to 50: {row:?}");
+        assert!(crate::ui::width(row) == 50 && row.ends_with(" #3"), "right-aligned to 50: {row:?}");
     }
 
     #[test]
