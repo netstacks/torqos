@@ -249,10 +249,10 @@ static SHOW_SYSTEM: &[Node] = &[
 
 static REQUEST_SYSTEM: &[Node] = &[
     fixed("password", "Change a person's password (yours, or <user>'s)", In::Op).whole(password).then(&[value(Value::User, "Whose (yours, if none)").whole(password)]),
-    fixed("repair", "Return a machine changed outside TorqOS to its last configuration", In::Op).whole(|_| Ok(Op::Request(Request::Repair))),
-    fixed("revert", "Undo one change (a new change forward)", In::Op).then(&[value(Value::Change, "The change's number, from show system ledger").whole(|r| Ok(Op::Request(Request::Revert { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
+    fixed("repair", "Return a machine changed outside TorqOS to its last configuration (it asks first)", In::Op).whole(|_| Ok(Op::Request(Request::Repair))),
+    fixed("revert", "Undo one change: a new change that reverses it (it asks first, unless it only touches your own settings)", In::Op).then(&[value(Value::Change, "The change's number, from show system ledger").whole(|r| Ok(Op::Request(Request::Revert { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
     fixed("software", "This machine's software", In::Op).then(&[fixed("rollback", "Load an earlier configuration's software into the candidate (a downgrade)", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(|r| Ok(Op::Request(Request::SoftwareRollback { n: r.number(Value::Rollback).unwrap_or(0) })))])]),
-    fixed("update", "Load the newest TorqOS into the candidate", In::Op).whole(update).then(&[fixed("all", "Every input, nixpkgs too", In::Op).whole(update)]),
+    fixed("update", "Load the newest TorqOS into the candidate (nothing changes until you commit it)", In::Op).whole(update).then(&[fixed("all", "Every input, nixpkgs too", In::Op).whole(update)]),
 ];
 
 static FILE: &[Node] = &[
