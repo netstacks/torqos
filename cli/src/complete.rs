@@ -81,6 +81,13 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
                 if verb == "edit" {
                     c.retain(|x| x.word != "|");
                 }
+                // Where an entry is named: the ones the configuration has, first.
+                if c.iter().any(|x| x.word == "<name>") {
+                    let at_loc = k.tree.locate(&path).map(|l| l.0).unwrap_or(path.clone());
+                    let whole = crate::whole::Whole { schema: k.schema, tree: k.tree };
+                    let names: std::collections::BTreeSet<String> = whole.entries(&at.data).into_iter().filter(|(w, _)| w.len() > at_loc.len() && w.starts_with(&at_loc)).map(|(w, _)| w[at_loc.len()].clone()).collect();
+                    out.extend(names.into_iter().map(|n| Choice::new(&n, "In the configuration")));
+                }
                 out.extend(c);
             }
         }
@@ -262,6 +269,13 @@ pub fn table(rows: &[(String, String)], fit: usize) -> String {
 /// The widest a word column gets; a wider word has its help on the next line.
 const COLUMN: usize = 24;
 
+/// A setting's help after a message about it, as one sentence: ` (Set the date … YYYY-MM-DD.)`;
+/// nothing if it has none.
+pub fn about(help: &str) -> String {
+    let h = summary(help);
+    if h.is_empty() { String::new() } else { format!(" ({})", h.trim_end_matches('.')) }
+}
+
 /// At most this many lines of help per choice; more ends in `…`.
 const HELP_LINES: usize = 3;
 
@@ -383,7 +397,7 @@ mod tests {
         assert!(choices(&s, Mode::Configuration, &w("set virtualisation docker"), "")[1].help.starts_with("This option enables docker"), "NixOS's own help");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd virtualHosts"), "")), ["<name>"]);
         // (An empty list is a value the session takes, so the line would run as it is.)
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking firewall allowedTCPPorts"), "")), ["<[Enter]>", "<[ a number … ]>"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking firewall allowedTCPPorts"), "")), ["<[Enter]>", "<[ a number from 0 to 65535 … ]>"]);
         // The settings TorqOS keeps in its own files: their values, as before.
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking hostName"), "")), ["<host-name>"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking hostName torq"), "")), ["<[Enter]>"], "a leaf has its value: nothing more");
@@ -590,6 +604,19 @@ mod tests {
             }
         }
         assert!(checked > 60, "the walk reached {checked} lines");
+    }
+
+    /// Where an entry is named, `?` offers the ones the configuration already has (Tab completes them).
+    #[test]
+    fn existing_entries_are_offered() {
+        let s = schema();
+        let mut data = crate::whole::Data::default();
+        let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
+        whole.set(&mut data, &w("users users alice extraGroups wheel")).unwrap();
+        let at = At { mode: Mode::Configuration, edit: vec![], data };
+        let c = choices_at(&s, &at, &w("set users users"), "");
+        assert_eq!(&words_of(&c)[..2], ["alice", "<name>"], "{c:?}");
+        assert_eq!(tab(&choices_at(&s, &at, &w("delete users users"), "a")), [("alice".to_string(), "alice ".to_string())]);
     }
 
     #[test]

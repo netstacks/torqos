@@ -20,12 +20,64 @@ pub struct Type {
     pub left: Option<Box<Type>>,
     pub right: Option<Box<Type>>,
     pub values: Option<Vec<Value>>,
+    /// A range's bounds (intBetween, numberBetween).
+    #[serde(default)]
+    pub range: Option<Vec<i64>>,
 }
 
 impl Type {
     /// The kind, without its arguments (`strMatching "^…$"` is a `strMatching`).
     fn kind(&self) -> &str {
         self.name.split_whitespace().next().unwrap_or("")
+    }
+
+    /// The values a closed set has (true and false, an enum's), for `?` to list and Tab to
+    /// complete; None for an open one.
+    pub fn choices(&self) -> Option<Vec<String>> {
+        match self.kind() {
+            "bool" => Some(vec!["false".into(), "true".into()]),
+            "enum" => self.values.as_ref().map(|v| v.iter().map(plain).collect()),
+            "nullOr" => self.elem.as_ref().and_then(|e| e.choices()),
+            _ => None,
+        }
+    }
+
+    /// A strMatching type's pattern, as NixOS checks it (the whole value must match).
+    fn pattern(&self) -> Option<String> {
+        let quoted = self.name.strip_prefix("strMatching ")?;
+        let inner = quoted.strip_prefix('"')?.strip_suffix('"')?;
+        // The type's name writes the pattern as a Nix string: \" \\ \$ are " \ $.
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some(e) => out.push(e),
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        Some(out)
+    }
+
+    /// The lowest and highest a number of this type may be.
+    fn bounds(&self) -> Option<(i64, i64)> {
+        match (self.kind(), self.range.as_deref()) {
+            (_, Some([low, high])) => Some((*low, *high)),
+            ("unsignedInt8", _) => Some((0, 255)),
+            ("unsignedInt16", _) => Some((0, 65535)),
+            ("unsignedInt32", _) => Some((0, 4_294_967_295)),
+            ("unsignedInt", _) => Some((0, i64::MAX)),
+            ("positiveInt", _) => Some((1, i64::MAX)),
+            ("signedInt8", _) => Some((-128, 127)),
+            ("signedInt16", _) => Some((-32768, 32767)),
+            ("signedInt32", _) => Some((-2_147_483_648, 2_147_483_647)),
+            _ => None,
+        }
     }
 
     /// Words for `?`: what a value of this type looks like.
@@ -37,8 +89,14 @@ impl Type {
             "enum" => format!("one of: {}", self.values.iter().flatten().map(plain).collect::<Vec<_>>().join(", ")),
             "package" => "a package name".into(),
             "attrsOf" | "lazyAttrsOf" => format!("<name> {}", self.elem.as_ref().map_or("value".into(), |e| e.describe())),
-            "path" | "pathInStore" => "a path".into(),
-            k if is_int(k) => "a number".into(),
+            "path" | "pathInStore" => "a path (from /)".into(),
+            k if is_int(k) => match self.bounds() {
+                Some((low, high)) if high < i64::MAX => format!("a number from {low} to {high}"),
+                Some((low, _)) => format!("a number, {low} or more"),
+                None => "a number".into(),
+            },
+            "strMatching" => self.pattern().map_or("text".into(), |p| format!("text matching {p}")),
+            "nonEmptyStr" => "text, not empty".into(),
             k if is_str(k) => "text".into(),
             other => format!("{other} (in a config file)"),
         }
@@ -88,6 +146,8 @@ pub struct Node {
 /// Where words lead in the tree.
 #[derive(Debug, PartialEq)]
 pub struct Resolved<'a> {
+    /// The setting's help (NixOS's description, its first paragraph).
+    pub help: &'a str,
     /// The setting's path in NixOS, with entry names in place of `<name>`
     /// (`services.httpd.virtualHosts."example.com".forceSSL` → [services, httpd, virtualHosts, example.com, forceSSL]).
     pub loc: Vec<String>,
@@ -132,37 +192,52 @@ impl Tree {
             || self.fence.iter().any(|pat| loc.len() >= pat.len() && pat.iter().zip(loc).all(|(p, s)| seg(p, s)))
     }
 
-    /// Follow `words` from the top: names of settings, and at a set of named entries, any word as
-    /// the entry's name. Stops at the first setting that takes a value; the words after it are that
-    /// value. A path that ends inside the tree, with no value, names a place, not a setting.
-    pub fn resolve(&self, words: &[String]) -> Result<Resolved<'_>> {
+    /// Where `words` lead: the path as the tree names it (a unique beginning of a name is that name,
+    /// as command words abbreviate; an entry's name is as written), the node there, and the words
+    /// after a setting that takes a value (its value).
+    fn walk(&self, words: &[String]) -> Result<Walk<'_>> {
         let (mut n, mut loc) = (&self.root, Vec::new());
         for (i, w) in words.iter().enumerate() {
             if let Some((ty, _)) = &n.setting {
                 if takes_value(ty) {
-                    return Ok(Resolved { loc, ty, values: words[i..].to_vec() });
+                    return Ok(Walk { loc, node: n, values: words[i..].to_vec() });
                 }
             }
-            n = match (n.children.get(w), n.children.get("<name>")) {
-                (Some(c), _) => c,
-                (None, Some(entry)) if w != "<name>" => entry,
-                _ => bail!("{}: no such setting{}", path_text(&loc, w), did_you_mean(n, w)),
-            };
-            loc.push(w.clone());
+            match step(n, w) {
+                Step::Name(c, name) => {
+                    loc.push(name);
+                    n = c;
+                }
+                Step::Entry(e) => {
+                    loc.push(w.clone());
+                    n = e;
+                }
+                Step::Many(names) => bail!("'{w}' is ambiguous{}: {}", if loc.is_empty() { String::new() } else { format!(" (after `{}`)", loc.join(" ")) }, names.join(", ")),
+                Step::None => bail!("{}: no such setting{}", path_text(&loc, w), did_you_mean(n, w)),
+            }
         }
-        match &n.setting {
-            Some((ty, _)) if takes_value(ty) => Ok(Resolved { loc, ty, values: vec![] }),
-            _ => bail!("{}: not a setting by itself (`?` shows what is below it)", loc.join(" ")),
+        Ok(Walk { loc, node: n, values: vec![] })
+    }
+
+    /// `words` as a setting and its value: where they lead, which must be a setting that takes a
+    /// value (the words after it are that value). A path that ends inside the tree, with no value,
+    /// names a place, not a setting.
+    pub fn resolve(&self, words: &[String]) -> Result<Resolved<'_>> {
+        let w = self.walk(words)?;
+        match &w.node.setting {
+            Some((ty, help)) if takes_value(ty) => Ok(Resolved { help, loc: w.loc, ty, values: w.values }),
+            _ => bail!("{}: not a setting by itself (`?` shows what is below it)", w.loc.join(" ")),
         }
     }
 
-    /// Where in `words` an entry is named (`services httpd virtualHosts example.com` → [3]).
+    /// Where in `words` an entry is named (`services httpd virtualHosts example.com` → [3]), as far
+    /// as the words lead.
     pub fn entry_positions(&self, words: &[String]) -> Vec<usize> {
         let (mut n, mut at) = (&self.root, Vec::new());
         for (i, w) in words.iter().enumerate() {
-            n = match (n.children.get(w), n.children.get("<name>")) {
-                (Some(c), _) => c,
-                (None, Some(e)) => {
+            n = match step(n, w) {
+                Step::Name(c, _) => c,
+                Step::Entry(e) => {
                     at.push(i);
                     e
                 }
@@ -175,55 +250,91 @@ impl Tree {
     /// Whether the last of `words` names an entry of a set of named ones (`virtualHosts example.com`).
     pub fn is_entry(&self, words: &[String]) -> bool {
         let Some((last, parent)) = words.split_last() else { return false };
-        let mut n = &self.root;
-        for w in parent {
-            n = match (n.children.get(w), n.children.get("<name>")) {
-                (Some(c), _) => c,
-                (None, Some(e)) => e,
-                _ => return false,
-            };
+        match self.walk(parent) {
+            Ok(w) if w.values.is_empty() => matches!(step(w.node, last), Step::Entry(_)),
+            _ => false,
         }
-        !n.children.contains_key(last) && n.children.contains_key("<name>")
     }
 
-    /// Where `words` lead, setting or not: the path (entry names in place of `<name>`), the setting
-    /// there if it takes a value, and the words after it. `delete` names places as well as settings.
+    /// Where `words` lead, setting or not: the path as the tree names it, the setting there if it
+    /// takes a value, and the words after it. `delete` names places as well as settings.
     pub fn locate(&self, words: &[String]) -> Result<(Vec<String>, Option<&Type>, Vec<String>)> {
-        match self.resolve(words) {
-            Ok(r) => Ok((r.loc, Some(r.ty), r.values)),
-            Err(e) if format!("{e}").contains("not a setting by itself") => Ok((words.to_vec(), None, vec![])),
-            Err(e) => Err(e),
-        }
+        let w = self.walk(words)?;
+        let ty = w.node.setting.as_ref().map(|(t, _)| t).filter(|t| takes_value(t));
+        Ok((w.loc, ty, w.values))
     }
 
     /// What may come after `words` (for `?` and Tab): the names below, `<name>` where an entry is
-    /// named, or, at a setting, what its value looks like.
+    /// named, or, at a setting, its values (a closed set: each, so Tab completes them) or what its
+    /// value looks like.
     pub fn next(&self, words: &[String]) -> Vec<(String, String)> {
-        let mut n = &self.root;
-        for w in words {
-            if let Some((ty, _)) = &n.setting {
-                if takes_value(ty) {
-                    return vec![];
-                }
-            }
-            n = match (n.children.get(w), n.children.get("<name>")) {
-                (Some(c), _) => c,
-                (None, Some(entry)) => entry,
-                _ => return vec![],
-            };
+        let Ok(w) = self.walk(words) else { return vec![] };
+        if !w.values.is_empty() {
+            return vec![];
         }
-        if let Some((ty, help)) = &n.setting {
+        if let Some((ty, help)) = &w.node.setting {
             if takes_value(ty) {
-                return vec![(format!("<{}>", ty.describe()), help.clone())];
+                return match ty.choices() {
+                    Some(values) => values.into_iter().map(|v| (v, String::new())).collect(),
+                    None => vec![(format!("<{}>", ty.describe()), help.clone())],
+                };
             }
         }
-        n.children
+        w.node
+            .children
             .iter()
-            .map(|(w, c)| {
-                let help = c.setting.as_ref().map(|(_, h)| h.clone()).unwrap_or_default();
-                (w.clone(), help)
+            .map(|(name, c)| {
+                let help = c.setting.as_ref().map(|(_, h)| h.clone()).unwrap_or_else(|| section_help(c));
+                (name.clone(), help)
             })
             .collect()
+    }
+}
+
+/// Where words lead (Tree::walk).
+struct Walk<'a> {
+    loc: Vec<String>,
+    node: &'a Node,
+    values: Vec<String>,
+}
+
+/// One word further down the tree from `n`.
+enum Step<'a> {
+    /// A name below: the node, and the name as the tree has it.
+    Name(&'a Node, String),
+    /// An entry's name, of a set of named ones.
+    Entry(&'a Node),
+    /// The beginning of several names.
+    Many(Vec<String>),
+    None,
+}
+
+/// What `w` is below `n`: a name (exactly, or a unique beginning of one), or an entry's name where
+/// entries are named — as written (an entry is named, never guessed at).
+fn step<'a>(n: &'a Node, w: &str) -> Step<'a> {
+    if let Some(c) = n.children.get(w).filter(|_| w != "<name>") {
+        return Step::Name(c, w.to_string());
+    }
+    if let Some(e) = n.children.get("<name>") {
+        return if w == "<name>" { Step::None } else { Step::Entry(e) };
+    }
+    let begins: Vec<(&String, &Node)> = n.children.iter().filter(|(k, _)| !w.is_empty() && k.starts_with(w)).collect();
+    match begins.as_slice() {
+        [(name, c)] => Step::Name(c, name.to_string()),
+        [] => Step::None,
+        many => Step::Many(many.iter().map(|(k, _)| k.to_string()).collect()),
+    }
+}
+
+/// What a section is, where NixOS describes only its settings: what it holds.
+fn section_help(n: &Node) -> String {
+    const SHOWN: usize = 5;
+    let names: Vec<&str> = n.children.keys().map(String::as_str).filter(|k| *k != "<name>" && !k.starts_with('_')).collect();
+    match names.len() {
+        0 if n.children.contains_key("<name>") => "Named entries, each with its settings".into(),
+        0 => String::new(),
+        k if k <= SHOWN => format!("Settings: {}", names.join(", ")),
+        k => format!("Settings: {}, and {} more", names[..SHOWN].join(", "), k - SHOWN),
     }
 }
 
@@ -318,11 +429,11 @@ pub fn value(ty: &Type, words: &[String]) -> Result<Value> {
         k if is_int(k) => {
             let w = one("a number")?;
             let n: i64 = w.parse().map_err(|_| anyhow::anyhow!("'{w}' is not a number"))?;
-            match k {
-                "unsignedInt16" if !(0..=65535).contains(&n) => bail!("{n}: 0 to 65535"),
-                "unsignedInt" | "unsignedInt8" | "unsignedInt32" if n < 0 => bail!("{n}: not below 0"),
-                "positiveInt" if n < 1 => bail!("{n}: 1 or more"),
-                _ => {}
+            if let Some((low, high)) = ty.bounds().filter(|(l, h)| !(*l..=*h).contains(&n)) {
+                if high == i64::MAX {
+                    bail!("{n} is out of range: {low} or more");
+                }
+                bail!("{n} is out of range: {low} to {high}");
             }
             Value::from(n)
         }
@@ -333,7 +444,25 @@ pub fn value(ty: &Type, words: &[String]) -> Result<Value> {
             }
             Value::String(w.clone())
         }
-        "path" | "pathInStore" => Value::String(one("a path")?.clone()),
+        "path" | "pathInStore" => {
+            let w = one("a path")?;
+            if !w.starts_with('/') {
+                bail!("'{w}' is not a path: a path starts at / (/srv/www, not srv/www)");
+            }
+            Value::String(w.clone())
+        }
+        "strMatching" => {
+            let w = one("text")?;
+            let p = ty.pattern().context("a strMatching type without its pattern")?;
+            // As NixOS checks it (builtins.match): the whole value matches.
+            let re = regex::Regex::new(&format!("^(?:{p})$")).with_context(|| format!("this setting's pattern ({p}) is not one torqcli can check: put it in a config file"))?;
+            if !re.is_match(w) {
+                bail!("'{w}' is not in the form this setting takes (text matching {p})");
+            }
+            Value::String(w.clone())
+        }
+        "nonEmptyStr" if one("text")?.trim().is_empty() => bail!("this setting takes text that is not empty"),
+        "passwdEntry" if one("text")?.contains([':', '\n']) => bail!("'{}' has a ':' (or a line break): an account's fields may not", one("text")?),
         k if is_str(k) => Value::String(one("text")?.clone()),
         other => bail!("a {other} is not a value here: put it in a config file"),
     })
@@ -389,6 +518,49 @@ mod tests {
         }
     }
 
+    /// A setting's rules come from NixOS's own description of it: closed sets list their values (so
+    /// Tab completes them), and `set` refuses what NixOS would — a pattern, a range, a path — saying
+    /// the form the setting takes.
+    #[test]
+    fn a_value_is_checked_as_nixos_checks_it() {
+        let t = tree();
+        let w = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        let next = |s: &str| t.next(&w(s)).into_iter().map(|(x, _)| x).collect::<Vec<_>>();
+        assert_eq!(next("services httpd enable"), ["false", "true"], "a closed set: each value");
+        let host = t.resolve(&w("networking hostName")).unwrap().ty.clone();
+        assert!(value(&host, &w("my-box")).is_ok() && value(&host, &[String::new()]).is_ok(), "^$ is allowed: empty asks DHCP");
+        let e = format!("{:#}", value(&host, &w("my_box!")).unwrap_err());
+        assert!(e.starts_with("'my_box!' is not in the form this setting takes (text matching ^$|^[[:alnum:]]"), "{e}");
+        let ty = |name: &str, range: Option<Vec<i64>>| Type { name: name.into(), elem: None, left: None, right: None, values: None, range };
+        let pct = ty("intBetween", Some(vec![1, 100]));
+        assert!(value(&pct, &w("100")).is_ok());
+        assert_eq!(format!("{:#}", value(&pct, &w("101")).unwrap_err()), "101 is out of range: 1 to 100");
+        assert_eq!(pct.describe(), "a number from 1 to 100");
+        assert_eq!(format!("{:#}", value(&ty("positiveInt", None), &w("0")).unwrap_err()), "0 is out of range: 1 or more");
+        assert!(format!("{:#}", value(&ty("path", None), &w("srv/www")).unwrap_err()).contains("a path starts at /"));
+        assert!(value(&ty("nonEmptyStr", None), &[" ".to_string()]).is_err());
+        assert!(value(&ty("passwdEntry", None), &w("a:b")).is_err());
+        let date = ty("strMatching \"[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}\"", None);
+        assert!(value(&date, &w("2027-01-31")).is_ok() && value(&date, &w("tomorrow")).is_err() && value(&date, &w("2027-01-31x")).is_err(), "the whole value matches");
+    }
+
+    /// A setting's name abbreviates as command words do: a unique beginning is the name (stored as
+    /// the name); several are named; an entry's name is never guessed at.
+    #[test]
+    fn names_abbreviate_entries_do_not() {
+        let t = tree();
+        let w = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert_eq!(t.resolve(&w("virt dock en true")).unwrap().loc, w("virtualisation docker enable"));
+        assert_eq!(t.locate(&w("serv htt")).unwrap().0, w("services httpd"), "a place, as the tree names it");
+        let e = format!("{:#}", t.resolve(&w("sy x")).unwrap_err());
+        assert_eq!(e, "'sy' is ambiguous: system, systemd");
+        assert_eq!(t.resolve(&w("users users al extraGroups wheel")).unwrap().loc, w("users users al extraGroups"), "an entry: as written");
+        assert!(t.next(&w("virt")).iter().any(|(x, _)| x == "docker"), "? after an abbreviation");
+        // A section NixOS does not describe says what it holds.
+        let docker = t.next(&w("virtualisation")).into_iter().find(|(x, _)| x == "docker").unwrap().1;
+        assert_eq!(docker, "Settings: enable, rootless");
+    }
+
     #[test]
     fn what_may_come_next() {
         let t = tree();
@@ -396,8 +568,8 @@ mod tests {
         assert_eq!(words(t.next(&w("virtualisation docker"))), ["enable", "rootless"]);
         assert_eq!(words(t.next(&w("services httpd virtualHosts"))), ["<name>"], "an entry is named");
         assert_eq!(words(t.next(&w("services httpd virtualHosts example.com"))), ["documentRoot", "forceSSL", "serverAliases"]);
-        assert_eq!(words(t.next(&w("networking firewall allowedTCPPorts"))), ["<[ a number … ]>"]);
-        assert_eq!(words(t.next(&w("services openssh settings LogLevel"))), ["<one of: QUIET, FATAL, ERROR, INFO, VERBOSE, DEBUG, DEBUG1, DEBUG2, DEBUG3>"]);
+        assert_eq!(words(t.next(&w("networking firewall allowedTCPPorts"))), ["<[ a number from 0 to 65535 … ]>"]);
+        assert_eq!(words(t.next(&w("services openssh settings LogLevel"))), ["QUIET", "FATAL", "ERROR", "INFO", "VERBOSE", "DEBUG", "DEBUG1", "DEBUG2", "DEBUG3"]);
         let help = t.next(&w("virtualisation docker"));
         assert!(help[0].1.starts_with("This option enables docker"), "{help:?}");
         assert!(t.next(&w("virtualisation docker enable true")).is_empty());

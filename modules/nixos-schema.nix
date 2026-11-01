@@ -25,6 +25,8 @@ let
         else if builtins.isList payload then payload
         else null;
       plain = v: builtins.isString v || builtins.isInt v;
+      # A range's bounds are only in its description ("integer between 1 and 65535 (both inclusive)").
+      bounds = builtins.match "[^0-9-]*(-?[0-9]+) and (-?[0-9]+).*" (t.description or "");
     in
     lib.filterAttrs (_: v: v != null) {
       name = t.name or "unknown";
@@ -32,6 +34,7 @@ let
       left = sub "left";
       right = sub "right";
       values = if (t.name or "") == "enum" && builtins.isList values && builtins.all plain values then values else null;
+      range = if builtins.elem (t.name or "") [ "intBetween" "numberBetween" ] && bounds != null then map lib.toInt bounds else null;
     };
 
   # The first paragraph of a description, on one line, at most 160 characters.
@@ -49,7 +52,8 @@ let
   walk = opts: builtins.concatMap (opt:
     let
       visible = opt.visible or true;
-      shown = visible != false && !(opt.internal or false);
+      # (A read-only setting is NixOS's own to set: never offered, never settable.)
+      shown = visible != false && !(opt.internal or false) && !(opt.readOnly or false);
       subs = builtins.tryEval (opt.type.getSubOptions opt.loc);
       below = if visible == true && subs.success && subs.value != { } then walk subs.value else [ ];
       entry = { loc = lib.drop prefix opt.loc; type = typeOf 4 opt.type; help = help (opt.description or ""); };

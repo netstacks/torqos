@@ -145,7 +145,8 @@ pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     if tree.fenced(&r.loc) {
         bail!("{}: not settable in the configuration tree (it reaches the broker or TorqOS itself)", r.loc.join(" "));
     }
-    let new = crate::nixos::value(r.ty, &r.values).with_context(|| r.loc.join(" "))?;
+    // A value that is not one: said with what the setting is (its help often says the form).
+    let new = crate::nixos::value(r.ty, &r.values).map_err(|e| anyhow::anyhow!("{}: {e:#}{}", r.loc.join(" "), crate::complete::about(r.help)))?;
     if control_text(&mut r.loc.clone(), &new).is_some() {
         bail!("{}: a line break or another control character in a value: multi-line text goes in a config file", r.loc.join(" "));
     }
