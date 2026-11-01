@@ -453,7 +453,8 @@ impl<'a> Session<'a> {
                 Ok(out)
             }
             Op::Compare { display } => self.compare(display),
-            Op::Rollback { n } => self.rollback(n),
+            Op::Rollback { n, path } if path.is_empty() => self.rollback(n),
+            Op::Rollback { n, path } => self.rollback_part(n, &path),
             Op::Commit(o) => {
                 let quit = o.and_quit;
                 let out = self.commit(o)?;
@@ -937,6 +938,40 @@ impl<'a> Session<'a> {
             out.push_str(" The software loaded into the candidate is kept.");
         }
         Ok(format!("{}\n", self.ui().line("", &out)))
+    }
+
+    /// `rollback <n> <path>`: the place `path` (from where configuration mode is) put back as
+    /// configuration n has it, the rest of the candidate as it is (n = 0: one change undone).
+    fn rollback_part(&mut self, n: usize, path: &[String]) -> Result<String> {
+        let here = self.here(path);
+        let then = self.configuration_of(&self.commit_at(n)?)?;
+        let mut d = self.candidate_data()?;
+        let before = self.pending()?;
+        let whole = self.whole();
+        let at = self.tree.locate(&here).map(|l| l.0).unwrap_or_else(|_| here.clone());
+        // Out, as the candidate has it; in, as configuration n has it.
+        whole.delete(&mut d, &here)?;
+        for (words, value) in whole.entries(&then).into_iter().filter(|(w, _)| w.starts_with(&at)) {
+            let value: Vec<String> = match value {
+                crate::tree::Val::One(v) => vec![v],
+                crate::tree::Val::Many(v) => [vec!["[".to_string()], v, vec!["]".to_string()]].concat(),
+            };
+            whole.set(&mut d, &[words, value].concat())?;
+        }
+        self.put_data(d)?;
+        self.save()?;
+        let after = self.pending()?;
+        let which = if n == 0 { "the configuration in effect".to_string() } else { format!("configuration {n}") };
+        let what = match before.saturating_sub(after) {
+            0 if before == after => "it already was".to_string(),
+            k => format!("{} undone", changes(k)),
+        };
+        Ok(format!("{}\n", self.ui().line("", &format!("Put back {} as {which} has it: {what}.", at.join(" ")))))
+    }
+
+    /// One line for each configuration `rollback ?` offers, newest first (0, 1, …).
+    pub fn configurations_list(&self) -> Vec<String> {
+        self.machine.configurations(&self.repo, 30).map(|h| h.configurations.iter().map(|c| format!("{} {}: {}", c.date, c.who, crate::history::one_line(&c.what, 80))).collect()).unwrap_or_default()
     }
 
     /// How many settings the candidate changes, as `show | compare` shows them: each setting added,
@@ -1794,6 +1829,23 @@ mod tests {
         lines.iter().map(|l| s.exec(l).unwrap_or_else(|e| panic!("{l}: {e:#}"))).collect()
     }
 
+
+    /// `rollback 0 <path>` undoes the changes at one place, the rest of the candidate as it is; `rollback
+    /// ?` lists the configurations, as on a network device.
+    #[test]
+    fn one_change_undone() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set networking hostName three", "set time timeZone UTC"]);
+        assert_eq!(s.exec("rollback 0 networking hostName").unwrap(), "Put back networking hostName as the configuration in effect has it: 1 change undone.\n");
+        let left = s.exec("show | compare").unwrap();
+        assert!(left.contains("timeZone UTC") && !left.contains("hostName"), "{left}");
+        assert_eq!(s.exec("rollback 0 netw hostN").unwrap(), "Put back networking hostName as the configuration in effect has it: it already was.\n", "abbreviated, as anywhere");
+        s.exec("edit time").unwrap();
+        assert!(s.exec("rollback 0 timeZone").unwrap().contains("Put back time timeZone"), "from where `edit` is");
+        assert_eq!(s.exec("top show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
+        assert!(s.configurations_list().len() <= 30);
+    }
 
     /// Every command says what it did, and every way out says what is kept: rollback (what it loaded or
     /// discarded), an empty comparison, a place with nothing set, configure with changes left from

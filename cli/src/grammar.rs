@@ -215,7 +215,7 @@ static ROOTS: &[Node] = &[
     fixed("load", "Load a saved or pasted configuration into the candidate (override, merge, set)", In::Cf).then(LOAD),
     fixed("quit", "The same as exit", In::Both).top_only().whole(|_| Ok(Op::Exit)),
     fixed("request", "Ask the machine to do something", In::Op).then(&[fixed("system", "This machine", In::Op).then(REQUEST_SYSTEM)]),
-    fixed("rollback", "Load an earlier configuration into the candidate", In::Cf).whole(rollback).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(rollback)]),
+    fixed("rollback", "Load an earlier configuration into the candidate, or put back one part of it", In::Cf).whole(rollback).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(rollback).then(&[node(Word::Path, "Only this part: put back as that configuration has it", In::Cf).whole(rollback)])]),
     fixed("run", "Run an operational-mode command", In::Cf).then(&[node(Word::Command(Mode::Operational), "An operational command", In::Cf).whole(|r| Ok(Op::Run(Box::new(sub(r)?))))]),
     fixed("save", "Save the whole candidate, and its config files, to a file", In::Cf).then(&[value(Value::File, "Where to save it (written private: 0600)").whole(|r| Ok(Op::Save { file: r.value(Value::File).unwrap_or_default().to_string() }))]),
     fixed("set", "Set a value", In::Cf).then(&[node(Word::Path, "The setting and its value", In::Cf).whole(|r| Ok(Op::Set { words: r.path.clone() }))]),
@@ -375,7 +375,7 @@ fn load(r: &Read) -> Result<Op> {
 }
 
 fn rollback(r: &Read) -> Result<Op> {
-    Ok(Op::Rollback { n: r.number(Value::Rollback).unwrap_or(0) })
+    Ok(Op::Rollback { n: r.number(Value::Rollback).unwrap_or(0), path: r.path.clone() })
 }
 
 fn up(r: &Read) -> Result<Op> {

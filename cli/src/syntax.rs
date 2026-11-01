@@ -86,7 +86,9 @@ pub enum Op {
     ShowCandidate { path: Vec<String>, display: Option<Display> },
     /// `show | compare`: what the candidate changes.
     Compare { display: Option<Display> },
-    Rollback { n: usize },
+    /// `rollback [<n> [<path>]]`: configuration n into the candidate — or only the place `path`,
+    /// put back as configuration n has it (`rollback 0 networking hostName` undoes one change).
+    Rollback { n: usize, path: Vec<String> },
     Commit(CommitOptions),
     /// `run <command>`: an operational command from configuration mode.
     Run(Box<Op>),
@@ -248,7 +250,7 @@ pub fn render(op: &Op) -> String {
         Op::Top { then: Some(op) } => format!("top {}", render(op)),
         Op::ShowCandidate { path, display } => format!("{}{}", sep("show", path), display_text(display)),
         Op::Compare { display } => format!("show | compare{}", display_text(display)),
-        Op::Rollback { n } => format!("rollback {n}"),
+        Op::Rollback { n, path } => sep(&format!("rollback {n}"), path),
         Op::Commit(o) => commit(o),
         Op::Run(op) => format!("run {}", render(op)),
         Op::Exit => "exit".into(),
@@ -318,7 +320,8 @@ mod tests {
             (Mode::Configuration, Op::ShowCandidate { path: vec![], display: detail }),
             (Mode::Configuration, Op::Compare { display: None }),
             (Mode::Configuration, Op::Compare { display: diff }),
-            (Mode::Configuration, Op::Rollback { n: 2 }),
+            (Mode::Configuration, Op::Rollback { n: 2, path: vec![] }),
+            (Mode::Configuration, Op::Rollback { n: 0, path: v("networking hostName") }),
             (Mode::Configuration, Op::Save { file: "/home/dev/my device.conf".into() }),
             (Mode::Configuration, Op::Load { how: LoadHow::Override, from: LoadFrom::File("a.conf".into()) }),
             (Mode::Configuration, Op::Load { how: LoadHow::Merge, from: LoadFrom::File("a.conf".into()) }),
