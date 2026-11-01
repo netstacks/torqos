@@ -61,6 +61,11 @@ in
     # Setup is the only way in: the image never takes over a repo by itself (`init` would ledger
     # files an interrupted setup left, unbuilt, as the machine's, with no account to log in to).
     systemd.services.torq-broker-init.enable = false;
+    # Nor checks it against its history: before change #1 there is none, and a finding then would
+    # outlive setup (a check during setup's switch finds the broker busy and keeps it), so the
+    # prompt would say "not as its history says" on a machine that is. The set-up system checks.
+    systemd.services.torq-status.enable = false;
+    systemd.timers.torq-status.enable = false;
 
     systemd.services.torq-setup = {
       description = "TorqOS first-boot setup";
