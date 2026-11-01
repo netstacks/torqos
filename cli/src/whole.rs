@@ -235,7 +235,18 @@ impl Whole<'_> {
         }
     }
 
+    /// `words` as the tree names them (abbreviations written out, `networkin hostName` →
+    /// `networking hostName`), so where a setting is kept is decided on its name, never on how it was
+    /// typed; words the tree does not take (an old name: `system host-name`) as they are.
+    fn spelled(&self, words: &[String]) -> Vec<String> {
+        match self.tree.locate(words) {
+            Ok((loc, _, values)) => [loc, values].concat(),
+            Err(_) => words.to_vec(),
+        }
+    }
+
     fn set_in(&self, d: &mut Data, words: &[String]) -> Result<()> {
+        let words: &[String] = &self.spelled(words);
         if let Some(rest) = software_words(words) {
             return match rest {
                 [url] => {
@@ -291,6 +302,7 @@ impl Whole<'_> {
     }
 
     fn delete_in(&self, d: &mut Data, words: &[String]) -> Result<Deleted> {
+        let words: &[String] = &self.spelled(words);
         if software_words(words).is_some() || words == ["system", "software"] || words == ["system", "software", "torq"] {
             bail!("the software's source can be changed (`set system software torq source …`), not deleted: a machine always has one");
         }
@@ -373,12 +385,14 @@ impl Whole<'_> {
 
     /// The configuration below `path` in the brace format. An unknown path is an error, not nothing.
     pub fn show(&self, d: &Data, path: &[String]) -> Result<String> {
+        let path: &[String] = &self.spelled(path);
         let below = self.below(d, path)?;
         Ok(crate::tree::render_entries(&below))
     }
 
     /// `| display set` below `path`: each line whole, from the top, so it can be pasted back.
     pub fn display_set(&self, d: &Data, path: &[String]) -> Result<String> {
+        let path: &[String] = &self.spelled(path);
         self.below(d, path)?;
         let path = self.shown_path(d, path);
         let all: Vec<(Vec<String>, Val)> = self.entries(d).into_iter().filter(|(w, _)| w.starts_with(&path)).collect();
@@ -566,7 +580,7 @@ mod tests {
         x.delete(&mut d, &w("users users dev packages jq")).unwrap();
         assert_eq!(x.display_set(&d, &[]).unwrap(), "set networking firewall allowedTCPPorts 22\nset users users dev packages htop\nset virtualisation docker enable true\n");
         let e = format!("{:#}", x.set(&mut d, &w("services ssh")).unwrap_err());
-        assert!(e.contains("`torq services enabled ssh`"), "{e}");
+        assert!(e.contains("services sshd: not a setting by itself: `set services sshd enable true` turns it on"), "{e}");
         assert!(x.set(&mut d, &w("services printing enable true")).is_ok(), "NixOS's own services are NixOS's");
         assert!(x.is_place(&w("virtualisation docker")) && x.is_place(&w("services httpd virtualHosts example.com")));
         assert!(!x.is_place(&w("virtualisation docker enable")));
@@ -616,6 +630,21 @@ fn a_password_is_never_in_the_configuration() {
     for p in ["password", "hashedPassword", "initialPassword", "initialHashedPassword", "hashedPasswordFile", "passwordFile"] {
         assert!(fence.contains(&format!("\"{p}\"")) && tree.password(&w(&format!("users users anyone {p}"))), "{p}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn an_abbreviated_setting_is_kept_where_the_whole_name_is() {
+    let (schema, tree) = (Schema::parse(include_str!("schema-fixture.json")).unwrap(), Tree::parse(include_str!("nixos-fixture.json")).unwrap());
+    let x = Whole { schema: &schema, tree: &tree };
+    let w = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+    let mut d = Data::default();
+    x.set(&mut d, &w("networking hostName baz")).unwrap();
+    x.set(&mut d, &w("networkin hostNa qux")).unwrap();
+    assert_eq!(x.show(&d, &w("networking")).unwrap(), "hostName qux;\n", "one setting, one place, however it was typed");
+    assert!(d.settings.is_empty(), "TorqOS's own file, both times: {:?}", d.settings);
+    assert_eq!(x.show(&d, &w("netw")).unwrap(), x.show(&d, &w("networking")).unwrap());
+    assert_eq!(x.delete(&mut d, &w("netw hostN")).unwrap(), Deleted::Done);
 }
 
 #[cfg(test)]

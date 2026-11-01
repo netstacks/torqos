@@ -267,6 +267,8 @@ impl Tree {
         let w = self.walk(words)?;
         match &w.node.setting {
             Some((ty, help)) if takes_value(ty) => Ok(Resolved { help, loc: w.loc, ty, values: w.values }),
+            // A service (or anything with an `enable`): how to turn it on.
+            _ if w.node.children.contains_key("enable") => bail!("{0}: not a setting by itself: `set {0} enable true` turns it on (`?` shows its settings)", w.loc.join(" ")),
             _ => bail!("{}: not a setting by itself (`?` shows what is below it)", w.loc.join(" ")),
         }
     }
