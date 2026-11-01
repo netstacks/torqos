@@ -24,5 +24,9 @@ in
     };
   };
 
-  config.nixpkgs.config.allowUnfreePredicate = pkg: cfg.all || builtins.elem (lib.getName pkg) cfg.packages;
+  # Only when something is allowed: otherwise nixpkgs' own default refuses unfree software, and a
+  # machine built from a shared package set (a NixOS test) need not set nixpkgs.config at all.
+  config = lib.mkIf (cfg.all || cfg.packages != [ ]) {
+    nixpkgs.config.allowUnfreePredicate = pkg: cfg.all || builtins.elem (lib.getName pkg) cfg.packages;
+  };
 }
