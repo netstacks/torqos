@@ -817,43 +817,54 @@ impl<'a> Session<'a> {
             let after = if rows.is_empty() { String::new() } else { format!("What may follow:\n{}", crate::complete::table(&rows, fit)) };
             return format!("{}\n{after}", crate::ui::hang("", &format!("{line}: {help}."), Some(fit), fit));
         }
-        // A search: every word, as the beginning of a word of a command or its help, or of a setting's
-        // path or help (`mountPoint` is the words mount and point: `ntp` is not in it).
+        // A search: every word found in a command's or a setting's name or its help (found_in); the
+        // closest first.
         let terms: Vec<String> = topic.iter().map(|t| t.to_lowercase()).collect();
-        let has_all = |text: &str| {
-            let words = words_in(text);
-            terms.iter().all(|t| words.iter().any(|w| w.starts_with(t.as_str())))
-        };
+        let score = |name: &str, help: &str| -> Option<usize> { terms.iter().map(|t| found_in(t, name, help)).try_fold(0, |sum, s| s.map(|s| sum + s)) };
         let mut out = String::new();
         let other = if self.mode == Mode::Operational { Mode::Configuration } else { Mode::Operational };
         for m in [self.mode, other] {
-            let rows: Vec<(String, String)> = crate::grammar::commands(m).into_iter().filter(|(l, h)| has_all(&format!("{l} {h}"))).map(|(l, h)| (l, h.to_string())).collect();
+            let mut found: Vec<(usize, String, String)> = crate::grammar::commands(m).into_iter().filter_map(|(l, h)| score(&l, h).map(|s| (s, l, h.to_string()))).collect();
+            found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(&b.1)));
+            let rows: Vec<(String, String)> = found.into_iter().map(|(_, l, h)| (l, h)).collect();
             if !rows.is_empty() {
                 let heading = if m == self.mode { "Commands:".to_string() } else { format!("Commands in {}:", mode_name(m)) };
                 out.push_str(&format!("{}{heading}\n{}", if out.is_empty() { "" } else { "\n" }, crate::complete::table(&rows, fit)));
             }
         }
+        // Places first (a service, a section: what someone searching for "ssh" is looking for), then
+        // single settings. A place is said by what turning it on does, else by what it holds.
+        let mut places: Vec<(usize, String, String)> = Vec::new();
         let mut settings: Vec<(usize, String, String)> = Vec::new();
         let mut stack: Vec<(Vec<String>, &crate::nixos::Node)> = vec![(vec![], &self.tree.root)];
         while let Some((path, n)) = stack.pop() {
             if path.last().is_some_and(|w| w.starts_with('_')) || (!path.is_empty() && self.tree.fenced(&path)) {
                 continue;
             }
+            let name = path.join(" ");
             if let Some((_, help)) = &n.setting {
-                let name = path.join(" ");
-                if has_all(&format!("{name} {help}")) {
-                    // Closest first: each word scores 3 as a whole word of the path, 2 as the beginning
-                    // of one, 1 in the help only; then the shorter path.
-                    let path_words = words_in(&name);
-                    let score: usize = terms.iter().map(|t| if path_words.iter().any(|w| w == t) { 3 } else if path_words.iter().any(|w| w.starts_with(t.as_str())) { 2 } else { 1 }).sum();
-                    settings.push((usize::MAX - score, name, help.clone()));
+                // Closest first: the better each word is found, then the shorter path.
+                if let Some(s) = score(&name, help) {
+                    settings.push((usize::MAX - s, name.clone(), help.clone()));
+                }
+            } else if !path.is_empty() && !n.children.is_empty() && !path.last().is_some_and(|w| w.starts_with('<') || w == "*") {
+                let help = n.children.get("enable").and_then(|e| e.setting.as_ref()).map(|(_, h)| h.clone()).unwrap_or_else(|| crate::nixos::section_help(n));
+                if let Some(s) = score(&name, "") {
+                    places.push((usize::MAX - s, name, help));
                 }
             }
             for (w, c) in n.children.iter().rev() {
                 stack.push(([path.clone(), vec![w.clone()]].concat(), c));
             }
         }
-        settings.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(&b.1)));
+        let closest = |a: &(usize, String, String), b: &(usize, String, String)| a.0.cmp(&b.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(&b.1));
+        places.sort_by(closest);
+        settings.sort_by(closest);
+        if !places.is_empty() {
+            const PLACES: usize = 10;
+            let rows: Vec<(String, String)> = places.iter().take(PLACES).map(|(_, p, h)| (p.clone(), h.clone())).collect();
+            out.push_str(&format!("{}Places (edit <place>; ? there lists its settings):\n{}", if out.is_empty() { "" } else { "\n" }, crate::complete::table(&rows, fit)));
+        }
         if !settings.is_empty() {
             const SHOWN: usize = 25;
             let rows: Vec<(String, String)> = settings.iter().take(SHOWN).map(|(_, p, h)| (p.clone(), h.clone())).collect();
@@ -1710,6 +1721,27 @@ fn in_home(file: &str) -> std::path::PathBuf {
     }
 }
 
+/// How well `term` (small letters) is found for `help`, in a command's or setting's `name` (its
+/// words, `services openssh enable`) or its `help`: 4 as a whole part of the name (`hostname` is
+/// hostName, `ssh` is not openssh), 3 at the beginning of one or of a word in it (`host`), 2 inside
+/// one (`ssh` in openssh), 1 in the help only; None, not at all.
+fn found_in(term: &str, name: &str, help: &str) -> Option<usize> {
+    let parts: Vec<String> = name.split_whitespace().map(str::to_lowercase).collect();
+    let words = words_in(name);
+    if parts.iter().any(|p| p == term) {
+        Some(4)
+    } else if parts.iter().chain(&words).any(|w| w.starts_with(term)) {
+        Some(3)
+    } else if words.iter().any(|w| w.contains(term)) {
+        // (Inside one word, never across two: `ntp` is not in mount|Point.)
+        Some(2)
+    } else if words_in(help).iter().any(|w| w.starts_with(term)) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 /// The words of a text as `help` searches them, small letters: split at anything not a letter or
 /// digit, and inside names where a capital starts a word (`mountPoint`: mount, point).
 fn words_in(text: &str) -> Vec<String> {
@@ -1969,10 +2001,16 @@ mod tests {
         assert!(one.starts_with("show system: This machine.") && one.contains("alarms") && one.contains("rollback"), "{one}");
         assert_eq!(s.exec("help sh sys").unwrap(), one, "abbreviated, as everywhere");
         let found = s.exec("help commit").unwrap();
-        assert!(found.contains("Commands:\n  configure") && found.contains("show system commit"), "{found}");
+        assert!(found.contains("Commands:\n  show system commit") && found.contains("\n  configure "), "the name first, then the help: {found}");
         assert!(found.contains("Commands in configuration mode:\n  commit "), "{found}");
         let none = s.exec("help zzqqx").unwrap();
         assert!(none.starts_with("Nothing has \"zzqqx\" in its name or description."), "{none}");
+        // How a word is found: a whole part of a name, its beginning, inside it, or in the help only.
+        assert_eq!(found_in("hostname", "networking hostName", ""), Some(4));
+        assert_eq!(found_in("host", "networking hostName", ""), Some(3));
+        assert_eq!(found_in("ssh", "services openssh enable", ""), Some(2));
+        assert_eq!(found_in("daemon", "services openssh enable", "Whether to enable the OpenSSH daemon."), Some(1));
+        assert_eq!(found_in("ntp", "fileSystems <name> mountPoint", "Location where it is mounted."), None, "mountPoint is mount and point");
         assert_eq!(words_in("services.openssh.settings PasswordAuthentication mountPoint x86_64"), ["services", "openssh", "settings", "password", "authentication", "mount", "point", "x86", "64"]);
     }
     #[test]

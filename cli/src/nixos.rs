@@ -399,7 +399,7 @@ fn step<'a>(n: &'a Node, w: &str) -> Step<'a> {
 }
 
 /// What a section is, where NixOS describes only its settings: what it holds.
-fn section_help(n: &Node) -> String {
+pub fn section_help(n: &Node) -> String {
     const SHOWN: usize = 5;
     let names: Vec<&str> = n.children.keys().map(String::as_str).filter(|k| *k != "<name>" && !k.starts_with('_')).collect();
     match names.len() {
