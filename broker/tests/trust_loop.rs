@@ -2014,3 +2014,31 @@ fn the_flake_needs_a_plain_absolute_repo_path() {
     let err = format!("{:#}", b.apply(p.body.seq, "casey", false).unwrap_err());
     assert!(err.contains("not an absolute path of plain characters"), "{err}");
 }
+
+/// First-boot setup (docs/INSTALL.md): the repo just written is taken over, built and switched to —
+/// and only then ledgered, as change #1 with the system it really switched to (not the image's).
+/// Once only; a failed build ledgers nothing and leaves the files for setup to try again.
+#[test]
+fn setup_builds_switches_then_ledgers_once() {
+    let (dir, repo) = config_dir();
+    let link = dir.path().join("current-system");
+    std::os::unix::fs::symlink("/nix/store/aaa-the-image", &link).unwrap();
+    // The "switch": the running system becomes the configuration's.
+    let switch = format!("ln -sfn /nix/store/bbb-the-machine {}", link.display());
+    let b = Broker::new(&repo, dir.path().join("state"), &switch).with_current_system(&link).with_system_profile(dir.path().join("no-profile"));
+    let e = b.set_up().unwrap();
+    assert_eq!((e.body.seq, e.body.kind.as_str(), e.body.reason.as_str()), (1, "init", "TorqOS set up"));
+    assert_eq!(e.body.data["system"], "/nix/store/bbb-the-machine", "the system it switched to, not the image's");
+    assert_eq!(e.body.data["commit"].as_str(), Some(b.repo.head().unwrap().as_str()));
+    assert!(b.status().unwrap().problems().is_empty(), "as its history says, at once");
+    let again = format!("{:#}", b.set_up().unwrap_err());
+    assert!(again.contains("already set up"), "{again}");
+
+    // A configuration that does not build: nothing ledgered, not taken over, the files kept.
+    let (dir, repo) = config_dir();
+    let failing = Broker::new(&repo, dir.path().join("state"), "false");
+    let e = format!("{:#}", failing.set_up().unwrap_err());
+    assert!(e.contains("nothing was set up"), "{e}");
+    assert!(failing.ledger.read_all().unwrap().is_empty());
+    assert!(!repo.join(".git").exists() && repo.join("desktop.nix").exists(), "files left, history gone");
+}

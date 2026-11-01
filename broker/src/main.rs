@@ -35,6 +35,7 @@ struct Cli {
 
 enum Cmd {
     Init,
+    Setup,
     Propose { diff: PathBuf, reason: String, actor: Actor, tainted: bool, base: Option<String> },
     Show { seq: u64 },
     Apply { seq: u64, approved_by: String, confirm_tainted: bool, confirm: Option<u32> },
@@ -96,6 +97,7 @@ fn command_line() -> clap::Command {
             "Machine-readable output: one JSON value per command (a ledger entry, or the status), and `{\"error\": \"...\"}` on failure. For the `torq` CLI (ADR-014); people get plain text.",
         ).global(true))
         .subcommand(Command::new("init").about("Initialise the config repo and ledger (idempotent)."))
+        .subcommand(Command::new("setup").about("First-boot setup: take over the config repo just written, build and switch to it, ledger it (once)."))
         .subcommand(
             Command::new("propose")
                 .about("Submit a change (unified diff against the repo) for review.")
@@ -151,6 +153,7 @@ fn parse_cli() -> Cli {
     let (name, sub) = m.subcommand().expect("a subcommand is required");
     let cmd = match name {
         "init" => Cmd::Init,
+        "setup" => Cmd::Setup,
         "propose" => Cmd::Propose {
             diff: p(sub, "diff").unwrap_or_default(),
             reason: s(sub, "reason").unwrap_or_default(),
@@ -268,6 +271,13 @@ fn run(mut cli: Cli) -> Result<()> {
             } else {
                 println!("initialised {} (ledger: {})", s.repo.display(), b.ledger.path().display());
             }
+        }
+        Cmd::Setup => {
+            let e = b.set_up()?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("set up: change #{} (commit {})", e.body.seq, e.body.data["commit"].as_str().unwrap_or_default());
         }
         Cmd::Propose { diff, reason, actor, tainted, base } => {
             let e = b.propose_on(base.as_deref(), &diff, &reason, actor, tainted)?;

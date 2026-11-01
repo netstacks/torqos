@@ -578,6 +578,37 @@ impl Broker {
         Ok(e)
     }
 
+    /// First-boot setup (docs/INSTALL.md): take over the config repo setup has just written, build it,
+    /// switch to it — and only then ledger it, as change #1, with the system it really switched to
+    /// (`init` records the running system as the configuration's, true only where the machine already
+    /// runs it). Once there is a ledger, refused: setup is once. If the build or the switch fails,
+    /// nothing is ledgered and the repo is not taken over (its history is removed, its files left),
+    /// so setup can correct its answers and try again.
+    pub fn set_up(&self) -> Result<Entry> {
+        let lock = Lock::acquire(&self.state_dir)?;
+        if !self.ledger.read_all()?.is_empty() {
+            bail!("this machine is already set up: it has a ledger");
+        }
+        if switch_running() {
+            bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then set up");
+        }
+        self.repo.init()?;
+        let head = self.repo.head()?;
+        if let Err(e) = self.rebuild(&lock, &head) {
+            let _ = std::fs::remove_dir_all(self.repo.root().join(".git"));
+            return Err(e.context("the new configuration did not build or switch: nothing was set up"));
+        }
+        self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: None,
+            kind: "init".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: "TorqOS set up".into(),
+            data: self.with_system(json!({ "commit": head })),
+        })
+    }
+
     pub fn init(&self) -> Result<()> {
         let _l = Lock::acquire(&self.state_dir)?;
         self.refuse_if_interrupted()?;
