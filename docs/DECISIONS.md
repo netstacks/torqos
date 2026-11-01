@@ -314,3 +314,32 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   when it starts over; on a set-up machine they stay a known gap (KNOWN-GAPS 6t).
 - **Consequences:** Builds that write many small paths are slower; a machine works after a power cut
   mid-change. Tried by cutting the power during setup in the image (docs/INSTALL.md).
+
+## ADR-025 — torqcli is built on six single sources, not on fixes
+- **Context:** Four usability reviews and a walk of every `?` (2026-11-01) found about 30 problems:
+  `?` and Enter disagreeing, a false "unknown command", values accepted that fail at commit, no
+  pager, text cut mid-word, errors echoing the line three times, commands silent about what they
+  did, TorqOS's own settings hidden next to NixOS's. Each was a symptom of something torqcli
+  described twice, or not at all. The owner: no band-aids or one-off fixes; a world-class CLI that
+  acts and reacts as anybody would expect.
+- **Decision:** torqcli rests on six single sources; every feature uses them, and each has a test
+  over its whole surface rather than per case:
+  1. **One command grammar** (`grammar.rs`): a declarative tree of the commands — words, help,
+     values, the pipes each takes, and how a whole line becomes an `Op`. `?`, Tab, abbreviations,
+     parsing, the explanation of a refused line, guidance for words from other CLIs (`| count` →
+     `wc -l`), and `help` are all read from it. Configuration paths stay the tree's.
+  2. **One value model:** each setting's rules (type, allowed values, format, range, read-only) from
+     NixOS's own description of it. `?` shows the format, Tab completes closed sets, `set` refuses
+     what commit would, and existing entries (users, interfaces) are offered.
+  3. **One output path:** every table and notice is laid out by `ui.rs`; output taller than the
+     window goes through one pager (`| no-more` skips it).
+  4. **One message form:** the shell names the line once; a message says what is wrong, then what
+     to do, in one quoting style.
+  5. **Every command says what it did** (changes made or discarded, "no changes", nothing to show),
+     and every way out of configuration mode (exit, Ctrl-D, the end of `-c`) reports uncommitted
+     changes.
+  6. **One place per setting:** TorqOS's own settings live at their NixOS paths, with TorqOS's
+     protections applied there (SSH, Podman, Tailscale, printing: the catalog is folded in).
+- **Consequences:** a larger rewrite of torqcli's grammar and settings layer now, instead of ~30
+  patches; afterwards a new command or setting gets `?`, Tab, help, checks and errors by being
+  declared once. Acceptance: the walk of every `?` and fresh usability reviews, before shipping.
