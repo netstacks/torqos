@@ -5,7 +5,8 @@ let
 in
 {
   options.torq.user = lib.mkOption {
-    type = lib.types.nullOr lib.types.str;
+    # A login name's shape (as the broker's user tier takes them): never empty.
+    type = lib.types.nullOr (lib.types.strMatching "[a-z_][a-z0-9_-]*");
     default = null;
     description = "Primary (owner) user account of this machine. None only in the image, before first-boot setup creates it (modules/setup.nix).";
   };

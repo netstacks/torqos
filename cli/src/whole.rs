@@ -36,6 +36,20 @@ pub const OLD_SERVICES: &[(&str, &str)] = &[
     ("printing", "services printing enable true"),
 ];
 
+/// An error of the hand-made schema about `hand`, in the words the person typed (`typed`): the
+/// setting named as they named it (`networking hostName`, not the file's `system host-name`).
+fn as_typed(e: anyhow::Error, typed: &[String], hand: &[String]) -> anyhow::Error {
+    let said = format!("{e:#}");
+    for (nixos, h, _) in MAP {
+        let (n, hw): (Vec<&str>, Vec<&str>) = (nixos.split(' ').collect(), h.split(' ').collect());
+        let fits = |words: &[String], pat: &[&str]| words.len() >= pat.len() && pat.iter().zip(words).all(|(p, w)| *p == "<name>" || p == w);
+        if fits(typed, &n) && fits(hand, &hw) {
+            return anyhow::anyhow!(said.replace(&hand[..hw.len()].join(" "), &typed[..n.len()].join(" ")));
+        }
+    }
+    e
+}
+
 /// `words` with a prefix matching one side of MAP (0: NixOS, 1: hand-made) replaced by the other.
 /// Words as the hand-made schema names them, if they name a setting TorqOS keeps in its own files:
 /// by its NixOS path (`environment systemPackages`), or by its old name (`system packages`), as `set`
@@ -259,7 +273,7 @@ impl Whole<'_> {
                     }
                 }
             }
-            return self.schema.set(&mut d.config, &h);
+            return self.schema.set(&mut d.config, &h).map_err(|e| as_typed(e, words, &h));
         }
         settings::set(self.tree, &mut d.settings, words).map_err(|e| self.hint(words, e))
     }
@@ -602,6 +616,18 @@ fn a_password_is_never_in_the_configuration() {
     for p in ["password", "hashedPassword", "initialPassword", "initialHashedPassword", "hashedPasswordFile", "passwordFile"] {
         assert!(fence.contains(&format!("\"{p}\"")) && tree.password(&w(&format!("users users anyone {p}"))), "{p}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn an_error_names_the_setting_as_it_was_typed() {
+    let (schema, tree) = (Schema::parse(include_str!("schema-fixture.json")).unwrap(), Tree::parse(include_str!("nixos-fixture.json")).unwrap());
+    let x = Whole { schema: &schema, tree: &tree };
+    let w = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+    let e = |line: &str| format!("{:#}", x.set(&mut Data::default(), &w(line)).unwrap_err());
+    assert_eq!(e("networking hostName my box"), "networking hostName: takes exactly one value");
+    assert_eq!(e("system host-name my box"), "system host-name: takes exactly one value", "the old name, as typed");
+    assert!(e("networking hostName my_box!").starts_with("'my_box!' is not a valid networking hostName: letters, digits and -"), "{}", e("networking hostName my_box!"));
 }
 
 #[cfg(test)]

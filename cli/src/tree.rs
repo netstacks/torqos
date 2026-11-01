@@ -215,15 +215,15 @@ impl Schema {
             }
             return Ok(());
         }
-        let ok = match n.ty.as_deref() {
-            Some("package") => package_name_ok(value),
-            Some("host-name") => host_name_ok(value),
-            Some("user-name") => user_name_ok(value),
+        let (ok, form) = match n.ty.as_deref() {
+            Some("package") => (package_name_ok(value), "a nixpkgs name: letters, digits, - _ and . between names"),
+            Some("host-name") => (host_name_ok(value), "letters, digits and -, at most 63, not starting or ending with -"),
+            Some("user-name") => (user_name_ok(value), "small letters, digits, _ and -, starting with a letter or _"),
             // A value with no closed set and no type: still one plain word.
-            _ => !value.is_empty() && !value.chars().any(|c| c.is_whitespace() || c.is_control()),
+            _ => (!value.is_empty() && !value.chars().any(|c| c.is_whitespace() || c.is_control()), "one word"),
         };
         if !ok {
-            bail!("'{value}' is not a valid {what}");
+            bail!("'{value}' is not a valid {what}: {form}");
         }
         Ok(())
     }
@@ -246,7 +246,7 @@ impl Schema {
         match (n.kind, file) {
             (Kind::Leaf, Some(file)) => {
                 let [value] = t.values.as_slice() else {
-                    bail!("set {}: needs exactly one value", t.words.join(" "));
+                    bail!("{}: takes exactly one value", t.words.join(" "));
                 };
                 self.check_value(&t.node, value)?;
                 let key = n.key.clone().context("schema: a leaf without a key")?;
