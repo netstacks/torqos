@@ -229,23 +229,38 @@ pub fn answer(k: &Know, at: &At, words: &[String], partial: &str, fit: usize) ->
 /// The choices, laid out to fit a window `fit` wide (ui.rs): each help wrapped under the help
 /// column, never back to the left edge.
 fn render(choices: &[Choice], fit: usize) -> String {
-    let width = choices.iter().map(|c| c.word.chars().count()).max().unwrap_or(0).min(24);
-    let mut out = String::from("Possible completions:\n");
-    for c in choices.iter().take(60) {
-        // A table: the word, then its help as a sentence beside it (ui::hang: wrapped under the help
-        // column, or under the word in a narrow window).
-        let help = summary(&c.help);
-        if help.is_empty() {
-            out.push_str(&format!("  {}\n", c.word));
-        } else {
-            out.push_str(&crate::ui::hang(&format!("  {:<width$}  ", c.word), &help, Some(fit), HELP_LINES));
-        }
-    }
+    let rows: Vec<(String, String)> = choices.iter().take(60).map(|c| (c.word.clone(), c.help.clone())).collect();
+    let mut out = format!("Possible completions:\n{}", table(&rows, fit));
     if choices.len() > 60 {
         out.push_str(&format!("  … and {} more: type more of the word\n", choices.len() - 60));
     }
     out
 }
+
+/// Words and their help as `?` and `help` lay them out, to fit a window `fit` wide (ui.rs): each
+/// help a sentence beside its word, wrapped under the help column (or under the word in a narrow
+/// window), never back to the left edge.
+pub fn table(rows: &[(String, String)], fit: usize) -> String {
+    let width = rows.iter().map(|(w, _)| w.chars().count()).max().unwrap_or(0).min(COLUMN);
+    let mut out = String::new();
+    for (word, help) in rows {
+        let help = summary(help);
+        if help.is_empty() {
+            out.push_str(&format!("  {word}\n"));
+        } else if word.chars().count() > width && fit.saturating_sub(width + 4) >= crate::ui::NARROWEST {
+            // A word wider than the column: its help on the next line, in the help column (where the
+            // window leaves no room there, ui::hang puts it under the word).
+            out.push_str(&format!("  {word}\n"));
+            out.push_str(&crate::ui::hang(&" ".repeat(width + 4), &help, Some(fit), HELP_LINES));
+        } else {
+            out.push_str(&crate::ui::hang(&format!("  {word:<width$}  "), &help, Some(fit), HELP_LINES));
+        }
+    }
+    out
+}
+
+/// The widest a word column gets; a wider word has its help on the next line.
+const COLUMN: usize = 24;
 
 /// At most this many lines of help per choice; more ends in `…`.
 const HELP_LINES: usize = 3;
@@ -349,13 +364,13 @@ mod tests {
     #[test]
     fn commands_of_each_mode() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "exit", "file", "quit", "request", "show"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "exit", "file", "help", "quit", "request", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["password", "repair", "revert", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["file", "request", "show"], "not configure or exit: already here");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["file", "help", "request", "show"], "not configure or exit: already here");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
     }
 
@@ -610,10 +625,13 @@ mod tests {
         assert_eq!(lines[4], "  vlans    Short.");
         assert_eq!(lines[5], "  ifstate");
         assert!(out.lines().all(|l| l.chars().count() <= 50), "{out}");
-        // A word wider than the column: its help starts after it, and wraps under where it started.
+        // A word wider than the column: its help on the next line, in the same column as the others.
         let wide = vec![Choice::new("usePredictableInterfaceNamesTooLong", long), Choice::new("a", "b")];
         let out = render(&wide, 60);
-        assert!(out.lines().nth(2).is_some_and(|l| l.starts_with(&" ".repeat(39)) && !l.starts_with(&" ".repeat(40))), "{out}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[1], "  usePredictableInterfaceNamesTooLong", "{out}");
+        assert!(lines[2].starts_with(&format!("{}This", " ".repeat(28))), "{out}");
+        assert!(lines.last().is_some_and(|l| l.starts_with(&format!("  {:<24}  b", "a"))), "the same column: {out}");
         assert!(out.lines().all(|l| l.chars().count() <= 60), "{out}");
         // Too long for three lines: the third ends in `…`.
         let out = render(&[Choice::new("a", &"abcd ".repeat(40))], 30);
@@ -635,7 +653,10 @@ mod tests {
         }
         // A short help that fits beside its word stays beside it.
         assert!(render(&choices, 40).contains(&format!("\n  {:<24}  Short.\n", "sits")));
+        // Room beside the column (50 - 28 ≥ 20): the help column; less: under the word, indented 4.
         let out = render(&[Choice::new(&"w".repeat(40), long), Choice::new("a", "b")], 50);
+        assert!(out.contains(&format!("\n  {}\n{}This", "w".repeat(40), " ".repeat(28))), "{out}");
+        let out = render(&[Choice::new(&"w".repeat(40), long), Choice::new("a", "b")], 45);
         assert!(out.contains(&format!("\n  {}\n    This", "w".repeat(40))), "{out}");
     }
 

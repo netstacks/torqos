@@ -90,6 +90,9 @@ pub enum Op {
     Exit,
     /// `exit configuration-mode`: out of configuration mode from anywhere.
     End,
+    /// `help [<command> | <words>]`: how to use torqcli, one command, or a search of the commands
+    /// and settings.
+    Help { topic: Vec<String> },
 }
 
 /// `request system …`: what the machine is asked to do.
@@ -241,6 +244,7 @@ pub fn render(op: &Op) -> String {
         Op::Run(op) => format!("run {}", render(op)),
         Op::Exit => "exit".into(),
         Op::End => "exit configuration-mode".into(),
+        Op::Help { topic } => sep("help", topic),
     }
 }
 
@@ -322,6 +326,8 @@ mod tests {
             (Mode::Configuration, Op::Run(Box::new(Op::ShowRollback { n: 1, compare: Some(0), display: diff }))),
             (Mode::Configuration, Op::Exit),
             (Mode::Configuration, Op::End),
+            (Mode::Operational, Op::Help { topic: vec![] }),
+            (Mode::Configuration, Op::Help { topic: v("show system") }),
         ]
     }
 

@@ -345,6 +345,7 @@ impl<'a> Session<'a> {
                 Ok(String::new())
             }
             Op::Exit | Op::End => self.leave(),
+            Op::Help { topic } => Ok(self.help(&topic)),
             Op::Up { n } => {
                 if self.edit.is_empty() {
                     bail!("already at the top of the configuration");
@@ -696,6 +697,77 @@ impl<'a> Session<'a> {
         let c = self.candidate()?;
         (c.config, c.settings, c.attached, c.source) = (d.config, d.settings, d.attached, d.source);
         Ok(())
+    }
+
+    /// `help`: how to use torqcli; `help <command>`: that command and what may follow it; `help
+    /// <words>`: the commands and settings whose names or descriptions have every word.
+    fn help(&self, topic: &[String]) -> String {
+        let fit = self.ui().width();
+        let mode_name = |m: Mode| if m == Mode::Operational { "operational mode" } else { "configuration mode" };
+        if topic.is_empty() {
+            let rows: Vec<(String, String)> = crate::grammar::first_words(self.mode).into_iter().map(|(w, h)| (w.to_string(), h.to_string())).collect();
+            let how = if self.mode == Mode::Operational { "`configure` edits the configuration" } else { "`commit` makes the candidate the machine's configuration; `exit` leaves" };
+            return format!(
+                "{}\nCommands:\n{}\n{}\n",
+                crate::ui::hang("", &format!("torqcli, TorqOS's command line, in {} ({how}).", mode_name(self.mode)), Some(fit), fit),
+                crate::complete::table(&rows, fit),
+                crate::ui::hang("", "Anywhere: `?` lists what may come next, with what each is; Tab completes a word; a word may be shortened while it is the only one it could be (`sh sys al`). `help <command>` explains a command; `help <word>` searches the commands and settings.", Some(fit), fit),
+            );
+        }
+        if let Some((line, help, next)) = crate::grammar::describe(self.mode, topic) {
+            let rows: Vec<(String, String)> = next.into_iter().map(|(w, h)| (w, h.to_string())).collect();
+            let after = if rows.is_empty() { String::new() } else { format!("What may follow:\n{}", crate::complete::table(&rows, fit)) };
+            return format!("{}\n{after}", crate::ui::hang("", &format!("{line}: {help}."), Some(fit), fit));
+        }
+        // A search: every word, as the beginning of a word of a command or its help, or of a setting's
+        // path or help (`mountPoint` is the words mount and point: `ntp` is not in it).
+        let terms: Vec<String> = topic.iter().map(|t| t.to_lowercase()).collect();
+        let has_all = |text: &str| {
+            let words = words_in(text);
+            terms.iter().all(|t| words.iter().any(|w| w.starts_with(t.as_str())))
+        };
+        let mut out = String::new();
+        let other = if self.mode == Mode::Operational { Mode::Configuration } else { Mode::Operational };
+        for m in [self.mode, other] {
+            let rows: Vec<(String, String)> = crate::grammar::commands(m).into_iter().filter(|(l, h)| has_all(&format!("{l} {h}"))).map(|(l, h)| (l, h.to_string())).collect();
+            if !rows.is_empty() {
+                let heading = if m == self.mode { "Commands:".to_string() } else { format!("Commands in {}:", mode_name(m)) };
+                out.push_str(&format!("{}{heading}\n{}", if out.is_empty() { "" } else { "\n" }, crate::complete::table(&rows, fit)));
+            }
+        }
+        let mut settings: Vec<(usize, String, String)> = Vec::new();
+        let mut stack: Vec<(Vec<String>, &crate::nixos::Node)> = vec![(vec![], &self.tree.root)];
+        while let Some((path, n)) = stack.pop() {
+            if path.last().is_some_and(|w| w.starts_with('_')) || (!path.is_empty() && self.tree.fenced(&path)) {
+                continue;
+            }
+            if let Some((_, help)) = &n.setting {
+                let name = path.join(" ");
+                if has_all(&format!("{name} {help}")) {
+                    // Closest first: each word scores 3 as a whole word of the path, 2 as the beginning
+                    // of one, 1 in the help only; then the shorter path.
+                    let path_words = words_in(&name);
+                    let score: usize = terms.iter().map(|t| if path_words.iter().any(|w| w == t) { 3 } else if path_words.iter().any(|w| w.starts_with(t.as_str())) { 2 } else { 1 }).sum();
+                    settings.push((usize::MAX - score, name, help.clone()));
+                }
+            }
+            for (w, c) in n.children.iter().rev() {
+                stack.push(([path.clone(), vec![w.clone()]].concat(), c));
+            }
+        }
+        settings.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(&b.1)));
+        if !settings.is_empty() {
+            const SHOWN: usize = 25;
+            let rows: Vec<(String, String)> = settings.iter().take(SHOWN).map(|(_, p, h)| (p.clone(), h.clone())).collect();
+            out.push_str(&format!("{}Settings (set <setting> <value>):\n{}", if out.is_empty() { "" } else { "\n" }, crate::complete::table(&rows, fit)));
+            if settings.len() > SHOWN {
+                out.push_str(&format!("  … and {} more: more words narrow it (help {} <word>)\n", settings.len() - SHOWN, topic.join(" ")));
+            }
+        }
+        if out.is_empty() {
+            return format!("{}\n", crate::ui::hang("", &format!("Nothing has \"{}\" in its name or description. `help` lists the commands; `?` lists what may come next.", topic.join(" ")), Some(fit), fit));
+        }
+        out
     }
 
     fn request(&mut self, r: syntax::Request) -> Result<String> {
@@ -1430,6 +1502,27 @@ fn short(id: &str) -> &str {
     &id[..id.len().min(12)]
 }
 
+/// The words of a text as `help` searches them, small letters: split at anything not a letter or
+/// digit, and inside names where a capital starts a word (`mountPoint`: mount, point).
+fn words_in(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut last_lower = false;
+    for c in text.chars() {
+        if (!c.is_alphanumeric() || (c.is_uppercase() && last_lower)) && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        if c.is_alphanumeric() {
+            word.extend(c.to_lowercase());
+        }
+        last_lower = c.is_lowercase() || c.is_ascii_digit();
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1591,6 +1684,27 @@ mod tests {
         lines.iter().map(|l| s.exec(l).unwrap_or_else(|e| panic!("{l}: {e:#}"))).collect()
     }
 
+
+    /// `help`: the commands of the mode; `help <command>`: that command and what may follow it;
+    /// `help <words>`: commands and settings with those words, closest first.
+    #[test]
+    fn help_lists_explains_and_searches() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        let all = s.exec("help").unwrap();
+        for w in ["configure", "file", "help", "request", "show"] {
+            assert!(all.contains(&format!("\n  {w} ")), "{w} in: {all}");
+        }
+        let one = s.exec("help show system").unwrap();
+        assert!(one.starts_with("show system: This machine.") && one.contains("alarms") && one.contains("rollback"), "{one}");
+        assert_eq!(s.exec("help sh sys").unwrap(), one, "abbreviated, as everywhere");
+        let found = s.exec("help commit").unwrap();
+        assert!(found.contains("Commands:\n  configure") && found.contains("show system commit"), "{found}");
+        assert!(found.contains("Commands in configuration mode:\n  commit "), "{found}");
+        let none = s.exec("help zzqqx").unwrap();
+        assert!(none.starts_with("Nothing has \"zzqqx\" in its name or description."), "{none}");
+        assert_eq!(words_in("services.openssh.settings PasswordAuthentication mountPoint x86_64"), ["services", "openssh", "settings", "password", "authentication", "mount", "point", "x86", "64"]);
+    }
     #[test]
     fn words_split_like_a_shell_with_pipes() {
         assert_eq!(words("show | compare").unwrap(), ["show", "|", "compare"]);

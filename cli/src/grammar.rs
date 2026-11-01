@@ -209,6 +209,7 @@ static ROOTS: &[Node] = &[
     fixed("exit", "Leave torqcli", In::Op).top_only().whole(|_| Ok(Op::Exit)),
     fixed("exit", "Up one level (out of configuration mode at the top; the candidate is kept)", In::Cf).top_only().whole(|_| Ok(Op::Exit)).then(&[fixed("configuration-mode", "Leave configuration mode from anywhere", In::Cf).whole(|_| Ok(Op::End))]),
     fixed("file", "The configuration's Nix files (list, show; edit and delete in configuration mode)", In::Both).then(FILE),
+    fixed("help", "How to use torqcli; help <command> explains one, help <word> searches commands and settings", In::Both).whole(help).pipes(Pipes::Filters).then(&[node(Word::Terms, "A command, or words to search for", In::Both).whole(help).pipes(Pipes::Filters)]),
     fixed("load", "Load a saved or pasted configuration into the candidate (override, merge, set)", In::Cf).then(LOAD),
     fixed("quit", "The same as exit", In::Both).top_only().whole(|_| Ok(Op::Exit)),
     fixed("request", "Ask the machine to do something", In::Op).then(&[fixed("system", "This machine", In::Op).then(REQUEST_SYSTEM)]),
@@ -300,6 +301,10 @@ const FOREIGN: &[(&str, &str, &str)] = &[
 ];
 
 // ── Building an Op ───────────────────────────────────────────────────────────────────────────────
+
+fn help(r: &Read) -> Result<Op> {
+    Ok(Op::Help { topic: r.terms.clone() })
+}
 
 fn sub(r: &Read) -> Result<Op> {
     r.sub.clone().ok_or_else(|| anyhow::anyhow!("a command must follow"))
@@ -762,4 +767,54 @@ pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String)> {
         }).collect(),
         _ => vec![],
     }
+}
+
+/// Every command of a mode as it is typed (values as their placeholders), with its help: what
+/// `help` lists and searches. Options that combine (commit's) are listed once each, right after
+/// their command, not in every order.
+pub fn commands(mode: Mode) -> Vec<(String, &'static str)> {
+    fn go(list: &'static [Node], mode: Mode, top: bool, at: &str, in_options: bool, out: &mut Vec<(String, &'static str)>) {
+        for n in list.iter().filter(|n| n.mode.has(mode) && (top || !n.top_only)) {
+            if in_options && n.once {
+                continue;
+            }
+            let line = if at.is_empty() { n.shown() } else { format!("{at} {}", n.shown()) };
+            if n.whole.is_some() || matches!(n.word, Word::Path | Word::Terms) {
+                out.push((line.clone(), n.help));
+            }
+            if !matches!(n.word, Word::Command(_)) {
+                go(n.then, mode, true, &line, in_options || n.once, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    go(ROOTS, mode, true, "", false, &mut out);
+    out
+}
+
+/// The first words of a mode's commands, with their help (what `help` lists).
+pub fn first_words(mode: Mode) -> Vec<(&'static str, &'static str)> {
+    Here::Start { mode, top: true }.next(&Read::default()).into_iter().filter_map(|n| match n.word {
+        Word::Fixed(w) => Some((w, n.help)),
+        _ => None,
+    }).collect()
+}
+
+/// The help for the command `words` begin with, if they name one: its help, and what may follow
+/// it (each with its help).
+pub fn describe(mode: Mode, words: &[String]) -> Option<(String, &'static str, Vec<(String, &'static str)>)> {
+    let walked = walk(mode, words).ok()?;
+    let node = walked.node()?;
+    if !matches!(node.word, Word::Fixed(_)) || walked.read.terms.len() + walked.read.path.len() + walked.read.values.len() > 0 {
+        return None;
+    }
+    let next = offers(&walked)
+        .into_iter()
+        .filter_map(|o| match o {
+            Offer::Word(w, h) => Some((w.to_string(), h)),
+            Offer::Value(w, h) => Some((w, h)),
+            Offer::Path { .. } => Some(("<path>".to_string(), "A place in the configuration (`?` lists them)")),
+        })
+        .collect();
+    Some((walked.words.join(" "), node.help, next))
 }

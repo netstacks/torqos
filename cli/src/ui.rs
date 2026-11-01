@@ -13,7 +13,7 @@ use std::time::Duration;
 /// The widest a line is laid out: wider windows get 80 columns too, so text stays readable.
 pub const WIDTH: usize = 80;
 /// The narrowest: below it, lines are laid out for 20 columns and the terminal wraps them.
-const NARROWEST: usize = 20;
+pub const NARROWEST: usize = 20;
 
 #[derive(Clone, Copy)]
 pub struct Ui {
