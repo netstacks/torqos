@@ -19,6 +19,46 @@ machine with UEFI and a TPM.
    signing key for boot. The project only signs its package repository/binary cache.
 3. **Tamper → locked disk.** If the boot chain changes, the TPM refuses to release the disk key.
 
+## Root, the owner, and an AI the owner runs
+
+- **The `root` account is locked** (no password: nobody logs in as root). **Root's powers** are
+  borrowed through `sudo` by the owner, with the owner's own password; `sudo bash` borrows them for a
+  whole shell. That is the owner's override, as on any Linux, and TorqOS does not try to forbid it:
+  people stay free, the AI is what is limited.
+- **What a root shell can do:** go around the broker — edit the config repo or system files, rebuild
+  by hand, rewrite the ledger. TorqOS's answer is that going around the door is never invisible:
+  drift from the ledger raises `show system alarms`; `/etc/nixos` refuses a stray rebuild; the
+  ledger's hash chain shows an edited entry. Gap: a root writer can rewrite the whole chain
+  consistently — closed by signing entries with a key root cannot read and anchoring the head off
+  the machine (KNOWN-GAPS #2, M3).
+- **An owner who runs an AI tool in a root shell** has handed it root, and no software can stop
+  that. TorqOS makes it **visible** (the same alarms; the ledger records what passed the door —
+  but cannot yet tell a person from a program: the broker identifying its caller, KNOWN-GAPS #4,
+  M3), **recoverable** (every configuration change undoes; `request system repair` returns the
+  machine to its last ledgered state; the store is read-only and rebuilt from the configuration —
+  but data a root process deletes, and a ledger it rewrites, need snapshots of data and the signed
+  ledger, both later), and **unnecessary** (TorqOS's own AI layer: an unprivileged agent that reads
+  and proposes, never `sudo`; the owner approves each proposal).
+- **Strict mode (later, optional):** the owner's `sudo` may run only TorqOS's own commands — no
+  root shell to run anything in — with a deliberate, ledgered break-glass for emergencies.
+- **Dev mode** (the machine TorqOS is built on) is the labelled exception: passwordless `sudo` and an
+  AI coding agent with root. Customer images ship with it off.
+
+## Accounts and passwords (proposed for M2, 2026-11-01; to confirm before building)
+
+- A new image has no user account: only the locked `root`. **First-boot setup** creates the owner's
+  account (name and password), asks how to log in remotely — **password, SSH key, or both** — and
+  commits it as change #1. It never runs again.
+- **Passwords never enter the config repo** (it is readable by everyone and kept forever; a hash
+  there can be cracked offline): the configuration declares the account and points at a file only
+  the system can read (NixOS `hashedPasswordFile`, outside the repo). A TorqOS command (e.g.
+  `request system password`) changes it through the broker; the ledger records *that* it changed,
+  when and by whom — never the secret. More users get theirs the same way.
+- **SSH with passwords** is allowed when chosen, protected: repeated wrong guesses slowed down, few
+  attempts per connection, `root` never logs in remotely; `show system alarms` notes that SSH
+  accepts passwords. Keys only stays one `set` away.
+- **Images** carry a checksum signed with a TorqOS release key, and the one command that checks it.
+
 ## Threat model
 
 | Threat | Primary defence | Notes |

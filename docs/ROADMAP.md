@@ -88,9 +88,12 @@ binary cache. Ease of use first.
 - [ ] **qcow2 image** (aarch64 first, testable here; then x86_64): download, boot in any VM (UTM,
       QEMU, Proxmox), log in. The config repo and ledger are created on first boot.
 - [ ] **First-boot setup**, like a network device's initial configuration dialog: host name,
-      time zone, user, password or SSH key, asked once at the console, written as tree files and
-      committed as change #1. No default password ships.
-- [ ] **Customer-safe defaults:** dev mode off, SSH keys-only, the /etc/nixos guard on, nothing
+      time zone, the owner's account and password, how to log in remotely (password, SSH key, or
+      both), asked once at the console, committed as change #1. No default password ships;
+      passwords live outside the config repo (proposed: SECURITY-MODEL.md, "Accounts and
+      passwords").
+- [ ] **Customer-safe defaults:** dev mode off, SSH as chosen at first boot (passwords protected
+      against guessing), the /etc/nixos guard on, nothing
       installed that is not needed.
 - [ ] **Releases** (`v0.1.0`, …) at one URL machines fetch from; `request system update` moves to
       the newest one. (The repo is private: where releases are published is decided before any
@@ -117,10 +120,14 @@ binary cache. Ease of use first.
 - A default-deny allow-list at the broker for what an agent may propose (KNOWN-GAPS 6m).
 - Signed commits (broker key), ledger anchoring.
 
-## Later (not planned now): boot security
+## Later (not planned now): boot security, and limits on root
 
 - Owner-rooted boot security (own Secure Boot keys, TPM2 + PIN; SECURITY-MODEL.md), tested in
   emulation first (QEMU + OVMF + swtpm).
+- Strict mode: the owner's `sudo` runs only TorqOS's commands, with a ledgered break-glass
+  (SECURITY-MODEL.md, "Root, the owner, and an AI the owner runs").
+- Snapshots of data (home folders, the ledger's state) before changes, so what a root process
+  deletes can be restored.
 
 ## Far future
 

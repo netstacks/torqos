@@ -152,6 +152,11 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    store it is built into: a secret must never be in it. M2's first-boot setup must keep passwords
    (even hashes, which can be cracked offline) out of the repo, and its images need checksums
    or signatures of their own (a signed binary cache covers store paths, not a qcow2 or ISO).
+   Proposed answer: SECURITY-MODEL.md, "Accounts and passwords".
+6s. **An owner can hand root to any program** (`sudo bash`, then an AI tool in it): no software can
+   stop that. What TorqOS does about it — visible, recoverable, unnecessary — and what is still
+   open (the broker telling a person from a program, #4; a ledger root can rewrite, #2; snapshots
+   of data; strict mode): SECURITY-MODEL.md, "Root, the owner, and an AI the owner runs".
 
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is
