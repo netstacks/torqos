@@ -341,7 +341,7 @@ pub fn parse(mode: Mode, w: &[String]) -> Result<Op> {
         ["delete", ..] => Op::Delete { words: w[1..].to_vec() },
         ["edit", ..] => Op::Edit { words: w[1..].to_vec() },
         ["up"] => Op::Up { n: 1 },
-        ["up", n] => Op::Up { n: number(n)?.max(1) },
+        ["up", n] => Op::Up { n: n.parse::<usize>().ok().filter(|n| *n >= 1).ok_or_else(|| anyhow::anyhow!("up <n>: how many levels up (1, 2, …), not '{n}'"))? },
         ["top"] => Op::Top { then: None },
         ["top", ..] => Op::Top { then: Some(Box::new(parse(Mode::Configuration, &w[1..])?)) },
         ["show", ..] => {

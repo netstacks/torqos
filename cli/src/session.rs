@@ -254,15 +254,35 @@ impl<'a> Session<'a> {
     /// Whether `line` would commit (not `commit check`): after failed lines the shell asks first, so
     /// a commit never takes part of a paste unseen.
     pub fn commits(&self, line: &str) -> bool {
-        let Ok(w) = words(line) else { return false };
-        matches!(syntax::parse_line(self.mode, &w), Ok((Op::Commit(o), _)) if !o.check)
+        // (Read exactly as it would run — abbreviated, or from the top — so no form slips past.)
+        fn commits(op: &Op) -> bool {
+            match op {
+                Op::Commit(o) => !o.check,
+                Op::Top { then: Some(op) } => commits(op),
+                _ => false,
+            }
+        }
+        words(line).ok().and_then(|w| self.read(&w).ok()).is_some_and(|(op, _)| commits(&op))
     }
 
     /// Whether `line` shows all the candidate changes (`show | compare`, from the top): the person
     /// has looked.
     pub fn reviews(&self, line: &str) -> bool {
-        let Ok(w) = words(line) else { return false };
-        self.edit.is_empty() && matches!(syntax::parse_line(self.mode, &w), Ok((Op::Compare { .. }, _)))
+        let whole = |op: &Op, at_top: bool| at_top && matches!(op, Op::Compare { .. });
+        words(line).ok().and_then(|w| self.read(&w).ok()).is_some_and(|(op, _)| match &op {
+            Op::Top { then: Some(op) } => whole(op, true),
+            op => whole(op, self.edit.is_empty()),
+        })
+    }
+
+    /// A line's words as the session runs them: read against the grammar (abbreviations become their
+    /// words, a word that may not stand where it is is named: complete::expand), then parsed; a line
+    /// of command words that is not whole says what may follow.
+    fn read(&self, w: &[String]) -> Result<(Op, Vec<crate::filter::Filter>)> {
+        let know = crate::complete::Know { schema: &self.schema, tree: &self.tree };
+        let at = crate::complete::At { mode: self.mode, edit: self.edit.clone(), data: Data::default() };
+        let w = crate::complete::expand(&know, &at, w)?;
+        syntax::parse_line(self.mode, &w).map_err(|e| crate::complete::incomplete(&know, &at, &w).map_or(e, |what| anyhow::anyhow!(what)))
     }
 
     /// Run one command, already split into words (`torqcli <command>`: as the calling shell split
@@ -275,15 +295,7 @@ impl<'a> Session<'a> {
         if w.is_empty() {
             return Ok(String::new());
         }
-        // Read against the grammar first: abbreviations become their words, and a word that may not
-        // stand where it is is named (complete::expand).
-        let know = crate::complete::Know { schema: &self.schema, tree: &self.tree };
-        let at = crate::complete::At { mode: self.mode, edit: self.edit.clone(), data: Data::default() };
-        let w = &crate::complete::expand(&know, &at, w)?;
-        let (op, filters) = match syntax::parse_line(self.mode, w) {
-            Ok(parsed) => parsed,
-            Err(e) => return Err(crate::complete::incomplete(&know, &at, w).map_or(e, |what| anyhow::anyhow!(what))),
-        };
+        let (op, filters) = self.read(w)?;
         self.fit = if filters.is_empty() { crate::ui::fit((self.screen)()) } else { None };
         crate::filter::apply(&filters, self.run(op)?)
     }
@@ -353,10 +365,19 @@ impl<'a> Session<'a> {
             // A command from the top, as on a network device: back where you were after it — unless
             // it is itself a move (`top edit system`).
             Op::Top { then: Some(op) } => {
-                let moves = matches!(*op, Op::Edit { .. } | Op::Up { .. } | Op::Top { .. } | Op::Exit | Op::End);
+                // A move: `edit`, `up`, `top`, `exit` — or a `top` around one (`top top edit x`).
+                fn moves(op: &Op) -> bool {
+                    match op {
+                        Op::Top { then: Some(op) } => moves(op),
+                        Op::Edit { .. } | Op::Up { .. } | Op::Top { then: None } | Op::Exit | Op::End => true,
+                        _ => false,
+                    }
+                }
+                let moved = moves(&op);
                 let was = std::mem::take(&mut self.edit);
                 let r = self.run(*op);
-                if !moves || r.is_err() {
+                // Back where it was — unless it moved, or left configuration mode (`commit and-quit`).
+                if (!moved || r.is_err()) && self.mode == Mode::Configuration {
                     self.edit = was;
                 }
                 r
@@ -1346,18 +1367,27 @@ fn software_compare(old: Option<&[u8]>, new: &Option<String>) -> String {
     out
 }
 
-/// The sections of a comparison (`[edit <path>]` and its lines) at or below `path`; all of them at
-/// the top.
+/// The sections of a comparison (`[edit <path>]` and its lines) at or below `path` — and the config
+/// files' (`[edit config files]`: whole files, no path); all of them at the top. Nothing there but
+/// changes elsewhere: said, so an empty answer never hides them.
 fn sections_under(compare: &str, path: &[String]) -> String {
     if path.is_empty() {
         return compare.to_string();
     }
+    let out = sections_at(compare, path);
+    if out.is_empty() && !compare.trim().is_empty() {
+        return "## nothing changes here; elsewhere it does: `top show | compare`\n".into();
+    }
+    out
+}
+
+fn sections_at(compare: &str, path: &[String]) -> String {
     let mut out = String::new();
     let mut keep = false;
     for line in compare.split_inclusive('\n') {
         if let Some(at) = line.trim_end().strip_prefix("[edit").and_then(|s| s.strip_suffix(']')) {
             // (Split as a line is: a name with spaces is quoted there.)
-            keep = words(at.trim()).is_ok_and(|w| w.starts_with(path));
+            keep = at.trim() == "config files" || words(at.trim()).is_ok_and(|w| w.starts_with(path));
         }
         if keep {
             out.push_str(line);
@@ -2675,6 +2705,32 @@ mod tests {
         let all = s.exec("show | compare").unwrap();
         assert!(all.contains("hostName three") && all.contains("timeZone UTC") && all.contains("documentRoot"), "{all}");
         assert!(s.reviews("show | compare") && !{ s.exec("edit networking").unwrap(); s.reviews("show | compare") }, "only the whole is a review");
+    }
+
+    /// Whether a line commits, or reviews, is read as the line runs: abbreviated, or from the top —
+    /// no form slips past the question after failed lines (review of 91bbf66).
+    #[test]
+    fn commits_and_reviews_whatever_their_form() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "edit networking"]);
+        for line in ["commit", "com", "comm and", "commit a", "top commit", "to com", "commit comment x"] {
+            assert!(s.commits(line), "{line}");
+        }
+        for line in ["commit check", "comm ch", "show | compare", "commi" , "top commit check"] {
+            assert_eq!(s.commits(line), line == "commi", "{line}");
+        }
+        assert!(!s.reviews("show | compare"), "a part is no review");
+        assert!(s.reviews("top show | compare") && s.reviews("to sh | comp"), "from the top: the whole");
+        // An empty word is never another word (`exit ""` is not `exit configuration-mode`).
+        assert!(s.exec_words(&["exit".to_string(), String::new()]).is_err());
+        assert_eq!(s.edit_path(), w("networking"));
+        // Nested `top` comes back; `top commit and-quit` leaves configuration mode for good.
+        run(&mut s, &["top top show time"]);
+        assert_eq!(s.edit_path(), w("networking"), "back where it was");
+        // At a level where nothing changes but elsewhere something does: said.
+        run(&mut s, &["top set time timeZone UTC"]);
+        assert!(s.exec("show | compare").unwrap().contains("nothing changes here; elsewhere it does"));
     }
 
     #[test]

@@ -27,6 +27,7 @@ const OPERATIONAL: &[(&str, &str)] = &[
     ("configure", "Edit the configuration (a candidate, until you commit it)"),
     ("exit", "Leave torqcli"),
     ("file", "The configuration's Nix files (list, show; edit and delete in configuration mode)"),
+    ("quit", "The same as exit"),
     ("request", "Ask the machine to do something"),
     ("show", "Show information about the machine"),
 ];
@@ -158,8 +159,9 @@ fn in_path(mode: Mode, words: &[String]) -> bool {
 pub fn expand(k: &Know, at: &At, words: &[String]) -> anyhow::Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for w in words {
-        // (`|` may follow any whole `show`: the parser judges it; what follows it is read again.)
-        if w == "|" || in_path(at.mode, &out) {
+        // (`|` may follow any whole `show`: the parser judges it; what follows it is read again. An
+        // empty word — `""`, a script's unset variable — is never any word but itself.)
+        if w.is_empty() || w == "|" || in_path(at.mode, &out) {
             out.push(w.clone());
             continue;
         }
@@ -292,7 +294,7 @@ fn choices_j(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> 
             let mut c = next(k, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial);
             // (Already in configuration mode; `exit` is configuration mode's own.)
             if words.len() == 1 {
-                c.retain(|x| x.word != "configure" && x.word != "exit");
+                c.retain(|x| !matches!(x.word.as_str(), "configure" | "exit" | "quit"));
             }
             c
         }
@@ -611,7 +613,7 @@ mod tests {
     #[test]
     fn commands_of_each_mode() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "exit", "file", "request", "show"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "exit", "file", "quit", "request", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
@@ -776,6 +778,8 @@ mod tests {
         assert_eq!(x(k, "ru sh sys ala").unwrap(), w("run show system alarms"));
         assert_eq!(x(k, "to se time timeZone UTC").unwrap(), w("top set time timeZone UTC"));
         assert!(x(k, "s").unwrap_err().contains("'s' is ambiguous: save, set, show"));
+        assert_eq!(expand(&s, &at(o), &["request".to_string(), "system".into(), "update".into(), String::new()]).unwrap()[3], "", "an empty word stays empty");
+        assert_eq!(x(o, "quit").unwrap(), w("quit"), "quit, as exit");
         let e = x(o, "show system foo").unwrap_err();
         assert!(e.contains("'foo' is not a word here (after `show system`)") && e.contains("alarms, commit, ledger, rollback"), "{e}");
         assert!(x(o, "show configuraton").unwrap_err().contains("did you mean configuration?"));
