@@ -567,7 +567,10 @@ pub fn display_set_entries(entries: &[(Vec<String>, Val)]) -> String {
 /// `show | compare` of any two sets of entries: what `new` changes from `old`.
 pub fn compare_entries(old: Vec<(Vec<String>, Val)>, new: Vec<(Vec<String>, Val)>) -> String {
     let (a, b): (BTreeMap<_, _>, BTreeMap<_, _>) = (old.into_iter().collect(), new.into_iter().collect());
-    let paths: BTreeSet<&Vec<String>> = a.keys().chain(b.keys()).collect();
+    // By section, then setting: a section's own settings together, before its sub-sections, so each
+    // `[edit …]` is said once (as on a network device).
+    let paths: BTreeSet<(&[String], &Vec<String>)> = a.keys().chain(b.keys()).map(|p| (&p[..p.len() - 1], p)).collect();
+    let paths = paths.into_iter().map(|(_, p)| p);
     let mut out = String::new();
     let mut section: Option<Vec<String>> = None;
     for p in paths {
@@ -855,6 +858,14 @@ mod tests {
         // An unknown setting or name is an error, not empty output.
         assert!(format!("{:#}", s.show(&c, &w("users nobody")).unwrap_err()).contains("not one of the users"));
         assert!(format!("{:#}", s.show(&c, &w("system hostname")).unwrap_err()).contains("not a setting"));
+    }
+
+    /// Each section once: its own settings, then its sub-sections.
+    #[test]
+    fn a_comparison_says_each_section_once() {
+        let e = |p: &str, v: &str| (p.split(' ').map(String::from).collect::<Vec<_>>(), Val::One(v.into()));
+        let out = compare_entries(vec![], vec![e("networking domain", "x"), e("networking firewall enable", "true"), e("networking nameservers", "y")]);
+        assert_eq!(out, "[edit networking]\n+   domain x;\n+   nameservers y;\n[edit networking firewall]\n+   enable true;\n");
     }
 
     #[test]
