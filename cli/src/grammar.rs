@@ -36,8 +36,10 @@ pub enum Value {
     Minutes,
     /// A person's account.
     User,
-    /// A file.
+    /// A file anywhere (save, load: in the home folder if relative).
     File,
+    /// A Nix file of the configuration (`file show|edit|delete`).
+    NixFile,
     /// Free text (a comment).
     Text,
 }
@@ -52,6 +54,7 @@ impl Value {
             Value::Minutes => "<minutes>",
             Value::User => "<user>",
             Value::File => "<file>",
+            Value::NixFile => "<nix-file>",
             Value::Text => "<\"text\">",
         }
     }
@@ -73,7 +76,7 @@ impl Value {
             Value::Change => whole(w.strip_prefix('#').unwrap_or(w), "change numbers", 1, u64::MAX).map(drop),
             Value::Minutes => whole(w, "minutes", 1, 1440).map(drop),
             Value::User if !w.is_empty() => Ok(()),
-            Value::File if !w.is_empty() => Ok(()),
+            Value::File | Value::NixFile if !w.is_empty() => Ok(()),
             Value::Text => Ok(()),
             _ => bail!("an empty word is not a {}", self.placeholder()),
         }
@@ -253,10 +256,10 @@ static REQUEST_SYSTEM: &[Node] = &[
 ];
 
 static FILE: &[Node] = &[
-    fixed("delete", "Delete one, in the candidate", In::Cf).then(&[value(Value::File, "A .nix file of the configuration (file list)").whole(|r| file(r, FileAction::Delete))]),
-    fixed("edit", "Edit one (or a new one) in your editor, in the candidate", In::Cf).then(&[value(Value::File, "A .nix file of the configuration (file list)").whole(|r| file(r, FileAction::Edit))]),
+    fixed("delete", "Delete one, in the candidate", In::Cf).then(&[value(Value::NixFile, "A .nix file of the configuration (file list)").whole(|r| file(r, FileAction::Delete))]),
+    fixed("edit", "Edit one (or a new one) in your editor, in the candidate", In::Cf).then(&[value(Value::NixFile, "A .nix file of the configuration (file list)").whole(|r| file(r, FileAction::Edit))]),
     fixed("list", "Every Nix file of the configuration", In::Both).whole(|r| file(r, FileAction::List)).pipes(Pipes::Filters),
-    fixed("show", "Print one", In::Both).then(&[value(Value::File, "A .nix file of the configuration (file list)").whole(|r| file(r, FileAction::Show)).pipes(Pipes::Filters)]),
+    fixed("show", "Print one", In::Both).then(&[value(Value::NixFile, "A .nix file of the configuration (file list)").whole(|r| file(r, FileAction::Show)).pipes(Pipes::Filters)]),
 ];
 
 static LOAD: &[Node] = &[
@@ -360,7 +363,7 @@ fn update(r: &Read) -> Result<Op> {
 }
 
 fn file(r: &Read, action: FileAction) -> Result<Op> {
-    Ok(Op::File { action, path: r.value(Value::File).map(String::from) })
+    Ok(Op::File { action, path: r.value(Value::NixFile).map(String::from) })
 }
 
 fn load(r: &Read) -> Result<Op> {
@@ -715,8 +718,8 @@ const MAX_FILTERS: usize = 16;
 pub enum Offer {
     /// A word, and its help.
     Word(&'static str, &'static str),
-    /// A value: its placeholder, and help.
-    Value(String, &'static str),
+    /// A value: its placeholder, and help, and what kind (where one is known: its values offered).
+    Value(String, &'static str, Option<Value>),
     /// A configuration path, for the tree to offer: the command it is for (`set`, `delete`, `edit`,
     /// `show`), and whether it is from the top (operational mode, `top`) or from where `edit` is.
     Path { verb: &'static str, from_top: bool },
@@ -729,7 +732,8 @@ pub fn offers(walked: &Walked) -> Vec<Offer> {
     for n in walked.next() {
         match n.word {
             Word::Fixed(w) => out.push(Offer::Word(w, n.help)),
-            Word::Value(_) | Word::Terms => out.push(Offer::Value(n.shown(), n.help)),
+            Word::Value(v) => out.push(Offer::Value(n.shown(), n.help, Some(v))),
+            Word::Terms => out.push(Offer::Value(n.shown(), n.help, None)),
             Word::Path => out.push(Offer::Path { verb: walked.read.fixed.first().copied().unwrap_or("show"), from_top }),
             Word::Command(m) => {
                 let start = Here::Start { mode: m, top: false };
@@ -828,7 +832,7 @@ pub fn describe(mode: Mode, words: &[String]) -> Option<(String, &'static str, V
         .into_iter()
         .filter_map(|o| match o {
             Offer::Word(w, h) => Some((w.to_string(), h)),
-            Offer::Value(w, h) => Some((w, h)),
+            Offer::Value(w, h, _) => Some((w, h)),
             Offer::Path { .. } => Some(("<path>".to_string(), "A place in the configuration (`?` lists them)")),
         })
         .collect();

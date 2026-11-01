@@ -625,6 +625,8 @@ pub fn main(args: &[String]) -> i32 {
 enum Invocation {
     /// The shell.
     Interactive,
+    /// `--help`: how torqcli is run, on standard output.
+    Help,
     /// `-c "<command>; <command>…"`.
     Script(String),
     /// `torqcli <command>`: one operational command, its words as the calling shell split them (one
@@ -681,7 +683,7 @@ fn parse_args(args: &[String]) -> Result<Invocation> {
             // (Read before anything runs: see `describe`.)
             "-v" | "--verbose" => {}
             "-c" if run == Invocation::Interactive => run = Invocation::Script(it.next().ok_or_else(usage)?.clone()),
-            "-h" | "--help" => return Err(usage()),
+            "-h" | "--help" => return Ok(Invocation::Help),
             o if o.starts_with('-') => return Err(usage()),
             _ if run == Invocation::Interactive => {
                 let rest: Vec<String> = std::iter::once(a).chain(it).cloned().collect();
@@ -719,6 +721,7 @@ fn a_command_on_the_command_line() {
     assert_eq!(a(&["show", "configuration", "|", "grep", "a b"]).unwrap(), Invocation::Command(w(&["show", "configuration", "|", "grep", "a b"])), "words as given");
     assert_eq!(a(&["show", "-v"]).unwrap(), Invocation::Command(w(&["show", "-v"])), "options come first");
     assert_eq!(a(&["-c", "show; show"]).unwrap(), Invocation::Script("show; show".into()));
+    assert_eq!(a(&["--help"]).unwrap(), Invocation::Help, "help is an answer, not an error");
     for bad in [&["-c", "x", "show"][..], &["-c", "x", "-c", "y"], &["-x"], &["-c"], &["--style", "j", "show"], &[""]] {
         assert!(a(bad).is_err(), "{bad:?}");
     }
@@ -731,6 +734,10 @@ fn run_shell(args: &[String]) -> Result<i32> {
         return crate::setup::run().map(|()| 0);
     }
     let run = parse_args(args)?;
+    if run == Invocation::Help {
+        say(&format!("{USAGE}\n\nWith no command: the shell (`help` there says how to use it). A command: that one operational\ncommand, its output on standard output. -c: commands separated by ;, stopping at the first that\nfails; their changes are their own (end with `commit` to keep them). --verbose: errors in full.\n"));
+        return Ok(0);
+    }
     // The overrides exist only in a development build (`cargo build`): the released torqcli (the Nix
     // package, a release build) always manages the machine's repo through its broker (second audit, L2).
     let env = |k: &str, d: &str| if cfg!(debug_assertions) { std::env::var(k).unwrap_or_else(|_| d.to_string()) } else { d.to_string() };
@@ -753,10 +760,20 @@ fn run_shell(args: &[String]) -> Result<i32> {
     };
     match run {
         Invocation::Script(script) => {
-            for line in script_lines(&script) {
-                match s.exec(&line) {
+            let lines = script_lines(&script);
+            for (i, line) in lines.iter().enumerate() {
+                match s.exec(line) {
                     Ok(out) => print_clean(&out),
-                    Err(e) => return fail(&line, e),
+                    Err(e) => {
+                        let code = fail(line, e);
+                        // Stopped there: say what did not run, so nothing is thought done that was not.
+                        let rest = lines.len() - i - 1;
+                        if rest > 0 {
+                            eprint!("{}", crate::ui::Ui::for_terminal(true).line("  ", &format!("(stopped: the {} after it did not run)", if rest == 1 { "command".to_string() } else { format!("{rest} commands") })));
+                            eprintln!();
+                        }
+                        return code;
+                    }
                 }
             }
             // A script's candidate is its own: what it changed and did not commit is gone. Say so.
@@ -777,6 +794,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
             }
         }
         Invocation::Interactive => interactive(&mut s),
+        Invocation::Help => unreachable!("answered before anything is read"),
     }
 }
 
@@ -1102,7 +1120,7 @@ mod editor {
         // (Ctrl-C while a command runs: the line editor keeps SIGINT for as long as it lives, so it
         // stops the command's child — nix, the broker — and torqcli says so and stays, its terminal
         // put back by the Echo guard as the command returns.)
-        let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data(), configurations: s.configurations_list() };
+        let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data(), configurations: s.configurations_list(), files: s.nix_files() };
         let help = Help { know: Arc::new((s.schema.clone(), s.tree.clone())), at: Arc::new(Mutex::new(at(s))) };
         // Bracketed paste off: a paste arrives as typed, each line running at its newline as on a network
         // device (not held as one block until another Enter); the lines after the first were waiting

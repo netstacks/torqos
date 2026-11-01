@@ -985,6 +985,11 @@ impl<'a> Session<'a> {
         Ok(format!("{}\n", self.ui().line("", &format!("Put back {} as {which} has it: {what}.", at.join(" ")))))
     }
 
+    /// The configuration's Nix files (as `file list` lists them: the candidate's in configuration mode).
+    pub fn nix_files(&mut self) -> Vec<String> {
+        self.file(FileAction::List, None).map(|out| out.lines().map(|l| l.trim().to_string()).filter(|l| l.ends_with(".nix")).collect()).unwrap_or_default()
+    }
+
     /// One line for each configuration `rollback ?` offers, newest first (0, 1, …).
     pub fn configurations_list(&self) -> Vec<String> {
         self.machine.configurations(&self.repo, 30).map(|h| h.configurations.iter().map(|c| format!("{} {}: {}", c.date, c.who, crate::history::one_line(&c.what, 80))).collect()).unwrap_or_default()
