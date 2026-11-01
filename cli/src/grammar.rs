@@ -181,6 +181,8 @@ pub struct Read {
     pub sub: Option<Op>,
     pub compare: bool,
     pub display: Option<Display>,
+    /// `| no-more`: all the output at once, never a screenful at a time.
+    pub no_more: bool,
 }
 
 impl Read {
@@ -619,7 +621,8 @@ fn apply_pipes(node: &Node, segments: &mut [Vec<String>], read: &mut Read, befor
             bail!("`{}` prints nothing to filter", before.join(" "));
         }
         let own = if filters.is_empty() { pipe_words(node, read) } else { vec![] };
-        let offered: Vec<String> = own.iter().chain(&filter_names).cloned().collect();
+        let paging = (!read.no_more).then(|| "no-more".to_string());
+        let offered: Vec<String> = own.iter().chain(&filter_names).chain(&paging).cloned().collect();
         let Some(first) = seg.first().cloned() else { bail!("a | needs something after it (one of: {})", offered.join(", ")) };
         let word = match resolve(&first, &offered, &after) {
             Ok(w) => w,
@@ -635,6 +638,8 @@ fn apply_pipes(node: &Node, segments: &mut [Vec<String>], read: &mut Read, befor
                 bail!("'{}' is not a word here: nothing may follow `{}`", seg.last().cloned().unwrap_or_default(), after.join(" "))
             }
             "compare" => read.compare = true,
+            "no-more" if seg.len() > 1 => bail!("'{}' is not a word here: nothing may follow `| no-more`", seg[1]),
+            "no-more" => read.no_more = true,
             "display" => {
                 let views = views(node, read);
                 let Some(v) = seg.get(1).cloned() else { bail!("needs <view> (one of: {})", views.join(", ")) };
@@ -679,20 +684,23 @@ pub fn views(node: &Node, read: &Read) -> Vec<String> {
     v.iter().map(|d| d.name().to_string()).collect()
 }
 
-/// A whole line read: its `Op`, its filters, and the words as meant (abbreviations expanded).
-pub fn read_line(mode: Mode, w: &[String]) -> Result<(Op, Vec<crate::filter::Filter>, Vec<String>)> {
+/// A whole line, read: its `Op`, its filters, and whether its output may be shown a screenful at a
+/// time (not after `| no-more`).
+pub struct Line {
+    pub op: Op,
+    pub filters: Vec<crate::filter::Filter>,
+    pub page: bool,
+}
+
+/// Read a whole line.
+pub fn read_line(mode: Mode, w: &[String]) -> Result<Line> {
     let bar = w.iter().position(|x| x == "|").unwrap_or(w.len());
     let mut walked = walk(mode, &w[..bar])?;
     let Some(node) = walked.node().filter(|n| n.whole.is_some()) else { return Err(short(&walked).into()) };
     let mut segments: Vec<Vec<String>> = if bar < w.len() { w[bar + 1..].split(|x| x == "|").map(<[String]>::to_vec).collect() } else { vec![] };
     let filters = apply_pipes(node, &mut segments, &mut walked.read, &walked.words)?;
     let op = walked.op()?;
-    let mut words = walked.words;
-    for seg in segments {
-        words.push("|".into());
-        words.extend(seg);
-    }
-    Ok((op, filters, words))
+    Ok(Line { op, filters, page: !walked.read.no_more })
 }
 
 /// The most filters one line may chain (each runs in its own sandbox).
@@ -754,6 +762,9 @@ pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String)> {
                 }
             }
             out.extend(crate::filter::FILTERS.iter().map(|(t, h)| (t.to_string(), h.to_string())));
+            if !walked.read.no_more {
+                out.push(("no-more".into(), "All of it at once, not a screenful at a time".into()));
+            }
             out
         }
         [d] if d == "display" && filters.is_empty() => views(node, &walked.read).into_iter().map(|v| {

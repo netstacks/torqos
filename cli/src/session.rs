@@ -133,6 +133,8 @@ pub struct Session<'a> {
     fit: Option<usize>,
     /// Set by `exit` in operational mode (or `quit`).
     pub done: bool,
+    /// Whether the last command's output may be shown a screenful at a time (not `| no-more`).
+    pub page: bool,
 }
 
 /// Split a command line into words as a shell does: whitespace-separated, "double" or 'single'
@@ -211,7 +213,7 @@ fn word(out: &mut Vec<String>, w: String) -> Result<()> {
 
 impl<'a> Session<'a> {
     pub fn new(schema: Schema, tree: crate::nixos::Tree, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str) -> Self {
-        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false }
+        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true }
     }
 
     /// The whole tree over both kinds of files (whole.rs).
@@ -265,14 +267,14 @@ impl<'a> Session<'a> {
                 _ => false,
             }
         }
-        words(line).ok().and_then(|w| self.read(&w).ok()).is_some_and(|(op, _)| commits(&op))
+        words(line).ok().and_then(|w| self.read(&w).ok()).is_some_and(|l| commits(&l.op))
     }
 
     /// Whether `line` shows all the candidate changes (`show | compare`, from the top): the person
     /// has looked.
     pub fn reviews(&self, line: &str) -> bool {
         let whole = |op: &Op, at_top: bool| at_top && matches!(op, Op::Compare { .. });
-        words(line).ok().and_then(|w| self.read(&w).ok()).is_some_and(|(op, _)| match &op {
+        words(line).ok().and_then(|w| self.read(&w).ok()).is_some_and(|l| match &l.op {
             Op::Top { then: Some(op) } => whole(op, true),
             op => whole(op, self.edit.is_empty()),
         })
@@ -280,8 +282,8 @@ impl<'a> Session<'a> {
 
     /// A line's words as the session runs them: read by the grammar (grammar.rs: abbreviations become
     /// their words; a line that is not a command says why).
-    fn read(&self, w: &[String]) -> Result<(Op, Vec<crate::filter::Filter>)> {
-        syntax::parse_line(self.mode, w)
+    fn read(&self, w: &[String]) -> Result<crate::grammar::Line> {
+        crate::grammar::read_line(self.mode, w)
     }
 
     /// Run one command, already split into words (`torqcli <command>`: as the calling shell split
@@ -294,9 +296,10 @@ impl<'a> Session<'a> {
         if w.is_empty() {
             return Ok(String::new());
         }
-        let (op, filters) = self.read(w)?;
-        self.fit = if filters.is_empty() { crate::ui::fit((self.screen)()) } else { None };
-        crate::filter::apply(&filters, self.run(op)?)
+        let line = self.read(w)?;
+        self.page = line.page;
+        self.fit = if line.filters.is_empty() { crate::ui::fit((self.screen)()) } else { None };
+        crate::filter::apply(&line.filters, self.run(line.op)?)
     }
 
     /// How this command's sentences and tables are laid out (ui.rs): to fit the window, unless a

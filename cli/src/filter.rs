@@ -195,7 +195,7 @@ mod tests {
         let w = |s: &str| crate::session::words(s).unwrap();
         for t in ["sh -c x", "sed s/a/b/", "awk 1", "tee f", "xargs rm", "less", "/bin/grep x", "./grep x", "env grep x"] {
             let line = w(&format!("show services | {t}"));
-            let e = format!("{:#}", crate::grammar::read_line(crate::session::Mode::Operational, &line).unwrap_err());
+            let e = format!("{:#}", crate::grammar::read_line(crate::session::Mode::Operational, &line).err().expect("refused"));
             assert!(e.contains("is not a word here"), "{t}: {e}");
         }
     }

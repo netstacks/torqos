@@ -142,6 +142,11 @@ pub fn columns(err: bool) -> Option<usize> {
     size.ok().map(|w| usize::from(w.ws_col)).filter(|&c| c > 0)
 }
 
+/// How many lines the terminal on standard output shows; None if it is not one.
+pub fn rows() -> Option<usize> {
+    rustix::termios::tcgetwinsize(std::io::stdout()).ok().map(|w| usize::from(w.ws_row)).filter(|&r| r > 0)
+}
+
 /// The width to fit for a window `columns` wide: 20 to 80. None (no window): None.
 pub fn fit(columns: Option<usize>) -> Option<usize> {
     columns.map(|c| c.clamp(NARROWEST, WIDTH))

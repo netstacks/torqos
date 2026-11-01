@@ -403,24 +403,24 @@ mod tests {
     fn pipes_after_show() {
         let s = schema();
         assert!(words_of(&choices(&s, Mode::Configuration, &w("show"), "")).contains(&"|"));
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show |"), "")), ["compare", "display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show |"), "")), ["compare", "display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc", "no-more"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show system | display"), "")), ["detail", "set"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | compare |"), "")), ["display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | compare |"), "")), ["display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc", "no-more"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | compare | display"), "")), ["diff"]);
-        let filters = ["cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"];
+        let filters = ["cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc", "no-more"];
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | display set |"), "")), filters, "one display");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | compare | display diff |"), "")), filters);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration | display set |"), "")), filters);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system commit | display"), "")), ["detail"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2 | display"), "")), ["detail", "set"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2 compare 0 | display"), "")), ["diff"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "")), ["display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "")), ["display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc", "no-more"]);
     }
 
     #[test]
     fn filters_after_any_show() {
         let s = schema();
-        let filters = ["cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"];
+        let filters = ["cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc", "no-more"];
         let mut with_display = vec!["display"];
         with_display.extend(filters);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system commit |"), "")), with_display);
@@ -517,17 +517,24 @@ mod tests {
     #[test]
     fn the_command_language_abbreviates() {
         let (o, k) = (Mode::Operational, Mode::Configuration);
-        let x = |mode, line: &str| crate::grammar::read_line(mode, &w(line)).map(|(_, _, words)| words).map_err(|e| format!("{e:#}"));
-        assert_eq!(x(o, "sho sys ala").unwrap(), w("show system alarms"));
-        assert_eq!(x(o, "sh conf | display set | grep host").unwrap(), w("show configuration | display set | grep host"));
-        assert_eq!(x(o, "sh conf netw").unwrap(), w("show configuration netw"), "a path is the configuration's to read");
-        assert_eq!(x(k, "se netw hostName x").unwrap(), w("set netw hostName x"));
+        let read = |mode, line: &[String]| crate::grammar::read_line(mode, line).map(|l| (l.op, l.filters)).map_err(|e| format!("{e:#}"));
+        let x = |mode, line: &str| read(mode, &w(line));
+        // An abbreviated line is the same command as the line written out.
+        for (mode, short, long) in [
+            (o, "sho sys ala", "show system alarms"),
+            (o, "sh conf | disp set | gr host", "show configuration | display set | grep host"),
+            (o, "sh conf netw", "show configuration netw"),
+            (k, "se netw hostName x", "set netw hostName x"),
+            (k, "ru sh sys ala", "run show system alarms"),
+            (k, "to se time timeZone UTC", "top set time timeZone UTC"),
+            (k, "to sh | comp", "top show | compare"),
+            (o, "quit", "quit"),
+        ] {
+            assert_eq!(x(mode, short).unwrap(), x(mode, long).unwrap(), "{short}");
+        }
         let why = vec!["comm".to_string(), "comm".into(), "why not".into()];
-        assert_eq!(crate::grammar::read_line(k, &why).unwrap().2, vec!["commit".to_string(), "comment".into(), "why not".into()], "a value stays");
-        assert_eq!(x(k, "ru sh sys ala").unwrap(), w("run show system alarms"));
-        assert_eq!(x(k, "to se time timeZone UTC").unwrap(), w("top set time timeZone UTC"));
+        assert_eq!(read(k, &why).unwrap(), read(k, &["commit".to_string(), "comment".into(), "why not".into()]).unwrap(), "a value stays as it is");
         assert!(x(k, "s").unwrap_err().contains("'s' is ambiguous: save, set, show"));
-        assert_eq!(x(o, "quit").unwrap(), w("quit"), "quit, as exit");
         let e = x(o, "show system foo").unwrap_err();
         assert!(e.contains("'foo' is not a word here (after `show system`)") && e.contains("alarms, commit, ledger, rollback"), "{e}");
         assert!(x(o, "show configuraton").unwrap_err().contains("did you mean configuration?"));
@@ -536,6 +543,10 @@ mod tests {
         assert_eq!(x(o, "request system revert").unwrap_err(), "needs <change> (the change's number, from show system ledger)");
         assert_eq!(x(o, "show system alarms extra").unwrap_err(), "'extra' is not a word here: nothing may follow `show system alarms`");
         assert_eq!(x(o, "show system rollback x").unwrap_err(), "'x' is not a number (configuration numbers: 0, 1, …)");
+        // `| no-more`: anywhere among the pipes, once.
+        assert!(!crate::grammar::read_line(o, &w("show system commit | no-more")).unwrap().page);
+        assert!(!crate::grammar::read_line(o, &w("show configuration | grep x | no")).unwrap().page);
+        assert!(crate::grammar::read_line(o, &w("show system commit")).unwrap().page);
     }
 
     /// The whole command language, walked as a person pressing `?` after every word would (a sample

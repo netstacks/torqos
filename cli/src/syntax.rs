@@ -140,7 +140,7 @@ pub const MAX_ROLLBACK: usize = 10_000;
 
 /// Read one line: the command and the filters after it (the grammar's, grammar.rs).
 pub fn parse_line(mode: Mode, w: &[String]) -> Result<(Op, Vec<Filter>)> {
-    crate::grammar::read_line(mode, w).map(|(op, filters, _)| (op, filters))
+    crate::grammar::read_line(mode, w).map(|l| (l.op, l.filters))
 }
 
 // Rendering (Op → text) is what the round-trip test checks the parser against; nothing else prints

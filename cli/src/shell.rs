@@ -768,9 +768,75 @@ fn run_shell(args: &[String]) -> Result<i32> {
 /// Output line by line, each cleaned of anything that could fool a terminal (the configuration is
 /// checked on load, but the ledger's reasons and messages are not ours).
 fn print_clean(out: &str) {
+    say(&clean(out));
+}
+
+/// Output as it is printed: each line cleaned, then coloured (paint.rs: on what is already clean),
+/// in the console's own characters (ui::for_console).
+fn clean(out: &str) -> String {
     let cleaned: String = out.lines().map(|l| format!("{}\n", history::clean(l))).collect();
-    // Colour last, on what is already clean (paint.rs); the console's own characters (ui::for_console).
-    say(&crate::ui::for_console(&crate::paint::paint(&cleaned, &crate::ui::Ui::for_terminal(false))));
+    crate::ui::for_console(&crate::paint::paint(&cleaned, &crate::ui::Ui::for_terminal(false)))
+}
+
+/// Output taller than the window, a screenful at a time, as on a network device: Space for the next
+/// screenful, Enter for one line more, `n` for the rest at once, `q` (or Ctrl-C) to stop. All at
+/// once when it fits, when standard output or input is not a terminal, and when more input is
+/// already waiting (a paste: its next lines are not keys).
+fn paged(text: &str) {
+    let (Some(rows), Some(cols)) = (crate::ui::rows(), crate::ui::columns(false)) else { return say(text) };
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    // How many rows of the window a line takes (a line wider than it wraps).
+    let height = |l: &str| crate::ui::width(l.trim_end_matches('\n')).div_ceil(cols).max(1);
+    let total: usize = lines.iter().map(|l| height(l)).sum();
+    if rows < 3 || total < rows || waiting() {
+        return say(text);
+    }
+    let (mut next, mut room) = (0, rows - 1);
+    while next < lines.len() {
+        let mut used = 0;
+        let start = next;
+        while next < lines.len() && used + height(lines[next]) <= room.max(height(lines[next])) {
+            used += height(lines[next]);
+            next += 1;
+        }
+        say(&lines[start..next].concat());
+        if next >= lines.len() {
+            return;
+        }
+        let shown: usize = lines[..next].iter().map(|l| height(l)).sum();
+        say(&format!("---(more {}%)---", shown * 100 / total));
+        let key = key();
+        say("\r\x1b[K");
+        match key {
+            Some(b' ' | b'f') => room = rows - 1,
+            Some(b'\r' | b'\n' | b'j') => room = 1,
+            Some(b'n' | b'N') => return say(&lines[next..].concat()),
+            _ => return,
+        }
+    }
+}
+
+/// Whether more input is waiting to be read already (a paste).
+fn waiting() -> bool {
+    let stdin = std::io::stdin();
+    let mut fds = [rustix::event::PollFd::new(&stdin, rustix::event::PollFlags::IN)];
+    rustix::event::poll(&mut fds, Some(&rustix::event::Timespec { tv_sec: 0, tv_nsec: 0 })).is_ok_and(|n| n > 0)
+}
+
+/// One key from the terminal, as it is pressed (not echoed, Ctrl-C a key like any other); None if
+/// there is no terminal to read.
+fn key() -> Option<u8> {
+    let stdin = std::io::stdin();
+    let was = rustix::termios::tcgetattr(&stdin).ok()?;
+    let mut raw = was.clone();
+    raw.local_modes.remove(rustix::termios::LocalModes::ICANON | rustix::termios::LocalModes::ECHO | rustix::termios::LocalModes::ISIG);
+    raw.special_codes[rustix::termios::SpecialCodeIndex::VMIN] = 1;
+    raw.special_codes[rustix::termios::SpecialCodeIndex::VTIME] = 0;
+    rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &raw).ok()?;
+    let mut b = [0u8; 1];
+    let got = rustix::io::read(&stdin, &mut b);
+    let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &was);
+    got.ok().filter(|&n| n == 1).map(|_| b[0])
 }
 
 /// One cause of an error as a person reads it: the system's own words for a failed file operation
@@ -838,7 +904,7 @@ fn interactive(s: &mut Session) -> Result<i32> {
         }
         // Piped lines are a script: stop at the first error, so a later `commit` cannot commit
         // what an earlier failed line did not change.
-        if !run_line(s, line.trim()) {
+        if !run_line(s, line.trim(), false) {
             return Ok(1);
         }
         if s.done {
@@ -902,9 +968,14 @@ impl Drop for Echo {
 static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Run one line; false if it failed (the error is printed with the line: in a paste, the first line
-/// cannot know more follow, so every error names its line).
-fn run_line(s: &mut Session, line: &str) -> bool {
+/// cannot know more follow, so every error names its line). `typed`: a person typed it, and waits
+/// for it — its output may be shown a screenful at a time (not a script's, nor a paste's).
+fn run_line(s: &mut Session, line: &str, typed: bool) -> bool {
     match s.exec(line) {
+        Ok(out) if s.page && typed => {
+            paged(&clean(&out));
+            true
+        }
         Ok(out) => {
             print_clean(&out);
             true
@@ -1046,7 +1117,9 @@ mod editor {
                 // paste unseen. (No timing decides that; timing only tells which lines came before
                 // a question: those still waiting when it was asked.)
                 Ok(text) => {
-                    if asked.elapsed() >= WAITING {
+                    // Typed, not pasted: the prompt waited for it (a paste's later lines come at once).
+                    let typed = asked.elapsed() >= WAITING;
+                    if typed {
                         after_question = false;
                     }
                     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -1071,7 +1144,7 @@ mod editor {
                         // (Typing goes on while a command runs: keys wait, unseen, for the next line.)
                         let ok = {
                             let _quiet = Echo::set(false);
-                            run_line(s, line)
+                            run_line(s, line, typed && lines.len() == 0)
                         };
                         if !ok {
                             failed += 1;
