@@ -778,7 +778,7 @@ fn interactive(s: &mut Session) -> Result<i32> {
         }
         // Piped lines are a script: stop at the first error, so a later `commit` cannot commit
         // what an earlier failed line did not change.
-        if !run_line(s, line.trim(), true) {
+        if !run_line(s, line.trim()) {
             return Ok(1);
         }
         if s.done {
@@ -820,17 +820,16 @@ impl Drop for Echo {
 /// Set when a question was asked (`Real::ask`): it ends the batch the line was part of.
 static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Run one line; false if it failed (the error is printed — `named`: with the line, as when it was
-/// one of several pasted or piped).
-fn run_line(s: &mut Session, line: &str, named: bool) -> bool {
+/// Run one line; false if it failed (the error is printed with the line: in a paste, the first line
+/// cannot know more follow, so every error names its line).
+fn run_line(s: &mut Session, line: &str) -> bool {
     match s.exec(line) {
         Ok(out) => {
             print_clean(&out);
             true
         }
         Err(e) => {
-            let what = if named { format!("{}: {}", history::one_line(line, 80), describe(&e)) } else { describe(&e) };
-            print!("{}", crate::ui::Ui::for_terminal(false).error(&what));
+            print!("{}", crate::ui::Ui::for_terminal(false).error(&format!("{}: {}", history::one_line(line, 80), describe(&e))));
             false
         }
     }
@@ -962,7 +961,6 @@ mod editor {
                         (failed, after_question) = (0, false);
                     }
                     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-                    let named = lines.len() > 1 || waiting;
                     let mut lines = lines.into_iter();
                     while let Some(line) = lines.next() {
                         // A question ended this batch: what came after it was pasted, not answered.
@@ -982,7 +980,7 @@ mod editor {
                         // (Typing goes on while a command runs: keys wait, unseen, for the next line.)
                         let ok = {
                             let _quiet = Echo::set(false);
-                            run_line(s, line, named)
+                            run_line(s, line)
                         };
                         if !ok {
                             failed += 1;
