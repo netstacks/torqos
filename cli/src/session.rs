@@ -31,7 +31,7 @@ pub trait Machine {
     /// `show system alarms`: what is not as the ledger says (and a commit confirmed waiting); with
     /// `detail`, the broker's facts behind it (commits, store paths).
     fn alarms(&self, detail: bool, fit: Option<usize>) -> Result<String>;
-    /// `show packages available <term>…`.
+    /// `show packages <term>…`.
     fn search(&self, terms: &[String], fit: Option<usize>) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
     fn repair(&self) -> Result<String>;
@@ -104,7 +104,7 @@ pub struct Waiting {
     pub by: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Operational,
     Configuration,
@@ -278,14 +278,10 @@ impl<'a> Session<'a> {
         })
     }
 
-    /// A line's words as the session runs them: read against the grammar (abbreviations become their
-    /// words, a word that may not stand where it is is named: complete::expand), then parsed; a line
-    /// of command words that is not whole says what may follow.
+    /// A line's words as the session runs them: read by the grammar (grammar.rs: abbreviations become
+    /// their words; a line that is not a command says why).
     fn read(&self, w: &[String]) -> Result<(Op, Vec<crate::filter::Filter>)> {
-        let know = crate::complete::Know { schema: &self.schema, tree: &self.tree };
-        let at = crate::complete::At { mode: self.mode, edit: self.edit.clone(), data: Data::default() };
-        let w = crate::complete::expand(&know, &at, w)?;
-        syntax::parse_line(self.mode, &w).map_err(|e| crate::complete::explain(&know, &at, &w).map_or(e, |what| anyhow::anyhow!(what)))
+        syntax::parse_line(self.mode, w)
     }
 
     /// Run one command, already split into words (`torqcli <command>`: as the calling shell split
@@ -336,7 +332,7 @@ impl<'a> Session<'a> {
             Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } => {
                 self.show_operational(op)
             }
-            Op::Request { words } => self.request(&words),
+            Op::Request(r) => self.request(r),
             Op::File { action, path } => self.file(action, path),
             Op::Save { file } => self.save_to(&file),
             Op::Load { how, from } => self.load_from(how, &from),
@@ -386,16 +382,13 @@ impl<'a> Session<'a> {
                 r
             }
             Op::Edit { words } => {
-                if words.is_empty() {
-                    bail!("edit needs a place to go: `edit ?` lists them");
-                }
                 let full = self.here(&words);
                 self.candidate()?;
                 if !self.whole().is_place(&full) {
                     // Not a place: no such setting at all (said with a hint), or a setting.
                     if let Err(e) = self.tree.locate(&full) {
                         if crate::whole::hand_words(&full).is_none() {
-                            return Err(e.context(format!("edit {}", full.join(" "))));
+                            return Err(e);
                         }
                     }
                     bail!("{}: a setting, not a place to go: `set {} <value>`", full.join(" "), words.iter().map(|w| syntax::quote(w)).collect::<Vec<_>>().join(" "));
@@ -404,9 +397,6 @@ impl<'a> Session<'a> {
                 Ok(String::new())
             }
             Op::Set { words } => {
-                if words.is_empty() {
-                    bail!("set needs a setting and its value: `set ?` lists them");
-                }
                 let full = self.here(&words);
                 let mut d = self.candidate_data()?;
                 let was = d.source.clone();
@@ -708,19 +698,13 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    fn request(&mut self, w: &[String]) -> Result<String> {
-        match w.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-            ["system", "repair"] => self.machine.repair(),
-            ["system", "password"] => self.machine.set_password(&self.me),
-            ["system", "password", user] => self.machine.set_password(user),
-            ["system", "revert", n] => {
-                let seq: u64 = n.parse().with_context(|| format!("request system revert <change>: '{n}' is not a change number"))?;
-                self.machine.revert(seq, &self.me)
-            }
-            ["system", "update"] => self.update(false),
-            ["system", "update", "all"] => self.update(true),
-            ["system", "software", "rollback", n] => self.software_rollback(syntax::number(n)?),
-            _ => bail!("request: one of: system password [<user>], system repair, system revert <change>, system update [all], system software rollback <n>"),
+    fn request(&mut self, r: syntax::Request) -> Result<String> {
+        match r {
+            syntax::Request::Repair => self.machine.repair(),
+            syntax::Request::Password { user } => self.machine.set_password(user.as_deref().unwrap_or(&self.me.clone())),
+            syntax::Request::Revert { change } => self.machine.revert(change, &self.me),
+            syntax::Request::Update { all } => self.update(all),
+            syntax::Request::SoftwareRollback { n } => self.software_rollback(n),
         }
     }
 
@@ -815,7 +799,7 @@ impl<'a> Session<'a> {
     }
 
     fn rollback(&mut self, n: usize) -> Result<String> {
-        let id = self.commit_at(n).with_context(|| format!("rollback {n}"))?;
+        let id = self.commit_at(n)?;
         // A configuration, not software: what the candidate had loaded (`request system update`) stays —
         // except for `rollback 0`, which starts over.
         // The software's source is the base's after it (a configuration, not software), so a lock made for
@@ -1093,7 +1077,7 @@ impl<'a> Session<'a> {
         if text.len() > crate::saved::MAX {
             bail!("save {file}: the configuration is {} bytes; a saved one is at most {}, so it could not be loaded", text.len(), crate::saved::MAX);
         }
-        write_private(std::path::Path::new(file), text.as_bytes()).with_context(|| format!("save {file}"))?;
+        write_private(std::path::Path::new(file), text.as_bytes())?;
         let n = text.lines().count();
         Ok(format!("Wrote {n} line{} of configuration to '{file}'\n", if n == 1 { "" } else { "s" }))
     }
@@ -1106,8 +1090,7 @@ impl<'a> Session<'a> {
         let (file, text) = match from {
             LoadFrom::File(file) => {
                 let mut text = String::new();
-                std::io::Read::read_to_string(&mut std::io::Read::take(std::fs::File::open(file).with_context(|| format!("load {file}"))?, crate::saved::MAX as u64 + 1), &mut text)
-                    .with_context(|| format!("load {file}"))?;
+                std::io::Read::read_to_string(&mut std::io::Read::take(std::fs::File::open(file)?, crate::saved::MAX as u64 + 1), &mut text)?;
                 (file.as_str(), text)
             }
             LoadFrom::Terminal => ("terminal", self.machine.read_terminal(crate::saved::MAX + 1).context("load terminal")?),
@@ -1130,7 +1113,7 @@ impl<'a> Session<'a> {
             Err(e) => {
                 self.candidate = Some(before.0);
                 self.save()?;
-                Err(e.context(format!("load {file}: nothing loaded")))
+                Err(e.context("nothing loaded"))
             }
         }
     }
@@ -1824,7 +1807,7 @@ mod tests {
         s.exec("rollback 1").unwrap();
         assert!(s.exec("show | compare").unwrap().contains("+   hostName two;"));
         let e = format!("{:#}", s.exec("rollback 3").unwrap_err());
-        assert!(e.contains("rollback 3: there are only 3 configurations"), "{e}");
+        assert_eq!(e, "there are only 3 configurations", "the line is named once, by the shell");
     }
 
     #[test]
@@ -1875,7 +1858,7 @@ mod tests {
         assert_eq!(s.exec("show system ledger 5 | wc -l").unwrap(), "1\n");
         assert!(format!("{:#}", s.exec("show system ledger 0").unwrap_err()).contains("1 to 10000"));
         assert_eq!(s.exec("request system revert 7").unwrap(), "reverted 7 for dev\n");
-        assert!(format!("{:#}", s.exec("request system revert x").unwrap_err()).contains("not a change number"));
+        assert!(format!("{:#}", s.exec("request system revert x").unwrap_err()).contains("'x' is not a number (change numbers: 1, 2, …)"));
         s.exec("configure").unwrap();
         assert_eq!(s.exec("run request system revert 3").unwrap(), "reverted 3 for dev\n");
     }
@@ -2045,7 +2028,7 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         assert_eq!(s.exec("file show system.nix").unwrap(), "{ ... }: { }\n");
         assert_eq!(s.exec("file list").unwrap(), "system.nix\n");
-        assert!(s.exec("file edit system.nix").unwrap_err().to_string().contains("configuration mode"));
+        assert!(s.exec("file edit system.nix").unwrap_err().to_string().contains("a configuration-mode command (after `file`): `configure` first"));
         assert!(s.exec("file show flake.nix").is_err(), "the repo's own structure is not a config file");
         assert!(s.exec("show configuration").unwrap().contains("in Nix: system.nix"));
         // Once attached, it is part of the configuration: shown there, not as outside it.
@@ -2259,7 +2242,8 @@ mod tests {
         s.exec(&format!("save {}", link.display())).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
         assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert!(s.exec(&format!("save {}", d.path().display())).unwrap_err().to_string().contains("save"));
+        let e = format!("{:#}", s.exec(&format!("save {}", d.path().display())).unwrap_err());
+        assert!(e.contains("not a plain file"), "a folder: {e}");
         assert!(format!("{:#}", s.exec("save /dev/null").unwrap_err()).contains("not a plain file"));
         assert!(std::fs::read_dir(d.path()).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")), "no temp file left");
         // Load: not a huge file; not an attachment without content.
@@ -2530,7 +2514,7 @@ mod tests {
         assert!(format!("{:#}", s.exec("rollback 9").unwrap_err()).contains("only 2 configurations"));
         assert!(format!("{:#}", s.exec("rollback x").unwrap_err()).contains("not a number"));
         for huge in ["rollback 18446744073709551615", "run show system rollback 18446744073709551615"] {
-            assert!(format!("{:#}", s.exec(huge).unwrap_err()).contains("go up to 10000"), "{huge}");
+            assert!(format!("{:#}", s.exec(huge).unwrap_err()).contains("configuration numbers go from 0 to 10000"), "{huge}");
         }
     }
 
@@ -2603,7 +2587,7 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set users dev packages jq"]);
-        for (bad, why) in [("commit confirmed 0", "1 to 1440"), ("commit confirmed 1441", "1 to 1440"), ("commit confirmed 99999999999", "too many"), ("commit now", "one of")] {
+        for (bad, why) in [("commit confirmed 0", "1 to 1440"), ("commit confirmed 1441", "1 to 1440"), ("commit confirmed 99999999999", "1 to 1440"), ("commit now", "one of")] {
             assert!(format!("{:#}", s.exec(bad).unwrap_err()).contains(why), "{bad}");
         }
         assert!(m.checks.borrow().is_empty(), "refused before anything is checked");
@@ -2762,8 +2746,8 @@ mod tests {
         run(&mut s, &["top edit virtualisation"]);
         assert_eq!(s.edit_path(), w("virtualisation"), "a move moves");
         assert!(format!("{:#}", s.exec("run configure").unwrap_err()).contains("'configure' is not a word here (after `run`)"));
-        assert!(format!("{:#}", s.exec("edit").unwrap_err()).contains("edit needs a place"));
-        assert!(format!("{:#}", s.exec("set").unwrap_err()).contains("set needs a setting"));
+        assert!(format!("{:#}", s.exec("edit").unwrap_err()).contains("needs <path> (where to go)"));
+        assert!(format!("{:#}", s.exec("set").unwrap_err()).contains("needs <path> (the setting and its value)"));
         assert!(format!("{:#}", s.exec("edit nosuch").unwrap_err()).contains("nosuch"));
         let out = s.exec("commit and-quit").unwrap();
         assert!(out.ends_with("Exiting configuration mode\n") && s.mode == Mode::Operational, "{out}");
@@ -2814,7 +2798,7 @@ mod tests {
         let m = Fake { typed: Some("set environment variables A one\nset nonsense x\n".into()), ..Default::default() };
         let mut s = session(d.path(), None, &m);
         let e = format!("{:#}", run_err(&mut s, &["configure"], "load set terminal"));
-        assert!(e.contains("load terminal: nothing loaded") && e.contains("line 2"), "{e}");
+        assert!(e.starts_with("nothing loaded: line 2: set nonsense x"), "the line is named once, by the shell: {e}");
         assert_eq!(s.exec("show | compare").unwrap(), "", "all or nothing");
         // No terminal (a script): said.
         let m = Fake::default();
@@ -2859,7 +2843,7 @@ mod tests {
         let out = s.exec("show services").unwrap();
         assert!(out.lines().any(|l| l.starts_with("on  ssh ")) && out.lines().any(|l| l.starts_with("off podman")), "{out}");
         assert_eq!(s.exec("show system alarms").unwrap(), "all well\n");
-        assert_eq!(s.exec("show packages available ripgrep").unwrap(), "searched ripgrep\n");
+        assert_eq!(s.exec("show packages ripgrep").unwrap(), "searched ripgrep\n");
         assert_eq!(s.exec("request system repair").unwrap(), "repaired\n");
         let e = format!("{:#}", s.exec("request system software rollback 0").unwrap_err());
         assert!(e.contains("configuration 0 has no flake.lock"), "{e}");
@@ -2875,7 +2859,7 @@ mod tests {
         assert_eq!(s.exec("show configuration").unwrap(), "networking {\n    hostName two;\n}\n");
         assert_eq!(s.exec("show configuration | display set").unwrap(), "set networking hostName two\n");
         assert!(s.exec("show system commit").unwrap().starts_with("0   "));
-        assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("'set' is not a word here"));
+        assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("'set' is a configuration-mode command: `configure` first"));
         run(&mut s, &["configure", "set system host-name three"]);
         assert_eq!(s.exec("run show configuration").unwrap(), "networking {\n    hostName two;\n}\n", "run: the active one");
         assert_eq!(s.mode, Mode::Configuration);

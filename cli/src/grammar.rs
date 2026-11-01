@@ -1,0 +1,765 @@
+//! The command language, declared once (ADR-025): each command's words, help, values, the pipes
+//! its output takes, and how a whole line becomes an `Op`. One walk over it parses a line, expands
+//! abbreviations, lists what may come next (`?`, Tab) and says why a line is refused, so these can
+//! never disagree. Configuration paths are the tree's (complete.rs, whole.rs); filters, filter.rs's.
+
+use crate::session::Mode;
+use crate::syntax::{CommitOptions, Display, FileAction, LoadFrom, LoadHow, Op, Request};
+use anyhow::{bail, Result};
+
+/// The modes a command is in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum In {
+    Op,
+    Cf,
+    Both,
+}
+
+impl In {
+    fn has(self, m: Mode) -> bool {
+        matches!((self, m), (In::Both, _) | (In::Op, Mode::Operational) | (In::Cf, Mode::Configuration))
+    }
+}
+
+/// A value at one place of a command.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Value {
+    /// A configuration number (0 is the current one).
+    Rollback,
+    /// Levels to go up.
+    Levels,
+    /// How many entries.
+    Count,
+    /// A change number (the ledger's).
+    Change,
+    /// Minutes to confirm a commit in.
+    Minutes,
+    /// A person's account.
+    User,
+    /// A file.
+    File,
+    /// Free text (a comment).
+    Text,
+}
+
+impl Value {
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Value::Rollback => "<number>",
+            Value::Levels => "<n>",
+            Value::Count => "<count>",
+            Value::Change => "<change>",
+            Value::Minutes => "<minutes>",
+            Value::User => "<user>",
+            Value::File => "<file>",
+            Value::Text => "<\"text\">",
+        }
+    }
+
+    /// Whether `w` is such a value, and if not, why.
+    pub fn check(self, w: &str) -> Result<()> {
+        let whole = |w: &str, what: &str, low: u64, high: u64| -> Result<u64> {
+            match w.parse::<u64>() {
+                Ok(n) if (low..=high).contains(&n) => Ok(n),
+                Ok(_) => bail!("'{w}' is out of range: {what} go from {low} to {high}"),
+                Err(_) => bail!("'{w}' is not a number ({what}: {low}, {}, …)", low + 1),
+            }
+        };
+        match self {
+            Value::Rollback => whole(w, "configuration numbers", 0, crate::syntax::MAX_ROLLBACK as u64).map(drop),
+            Value::Levels => whole(w, "levels", 1, 10_000).map(drop),
+            Value::Count => whole(w, "counts", 1, 10_000).map(drop),
+            Value::Change => whole(w, "change numbers", 1, u64::MAX).map(drop),
+            Value::Minutes => whole(w, "minutes", 1, 1440).map(drop),
+            Value::User if !w.is_empty() => Ok(()),
+            Value::File if !w.is_empty() => Ok(()),
+            Value::Text => Ok(()),
+            _ => bail!("an empty word is not a {}", self.placeholder()),
+        }
+    }
+}
+
+/// What stands at one place of a command.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Word {
+    /// The word itself.
+    Fixed(&'static str),
+    /// One value.
+    Value(Value),
+    /// A configuration path: every word to the end (or a `|`), the tree's to read.
+    Path,
+    /// One or more words to the end (or a `|`): search words.
+    Terms,
+    /// A whole command of a mode, as from where that mode starts (`run`, `top`).
+    Command(Mode),
+}
+
+/// What a command's output takes after a `|`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pipes {
+    /// Nothing: it prints no output to filter.
+    None,
+    /// Filters (grep, wc, …).
+    Filters,
+    /// Filters, and these `| display` views.
+    Views(&'static [Display]),
+    /// The candidate's `show`: `| compare`, `| display set|detail` (after compare: `| display diff`),
+    /// and filters.
+    Candidate,
+}
+
+/// How a whole line becomes an `Op`, from what was read.
+pub type Build = fn(&Read) -> Result<Op>;
+
+/// One place of a command.
+pub struct Node {
+    pub word: Word,
+    pub help: &'static str,
+    pub mode: In,
+    /// Only where its mode starts, not after `run` or `top` (configure, exit, quit).
+    pub top_only: bool,
+    /// May appear once in a line (commit's options).
+    pub once: bool,
+    /// The line may end here: how it becomes an `Op`.
+    pub whole: Option<Build>,
+    pub pipes: Pipes,
+    /// What may follow.
+    pub then: &'static [Node],
+}
+
+const fn node(word: Word, help: &'static str, mode: In) -> Node {
+    Node { word, help, mode, top_only: false, once: false, whole: None, pipes: Pipes::None, then: &[] }
+}
+const fn fixed(w: &'static str, help: &'static str, mode: In) -> Node {
+    node(Word::Fixed(w), help, mode)
+}
+const fn value(v: Value, help: &'static str) -> Node {
+    node(Word::Value(v), help, In::Both)
+}
+
+impl Node {
+    const fn whole(mut self, b: Build) -> Self {
+        self.whole = Some(b);
+        self
+    }
+    const fn then(mut self, t: &'static [Node]) -> Self {
+        self.then = t;
+        self
+    }
+    const fn pipes(mut self, p: Pipes) -> Self {
+        self.pipes = p;
+        self
+    }
+    const fn top_only(mut self) -> Self {
+        self.top_only = true;
+        self
+    }
+    const fn once(mut self) -> Self {
+        self.once = true;
+        self
+    }
+    /// The word as `?` lists it.
+    pub fn shown(&self) -> String {
+        match self.word {
+            Word::Fixed(w) => w.to_string(),
+            Word::Value(v) => v.placeholder().to_string(),
+            Word::Path => "<path>".into(),
+            Word::Terms => "<word>".into(),
+            Word::Command(_) => "<command>".into(),
+        }
+    }
+}
+
+/// What a walk read: the fixed words, the values (each with its kind), the path or words, the
+/// command after `run`/`top`, and the pipes before the filters.
+#[derive(Debug, Default, Clone)]
+pub struct Read {
+    pub fixed: Vec<&'static str>,
+    pub values: Vec<(Value, String)>,
+    pub path: Vec<String>,
+    pub terms: Vec<String>,
+    pub sub: Option<Op>,
+    pub compare: bool,
+    pub display: Option<Display>,
+}
+
+impl Read {
+    fn has(&self, w: &str) -> bool {
+        self.fixed.contains(&w)
+    }
+    fn value(&self, v: Value) -> Option<&str> {
+        self.values.iter().find(|(k, _)| *k == v).map(|(_, s)| s.as_str())
+    }
+    fn number(&self, v: Value) -> Option<usize> {
+        self.value(v).and_then(|n| n.parse().ok())
+    }
+}
+
+// ── The commands ─────────────────────────────────────────────────────────────────────────────────
+
+const CONFIGURATION_VIEWS: &[Display] = &[Display::Detail, Display::Set];
+const DETAIL: &[Display] = &[Display::Detail];
+const COMPARISON: &[Display] = &[Display::Diff];
+
+static ROOTS: &[Node] = &[
+    fixed("commit", "Make the candidate the machine's configuration", In::Cf).whole(commit).then(COMMIT_FIRST),
+    fixed("configure", "Edit the configuration (a candidate, until you commit it)", In::Op).top_only().whole(|_| Ok(Op::Configure)),
+    fixed("delete", "Remove a value, a setting, or everything below a place", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() })).then(&[node(Word::Path, "What to remove", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() }))]),
+    fixed("edit", "Go down to a part of the configuration", In::Cf).then(&[node(Word::Path, "Where to go", In::Cf).whole(|r| Ok(Op::Edit { words: r.path.clone() }))]),
+    fixed("exit", "Leave torqcli", In::Op).top_only().whole(|_| Ok(Op::Exit)),
+    fixed("exit", "Up one level (out of configuration mode at the top; the candidate is kept)", In::Cf).top_only().whole(|_| Ok(Op::Exit)).then(&[fixed("configuration-mode", "Leave configuration mode from anywhere", In::Cf).whole(|_| Ok(Op::End))]),
+    fixed("file", "The configuration's Nix files (list, show; edit and delete in configuration mode)", In::Both).then(FILE),
+    fixed("load", "Load a saved or pasted configuration into the candidate (override, merge, set)", In::Cf).then(LOAD),
+    fixed("quit", "The same as exit", In::Both).top_only().whole(|_| Ok(Op::Exit)),
+    fixed("request", "Ask the machine to do something", In::Op).then(&[fixed("system", "This machine", In::Op).then(REQUEST_SYSTEM)]),
+    fixed("rollback", "Load an earlier configuration into the candidate", In::Cf).whole(rollback).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(rollback)]),
+    fixed("run", "Run an operational-mode command", In::Cf).then(&[node(Word::Command(Mode::Operational), "An operational command", In::Cf).whole(|r| Ok(Op::Run(Box::new(sub(r)?))))]),
+    fixed("save", "Save the whole candidate, and its config files, to a file", In::Cf).then(&[value(Value::File, "Where to save it (written private: 0600)").whole(|r| Ok(Op::Save { file: r.value(Value::File).unwrap_or_default().to_string() }))]),
+    fixed("set", "Set a value", In::Cf).then(&[node(Word::Path, "The setting and its value", In::Cf).whole(|r| Ok(Op::Set { words: r.path.clone() }))]),
+    fixed("show", "Show information about the machine", In::Op).then(SHOW),
+    fixed("show", "Show the candidate configuration, or what it changes (show | compare)", In::Cf).whole(show_candidate).pipes(Pipes::Candidate).then(&[node(Word::Path, "A part of it", In::Cf).whole(show_candidate).pipes(Pipes::Candidate)]),
+    fixed("top", "Back to the top, or run a command from there", In::Cf).whole(|_| Ok(Op::Top { then: None })).then(&[node(Word::Command(Mode::Configuration), "A command, as from the top", In::Cf).whole(|r| Ok(Op::Top { then: Some(Box::new(sub(r)?)) }))]),
+    fixed("up", "Up one level, or <n> levels", In::Cf).whole(up).then(&[value(Value::Levels, "How many levels up").whole(up)]),
+];
+
+static SHOW: &[Node] = &[
+    fixed("configuration", "The configuration in effect", In::Op).whole(show_active).pipes(Pipes::Views(CONFIGURATION_VIEWS)).then(&[node(Word::Path, "A part of it", In::Op).whole(show_active).pipes(Pipes::Views(CONFIGURATION_VIEWS))]),
+    fixed("packages", "Search the software you can install", In::Op).then(&[node(Word::Terms, "Words to search for, in names and descriptions", In::Op).whole(|r| Ok(Op::ShowPackages { terms: r.terms.clone() })).pipes(Pipes::Filters)]),
+    fixed("services", "The services TorqOS offers, and which are on", In::Op).whole(|_| Ok(Op::ShowServices)).pipes(Pipes::Filters),
+    fixed("system", "This machine", In::Op).then(SHOW_SYSTEM),
+];
+
+static SHOW_SYSTEM: &[Node] = &[
+    fixed("alarms", "Whether this machine is as its history says", In::Op).whole(|r| Ok(Op::ShowAlarms { display: r.display })).pipes(Pipes::Views(DETAIL)),
+    fixed("commit", "The configurations so far, newest first", In::Op).whole(|r| Ok(Op::ShowCommits { display: r.display })).pipes(Pipes::Views(DETAIL)),
+    fixed("ledger", "Every change, as the ledger has it (refused and failed ones too)", In::Op).whole(ledger).pipes(Pipes::Filters).then(&[value(Value::Count, "How many entries (20)").whole(ledger).pipes(Pipes::Filters)]),
+    fixed("rollback", "An earlier configuration, or how two differ", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(show_rollback).pipes(Pipes::Views(CONFIGURATION_VIEWS)).then(&[fixed("compare", "How it differs from another one", In::Op).then(&[value(Value::Rollback, "The configuration to compare with").whole(show_rollback).pipes(Pipes::Views(COMPARISON))])])]),
+];
+
+static REQUEST_SYSTEM: &[Node] = &[
+    fixed("password", "Change a person's password (yours, or <user>'s)", In::Op).whole(password).then(&[value(Value::User, "Whose (yours, if none)").whole(password)]),
+    fixed("repair", "Return a machine changed outside TorqOS to its last configuration", In::Op).whole(|_| Ok(Op::Request(Request::Repair))),
+    fixed("revert", "Undo one change (a new change forward)", In::Op).then(&[value(Value::Change, "The change's number, from show system ledger").whole(|r| Ok(Op::Request(Request::Revert { change: r.value(Value::Change).unwrap_or_default().parse()? })))]),
+    fixed("software", "This machine's software", In::Op).then(&[fixed("rollback", "Load an earlier configuration's software into the candidate (a downgrade)", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(|r| Ok(Op::Request(Request::SoftwareRollback { n: r.number(Value::Rollback).unwrap_or(0) })))])]),
+    fixed("update", "Load the newest TorqOS into the candidate", In::Op).whole(update).then(&[fixed("all", "Every input, nixpkgs too", In::Op).whole(update)]),
+];
+
+static FILE: &[Node] = &[
+    fixed("delete", "Delete one, in the candidate", In::Cf).then(&[value(Value::File, "A .nix file of the configuration (file list)").whole(|r| file(r, FileAction::Delete))]),
+    fixed("edit", "Edit one (or a new one) in your editor, in the candidate", In::Cf).then(&[value(Value::File, "A .nix file of the configuration (file list)").whole(|r| file(r, FileAction::Edit))]),
+    fixed("list", "Every Nix file of the configuration", In::Both).whole(|r| file(r, FileAction::List)).pipes(Pipes::Filters),
+    fixed("show", "Print one", In::Both).then(&[value(Value::File, "A .nix file of the configuration (file list)").whole(|r| file(r, FileAction::Show)).pipes(Pipes::Filters)]),
+];
+
+static LOAD: &[Node] = &[
+    fixed("merge", "Set the file's settings onto the candidate", In::Cf).then(LOAD_FROM),
+    fixed("override", "The file becomes the candidate", In::Cf).then(LOAD_FROM),
+    fixed("set", "Run the file's `set` and `delete` lines (what `| display set` writes)", In::Cf).then(LOAD_FROM),
+];
+
+static LOAD_FROM: &[Node] = &[
+    fixed("terminal", "What you paste or type next, ended by Ctrl-D at a new line", In::Cf).whole(load),
+    value(Value::File, "A configuration saved with `save` (or `| display set` lines)").whole(load),
+];
+
+/// Right after `commit`: `check` stands alone; the rest combine, each once.
+static COMMIT_FIRST: &[Node] = &[
+    fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("check", "Check the candidate evaluates, without committing", In::Cf).once().whole(commit),
+    fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
+    fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).then(&CONFIRMED),
+];
+static COMMIT_MORE: [Node; 3] = [
+    fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
+    fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).then(&CONFIRMED),
+];
+static COMMENT: [Node; 1] = [value(Value::Text, "What the change is for").whole(commit).then(&COMMIT_MORE)];
+static CONFIRMED: [Node; 3] = [
+    value(Value::Minutes, "1 to 1440: confirm by committing again").whole(commit).then(&COMMIT_MORE),
+    fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
+];
+
+/// Words from other CLIs and shells, where they are refused, and what to use here instead.
+const FOREIGN: &[(&str, &str, &str)] = &[
+    ("|", "count", "lines are counted with `| wc -l`"),
+    ("|", "match", "lines are matched with `| grep <pattern>`"),
+    ("|", "except", "lines are left out with `| grep -v <pattern>`"),
+    ("|", "find", "lines are found with `| grep <pattern>`"),
+    ("|", "last", "the last lines are `| tail -n <lines>`"),
+    ("|", "trim", "columns are cut with `| cut -c <from>-`"),
+    ("|", "save", "the configuration is saved with `save <file>`, in configuration mode"),
+    ("", "copy", "TorqOS has no copy: set the new place's values (`show <place> | display set` lists the old ones)"),
+    ("", "rename", "TorqOS has no rename: set the new place, then delete the old one"),
+    ("", "annotate", "a change's reason is recorded with `commit comment \"…\"`"),
+    ("", "deactivate", "TorqOS has no inactive settings: delete it (its history keeps it)"),
+    ("", "ping", "ping is a shell command: run it outside torqcli"),
+    ("", "traceroute", "traceroute is a shell command: run it outside torqcli"),
+    ("", "ssh", "ssh is a shell command: run it outside torqcli"),
+];
+
+// ── Building an Op ───────────────────────────────────────────────────────────────────────────────
+
+fn sub(r: &Read) -> Result<Op> {
+    r.sub.clone().ok_or_else(|| anyhow::anyhow!("a command must follow"))
+}
+
+/// `d` if `what` offers it.
+fn offered(what: &str, allowed: &[Display], d: Option<Display>) -> Result<Option<Display>> {
+    match d {
+        Some(d) if !allowed.contains(&d) => {
+            let names: Vec<String> = allowed.iter().map(|a| format!("| display {}", a.name())).collect();
+            bail!("| display {} is not for {what} (it has {})", d.name(), if names.is_empty() { "none".into() } else { names.join(", ") })
+        }
+        d => Ok(d),
+    }
+}
+
+fn show_candidate(r: &Read) -> Result<Op> {
+    if r.compare {
+        if !r.path.is_empty() {
+            bail!("| compare compares the whole candidate: `show | compare`");
+        }
+        return Ok(Op::Compare { display: offered("a comparison", COMPARISON, r.display)? });
+    }
+    Ok(Op::ShowCandidate { path: r.path.clone(), display: offered("a configuration", CONFIGURATION_VIEWS, r.display)? })
+}
+
+fn show_active(r: &Read) -> Result<Op> {
+    Ok(Op::ShowActive { path: r.path.clone(), display: r.display })
+}
+
+fn show_rollback(r: &Read) -> Result<Op> {
+    let n: Vec<usize> = r.values.iter().filter(|(k, _)| *k == Value::Rollback).filter_map(|(_, v)| v.parse().ok()).collect();
+    Ok(Op::ShowRollback { n: n.first().copied().unwrap_or(0), compare: n.get(1).copied(), display: r.display })
+}
+
+fn ledger(r: &Read) -> Result<Op> {
+    Ok(Op::ShowLedger { count: r.number(Value::Count) })
+}
+
+fn password(r: &Read) -> Result<Op> {
+    Ok(Op::Request(Request::Password { user: r.value(Value::User).map(String::from) }))
+}
+
+fn update(r: &Read) -> Result<Op> {
+    Ok(Op::Request(Request::Update { all: r.has("all") }))
+}
+
+fn file(r: &Read, action: FileAction) -> Result<Op> {
+    Ok(Op::File { action, path: r.value(Value::File).map(String::from) })
+}
+
+fn load(r: &Read) -> Result<Op> {
+    let how = if r.has("merge") {
+        LoadHow::Merge
+    } else if r.has("override") {
+        LoadHow::Override
+    } else {
+        LoadHow::Set
+    };
+    let from = r.value(Value::File).map(|f| LoadFrom::File(f.to_string())).unwrap_or(LoadFrom::Terminal);
+    Ok(Op::Load { how, from })
+}
+
+fn rollback(r: &Read) -> Result<Op> {
+    Ok(Op::Rollback { n: r.number(Value::Rollback).unwrap_or(0) })
+}
+
+fn up(r: &Read) -> Result<Op> {
+    Ok(Op::Up { n: r.number(Value::Levels).unwrap_or(1) })
+}
+
+fn commit(r: &Read) -> Result<Op> {
+    Ok(Op::Commit(CommitOptions {
+        check: r.has("check"),
+        confirm: r.has("confirmed").then(|| r.value(Value::Minutes).and_then(|m| m.parse().ok()).unwrap_or(10)),
+        comment: r.value(Value::Text).map(String::from),
+        and_quit: r.has("and-quit"),
+    }))
+}
+
+// ── The walk ─────────────────────────────────────────────────────────────────────────────────────
+
+/// Where a walk stands: where a mode starts (`top`: not after `run` or `top`), or after a node.
+#[derive(Clone, Copy)]
+enum Here {
+    Start { mode: Mode, top: bool },
+    After(&'static Node, Mode),
+}
+
+impl Here {
+    fn mode(self) -> Mode {
+        match self {
+            Here::Start { mode, .. } | Here::After(_, mode) => mode,
+        }
+    }
+    /// What may stand next, as `read` stands.
+    fn next(self, read: &Read) -> Vec<&'static Node> {
+        let (list, mode, top): (&'static [Node], Mode, bool) = match self {
+            Here::Start { mode, top } => (ROOTS, mode, top),
+            Here::After(n, mode) => match n.word {
+                // A path or words go on to the end.
+                Word::Path | Word::Terms => return vec![n],
+                _ => (n.then, mode, true),
+            },
+        };
+        list.iter().filter(|n| n.mode.has(mode) && (top || !n.top_only) && !(n.once && matches!(n.word, Word::Fixed(w) if read.has(w)))).collect()
+    }
+    fn node(self) -> Option<&'static Node> {
+        match self {
+            Here::After(n, _) => Some(n),
+            Here::Start { .. } => None,
+        }
+    }
+}
+
+/// Why a walk stopped.
+#[derive(Debug)]
+pub enum Stop {
+    /// A word that may not stand where it is: why, with what may, or advice.
+    Word { said: String },
+    /// A value that is not one.
+    Value { why: String },
+    /// The line ends before it is a command: what may follow.
+    Short { offered: Vec<String>, needs: Option<(String, String)> },
+}
+
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stop::Word { said, .. } => write!(f, "{said}"),
+            Stop::Value { why } => write!(f, "{why}"),
+            Stop::Short { needs: Some((p, help)), offered, .. } if offered.is_empty() => write!(f, "needs {p} ({})", lower(help)),
+            Stop::Short { needs: Some((p, _)), offered, .. } => write!(f, "not a whole command: {p} or one of: {}", offered.join(", ")),
+            Stop::Short { offered, .. } => write!(f, "not a whole command: one of these may follow: {}", offered.join(", ")),
+        }
+    }
+}
+
+impl std::error::Error for Stop {}
+
+/// A help sentence inside another sentence: its first letter small, no full stop.
+fn lower(help: &str) -> String {
+    let t = help.trim_end_matches('.');
+    let mut c = t.chars();
+    c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// A walk of a line's command words (up to any `|`): the words as they are meant (abbreviations
+/// expanded), where it ended, what it read, and the commands it is inside (`run`, `top`: the
+/// outermost first), each with what it read.
+pub struct Walked {
+    pub words: Vec<String>,
+    here: Here,
+    pub read: Read,
+    outer: Vec<(&'static Node, Read)>,
+}
+
+impl Walked {
+    /// The last node of the innermost command (its pipes, whether it is whole).
+    pub fn node(&self) -> Option<&'static Node> {
+        self.here.node()
+    }
+    /// What may follow, for `?`.
+    pub fn next(&self) -> Vec<&'static Node> {
+        self.here.next(&self.read)
+    }
+    pub fn mode(&self) -> Mode {
+        self.here.mode()
+    }
+    /// The line's `Op`: the innermost command's, inside each command around it.
+    fn op(&self) -> Result<Op> {
+        let node = self.node().filter(|n| n.whole.is_some()).ok_or_else(|| short(self))?;
+        let mut op = (node.whole.expect("whole"))(&self.read)?;
+        for (n, read) in self.outer.iter().rev() {
+            let read = Read { sub: Some(op), ..read.clone() };
+            op = (n.whole.expect("a command around another is whole"))(&read)?;
+        }
+        Ok(op)
+    }
+}
+
+/// Walk `words` (command words only: no `|`) in `mode`: each word is the one that stands there, a
+/// unique beginning of one (abbreviations), or a value, path or search word where one may stand.
+pub fn walk(mode: Mode, words: &[String]) -> Result<Walked, Stop> {
+    let mut walked = Walked { words: vec![], here: Here::Start { mode, top: true }, read: Read::default(), outer: vec![] };
+    for w in words {
+        step(&mut walked, w)?;
+    }
+    Ok(walked)
+}
+
+/// One word more.
+fn step(walked: &mut Walked, w: &String) -> Result<(), Stop> {
+    let here = walked.here;
+    let next = here.next(&walked.read);
+    // A whole command of another mode (`run`, `top`): from here on, that command, from its start.
+    if let Some(n) = next.iter().find(|n| matches!(n.word, Word::Command(_))) {
+        let Word::Command(m) = n.word else { unreachable!() };
+        walked.outer.push((n, std::mem::take(&mut walked.read)));
+        walked.here = Here::Start { mode: m, top: false };
+        return step(walked, w);
+    }
+    if let Some(n) = next.iter().find(|n| matches!(n.word, Word::Path | Word::Terms)) {
+        if matches!(n.word, Word::Path) { walked.read.path.push(w.clone()) } else { walked.read.terms.push(w.clone()) }
+        walked.words.push(w.clone());
+        walked.here = Here::After(n, here.mode());
+        return Ok(());
+    }
+    let name = |n: &Node| match n.word {
+        Word::Fixed(f) => f,
+        _ => "",
+    };
+    let fixed: Vec<&'static Node> = next.iter().copied().filter(|n| matches!(n.word, Word::Fixed(_))).collect();
+    let valued = next.iter().find(|n| matches!(n.word, Word::Value(_)));
+    let exact = fixed.iter().find(|n| name(n) == w);
+    // A unique beginning of a word — only where no value may stand (`load merge term` is a file).
+    let begins: Vec<&'static Node> = if exact.is_none() && valued.is_none() && !w.is_empty() { fixed.iter().copied().filter(|n| name(n).starts_with(w.as_str())).collect() } else { vec![] };
+    if let Some(n) = exact.copied().or(if begins.len() == 1 { Some(begins[0]) } else { None }) {
+        walked.read.fixed.push(name(n));
+        walked.words.push(name(n).to_string());
+        walked.here = Here::After(n, here.mode());
+        return Ok(());
+    }
+    if let Some(n) = valued {
+        let Word::Value(v) = n.word else { unreachable!() };
+        v.check(w).map_err(|e| Stop::Value { why: format!("{e:#}") })?;
+        walked.read.values.push((v, w.clone()));
+        walked.words.push(w.clone());
+        walked.here = Here::After(n, here.mode());
+        return Ok(());
+    }
+    let offered: Vec<String> = fixed.iter().map(|n| name(n).to_string()).collect();
+    let after = walked.words.clone();
+    // The word of a command in the other mode, where it stands there.
+    let other = if here.mode() == Mode::Operational { Mode::Configuration } else { Mode::Operational };
+    let there = match here {
+        Here::Start { top, .. } => Here::Start { mode: other, top },
+        Here::After(n, _) => Here::After(n, other),
+    };
+    let elsewhere = there.next(&walked.read).iter().any(|n| name(n) == w);
+    let said = if begins.len() > 1 {
+        let many: Vec<&str> = begins.iter().map(|n| name(n)).collect();
+        format!("'{w}' is ambiguous{}: {}", after_text(&after), many.join(", "))
+    } else if elsewhere && other == Mode::Configuration {
+        format!("'{w}' is a configuration-mode command{}: `configure` first", after_text(&after))
+    } else if elsewhere {
+        format!("'{w}' is an operational-mode command{}: `run {}` runs it from here", after_text(&after), after.iter().map(String::as_str).chain([w.as_str(), "…"]).collect::<Vec<_>>().join(" "))
+    } else if offered.is_empty() {
+        format!("'{w}' is not a word here: nothing may follow `{}`", after.join(" "))
+    } else {
+        refused(w, &after, &offered)
+    };
+    Err(Stop::Word { said })
+}
+
+fn after_text(after: &[String]) -> String {
+    if after.is_empty() { String::new() } else { format!(" (after `{}`)", after.join(" ")) }
+}
+
+/// Why `w` may not stand after `after`: advice for another CLI's word, a near word, or what may
+/// stand there.
+fn refused(w: &str, after: &[String], offered: &[String]) -> String {
+    let at = after_text(after);
+    let foreign_at = if after.last().is_some_and(|x| x == "|") { "|" } else if after.is_empty() { "" } else { "-" };
+    if let Some((_, _, advice)) = FOREIGN.iter().find(|(at, word, _)| *at == foreign_at && *word == w) {
+        return format!("'{w}' is not a word here{at}: {advice}");
+    }
+    // Near enough to be a slip: one letter off in a short word, two in a longer one.
+    let near = offered.iter().filter(|f| {
+        let d = crate::nixos::distance(f, w);
+        d <= if w.chars().count() <= 4 { 1 } else { 2 } && d < w.chars().count()
+    });
+    let hint = near.min_by_key(|f| crate::nixos::distance(f, w)).map(|n| format!(": did you mean {n}?")).unwrap_or_default();
+    format!("'{w}' is not a word here{at}{hint} (one of: {})", offered.join(", "))
+}
+
+/// Why a walked line is not a whole command.
+pub fn short(walked: &Walked) -> Stop {
+    let next = walked.next();
+    let offered: Vec<String> = next.iter().filter_map(|n| match n.word {
+        Word::Fixed(f) => Some(f.to_string()),
+        _ => None,
+    }).collect();
+    let needs = next.iter().find(|n| !matches!(n.word, Word::Fixed(_))).map(|n| (n.shown(), n.help.to_string()));
+    Stop::Short { offered, needs }
+}
+
+/// A word that stands where `offered` may: itself, or a unique beginning of one (as command words
+/// abbreviate); otherwise why not.
+fn resolve(w: &str, offered: &[String], after: &[String]) -> Result<String> {
+    if offered.iter().any(|o| o == w) {
+        return Ok(w.to_string());
+    }
+    let begins: Vec<&String> = offered.iter().filter(|o| !w.is_empty() && o.starts_with(w)).collect();
+    match begins.as_slice() {
+        [one] => Ok(one.to_string()),
+        [] => bail!("{}", refused(w, after, offered)),
+        many => bail!("'{w}' is ambiguous{}: {}", after_text(after), many.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+    }
+}
+
+/// A line's pipes after `node`'s command (`before`): its own (`| compare`, `| display <view>`), then
+/// the filters, each word as it is meant (abbreviations expanded). Reads them into `read`; the
+/// filters are returned.
+fn apply_pipes(node: &Node, segments: &mut [Vec<String>], read: &mut Read, before: &[String]) -> Result<Vec<crate::filter::Filter>> {
+    let filter_names: Vec<String> = crate::filter::FILTERS.iter().map(|(t, _)| t.to_string()).collect();
+    let mut filters = Vec::new();
+    let mut after: Vec<String> = before.to_vec();
+    for seg in segments.iter_mut() {
+        after.push("|".into());
+        if node.pipes == Pipes::None {
+            bail!("`{}` prints nothing to filter", before.join(" "));
+        }
+        let own = if filters.is_empty() { pipe_words(node, read) } else { vec![] };
+        let offered: Vec<String> = own.iter().chain(&filter_names).cloned().collect();
+        let Some(first) = seg.first().cloned() else { bail!("a | needs something after it (one of: {})", offered.join(", ")) };
+        let word = match resolve(&first, &offered, &after) {
+            Ok(w) => w,
+            Err(e) if !filters.is_empty() && pipe_words(node, read).iter().any(|p| p.starts_with(first.as_str())) => {
+                bail!("| {first} must come before the filters: they work on the output, last ({e:#})")
+            }
+            Err(e) => return Err(e),
+        };
+        seg[0] = word.clone();
+        after.push(word.clone());
+        match word.as_str() {
+            "compare" | "display" if seg.len() > 2 || (word == "compare" && seg.len() > 1) => {
+                bail!("'{}' is not a word here: nothing may follow `{}`", seg.last().cloned().unwrap_or_default(), after.join(" "))
+            }
+            "compare" => read.compare = true,
+            "display" => {
+                let views = views(node, read);
+                let Some(v) = seg.get(1).cloned() else { bail!("needs <view> (one of: {})", views.join(", ")) };
+                let view = resolve(&v, &views, &after).map_err(|_| anyhow::anyhow!("'{v}' is not a view (after `| display`) (one of: {})", views.join(", ")))?;
+                seg[1] = view.clone();
+                read.display = Some(match view.as_str() {
+                    "set" => Display::Set,
+                    "detail" => Display::Detail,
+                    _ => Display::Diff,
+                });
+            }
+            _ => filters.push(crate::filter::Filter { tool: word, args: seg[1..].to_vec() }),
+        }
+        after.extend(seg[1..].iter().cloned());
+    }
+    if filters.len() > MAX_FILTERS {
+        bail!("at most {MAX_FILTERS} filters on one line");
+    }
+    Ok(filters)
+}
+
+/// The pipe words a command takes next (`compare`, `display`), as `read` stands.
+pub fn pipe_words(node: &Node, read: &Read) -> Vec<String> {
+    let mut w = Vec::new();
+    if node.pipes == Pipes::Candidate && !read.compare && read.display.is_none() {
+        w.push("compare".to_string());
+    }
+    if matches!(node.pipes, Pipes::Candidate | Pipes::Views(_)) && read.display.is_none() && !views(node, read).is_empty() {
+        w.push("display".into());
+    }
+    w
+}
+
+/// The views `| display` offers, as `read` stands.
+pub fn views(node: &Node, read: &Read) -> Vec<String> {
+    let v: &[Display] = match node.pipes {
+        Pipes::Candidate if read.compare => COMPARISON,
+        Pipes::Candidate => CONFIGURATION_VIEWS,
+        Pipes::Views(v) => v,
+        _ => &[],
+    };
+    v.iter().map(|d| d.name().to_string()).collect()
+}
+
+/// A whole line read: its `Op`, its filters, and the words as meant (abbreviations expanded).
+pub fn read_line(mode: Mode, w: &[String]) -> Result<(Op, Vec<crate::filter::Filter>, Vec<String>)> {
+    let bar = w.iter().position(|x| x == "|").unwrap_or(w.len());
+    let mut walked = walk(mode, &w[..bar])?;
+    let Some(node) = walked.node().filter(|n| n.whole.is_some()) else { return Err(short(&walked).into()) };
+    let mut segments: Vec<Vec<String>> = if bar < w.len() { w[bar + 1..].split(|x| x == "|").map(<[String]>::to_vec).collect() } else { vec![] };
+    let filters = apply_pipes(node, &mut segments, &mut walked.read, &walked.words)?;
+    let op = walked.op()?;
+    let mut words = walked.words;
+    for seg in segments {
+        words.push("|".into());
+        words.extend(seg);
+    }
+    Ok((op, filters, words))
+}
+
+/// The most filters one line may chain (each runs in its own sandbox).
+const MAX_FILTERS: usize = 16;
+
+/// One thing that may come next, for `?` and Tab.
+pub enum Offer {
+    /// A word, and its help.
+    Word(&'static str, &'static str),
+    /// A value: its placeholder, and help.
+    Value(String, &'static str),
+    /// A configuration path, for the tree to offer: the command it is for (`set`, `delete`, `edit`,
+    /// `show`), and whether it is from the top (operational mode, `top`) or from where `edit` is.
+    Path { verb: &'static str, from_top: bool },
+}
+
+/// What may come next after a walk's words.
+pub fn offers(walked: &Walked) -> Vec<Offer> {
+    let from_top = walked.mode() == Mode::Operational || walked.outer.iter().any(|(_, r)| r.has("top"));
+    let mut out = Vec::new();
+    for n in walked.next() {
+        match n.word {
+            Word::Fixed(w) => out.push(Offer::Word(w, n.help)),
+            Word::Value(_) | Word::Terms => out.push(Offer::Value(n.shown(), n.help)),
+            Word::Path => out.push(Offer::Path { verb: walked.read.fixed.first().copied().unwrap_or("show"), from_top }),
+            Word::Command(m) => {
+                let start = Here::Start { mode: m, top: false };
+                out.extend(start.next(&Read::default()).into_iter().filter_map(|x| match x.word {
+                    Word::Fixed(w) => Some(Offer::Word(w, x.help)),
+                    _ => None,
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// Whether a line's output may be piped (it is a whole command that prints something).
+pub fn filtered(mode: Mode, words: &[String]) -> bool {
+    walk(mode, words).ok().and_then(|w| w.node()).is_some_and(|n| n.whole.is_some() && n.pipes != Pipes::None)
+}
+
+/// What may come after the last `|` of a line, and its help: the command's own pipes, then the
+/// filters; after `| display`, the views; after a filter's name, its own words (none offered).
+pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String)> {
+    let Some(bar) = words.iter().position(|x| x == "|") else { return vec![] };
+    let Ok(mut walked) = walk(mode, &words[..bar]) else { return vec![] };
+    let Some(node) = walked.node().filter(|n| n.whole.is_some() && n.pipes != Pipes::None) else { return vec![] };
+    let mut segments: Vec<Vec<String>> = words[bar + 1..].split(|x| x == "|").map(<[String]>::to_vec).collect();
+    let last = segments.pop().unwrap_or_default();
+    let Ok(filters) = apply_pipes(node, &mut segments, &mut walked.read, &walked.words) else { return vec![] };
+    match last.as_slice() {
+        [] => {
+            let mut out: Vec<(String, String)> = Vec::new();
+            if filters.is_empty() {
+                for w in pipe_words(node, &walked.read) {
+                    let help = if w == "compare" { "What the candidate changes" } else { "Show it differently" };
+                    out.push((w, help.to_string()));
+                }
+            }
+            out.extend(crate::filter::FILTERS.iter().map(|(t, h)| (t.to_string(), h.to_string())));
+            out
+        }
+        [d] if d == "display" && filters.is_empty() => views(node, &walked.read).into_iter().map(|v| {
+            let help = match v.as_str() {
+                "set" => "As set commands",
+                "detail" if node.pipes == Pipes::Candidate || matches!(node.pipes, Pipes::Views(x) if x.contains(&Display::Set)) => "With the files and commit behind it",
+                "detail" => "With the commits and store paths behind it",
+                _ => "As the raw diff of the files (what the broker records)",
+            };
+            (v, help.to_string())
+        }).collect(),
+        _ => vec![],
+    }
+}

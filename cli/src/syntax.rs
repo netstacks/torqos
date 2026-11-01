@@ -1,10 +1,10 @@
-//! torqcli's commands as one model (`Op`) and one syntax (ADR-016, ADR-021): a line parses to an
-//! `Op`. The session executes `Op`s; nothing else knows the syntax. A property test
-//! checks that every `Op`, rendered as it is typed, parses back to itself.
+//! torqcli's commands as one model (`Op`, ADR-016, ADR-021). The grammar (grammar.rs, ADR-025) reads
+//! a line into an `Op`; the session executes `Op`s. A property test checks that every `Op`, rendered
+//! as it is typed, reads back to itself.
 
 use crate::session::Mode;
 use crate::filter::Filter;
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 
 /// A word with a meaning of its own after a path (`set <place> config <file>`): no list entry may be
 /// named it (settings.rs, tree.rs), so a line never means two things.
@@ -23,28 +23,12 @@ pub enum Display {
 }
 
 impl Display {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Display::Set => "set",
             Display::Detail => "detail",
             Display::Diff => "diff",
         }
-    }
-}
-
-/// The displays a configuration, a comparison, and the commit list or alarms offer.
-const OF_CONFIGURATION: &[Display] = &[Display::Set, Display::Detail];
-const OF_COMPARISON: &[Display] = &[Display::Diff];
-const OF_DETAIL: &[Display] = &[Display::Detail];
-
-/// `d` if `what` offers it.
-fn offered(what: &str, allowed: &[Display], d: Option<Display>) -> Result<Option<Display>> {
-    match d {
-        Some(d) if !allowed.contains(&d) => {
-            let names: Vec<String> = allowed.iter().map(|a| format!("| display {}", a.name())).collect();
-            bail!("| display {}: not for {what} (it has {})", d.name(), names.join(", "))
-        }
-        d => Ok(d),
     }
 }
 
@@ -73,7 +57,7 @@ pub enum Op {
     /// `show system ledger [<count>]`: the ledger itself — every change, refused and failed ones too.
     ShowLedger { count: Option<usize> },
     ShowPackages { terms: Vec<String> },
-    Request { words: Vec<String> },
+    Request(Request),
     /// `file show|edit|delete <path>`, `file list`: the config repo's config files (in configuration
     /// mode, the candidate's; in operational mode, the active ones; `edit` and `delete` only there).
     File { action: FileAction, path: Option<String> },
@@ -108,6 +92,20 @@ pub enum Op {
     End,
 }
 
+/// `request system …`: what the machine is asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    Repair,
+    /// A person's password (`None`: the one asking).
+    Password { user: Option<String> },
+    /// Undo one change (a new change forward).
+    Revert { change: u64 },
+    /// The newest TorqOS (`all`: every input) into the candidate.
+    Update { all: bool },
+    /// An earlier configuration's software into the candidate.
+    SoftwareRollback { n: usize },
+}
+
 /// How `load` takes a saved configuration: as the whole candidate, onto it, or as `set` lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadHow {
@@ -124,18 +122,6 @@ pub enum LoadFrom {
     Terminal,
 }
 
-fn parse_load(w: &[String]) -> Result<Op> {
-    let s: Vec<&str> = w.iter().map(String::as_str).collect();
-    let how = match s.as_slice() {
-        ["override", _] => LoadHow::Override,
-        ["merge", _] => LoadHow::Merge,
-        ["set", _] => LoadHow::Set,
-        _ => bail!("load: one of: load override <file>|terminal (it becomes the candidate), load merge <file>|terminal (onto it), load set <file>|terminal (set and delete lines)"),
-    };
-    let from = if w[1] == "terminal" { LoadFrom::Terminal } else { LoadFrom::File(w[1].clone()) };
-    Ok(Op::Load { how, from })
-}
-
 /// What `file` does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileAction {
@@ -145,230 +131,13 @@ pub enum FileAction {
     List,
 }
 
-fn parse_file(w: &[String], mode: Mode) -> Result<Op> {
-    let s: Vec<&str> = w.iter().map(String::as_str).collect();
-    let (action, path) = match s.as_slice() {
-        ["show", p] => (FileAction::Show, Some(p.to_string())),
-        ["edit", p] if mode == Mode::Configuration => (FileAction::Edit, Some(p.to_string())),
-        ["delete", p] if mode == Mode::Configuration => (FileAction::Delete, Some(p.to_string())),
-        ["list"] => (FileAction::List, None),
-        ["edit" | "delete", _] => bail!("file edit and file delete change the candidate: in configuration mode"),
-        _ => bail!("file: one of: file list, file show <path>, file edit <path>, file delete <path>"),
-    };
-    Ok(Op::File { action, path })
-}
-
 /// The highest rollback number (how far back `rollback` and `show system rollback` reach).
 pub const MAX_ROLLBACK: usize = 10_000;
 
-pub fn number(n: &str) -> Result<usize> {
-    let n: usize = n.parse().map_err(|_| anyhow::anyhow!("'{n}' is not a number (0, 1, 2, …)"))?;
-    if n > MAX_ROLLBACK {
-        bail!("rollback numbers go up to {MAX_ROLLBACK}");
-    }
-    Ok(n)
-}
 
-/// A show's words and its own pipes: the words before them, whether `| compare` came, and the
-/// `| display` (one).
-fn split_pipes(w: &[String]) -> Result<(Vec<String>, bool, Option<Display>)> {
-    let mut parts = w.split(|x| x == "|");
-    let head = parts.next().unwrap_or_default().to_vec();
-    let (mut compare, mut display) = (false, None);
-    for part in parts {
-        let d = match part.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-            ["compare"] if !compare => {
-                compare = true;
-                continue;
-            }
-            ["display", "set"] => Display::Set,
-            ["display", "detail"] => Display::Detail,
-            ["display", "diff"] => Display::Diff,
-            other => bail!(
-                "unknown pipe: | {}; one of: compare, display set|detail|diff, or a filter: {}",
-                other.join(" "),
-                crate::filter::names()
-            ),
-        };
-        if let Some(was) = display.replace(d) {
-            bail!("one | display at a time (| display {} and | display {})", was.name(), d.name());
-        }
-    }
-    Ok((head, compare, display))
-}
-
-/// The pipes after a show that takes no more words (`show system commit [| display detail]`).
-fn view_pipes(what: &str, w: &[String], allowed: &[Display]) -> Result<Option<Display>> {
-    let (rest, compare, display) = split_pipes(w)?;
-    if let Some(x) = rest.first() {
-        bail!("{what}: unexpected '{x}'");
-    }
-    if compare {
-        bail!("| compare is for the candidate, in configuration mode");
-    }
-    offered(what, allowed, display)
-}
-
-/// The most filters one line may chain (each runs in its own sandbox).
-const MAX_FILTERS: usize = 16;
-
-/// Split the filters off the end of a line: the rest is the command and its own pipes. A filter
-/// works on output text, so only another filter may follow it.
-fn split_filters(w: &[String]) -> Result<(Vec<String>, Vec<Filter>)> {
-    let bars: Vec<usize> = w.iter().enumerate().filter(|(_, x)| *x == "|").map(|(i, _)| i).collect();
-    let (mut head_end, mut filters) = (w.len(), Vec::new());
-    for (n, &bar) in bars.iter().enumerate() {
-        let seg = &w[bar + 1..bars.get(n + 1).copied().unwrap_or(w.len())];
-        if seg.is_empty() {
-            bail!("a | needs something after it: compare, display set, or a filter: {}", crate::filter::names());
-        }
-        match crate::filter::parse(seg) {
-            Some(f) => {
-                head_end = head_end.min(bar);
-                filters.push(f);
-                if filters.len() > MAX_FILTERS {
-                    bail!("at most {MAX_FILTERS} filters on one line");
-                }
-            }
-            None if head_end < w.len() => {
-                bail!("| {} must come before | {}: filters work on the output, last", seg.join(" "), w[head_end + 1])
-            }
-            None => {}
-        }
-    }
-    Ok((w[..head_end].to_vec(), filters))
-}
-
-/// Whether `op` prints output a filter can work on.
-pub fn shows(op: &Op) -> bool {
-    match op {
-        Op::ShowActive { .. } | Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowLedger { .. } => true,
-        Op::ShowCandidate { .. } | Op::Compare { .. } | Op::ShowPackages { .. } => true,
-        Op::Run(op) => shows(op),
-        _ => false,
-    }
-}
-
-/// Parse one line: the command (`parse`) and the filters after it.
+/// Read one line: the command and the filters after it (the grammar's, grammar.rs).
 pub fn parse_line(mode: Mode, w: &[String]) -> Result<(Op, Vec<Filter>)> {
-    let (head, filters) = split_filters(w)?;
-    let op = parse(mode, &head)?;
-    if !filters.is_empty() && !shows(&op) {
-        let tool = &w[head.len() + 1];
-        bail!("| {tool}: only the output of a show command can be filtered");
-    }
-    Ok((op, filters))
-}
-
-pub fn parse_commit(w: &[String]) -> Result<CommitOptions> {
-    let usage = || anyhow::anyhow!("commit: one of: commit, commit check, commit [confirmed [<minutes>]] [comment \"…\"] [and-quit]");
-    if w.len() == 1 && w[0] == "check" {
-        return Ok(CommitOptions { check: true, ..Default::default() });
-    }
-    let (mut confirm, mut comment, mut and_quit, mut i) = (None, None, false, 0);
-    while i < w.len() {
-        match w[i].as_str() {
-            "and-quit" if !and_quit => and_quit = true,
-            "confirmed" if confirm.is_none() => {
-                let mut m = 10;
-                if let Some(n) = w.get(i + 1).filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
-                    m = n.parse().map_err(|_| anyhow::anyhow!("commit confirmed: '{n}' minutes is too many"))?;
-                    i += 1;
-                }
-                if !(1..=1440).contains(&m) {
-                    bail!("commit confirmed takes 1 to 1440 minutes, not {m}");
-                }
-                confirm = Some(m);
-            }
-            "comment" if comment.is_none() => {
-                comment = Some(w.get(i + 1).ok_or_else(usage)?.clone());
-                i += 1;
-            }
-            _ => return Err(usage()),
-        }
-        i += 1;
-    }
-    Ok(CommitOptions { check: false, confirm, comment, and_quit })
-}
-
-/// The operational commands (`configure` and `config` both enter configuration mode).
-fn parse_operational(w: &[String]) -> Result<Op> {
-    let s: Vec<&str> = w.iter().map(String::as_str).collect();
-    Ok(match s.as_slice() {
-        ["configure" | "config"] | ["configure", "terminal"] => Op::Configure,
-        ["exit" | "quit"] => Op::Exit,
-        ["show", "configuration", ..] => {
-            let (path, compare, display) = split_pipes(&w[2..])?;
-            if compare {
-                bail!("| compare is for the candidate, in configuration mode");
-            }
-            Op::ShowActive { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
-        }
-        ["show", "system", "commit", ..] => Op::ShowCommits { display: view_pipes("show system commit", &w[3..], OF_DETAIL)? },
-        ["show", "system", "rollback", ..] => {
-            let bar = w.iter().position(|x| x == "|").unwrap_or(w.len());
-            let (n, compare) = match &s[3..bar] {
-                [n] => (number(n)?, None),
-                [n, "compare", m] => (number(n)?, Some(number(m)?)),
-                _ => bail!("show system rollback <n> [compare <m>]"),
-            };
-            let (what, allowed) = if compare.is_some() { ("a comparison", OF_COMPARISON) } else { ("a configuration", OF_CONFIGURATION) };
-            Op::ShowRollback { n, compare, display: view_pipes(what, &w[bar..], allowed)? }
-        }
-        ["show", "system", "alarms", ..] => Op::ShowAlarms { display: view_pipes("show system alarms", &w[3..], OF_DETAIL)? },
-        ["show", "services"] => Op::ShowServices,
-        ["show", "system", "ledger"] => Op::ShowLedger { count: None },
-        ["show", "system", "ledger", n] => Op::ShowLedger { count: Some(n.parse().ok().filter(|n| (1..=10_000).contains(n)).with_context(|| format!("show system ledger <count>: 1 to 10000, not '{n}'"))?) },
-        ["show", "packages", "available", terms @ ..] if !terms.is_empty() => Op::ShowPackages { terms: w[3..].to_vec() },
-        ["request", ..] => Op::Request { words: w[1..].to_vec() },
-        ["file", ..] => parse_file(&w[1..], Mode::Operational)?,
-        [] => bail!("empty command"),
-        [other, ..] => bail!("unknown command: {other}; one of: configure, show configuration, show system …, show services, request, file, exit"),
-    })
-}
-
-/// Parse one line's words in `mode`.
-pub fn parse(mode: Mode, w: &[String]) -> Result<Op> {
-    if w.is_empty() {
-        bail!("empty command");
-    }
-    if mode == Mode::Operational {
-        return parse_operational(w);
-    }
-    let s: Vec<&str> = w.iter().map(String::as_str).collect();
-    Ok(match s.as_slice() {
-        ["set", ..] => Op::Set { words: w[1..].to_vec() },
-        ["delete", ..] => Op::Delete { words: w[1..].to_vec() },
-        ["edit", ..] => Op::Edit { words: w[1..].to_vec() },
-        ["up"] => Op::Up { n: 1 },
-        ["up", n] => Op::Up { n: n.parse::<usize>().ok().filter(|n| *n >= 1).ok_or_else(|| anyhow::anyhow!("up <n>: how many levels up (1, 2, …), not '{n}'"))? },
-        ["top"] => Op::Top { then: None },
-        ["top", ..] => Op::Top { then: Some(Box::new(parse(Mode::Configuration, &w[1..])?)) },
-        ["show", ..] => {
-            let (path, compare, display) = split_pipes(&w[1..])?;
-            match (compare, path.is_empty()) {
-                (true, true) => Op::Compare { display: offered("a comparison", OF_COMPARISON, display)? },
-                (true, false) => bail!("| compare compares the whole candidate: `show | compare`"),
-                (false, _) => Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? },
-            }
-        }
-        ["save", f] => Op::Save { file: f.to_string() },
-        ["save", ..] => bail!("save <file>: one file (the whole candidate is saved, from the top)"),
-        ["load", ..] => parse_load(&w[1..])?,
-        ["file", ..] => parse_file(&w[1..], mode)?,
-        ["rollback"] => Op::Rollback { n: 0 },
-        ["rollback", n] => Op::Rollback { n: number(n)? },
-        ["commit", ..] => Op::Commit(parse_commit(&w[1..])?),
-        ["run", ..] => match parse_operational(&w[1..])? {
-            Op::Configure => bail!("run configure: already in configuration mode"),
-            Op::Exit => bail!("run exit: `exit` leaves configuration mode (`exit configuration-mode` from anywhere)"),
-            op => Op::Run(Box::new(op)),
-        },
-        ["exit", "configuration-mode"] => Op::End,
-        ["exit" | "quit"] => Op::Exit,
-        [other, ..] => bail!("unknown command: {other}; one of: set, delete, edit, up, top, show, commit, rollback, run, save, load, file, exit"),
-        [] => unreachable!(),
-    })
+    crate::grammar::read_line(mode, w).map(|(op, filters, _)| (op, filters))
 }
 
 // Rendering (Op → text) is what the round-trip test checks the parser against; nothing else prints
@@ -427,8 +196,16 @@ pub fn render(op: &Op) -> String {
         Op::ShowServices => "show services".into(),
         Op::ShowLedger { count: None } => "show system ledger".into(),
         Op::ShowLedger { count: Some(n) } => format!("show system ledger {n}"),
-        Op::ShowPackages { terms } => sep("show packages available", terms),
-        Op::Request { words } => sep("request", words),
+        Op::ShowPackages { terms } => sep("show packages", terms),
+        Op::Request(r) => match r {
+            Request::Repair => "request system repair".into(),
+            Request::Password { user: None } => "request system password".into(),
+            Request::Password { user: Some(u) } => format!("request system password {}", quote(u)),
+            Request::Revert { change } => format!("request system revert {change}"),
+            Request::Update { all: false } => "request system update".into(),
+            Request::Update { all: true } => "request system update all".into(),
+            Request::SoftwareRollback { n } => format!("request system software rollback {n}"),
+        },
         Op::Save { file } => format!("save {}", quote(file)),
         Op::Load { how, from } => {
             let h = match how {
@@ -475,7 +252,7 @@ mod tests {
         crate::session::words(s).unwrap()
     }
     fn p(mode: Mode, line: &str) -> Op {
-        parse(mode, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"))
+        parse_line(mode, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}")).0
     }
 
     /// Every operation, in both modes it exists in.
@@ -499,7 +276,12 @@ mod tests {
             (Mode::Operational, Op::ShowLedger { count: None }),
             (Mode::Operational, Op::ShowLedger { count: Some(5) }),
             (Mode::Operational, Op::ShowPackages { terms: v("rip grep") }),
-            (Mode::Operational, Op::Request { words: v("system repair") }),
+            (Mode::Operational, Op::Request(Request::Repair)),
+            (Mode::Operational, Op::Request(Request::Password { user: None })),
+            (Mode::Operational, Op::Request(Request::Password { user: Some("dana".into()) })),
+            (Mode::Operational, Op::Request(Request::Revert { change: 12 })),
+            (Mode::Operational, Op::Request(Request::Update { all: true })),
+            (Mode::Operational, Op::Request(Request::SoftwareRollback { n: 2 })),
             (Mode::Operational, Op::Exit),
             (Mode::Configuration, Op::Set { words: v("system host-name torq") }),
             (Mode::Configuration, Op::Set { words: v("system packages [ htop vim ]") }),
@@ -528,6 +310,8 @@ mod tests {
             (Mode::Configuration, Op::File { action: FileAction::Edit, path: Some("custom/a.nix".into()) }),
             (Mode::Configuration, Op::File { action: FileAction::List, path: None }),
             (Mode::Operational, Op::File { action: FileAction::Show, path: Some("a.nix".into()) }),
+            (Mode::Configuration, Op::Run(Box::new(Op::File { action: FileAction::List, path: None }))),
+            (Mode::Configuration, Op::Top { then: Some(Box::new(Op::Run(Box::new(Op::ShowServices)))) }),
             (Mode::Configuration, Op::Commit(CommitOptions::default())),
             (Mode::Configuration, Op::Commit(CommitOptions { check: true, ..Default::default() })),
             (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()), and_quit: false })),
@@ -550,21 +334,35 @@ mod tests {
         }
     }
 
-    /// One syntax: a line is a command, never a bare path; the other syntax's words are unknown.
+    /// One syntax: a line is a command, never a bare path; the other syntax's words are not words.
     #[test]
     fn commands_only() {
         for (mode, line, want) in [
-            (Mode::Configuration, "system host-name x", "unknown command: system"),
-            (Mode::Configuration, "no system packages jq", "unknown command: no"),
-            (Mode::Configuration, "do show system alarms", "unknown command: do"),
-            (Mode::Configuration, "end", "unknown command: end"),
-            (Mode::Configuration, "switch cli", "unknown command: switch"),
-            (Mode::Operational, "show running-config", "unknown command: show"),
-            (Mode::Operational, "switch cli", "unknown command: switch"),
+            (Mode::Configuration, "system host-name x", "'system' is not a word here (one of: commit, delete,"),
+            (Mode::Configuration, "no system packages jq", "'no' is not a word here"),
+            (Mode::Configuration, "do show system alarms", "'do' is not a word here"),
+            (Mode::Configuration, "end", "'end' is not a word here"),
+            (Mode::Operational, "show running-config", "'running-config' is not a word here (after `show`)"),
+            (Mode::Operational, "switch cli", "'switch' is not a word here"),
+            (Mode::Operational, "set system host-name x", "'set' is a configuration-mode command: `configure` first"),
+            (Mode::Configuration, "request system repair", "'request' is an operational-mode command: `run request …` runs it from here"),
+            (Mode::Configuration, "run configure", "'configure' is not a word here (after `run`)"),
+            (Mode::Configuration, "top exit", "'exit' is not a word here (after `top`)"),
+            (Mode::Operational, "exit now", "'now' is not a word here: nothing may follow `exit`"),
+            (Mode::Operational, "show packages", "needs <word> (words to search for, in names and descriptions)"),
+            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, commit, ledger, rollback"),
+            (Mode::Operational, "request system revert x", "'x' is not a number (change numbers: 1, 2, …)"),
+            (Mode::Configuration, "up 0", "'0' is out of range: levels go from 1 to 10000"),
+            (Mode::Configuration, "commit check comment x", "'comment' is not a word here: nothing may follow `commit check`"),
+            (Mode::Configuration, "commit comment a comment b", "'comment' is not a word here (after `commit comment a`)"),
         ] {
-            let e = format!("{:#}", parse(mode, &w(line)).unwrap_err());
+            let e = format!("{:#}", parse_line(mode, &w(line)).unwrap_err());
             assert!(e.contains(want), "{line}: {e}");
         }
+        // Abbreviations: a unique beginning is the word; where a value may stand, the word is the value.
+        assert_eq!(p(Mode::Operational, "sh sys ala"), Op::ShowAlarms { display: None });
+        assert_eq!(p(Mode::Configuration, "load merge term"), Op::Load { how: LoadHow::Merge, from: LoadFrom::File("term".into()) });
+        assert_eq!(p(Mode::Configuration, "com con 5 and"), Op::Commit(CommitOptions { confirm: Some(5), and_quit: true, ..Default::default() }));
     }
 
     fn pl(mode: Mode, line: &str) -> Result<(Op, Vec<Filter>)> {
@@ -582,7 +380,7 @@ mod tests {
     fn filters_follow_every_show() {
         let filters = vec![f("grep", "-Ei \"host|name\""), f("sort", "-r"), f("wc", "-l")];
         let mut n = 0;
-        for (mode, op) in ops().into_iter().filter(|(_, op)| shows(op)) {
+        for (mode, op) in ops().into_iter().filter(|(mode, op)| crate::grammar::filtered(*mode, &w(&render(op)))) {
             let line = format!("{} | grep -Ei \"host|name\" | sort -r | wc -l", render(&op));
             assert_eq!(pl(mode, &line).unwrap_or_else(|e| panic!("{line}: {e:#}")), (op.clone(), filters.clone()), "{line}");
             n += 1;
@@ -594,15 +392,17 @@ mod tests {
     fn each_view_has_its_own_displays() {
         let (o, c) = (Mode::Operational, Mode::Configuration);
         for (mode, line, want) in [
-            (o, "show system commit | display set", "| display set: not for show system commit (it has | display detail)"),
-            (o, "show system alarms | display diff", "not for show system alarms"),
-            (o, "show configuration | display diff", "not for a configuration (it has | display set, | display detail)"),
-            (o, "show system rollback 1 compare 0 | display set", "not for a comparison (it has | display diff)"),
-            (o, "show configuration | display set | display detail", "one | display at a time"),
-            (o, "show system commit extra", "show system commit: unexpected 'extra'"),
-            (o, "show system rollback 1 compare", "show system rollback <n> [compare <m>]"),
-            (c, "show | compare | display set", "not for a comparison"),
-            (c, "show | display diff", "not for a configuration"),
+            (o, "show system commit | display set", "'set' is not a view (after `| display`) (one of: detail)"),
+            (o, "show system alarms | display diff", "'diff' is not a view (after `| display`) (one of: detail)"),
+            (o, "show configuration | display diff", "'diff' is not a view (after `| display`) (one of: detail, set)"),
+            (o, "show system rollback 1 compare 0 | display set", "'set' is not a view (after `| display`) (one of: diff)"),
+            (o, "show configuration | display set | display detail", "'display' is not a word here (after `show configuration | display set |`)"),
+            (o, "show system commit extra", "'extra' is not a word here: nothing may follow `show system commit`"),
+            (o, "show system rollback 1 compare", "needs <number> (the configuration to compare with)"),
+            (c, "show | compare | display set", "'set' is not a view (after `| display`) (one of: diff)"),
+            (c, "show | display diff", "'diff' is not a view (after `| display`) (one of: detail, set)"),
+            (o, "show system commit | count", "'count' is not a word here (after `show system commit |`): lines are counted with `| wc -l`"),
+            (o, "show services | match ssh", "lines are matched with `| grep <pattern>`"),
         ] {
             let e = err(mode, line);
             assert!(e.contains(want), "{line}: {e}");
@@ -620,21 +420,22 @@ mod tests {
         assert_eq!(pl(c, "run show system alarms | wc -l").unwrap().0, Op::Run(Box::new(Op::ShowAlarms { display: None })));
         assert_eq!(pl(c, "show").unwrap().1, [], "no pipe, no filter");
         for (line, want) in [
-            ("show configuration | grep a | display set", "| display set must come before | grep"),
-            ("show configuration | grep x |", "a | needs something after it"),
-            ("show configuration |", "a | needs something after it"),
-            ("show configuration | sed s/a/b/", "unknown pipe: | sed s/a/b/; one of: compare, display set|detail|diff, or a filter: cut, grep"),
-            ("show configuration | sh -c x", "unknown pipe: | sh -c x"),
+            ("show configuration | grep a | display set", "| display must come before the filters"),
+            ("show configuration | grep x |", "a | needs something after it (one of: cut, grep"),
+            ("show configuration |", "a | needs something after it (one of: display, cut, grep"),
+            ("show configuration | sed s/a/b/", "'sed' is not a word here (after `show configuration |`) (one of: display, cut, grep"),
+            ("show configuration | sh -c x", "'sh' is not a word here"),
         ] {
             let e = err(o, line);
             assert!(e.contains(want), "{line}: {e}");
         }
-        assert_eq!(pl(o, "show packages available rg | grep x").unwrap(), (Op::ShowPackages { terms: w("rg") }, vec![f("grep", "x")]), "a search is a show like any other");
+        assert_eq!(pl(o, "show packages rg | grep x").unwrap(), (Op::ShowPackages { terms: w("rg") }, vec![f("grep", "x")]), "a search is a show like any other");
+        assert_eq!(pl(o, "file show a.nix | head").unwrap().0, Op::File { action: FileAction::Show, path: Some("a.nix".into()) }, "a file shown is output too");
         for line in ["set system host-name a | wc -l", "commit | grep x", "rollback 1 | head"] {
             let e = err(c, line);
-            assert!(e.contains("filtered"), "{line}: {e}");
+            assert!(e.contains("prints nothing to filter"), "{line}: {e}");
         }
-        let many = format!("show configuration{}", " | wc -l".repeat(MAX_FILTERS));
+        let many = format!("show configuration{}", " | wc -l".repeat(16));
         assert!(pl(o, &many).is_ok());
         let e = err(o, &format!("{many} | wc -l"));
         assert!(e.contains("at most 16 filters"), "{e}");

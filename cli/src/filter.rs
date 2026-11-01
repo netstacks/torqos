@@ -27,22 +27,11 @@ pub const FILTERS: &[(&str, &str)] = &[
     ("wc", "Count lines, words, characters (wc -l)"),
 ];
 
-/// The filters' names, for an error.
-pub fn names() -> String {
-    FILTERS.iter().map(|(t, _)| *t).collect::<Vec<_>>().join(", ")
-}
-
 /// One filter: the tool and its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filter {
     pub tool: String,
     pub args: Vec<String>,
-}
-
-/// One pipe's words as a filter; None if it is not one (`compare`, `display set`, or unknown).
-pub fn parse(seg: &[String]) -> Option<Filter> {
-    let (tool, args) = seg.split_first()?;
-    FILTERS.iter().any(|(t, _)| t == tool).then(|| Filter { tool: tool.clone(), args: args.to_vec() })
 }
 
 /// The sandbox (bwrap) and the tools' folder, as the package names them at build time; None in a
@@ -167,7 +156,7 @@ mod tests {
 
     fn f(line: &str) -> Vec<Filter> {
         let w = crate::session::words(line).unwrap();
-        w.split(|x| x == "|").map(|seg| parse(seg).unwrap_or_else(|| panic!("{seg:?}"))).collect()
+        w.split(|x| x == "|").map(|seg| Filter { tool: seg[0].clone(), args: seg[1..].to_vec() }).collect()
     }
     const OUT: &str = "system {\n    host-name two;\n    time-zone UTC;\n}\n";
 
@@ -200,11 +189,14 @@ mod tests {
         assert!(!e.contains("head: head:"), "the tool named once: {e}");
     }
 
+    /// Only the tools on the list are filters: the grammar refuses any other after a `|`.
     #[test]
     fn only_the_filters_on_the_list() {
         let w = |s: &str| crate::session::words(s).unwrap();
         for t in ["sh -c x", "sed s/a/b/", "awk 1", "tee f", "xargs rm", "less", "/bin/grep x", "./grep x", "env grep x"] {
-            assert_eq!(parse(&w(t)), None, "{t}");
+            let line = w(&format!("show services | {t}"));
+            let e = format!("{:#}", crate::grammar::read_line(crate::session::Mode::Operational, &line).unwrap_err());
+            assert!(e.contains("is not a word here"), "{t}: {e}");
         }
     }
 

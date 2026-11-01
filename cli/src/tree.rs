@@ -288,7 +288,7 @@ impl Schema {
         let t = self.resolve_in(words, Some(cfg))?;
         self.not_the_top("delete", &t)?;
         let n = self.node(&t.node);
-        let gone = |what: &str| anyhow::Error::new(NotSet(what.to_string())).context(format!("delete {}", t.words.join(" ")));
+        let gone = |what: &str| anyhow::Error::new(NotSet(what.to_string()));
         match n.kind {
             Kind::Leaf => {
                 if !t.values.is_empty() {
