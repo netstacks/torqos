@@ -7,6 +7,7 @@
     ./ai.nix
     ./dev.nix
     ./packages.nix
+    ./unfree.nix
     ./host.nix
     ./shell.nix
     ./schema.nix

@@ -287,6 +287,7 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `show system alarms` | is this machine exactly as its history says? (and any pending confirmed commit) |
 | `show system ledger [<count>]` | every change as the ledger has it, refused and failed ones too |
 | `show packages available <term>` | search this machine's nixpkgs: each package as it is typed (`htop`, `python3Packages.rich`), its version and description; filterable like any `show` |
+| `set torq unfree packages [ <name> … ]` · `set torq unfree all true` | (configuration mode) allow unfree software (Postman, VS Code, …): by name, or all of it; refused otherwise, saying so (modules/unfree.nix) |
 | `show services` | the catalog, and what is on |
 | `request system update [all]` | load the newest TorqOS (and its nixpkgs) into the candidate |
 | `request system software rollback <n>` | load commit <n>'s software into the candidate (a downgrade) |

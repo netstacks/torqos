@@ -32,6 +32,9 @@ let
   # no typed setting reads (`users-bad-leaf`; a leftover cli.json: torqcli spoke two syntaxes before
   # ADR-021), a symlink, or names nobody on this machine.
   usersRefused = case: let c = configOf case; in tryValue c.torq.packages.user == null || torqFailures c != [ ];
+  # Unfree software (modules/unfree.nix): refused, saying how to allow it; allowed by name, or all.
+  unfreeInstalled = case: tryValue (builtins.any (p: lib.getName p == "unrar") (configOf case).environment.systemPackages);
+  unfreeSaid = (builtins.tryEval (builtins.deepSeq (configOf "unfree-refused").environment.systemPackages null)).success;
   usersInvalid = [ "users-leftover-cli" "users-bad-leaf" "users-bad-symlink" "users-bad-user" ];
 
   # The tree's NixOS settings (nixos/*.json, modules/nixos-settings.nix) reach NixOS as they are,
@@ -208,6 +211,9 @@ let
     ) expect)
     ++ lib.concatMap (case: lib.optional (host case != null) "${case}: evaluated, but must be refused") invalid
     ++ lib.concatMap (case: lib.optional (!(usersRefused case)) "${case}: evaluated, but must be refused") usersInvalid
+    ++ lib.optional (unfreeInstalled "unfree-refused" != null || unfreeSaid) "unfree-refused: an unfree package not allowed evaluated"
+    ++ lib.optional (unfreeInstalled "unfree-named" != true) "unfree-named: an unfree package allowed by name was not installed"
+    ++ lib.optional (unfreeInstalled "unfree-all" != true) "unfree-all: an unfree package was not installed with all allowed"
     ++ lib.optional (usersRefused "schema-good") "schema-good: a person's own packages.json must evaluate"
     ++ nixosMismatches;
 in
@@ -219,5 +225,6 @@ else
     echo "schema: ${toString (builtins.length (lib.attrNames nodes))} nodes consistent" >> $out
     echo "host: ${toString (builtins.length invalid)} invalid cases refused, ${toString (builtins.length (lib.attrNames expect) + 1)} valid ones read" >> $out
     echo "users: ${toString (builtins.length usersInvalid)} invalid folders refused, schema-good read" >> $out
+    echo "unfree: refused unless allowed, by name or all" >> $out
     echo "nixos: ${toString (builtins.length (lib.attrNames nixosInvalid))} invalid cases refused, nixos-good read" >> $out
   ''

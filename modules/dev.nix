@@ -23,7 +23,8 @@ in
     security.sudo.wheelNeedsPassword = false;
     nix.settings.trusted-users = [ config.torq.user ];
 
-    nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
+    # (Unfree: allowed by name, through the one rule for it, modules/unfree.nix.)
+    torq.unfree.packages = [ "claude-code" ];
     # tmux: run Claude Code inside it (`tmux new -A -s claude`) so a dropped SSH connection — the
     # Mac sleeping, UTM pausing, the network restarting during a switch — does not kill the session.
     environment.systemPackages = with pkgs; [ claude-code gh tmux ];

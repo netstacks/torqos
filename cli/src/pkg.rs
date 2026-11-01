@@ -15,8 +15,10 @@ pub fn explain_check_error(msg: &str) -> String {
     let name = msg.split('\'').nth(1).unwrap_or_default();
     if msg.contains("is not a package in nixpkgs") {
         format!("\"{name}\" isn't a package. Find the right name: show packages available {name}")
+    } else if let Some((_, how)) = msg.split_once(" is unfree: ") {
+        format!("{name} is unfree: {how}")
     } else if msg.contains("is not available here") {
-        format!("{name} can't be installed here: it is unfree, broken, insecure, or not built for this machine.")
+        format!("{name} can't be installed here: it is broken, insecure, or not built for this machine.")
     } else if msg.contains("is not a package name") {
         format!("\"{name}\" isn't a package name. Find one: show packages available <words>")
     } else {
@@ -177,7 +179,11 @@ mod tests {
             explain_check_error("torq.packages: 'htpo' (user viper) is not a package in nixpkgs"),
             "\"htpo\" isn't a package. Find the right name: show packages available htpo"
         );
-        assert!(explain_check_error("torq.packages: 'vscode' (user viper) is not available here: unfree, ...")
+        assert_eq!(
+            explain_check_error("torq.packages: 'vscode' (user viper) is unfree: allow it with `set torq unfree packages vscode`, or every unfree package with `set torq unfree all true`"),
+            "vscode is unfree: allow it with `set torq unfree packages vscode`, or every unfree package with `set torq unfree all true`"
+        );
+        assert!(explain_check_error("torq.packages: 'vscode' (user viper) is not available here: broken, ...")
             .starts_with("vscode can't be installed here"));
         assert!(explain_check_error("something else").starts_with("This change wouldn't work"));
     }

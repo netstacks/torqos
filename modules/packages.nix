@@ -38,8 +38,12 @@ let
       throw "${what} is not a package name: use a top-level nixpkgs attribute, or one level under ${lib.concatStringsSep ", " packageSets}"
     else if !(lib.isDerivation pkg) then
       throw "${what} is not a package in nixpkgs"
+    # Unfree and not allowed: say so, and how to allow it (modules/unfree.nix), by the name nixpkgs
+    # checks — which can differ from the attribute (`python3Packages.x` is `x`).
+    else if !(pkg.meta.available or true) && lib.any (l: !(l.free or true)) (lib.toList (pkg.meta.license or [ ])) && !(pkg.meta.broken or false) then
+      throw "${what} is unfree: allow it with `set torq unfree packages ${lib.getName pkg}`, or every unfree package with `set torq unfree all true`"
     else if !(pkg.meta.available or true) then
-      throw "${what} is not available here: unfree, broken, insecure, or unsupported on ${pkgs.stdenv.hostPlatform.system}"
+      throw "${what} is not available here: broken, insecure, or unsupported on ${pkgs.stdenv.hostPlatform.system}"
     else
       pkg;
 
