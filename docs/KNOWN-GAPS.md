@@ -157,6 +157,12 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    stop that. What TorqOS does about it — visible, recoverable, unnecessary — and what is still
    open (the broker telling a person from a program, #4; a ledger root can rewrite, #2; snapshots
    of data; strict mode): SECURITY-MODEL.md, "Root, the owner, and an AI the owner runs".
+6t. **A power cut mid-build can damage Nix's caches** (`/root/.cache/nix`, the broker's HOME): Nix
+   writes them without waiting for the disk, and then every later build fails with "database disk
+   image is malformed". Found by cutting the power during first-boot setup, which now clears them
+   when it starts over (nothing else uses them before change #1). On a set-up machine it stays
+   manual: remove `/root/.cache/nix` (only a cache; rebuilt as needed). The broker could do that
+   itself when a build fails that way, with a test that damages the cache.
 
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is

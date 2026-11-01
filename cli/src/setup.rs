@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 /// What the image keeps for setup (modules/setup.nix): its own TorqOS source, the lock pinning it,
 /// its disk's hardware file.
 const IMAGE: &str = "/etc/torq/image";
+/// Nix's caches for the broker's builds (its HOME is /root: modules/broker.nix).
+const BUILD_CACHE: &str = "/root/.cache/nix";
 /// The broker's history: set up means it has its first entry (change #1).
 const LEDGER: &str = "/var/lib/torq/state/ledger.jsonl";
 const REPO: &str = "/var/lib/torq/config";
@@ -150,8 +152,12 @@ pub fn run() -> Result<()> {
     }
     let repo = Path::new(REPO);
     loop {
-        // Anything a setup cut short left: gone, to start clean.
+        // Anything a setup cut short left: gone, to start clean. That includes Nix's caches of the
+        // broker's build (HOME=/root): Nix writes them without waiting for the disk, so a power cut
+        // mid-build can leave them damaged ("database disk image is malformed"), and every later
+        // build would fail on them. Before change #1 nothing else on the image uses them.
         let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(BUILD_CACHE);
         println!("\nWelcome to TorqOS. This machine has no configuration yet: a few questions set it up.\n");
         let a = ask()?;
         match apply(&a) {
