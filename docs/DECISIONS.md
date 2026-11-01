@@ -280,10 +280,11 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Context:** Testers found that a paste stopped at its first error (the rest silently not run) and
   that `delete <place>` needed `delete <place> all`; a network engineer pastes blocks of commands and
   expects every line to run, each error reported, and `delete` to take what it names.
-- **Decision:** Every line of a paste runs; each error names its line. A batch is the lines already
-  waiting when the shell asks for the next (a paste, keys typed ahead): a `commit` after a failed
-  line of the same batch is refused, so a commit never takes part of a paste; a question
-  (`Commit? [y/N]`) takes only an answer typed after it and ends the batch. `delete` takes what it
+- **Decision:** Every line of a paste runs; each error names its line. A `commit` while lines
+  have failed since the person last looked at `show | compare` asks first; a question (`[y/N]`)
+  takes only an answer typed after it, so a paste can never answer it and a commit never takes part
+  of a paste unseen — no timing is part of that decision (a pause inside a paste must not make it
+  look typed). A question ends what was pasted: the lines still waiting are shown as not run. `delete` takes what it
   names — one value, a setting, or everything below a place — without `all`; deleting what is not
   set is a warning. `delete` alone (everything at this level) asks first. Scripts (`-c`, piped
   input) still stop at their first error. Rules between settings are checked on the whole

@@ -253,17 +253,20 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"[edit system]\"')}", timeout=30)
         as_dev("tmux send-keys -t t top Enter")
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -v \"^$\" | tail -n 2 | head -n 1 | grep -qxF \"[edit]\"')}", timeout=30)
-        # A paste runs every line as it arrives (no Enter after it), each error naming its line — but
-        # a commit after a failed line of the same paste is refused: it never commits part of one.
+        # A paste runs every line as it arrives (no Enter after it), each error naming its line — and a
+        # commit after a failed line asks first, a question the paste cannot answer.
         as_dev("tmux send-keys -t t C-u")
         as_dev("printf 'set system host-name my_laptop\\nset users dev packages vim\\ncommit\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qE \"^\\+   dev \\[.* vim \\];\"')}", timeout=30)
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"1 line failed since you last looked at\"')}", timeout=30)
         out = as_dev(screen)
         assert "error: set system host-name my_laptop:" in out, out
-        assert "error: commit: not committed: 1 line of this paste failed" in out, out
+        as_dev("tmux send-keys -t t n Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"error: commit: not committed\"')}", timeout=30)
+        as_dev("tmux send-keys -t t 'show | compare' Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qE \"^\\+   dev \\[.* vim \\];\"')}", timeout=30)
         # Without bracketed paste (a serial console, screen): the same, and no line is lost.
         as_dev("printf 'set users dev packages htop\\nset users dev packages jq\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -t t")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qE \"^\\+   dev \\[.* vim htop .*\\];\"')}", timeout=30)
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qE \"^\\+   dev \\[.*(htop.*vim|vim.*htop).*\\];\"')}", timeout=30)
         # `load merge terminal`: a configuration pasted in brace format (a comment in it is left out),
         # ended by Ctrl-D, as on a network device.
         as_dev("tmux send-keys -t t 'load merge terminal' Enter")

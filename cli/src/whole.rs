@@ -12,7 +12,7 @@ use crate::settings::{self, Settings};
 use crate::tree::{Config, Kind, Schema, Val};
 use crate::attach::{self, Attached};
 use crate::software;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 
 /// (NixOS path, the hand-made schema's path to the file that holds it, whether the old name still
@@ -124,14 +124,15 @@ impl Whole<'_> {
     /// `<place> config [<file>]`: the place a config file is (to be) attached at, and the file. None if
     /// the words are not that — and where NixOS has a setting named `config` (`containers <name>
     /// config`), they are NixOS's.
-    fn attachment<'w>(&self, words: &'w [String]) -> Option<(&'w [String], Vec<String>)> {
+    fn attachment<'w>(&self, words: &'w [String]) -> Option<(&'w [String], Option<Vec<String>>)> {
         let i = words.iter().rposition(|w| w == "config")?;
         let (place, rest) = (&words[..i], &words[i + 1..]);
-        // Files: none (all of a place's), one, or `[ a b ]` (as a saved configuration writes several).
+        // Files: none named (None: all of a place's), one, or `[ a b ]` (as a saved configuration
+        // writes several; `[ ]` names none, which is no file at all).
         let files = match rest {
-            [] => vec![],
-            [one] if one != "[" && one != "]" => vec![one.clone()],
-            [open, inner @ .., close] if open == "[" && close == "]" => inner.to_vec(),
+            [] => None,
+            [one] if one != "[" && one != "]" => Some(vec![one.clone()]),
+            [open, inner @ .., close] if open == "[" && close == "]" => Some(inner.to_vec()),
             _ => return None,
         };
         // Below a set of named entries (`virtualHosts`), `config` is an entry's name.
@@ -201,9 +202,7 @@ impl Whole<'_> {
         // A config file joins the place's files, as a value joins a list (`set config motd.nix` does not
         // take hardware-configuration.nix's place).
         if let Some((place, files)) = self.attachment(words) {
-            if files.is_empty() {
-                bail!("config <file>: which file (a .nix file of the config repo, like services/httpd.nix)");
-            }
+            let files = files.filter(|f| !f.is_empty()).context("config <file>: which file (a .nix file of the config repo, like services/httpd.nix)")?;
             for f in &files {
                 attach::valid(f)?;
             }
@@ -227,11 +226,14 @@ impl Whole<'_> {
         }
         if let Some((place, files)) = self.attachment(words) {
             let key = place.join(" ");
+            if files.as_ref().is_some_and(Vec::is_empty) {
+                bail!("config [ ]: names no file (`delete {}config` takes them all)", if key.is_empty() { String::new() } else { format!("{key} ") });
+            }
             let Some(have) = d.attached.get_mut(&key) else { return Ok(Deleted::NotFound) };
-            if files.is_empty() {
+            let Some(files) = files else {
                 d.attached.remove(&key);
                 return Ok(Deleted::Done);
-            }
+            };
             // All or nothing, as for a list's values.
             if !files.iter().all(|f| have.contains(f)) {
                 return Ok(Deleted::NotFound);
@@ -243,9 +245,11 @@ impl Whole<'_> {
             return Ok(Deleted::Done);
         }
         let hand = self.hand(words, &d.config).ok().flatten();
-        // An old name's place (`users dev`, `system`): the hand-made schema's container or entry.
+        // An old name's place (`users dev`): the hand-made schema's container or entry — unless the
+        // words are a NixOS place too (`system`, `users`): then they take what `show` shows there.
+        let nixos_place = matches!(self.tree.locate(words), Ok((_, None, _)));
         let old_place = self.schema.resolve_in(words, Some(&d.config)).ok().filter(|t| {
-            t.values.is_empty() && !t.node.is_empty() && matches!(self.schema.nodes[&t.node].kind, Kind::Container | Kind::List)
+            !nixos_place && t.values.is_empty() && !t.node.is_empty() && matches!(self.schema.nodes[&t.node].kind, Kind::Container | Kind::List)
         });
         // Values after the setting's path: those values only.
         let values = match (&hand, &old_place) {
@@ -400,6 +404,30 @@ mod tests {
     /// What is not set is `NotFound` (nothing changed, no error), wherever it would be; an unknown
     /// path is still an error.
     #[test]
+    fn deletes_are_exact() {
+        let t = t();
+        let x = Whole { schema: &t.schema, tree: &t.tree };
+        let mut d = Data::default();
+        for line in ["virtualisation docker enable false", "networking firewall allowedTCPPorts [ 22 80 ]", "config hardware-configuration.nix"] {
+            x.set(&mut d, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
+        let before = d.clone();
+        // A value named must be the value set; every value of a list named must be there.
+        assert_eq!(x.delete(&mut d, &w("virtualisation docker enable true")).unwrap(), Deleted::NotFound);
+        assert_eq!(x.delete(&mut d, &w("networking firewall allowedTCPPorts [ 22 9999 ]")).unwrap(), Deleted::NotFound);
+        assert_eq!(d, before, "nothing deleted");
+        assert_eq!(x.delete(&mut d, &w("virtualisation docker enable false")).unwrap(), Deleted::Done);
+        // `config [ ]` names no file: an error, never "all of them".
+        assert!(format!("{:#}", x.delete(&mut d, &w("config [ ]")).unwrap_err()).contains("names no file"));
+        assert!(x.set(&mut d, &w("config [ ]")).is_err());
+        assert_eq!(attach::files(&d.attached).count(), 1);
+        // A word that is a NixOS place takes what `show` shows there, not old names under it.
+        x.set(&mut d, &w("system time-zone UTC")).unwrap();
+        assert_eq!(x.delete(&mut d, &w("system")).unwrap(), Deleted::NotFound);
+        assert!(x.show(&d, &w("time")).unwrap().contains("UTC"));
+    }
+
+    #[test]
     fn deleting_what_is_not_set_finds_nothing() {
         let t = t();
         let x = Whole { schema: &t.schema, tree: &t.tree };
@@ -531,7 +559,13 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     // An old name's place deletes what it always did.
     x.delete(&mut d, &w("users dev")).unwrap();
     assert!(!x.show(&d, &[]).unwrap().contains("dev"));
-    x.delete(&mut d, &w("system")).unwrap();
+    // A word that is a NixOS place takes what `show` shows there — not the old names that began with
+    // it (`system host-name` is `networking hostName` now; `system time-zone` is `time timeZone`).
+    let shown = x.show(&d, &w("system")).unwrap_or_default();
+    assert_eq!(x.delete(&mut d, &w("system")).unwrap(), if shown.is_empty() { Deleted::NotFound } else { Deleted::Done });
+    assert!(x.show(&d, &[]).unwrap().contains("timeZone UTC") && x.show(&d, &[]).unwrap().contains("system [ vim ]"), "{}", x.show(&d, &[]).unwrap());
+    x.delete(&mut d, &w("time")).unwrap();
+    x.delete(&mut d, &w("torq")).unwrap();
     assert_eq!(x.show(&d, &[]).unwrap(), "");
     assert_eq!(x.delete(&mut d, &w("virtualisation")).unwrap(), Deleted::NotFound, "nothing set below it: nothing deleted, no error");
     // Text that would draw lines of its own: refused when set, and when read.

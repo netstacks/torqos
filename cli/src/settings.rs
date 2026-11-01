@@ -206,28 +206,29 @@ fn remove_at(v: &mut Value, path: &[String], what: Option<&Value>) -> Result<boo
     let found = if rest.is_empty() {
         match (o.get_mut(k), what) {
             (None, _) => false,
+            // Values named: all of them must be there (all or nothing, as for the files TorqOS keeps).
             (Some(Value::Array(have)), Some(Value::Array(gone))) => {
-                let before = have.len();
-                have.retain(|x| !gone.contains(x));
-                if have.len() == before {
+                if !gone.iter().all(|g| have.contains(g)) {
                     return Ok(false);
                 }
+                have.retain(|x| !gone.contains(x));
                 if have.is_empty() {
                     o.remove(k);
                 }
                 true
             }
             (Some(Value::Object(have)), Some(Value::Object(gone))) => {
-                let before = have.len();
-                have.retain(|key, _| !gone.contains_key(key));
-                if have.len() == before {
+                if !gone.keys().all(|k| have.contains_key(k)) {
                     return Ok(false);
                 }
+                have.retain(|key, _| !gone.contains_key(key));
                 if have.is_empty() {
                     o.remove(k);
                 }
                 true
             }
+            // One value named: only that value goes (`delete … enable true` when it is false: nothing).
+            (Some(have), Some(want)) if have != want => false,
             (Some(_), _) => o.remove(k).is_some(),
         }
     } else {

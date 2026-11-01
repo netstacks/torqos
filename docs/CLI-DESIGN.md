@@ -259,13 +259,14 @@ only if it was). On a terminal the shell has history, Tab and `?`.
 
 **Pasting** (how configurations travel): a paste arrives as typed — each line runs at its newline,
 none is lost however the terminal sends it (with or without bracketed paste; rustyline keeps what it
-read past one line). Lines that were already waiting when the shell asked for the next (a paste,
-keys typed while a command ran) are one **batch**: every line of it runs and each error names its
-line, as on a network device — but a `commit` after a failed line of the same batch is refused, so
-a commit never takes part of a paste. A question (`Commit? [y/N]`) takes only an answer typed after
-it: it ends the batch, and each line pasted after it is shown as not run. While a command runs,
-keys typed are not echoed over its output; they wait for the next line. Scripts (`-c`, piped
-input) still stop at their first error.
+read past one line). Every line of a paste runs and each error names its line, as on a network
+device. A `commit` while lines have failed since you last looked at `show | compare` asks first
+(`2 lines failed since you last looked at show | compare. Commit anyway? [y/N]`) — and a question
+takes only an answer typed after it, so a paste can never answer it: a commit never takes part of a
+paste unseen. No timing decides that. A question, or `load … terminal` asking for input, ends what
+was pasted: the lines still waiting are shown as not run. While a command runs, keys typed are not
+echoed over its output; they wait for the next line. Ctrl-C stops the running command (its child
+process) and returns to the prompt. Scripts (`-c`, piped input) still stop at their first error.
 
 ## Operational commands
 

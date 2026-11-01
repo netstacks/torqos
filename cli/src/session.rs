@@ -251,11 +251,17 @@ impl<'a> Session<'a> {
         self.exec_words(&words(line)?)
     }
 
-    /// Whether `line` would commit (not `commit check`): the shell refuses it in a paste where an
-    /// earlier line failed, so a commit never takes part of a paste.
+    /// Whether `line` would commit (not `commit check`): after failed lines the shell asks first, so
+    /// a commit never takes part of a paste unseen.
     pub fn commits(&self, line: &str) -> bool {
         let Ok(w) = words(line) else { return false };
         matches!(syntax::parse_line(self.mode, &w), Ok((Op::Commit(o), _)) if !o.check)
+    }
+
+    /// Whether `line` shows what the candidate changes (`show | compare`): the person has looked.
+    pub fn reviews(&self, line: &str) -> bool {
+        let Ok(w) = words(line) else { return false };
+        matches!(syntax::parse_line(self.mode, &w), Ok((Op::Compare { .. }, _)))
     }
 
     /// Run one command, already split into words (`torqcli <command>`: as the calling shell split
@@ -781,6 +787,8 @@ impl<'a> Session<'a> {
             if base != head {
                 bail!("the configuration has changed since your candidate was started: `rollback 0` starts over");
             }
+            // The rules between settings, as `commit` applies them.
+            crate::whole::software_allowed(&a.data)?;
             self.machine.check(&base, &files)?;
             return Ok("configuration check succeeds\n".into());
         }
@@ -1031,6 +1039,10 @@ impl<'a> Session<'a> {
         };
         if text.len() > crate::saved::MAX {
             bail!("load {file}: not a saved configuration (bigger than the most, {} bytes)", crate::saved::MAX);
+        }
+        // Nothing to load is never a configuration (an override would empty the candidate).
+        if text.trim().is_empty() {
+            bail!("load {file}: nothing loaded: {}", if file == "terminal" { "nothing was pasted" } else { "the file is empty" });
         }
         let before = (self.candidate()?.clone(), self.edit.clone());
         let result = match how {
@@ -2176,7 +2188,12 @@ mod tests {
         let out = s.exec("set system software torq source path:/home/dev/torq").unwrap();
         assert!(out.contains("! TorqOS from a folder (path:)") && out.contains("torq dev enable true") && out.contains("`commit` refuses until then"), "{out}");
         assert!(s.exec("commit").unwrap_err().to_string().contains("torq dev enable true"));
+        assert!(s.exec("commit check").unwrap_err().to_string().contains("torq dev enable true"), "a check applies the same rules");
         assert!(m.commits.borrow().is_empty());
+        // Nothing to load is never a configuration: an empty file or paste loads nothing.
+        let empty = d.path().join("empty.conf");
+        std::fs::write(&empty, "\n  \n").unwrap();
+        assert!(format!("{:#}", s.exec(&format!("load override {}", empty.display())).unwrap_err()).contains("the file is empty"));
         run(&mut s, &["set system software torq source github:netstacks/torqos/v1"]);
         // In dev mode it may; turning dev mode off with the folder still the source does not commit.
         run(&mut s, &["rollback 0", "set torq dev enable true", "set system software torq source path:/home/dev/torq", "set torq dev enable false"]);
