@@ -77,8 +77,8 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       pkg/service/update/undo commands were retired (4g).
 - [x] New, small: "did you mean" for misspelled packages; `torq status --repair` to return a
       drifted machine to its ledgered system (asks first; ADR-012 still: never automatic).
-- [ ] Terminal look: TorqOS's shell, zsh + oh-my-zsh with the TorqOS prompt (done, modules/shell.nix);
-      torqcli in colour (`show | compare`, `show configuration`, its prompt, errors, `?`) next.
+- [x] Terminal look: TorqOS's shell, zsh + oh-my-zsh with the TorqOS prompt (modules/shell.nix);
+      torqcli in colour (`show | compare`, `show configuration`, its prompt, errors, `?`; paint.rs).
 - [ ] Usability check: someone new to TorqOS installs, removes, undoes and reads the log unaided.
 
 ### M2 — Install: TorqOS as a ready image, never compiled by its users

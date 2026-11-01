@@ -424,7 +424,7 @@ impl Machine for Real<'_> {
         // Only an answer typed after the question counts: anything already waiting (typed or pasted
         // ahead, e.g. a "y" after "commit") is thrown away.
         let _ = rustix::termios::tcflush(std::io::stdin(), rustix::termios::QueueSelector::IFlush);
-        print!("{question}[y/N] ");
+        print!("{}[y/N] ", crate::paint::paint(question, &crate::ui::Ui::for_terminal(false)));
         let _ = std::io::stdout().flush();
         let mut answer = String::new();
         std::io::stdin().lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
@@ -538,7 +538,7 @@ pub fn main(args: &[String]) -> i32 {
     match run_shell(args) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {}", describe(&e));
+            say_error(&describe(&e));
             1
         }
     }
@@ -679,7 +679,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
     let saved = if run == Invocation::Interactive { Some(Candidate::default_path()?) } else { None };
     let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who, style);
     let fail = |line: &str, e: anyhow::Error| {
-        eprintln!("error: {}: {}", history::one_line(line, 80), describe(&e));
+        say_error(&format!("{}: {}", history::one_line(line, 80), describe(&e)));
         Ok(1)
     };
     match run {
@@ -710,9 +710,15 @@ fn run_shell(args: &[String]) -> Result<i32> {
 /// Output line by line, each cleaned of anything that could fool a terminal (the configuration is
 /// checked on load, but the ledger's reasons and messages are not ours).
 fn print_clean(out: &str) {
-    for line in out.lines() {
-        say(&format!("{}\n", history::clean(line)));
-    }
+    let cleaned: String = out.lines().map(|l| format!("{}\n", history::clean(l))).collect();
+    // Colour last, on what is already clean (paint.rs).
+    say(&crate::paint::paint(&cleaned, &crate::ui::Ui::for_terminal(false)));
+}
+
+/// `error: …` to standard error, the word in red on a terminal.
+fn say_error(msg: &str) {
+    let ui = crate::ui::Ui::for_terminal(true);
+    eprintln!("{} {}", ui.red("error:"), msg);
 }
 
 /// Write to standard output. Whoever reads it stopped (`torqcli show configuration | head`): stop
@@ -794,7 +800,7 @@ fn run_line(s: &mut Session, line: &str) -> bool {
             true
         }
         Err(e) => {
-            println!("error: {}", describe(&e));
+            println!("{} {}", crate::ui::Ui::for_terminal(false).red("error:"), describe(&e));
             false
         }
     }
@@ -852,7 +858,12 @@ mod editor {
     impl Hinter for Help {
         type Hint = String;
     }
-    impl Highlighter for Help {}
+    impl Highlighter for Help {
+        // The prompt in colour (paint.rs); rustyline measures it from the plain text.
+        fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&'s self, prompt: &'p str, _default: bool) -> std::borrow::Cow<'b, str> {
+            std::borrow::Cow::Owned(crate::paint::prompt(prompt, &crate::ui::Ui::for_terminal(false)))
+        }
+    }
     impl Validator for Help {}
     impl rustyline::Helper for Help {}
 
@@ -862,6 +873,7 @@ mod editor {
         fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
             let (choices, _) = self.0.choices(&ctx.line()[..ctx.pos()])?; // in quotes: a plain '?'
             let text: String = complete::render(&choices).lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
+            let text = crate::paint::paint(&text, &crate::ui::Ui::for_terminal(false));
             print!("?\r\n{}", text.replace('\n', "\r\n"));
             Some(Cmd::Repaint)
         }
@@ -891,7 +903,7 @@ mod editor {
             *help.at.lock().unwrap() = at(s);
             let (above, p) = prompt(s, user, host);
             if let Some(a) = above {
-                println!("{a}");
+                println!("{}", crate::paint::paint(&a, &crate::ui::Ui::for_terminal(false)));
             }
             match ed.readline(&p) {
                 // A paste of several lines (bracketed paste) arrives as one: run each, in order, as

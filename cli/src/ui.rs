@@ -36,6 +36,24 @@ impl Ui {
     pub fn bold(&self, s: &str) -> String {
         self.paint("1", s)
     }
+    pub fn cyan(&self, s: &str) -> String {
+        self.paint("36", s)
+    }
+    pub fn cyan_bold(&self, s: &str) -> String {
+        self.paint("1;36", s)
+    }
+    pub fn blue(&self, s: &str) -> String {
+        self.paint("34", s)
+    }
+
+    /// Colour on a terminal only, and never with NO_COLOR set (any value) or TERM=dumb: for what goes
+    /// to standard output (`err`: to standard error).
+    pub fn for_terminal(err: bool) -> Self {
+        use std::io::IsTerminal;
+        let tty = if err { std::io::stderr().is_terminal() } else { std::io::stdout().is_terminal() };
+        let off = std::env::var_os("NO_COLOR").is_some() || std::env::var("TERM").is_ok_and(|t| t == "dumb");
+        Ui { color: tty && !off }
+    }
 
     /// `✓ what` … `right` (right-aligned to 80 columns when it fits).
     pub fn ok(&self, what: &str, right: &str) -> String {

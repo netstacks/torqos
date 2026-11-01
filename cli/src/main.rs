@@ -24,6 +24,7 @@ mod whole;
 mod attach;
 mod software;
 mod saved;
+mod paint;
 mod pkg;
 mod run;
 mod status;

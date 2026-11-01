@@ -429,4 +429,10 @@ highlighting, fzf history search and the TorqOS prompt (modules/shell/torq.zsh-t
 where, the git branch, a warning when the machine is not as its history says, a marker when a
 candidate of yours is waiting; plain Unicode, no patched font). All defaults: `set programs zsh
 ohMyZsh theme <any oh-my-zsh theme>`, `set users defaultUserShell …`, a person's own ~/.zshrc, or
-`torq shell enable false`. There is no desktop (ADR-019).
+`torq shell enable false`. torqcli itself is in colour on a terminal (cli/src/paint.rs): `[edit …]`
+sections bold cyan, `+`/`-` green/red, a configuration's places bold, settings cyan, braces and `;`
+dim, `## …` comments dim, ✓/⚠ green/yellow, `!` warnings yellow, `?` lists with the word cyan and
+its help dim, the prompt (user, host, mode) and `error:` in colour. It is added last, to text
+already cleaned of anything that could fool a terminal, so a value can never bring its own codes;
+and never with NO_COLOR, TERM=dumb, or when the output is not a terminal. There is no desktop
+(ADR-019).
