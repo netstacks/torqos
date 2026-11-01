@@ -394,7 +394,7 @@ impl<'a> Session<'a> {
                 if !self.whole().is_place(&full) {
                     // Not a place: no such setting at all (said with a hint), or a setting.
                     if let Err(e) = self.tree.locate(&full) {
-                        if crate::whole::to_hand(&full).is_none() {
+                        if crate::whole::hand_words(&full).is_none() {
                             return Err(e.context(format!("edit {}", full.join(" "))));
                         }
                     }

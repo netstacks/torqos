@@ -988,8 +988,11 @@ mod editor {
     struct Question(Help);
     impl ConditionalEventHandler for Question {
         fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
-            let (choices, _) = self.0.choices(&ctx.line()[..ctx.pos()])?; // in quotes: a plain '?'
-            let text: String = complete::render(&choices, crate::ui::Ui::for_terminal(false).width()).lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
+            let (w, partial) = at_cursor(&ctx.line()[..ctx.pos()])?; // in quotes: a plain '?'
+            let at = self.0.at.lock().unwrap().clone();
+            let know = complete::Know { schema: &self.0.know.0, tree: &self.0.know.1 };
+            let answer = complete::answer(&know, &at, &w, &partial, crate::ui::Ui::for_terminal(false).width());
+            let text: String = answer.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
             let text = crate::paint::paint(&text, &crate::ui::Ui::for_terminal(false));
             print!("?\r\n{}", text.replace('\n', "\r\n"));
             Some(Cmd::Repaint)

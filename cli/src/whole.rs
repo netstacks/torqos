@@ -27,9 +27,11 @@ pub const MAP: &[(&str, &str, bool)] = &[
 ];
 
 /// `words` with a prefix matching one side of MAP (0: NixOS, 1: hand-made) replaced by the other.
-/// A NixOS path as the hand-made schema names it, if TorqOS keeps that setting in its own files.
-pub fn to_hand(words: &[String]) -> Option<Vec<String>> {
-    translate(words, 0, false)
+/// Words as the hand-made schema names them, if they name a setting TorqOS keeps in its own files:
+/// by its NixOS path (`torq packages system`), or by its old name (`system packages`), as `set`
+/// reads them.
+pub fn hand_words(words: &[String]) -> Option<Vec<String>> {
+    translate(words, 0, false).or_else(|| translate(words, 1, true).map(|_| words.to_vec()))
 }
 
 fn translate(words: &[String], from: usize, aliases_only: bool) -> Option<Vec<String>> {

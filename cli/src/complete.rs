@@ -408,7 +408,7 @@ fn tree_choices(k: &Know, rest: &[String], cmd: &str) -> Vec<Choice> {
         ["system", "software", "torq", "source"] if cmd != "show" => return vec![Choice::new("<source>", "github:netstacks/torqos, a tag (…/v0.1.0), or path:/<folder> while developing")],
         _ => {}
     }
-    if let Some(hand) = crate::whole::to_hand(rest) {
+    if let Some(hand) = crate::whole::hand_words(rest) {
         let mut c = hand_tree_choices(&k.schema, &hand, cmd);
         if !c.is_empty() {
             if sw.as_slice() == ["system"] {
@@ -489,12 +489,27 @@ fn hand_tree_choices(schema: &Schema, rest: &[String], cmd: &str) -> Vec<Choice>
     }
 }
 
-/// `?`: the choices, laid out to fit a window `fit` wide (ui.rs): each help wrapped under the help
-/// column, never back to the left edge.
-pub fn render(choices: &[Choice], fit: usize) -> String {
-    if choices.is_empty() {
-        return "No completions here.\n".into();
+/// `?`: what may follow, or, where nothing may, why — in the words Enter would use (the same
+/// grammar: `expand`), laid out to fit a window `fit` wide.
+pub fn answer(k: &Know, at: &At, words: &[String], partial: &str, fit: usize) -> String {
+    let c = choices_at(k, at, words, partial);
+    if !c.is_empty() {
+        return render(&c, fit);
     }
+    let mut line = words.to_vec();
+    if !partial.is_empty() {
+        line.push(partial.to_string());
+    }
+    let why = match expand(k, at, &line) {
+        Err(e) => format!("{e:#}"),
+        Ok(_) => format!("Nothing more is known to follow `{}`: Enter runs it, and says what is wrong with it, if anything.", line.join(" ")),
+    };
+    format!("{}\n", crate::ui::hang("", &why, Some(fit), fit))
+}
+
+/// The choices, laid out to fit a window `fit` wide (ui.rs): each help wrapped under the help
+/// column, never back to the left edge.
+fn render(choices: &[Choice], fit: usize) -> String {
     let width = choices.iter().map(|c| c.word.chars().count()).max().unwrap_or(0).min(24);
     let mut out = String::from("Possible completions:\n");
     for c in choices.iter().take(60) {
@@ -799,6 +814,29 @@ mod tests {
         assert!(out.starts_with("Possible completions:\n  merge     Set the file's settings onto the candidate\n"), "{out}");
         let out = render(&choices(&s, Mode::Configuration, &w("set time timeZone"), ""), 80);
         assert!(out.contains("… and 537 more"), "{out}");
+    }
+
+    /// Where nothing may follow, `?` says why, as Enter would; a setting's old name completes as its
+    /// NixOS path does.
+    #[test]
+    fn question_mark_says_why_nothing_follows() {
+        let s = schema();
+        let at = |mode| At { mode, edit: vec![], data: crate::whole::Data::default() };
+        let out = answer(&s, &at(Mode::Operational), &w("show system packages"), "", 80);
+        let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(out.contains("'packages' is not a word here (after `show system`)") && out.contains("alarms, commit, ledger, rollback"), "{out}");
+        let out = answer(&s, &at(Mode::Operational), &w("show system"), "pac", 80);
+        assert!(out.contains("'pac' is not a word here"), "the word being typed too: {out}");
+        let out = answer(&s, &at(Mode::Configuration), &w("set system host-name a.b"), "", 80);
+        assert!(out.contains("Enter runs it"), "{out}");
+        assert!(!out.contains("Possible completions") && out.lines().all(|l| crate::ui::width(l) <= 80));
+        let narrow = answer(&s, &at(Mode::Operational), &w("show system packages"), "", 30);
+        assert!(narrow.lines().all(|l| crate::ui::width(l) <= 30), "{narrow}");
+        // The old name, as its NixOS path.
+        for line in ["set system packages", "set torq packages system"] {
+            assert_eq!(words_of(&choices(&s, Mode::Configuration, &w(line), "")), ["<package>"], "{line}");
+        }
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set system packages"), "b")), ["<package>"], "while typing a name");
     }
 
     #[test]
