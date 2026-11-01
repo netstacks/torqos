@@ -3170,7 +3170,7 @@ mod tests {
         // At the top it is the whole configuration, asked as such.
         let (d, no) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &no);
-        assert!(run_err(&mut s, &["configure"], "delete").to_string().contains("deletes the whole configuration"));
+        assert!(run_err(&mut s, &["configure"], "delete").to_string().starts_with("not deleted"), "refused: a script cannot answer");
         assert_eq!(no.asked.borrow().as_slice(), ["Delete the whole configuration? "]);
         // With a yes there, everything goes: TorqOS's own files and nixos/ alike.
         let (d, yes) = (repo(), Fake { answer: true, ..Default::default() });
