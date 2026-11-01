@@ -72,11 +72,8 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
 /// full NixOS module (sudo rules, services, ...) wherever it lives, so it is system tier. Keep in
 /// step with broker/user-leaves.json, which modules/packages.nix reads (tested below). A leaf is
 /// added only together with the typed module that reads it, and with its shape in `user_leaf_ok`:
-/// `packages.json` (modules/packages.nix), `cli.json` (modules/cli.nix).
-pub const USER_LEAVES: &[&str] = &["packages.json", "cli.json"];
-
-/// The CLI styles `torqcli` speaks (`cli.json`'s "style"; modules/cli.nix).
-pub const CLI_STYLES: &[&str] = &["j", "c"];
+/// `packages.json` (modules/packages.nix).
+pub const USER_LEAVES: &[&str] = &["packages.json"];
 
 /// The most packages one user's list may hold: a lightly-approved change must not be able to start
 /// hours of downloads and builds while holding the broker lock.
@@ -90,10 +87,6 @@ pub fn user_leaf_ok(leaf: &str, value: &serde_json::Value) -> bool {
         // A list of nixpkgs attribute names.
         "packages.json" => value.as_array().is_some_and(|names| {
             names.len() <= MAX_USER_PACKAGES && names.iter().all(|n| n.as_str().is_some_and(package_name_ok))
-        }),
-        // Exactly { "style": "j" | "c" }.
-        "cli.json" => value.as_object().is_some_and(|o| {
-            o.len() == 1 && o.get("style").and_then(|s| s.as_str()).is_some_and(|s| CLI_STYLES.contains(&s))
         }),
         _ => false,
     }
@@ -162,7 +155,7 @@ mod tests {
     fn classifies() {
         assert_eq!(tier_for_path("users/casey/packages.json"), Tier::User);
         assert_eq!(tier_for_path("./users/casey/packages.json"), Tier::User);
-        assert_eq!(tier_for_path("users/casey/cli.json"), Tier::User, "read by modules/cli.nix");
+        assert_eq!(tier_for_path("users/casey/cli.json"), Tier::System, "no longer read: torqcli speaks one syntax (ADR-021)");
         assert_eq!(tier_for_path("users/casey/env.json"), Tier::System, "no leaf without a typed reader");
         assert_eq!(tier_for_path("users/casey.nix"), Tier::System, "a NixOS module is never user tier");
         assert_eq!(tier_for_path("desktop.nix"), Tier::System);
@@ -202,7 +195,7 @@ mod tests {
         for p in ["users/casey/packages.json", "users/_svc/packages.json", "users/a-b_9/packages.json"] {
             assert_eq!(tier_for_path(p), Tier::User, "{p}");
         }
-        assert_eq!(USER_LEAVES, ["packages.json", "cli.json"]);
+        assert_eq!(USER_LEAVES, ["packages.json"]);
         // The modules read the same list (modules/packages.nix): the two cannot drift apart.
         let shared: Vec<String> = serde_json::from_str(include_str!("../user-leaves.json")).unwrap();
         assert_eq!(USER_LEAVES, shared, "broker/user-leaves.json");
@@ -226,15 +219,7 @@ mod tests {
         assert!(ok("packages.json", &at_most(256)));
         assert!(!ok("packages.json", &at_most(257)));
         assert!(!ok("unknown.json", "[]"), "a leaf without a shape is never ok");
-        for style in ["j", "c"] {
-            assert!(ok("cli.json", &format!(r#"{{"style": "{style}"}}"#)));
-        }
-        for bad in [
-            "{}", "[]", r#""j""#, r#"{"style": "J style"}"#, r#"{"style": "vim"}"#, r#"{"style": null}"#,
-            r#"{"style": ["j"]}"#, r#"{"style": "j", "prompt": "$(id)"}"#, r#"{"Style": "c"}"#,
-        ] {
-            assert!(!ok("cli.json", bad), "{bad}");
-        }
+        assert!(!ok("cli.json", r#"{"style": "j"}"#), "no longer a user leaf (ADR-021)");
     }
 
     #[test]

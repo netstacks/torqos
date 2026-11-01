@@ -8,7 +8,6 @@
     ./dev.nix
     ./packages.nix
     ./host.nix
-    ./cli.nix
     ./shell.nix
     ./schema.nix
     ./nixos-schema.nix

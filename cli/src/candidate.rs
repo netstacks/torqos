@@ -511,9 +511,9 @@ mod tests {
     #[test]
     fn a_link_at_a_tree_path_is_refused() {
         let (d, r) = repo();
-        sh(d.path(), "ln -s ../flake.nix users/dev/cli.json && git add -A && git commit -q -m link");
+        sh(d.path(), "ln -s ../flake.nix users/dev/packages.json && git add -A && git commit -q -m link");
         let e = format!("{:#}", r.tree_files(&schema(), "HEAD").unwrap_err());
-        assert!(e.contains("users/dev/cli.json") && e.contains("not a plain data file"), "{e}");
+        assert!(e.contains("users/dev/packages.json") && e.contains("not a plain data file"), "{e}");
     }
 
     /// `rollback 2` is the configuration two changes back, as a new change on today's HEAD.
@@ -531,7 +531,7 @@ mod tests {
         let (_d, r) = repo();
         let s = schema();
         let mut c = Candidate::from_repo(&r, &s, "HEAD").unwrap();
-        s.set(&mut c.config, &w("users dev cli style c")).unwrap();
+        s.set(&mut c.config, &w("users dev packages jq")).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("torq/candidate.json");
         c.save(&path).unwrap();
@@ -578,10 +578,10 @@ mod tests {
         assert!(changes(&s, &base, &c.config).unwrap().is_empty());
         s.set(&mut c.config, &w("system time-zone UTC")).unwrap(); // changes an existing file
         s.delete(&mut c.config, &w("system packages")).unwrap(); // deletes one
-        s.set(&mut c.config, &w("users dev cli style c")).unwrap(); // adds one
+        s.set(&mut c.config, &w("users dev packages jq")).unwrap(); // adds one
         let ch = changes(&s, &base, &c.config).unwrap();
         assert_eq!(ch.iter().map(|(p, o, n)| (p.as_str(), o.is_some(), n.is_some())).collect::<Vec<_>>(),
-            [("system/host.json", true, true), ("system/packages.json", true, false), ("users/dev/cli.json", false, true)]);
+            [("system/host.json", true, true), ("system/packages.json", true, false), ("users/dev/packages.json", false, true)]);
         let scratch = tempfile::tempdir().unwrap();
         let diff = unified_diff(scratch.path(), &ch).unwrap();
         fs::write(scratch.path().join("change.diff"), &diff).unwrap();
@@ -589,7 +589,7 @@ mod tests {
         let applied = fs::read_to_string(d.path().join("system/host.json")).unwrap();
         assert_eq!(applied, "{\n  \"host-name\": \"three\",\n  \"time-zone\": \"UTC\"\n}\n");
         assert!(!d.path().join("system/packages.json").exists());
-        assert_eq!(fs::read_to_string(d.path().join("users/dev/cli.json")).unwrap(), "{\n  \"style\": \"c\"\n}\n");
+        assert_eq!(fs::read_to_string(d.path().join("users/dev/packages.json")).unwrap(), "[\n  \"jq\"\n]\n");
     }
 }
 

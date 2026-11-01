@@ -28,19 +28,11 @@ let
 
   # TorqOS's own failed assertions (the case's minimal system fails NixOS's, e.g. no fileSystems).
   torqFailures = c: map (a: a.message) (lib.filter (a: !a.assertion && lib.hasPrefix "torq:" a.message) c.assertions);
-  # The CLI styles, or null if evaluation throws or a TorqOS assertion fails.
-  cli = case:
-    let c = configOf case; in
-    tryValue (if torqFailures c != [ ] then throw "assertion" else {
-      inherit (c.torq.cli) style userStyles;
-      etc = builtins.fromJSON c.environment.etc."torq/cli.json".text;
-    });
-  cliExpect = {
-    host-empty = { style = "j"; userStyles = { }; etc = { style = "j"; users = { }; }; };
-    cli-good = { style = "c"; userStyles = { dev = "j"; }; etc = { style = "c"; users = { dev = "j"; }; }; };
-    cli-user-only = { style = "j"; userStyles = { dev = "c"; }; etc = { style = "j"; users = { dev = "c"; }; }; };
-  };
-  cliInvalid = [ "cli-bad-style" "cli-bad-extra" "cli-bad-list" "cli-bad-leaf" "cli-bad-user" "cli-bad-symlink" ];
+  # A person's folder is refused (an evaluation error, or a TorqOS assertion) when it holds a file
+  # no typed setting reads (`users-bad-leaf`; a leftover cli.json: torqcli spoke two syntaxes before
+  # ADR-021), a symlink, or names nobody on this machine.
+  usersRefused = case: let c = configOf case; in tryValue c.torq.packages.user == null || torqFailures c != [ ];
+  usersInvalid = [ "users-leftover-cli" "users-bad-leaf" "users-bad-symlink" "users-bad-user" ];
 
   # The tree's NixOS settings (nixos/*.json, modules/nixos-settings.nix) reach NixOS as they are,
   # package names as packages; a wrong value, package or setting fails evaluation.
@@ -146,7 +138,7 @@ let
   # where the kind says, `users <name> …` is user tier and nothing else is, and the user-tier leaves
   # it describes are exactly the leaves a users/<name>/ folder may hold — no setting without a node,
   # no node without a reader.
-  schemaConfig = configOf "cli-good";
+  schemaConfig = configOf "schema-good";
   schema = builtins.fromJSON schemaConfig.environment.etc."torq/schema.json".text;
   nodes = schema.nodes;
   parentOf = path: lib.concatStringsSep " " (lib.init (lib.splitString " " path));
@@ -174,7 +166,7 @@ let
   ++ (let
     withOdd = (self.lib.mkSystem {
       system = pkgs.stdenv.hostPlatform.system;
-      configDir = ./tree/cli-good;
+      configDir = ./tree/schema-good;
       modules = [ {
         torq.user = "dev";
         users.users.dev.description = "Secret Person"; # a listed user's full name must not be copied
@@ -211,10 +203,8 @@ let
       let got = host case; in lib.optional (got != want) "${case}: got ${builtins.toJSON got}, want ${builtins.toJSON want}"
     ) expect)
     ++ lib.concatMap (case: lib.optional (host case != null) "${case}: evaluated, but must be refused") invalid
-    ++ lib.concatLists (lib.mapAttrsToList (case: want:
-      let got = cli case; in lib.optional (got != want) "${case}: cli got ${builtins.toJSON got}, want ${builtins.toJSON want}"
-    ) cliExpect)
-    ++ lib.concatMap (case: lib.optional (cli case != null) "${case}: cli evaluated, but must be refused") cliInvalid
+    ++ lib.concatMap (case: lib.optional (!(usersRefused case)) "${case}: evaluated, but must be refused") usersInvalid
+    ++ lib.optional (usersRefused "schema-good") "schema-good: a person's own packages.json must evaluate"
     ++ nixosMismatches;
 in
 if mismatches != [ ] then
@@ -224,6 +214,6 @@ else
     echo "rules: ${toString (builtins.length ruleCases)} cases" > $out
     echo "schema: ${toString (builtins.length (lib.attrNames nodes))} nodes consistent" >> $out
     echo "host: ${toString (builtins.length invalid)} invalid cases refused, ${toString (builtins.length (lib.attrNames expect) + 1)} valid ones read" >> $out
-    echo "cli: ${toString (builtins.length cliInvalid)} invalid cases refused, ${toString (builtins.length (lib.attrNames cliExpect))} valid ones read" >> $out
+    echo "users: ${toString (builtins.length usersInvalid)} invalid folders refused, schema-good read" >> $out
     echo "nixos: ${toString (builtins.length (lib.attrNames nixosInvalid))} invalid cases refused, nixos-good read" >> $out
   ''

@@ -26,7 +26,7 @@ Three layers, bottom up. Each lists what we **reuse** and what we **build**.
 ## Layer 1: torq, the configuration part of the OS
 
 - **`torqcli`**, a shell driven like a network device: operational and configuration modes,
-  J and C syntax, a candidate, `show | compare`, `commit check`, `commit confirmed`,
+  one syntax (the J style, ADR-021), a candidate, `show | compare`, `commit check`, `commit confirmed`,
   `rollback <n>`. Its tree is every NixOS setting, generated from the system's own options
   (docs/CONFIG-IS-THE-DEVICE.md), plus plain Nix config files for what is not a value.
 - **`torq-broker`** (Rust, privileged, small): the only writer of the config repo; enforces

@@ -74,9 +74,9 @@ impl Data {
 /// A command's words resolved against the schema.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
-    /// The schema node: its key, e.g. "users <name> cli style".
+    /// The schema node: its key, e.g. "users <name> packages".
     pub node: String,
-    /// The words naming it, e.g. ["users", "alice", "cli", "style"].
+    /// The words naming it, e.g. ["users", "alice", "packages"].
     pub words: Vec<String>,
     /// The list entry name, if the path passes through a list (`users alice …`).
     pub name: Option<String>,
@@ -97,7 +97,7 @@ impl Schema {
         if s.version != 1 {
             bail!("this torqcli reads schema version 1, not {}", s.version);
         }
-        // No setting may be named like a command (a C style bare path would be ambiguous).
+        // No setting may be named `all`: `delete <path> all` would mean two things.
         if let Some(key) = s.nodes.keys().find(|k| k.split(' ').any(|w| crate::syntax::RESERVED.contains(&w))) {
             bail!("schema: '{key}' uses a word torqcli keeps for commands");
         }
@@ -600,7 +600,7 @@ fn check_name(key: &str, list: &Node, name: &str, existing: bool) -> Result<()> 
     if !shaped {
         bail!("'{name}' is not a valid name in {key}");
     }
-    // A command word as an entry name would be ambiguous (`users all`, C style `top` inside `users`).
+    // `all` as an entry name would be ambiguous (`delete users all`).
     if crate::syntax::RESERVED.contains(&name) {
         bail!("'{name}' cannot be named in {key}: torqcli keeps the word for a command");
     }
@@ -738,7 +738,6 @@ mod tests {
             "system packages [ ripgrep htop ]",
             "services ssh",
             "users dev packages jq",
-            "users dev cli style c",
         ] {
             s.set(&mut c, &w(cmd)).unwrap();
         }
@@ -748,9 +747,9 @@ mod tests {
     #[test]
     fn resolves_paths_through_the_schema() {
         let s = schema();
-        let t = s.resolve(&w("users dev cli style c")).unwrap();
-        assert_eq!((t.node.as_str(), t.name.as_deref(), t.values.clone()), ("users <name> cli style", Some("dev"), w("c")));
-        assert_eq!(t.words, w("users dev cli style"));
+        let t = s.resolve(&w("users dev packages jq")).unwrap();
+        assert_eq!((t.node.as_str(), t.name.as_deref(), t.values.clone()), ("users <name> packages", Some("dev"), w("jq")));
+        assert_eq!(t.words, w("users dev packages"));
         let t = s.resolve(&w("system")).unwrap();
         assert_eq!((t.node.as_str(), t.values.len()), ("system", 0));
         let e = format!("{:#}", s.resolve(&w("system hostname x")).unwrap_err());
@@ -769,8 +768,7 @@ mod tests {
         assert_eq!(c.files["system/packages.json"], Data::List(w("htop ripgrep")));
         assert_eq!(c.files["services.json"], Data::List(w("ssh")));
         assert_eq!(c.files["users/dev/packages.json"], Data::List(w("jq")));
-        assert_eq!(c.files["users/dev/cli.json"], Data::Object([("style".into(), "c".into())].into()));
-        assert_eq!(c.files.len(), 5);
+        assert_eq!(c.files.len(), 4);
     }
 
     #[test]
@@ -780,14 +778,14 @@ mod tests {
         assert!(e.contains("not a valid system time-zone"), "{e}");
         let e = err(s.set(&mut c, &w("system time-zone berlin")));
         assert!(e.contains("did you mean: Europe/Berlin"), "{e}");
-        for bad in ["system host-name my_laptop", "system host-name -x", "system packages ../x", "system packages a.b.c", "services telnet", "system cli style vim"] {
+        for bad in ["system host-name my_laptop", "system host-name -x", "system packages ../x", "system packages a.b.c", "services telnet"] {
             assert!(err(s.set(&mut c, &w(bad))).contains("is not a valid"), "{bad}");
         }
         assert!(err(s.set(&mut c, &w("system host-name a b"))).contains("exactly one value"));
         assert!(err(s.set(&mut c, &w("system packages"))).contains("needs a value"));
         assert!(err(s.set(&mut c, &w("system packages [ htop"))).contains("missing ']'"));
-        let e = err(s.set(&mut c, &w("system cli")));
-        assert!(e.contains("incomplete; one of: style"), "{e}");
+        let e = err(s.set(&mut c, &w("users dev")));
+        assert!(e.contains("incomplete; one of: packages"), "{e}");
         assert_eq!(c, Config::default(), "nothing invalid was written");
     }
 
@@ -818,7 +816,7 @@ mod tests {
     fn delete_of_a_container_takes_everything_below_it() {
         let (s, mut c) = (schema(), configured());
         s.delete(&mut c, &w("system")).unwrap();
-        assert_eq!(c.files.keys().collect::<Vec<_>>(), ["services.json", "users/dev/cli.json", "users/dev/packages.json"]);
+        assert_eq!(c.files.keys().collect::<Vec<_>>(), ["services.json", "users/dev/packages.json"]);
         let mut c = configured();
         s.delete(&mut c, &w("users")).unwrap();
         assert!(c.files.keys().all(|f| !f.starts_with("users/")));
@@ -831,14 +829,14 @@ mod tests {
             s.show(&c, &[]).unwrap(),
             "services [ ssh ];\n\
              system {\n    host-name torq;\n    packages [ htop ripgrep ];\n    time-zone Europe/Berlin;\n}\n\
-             users {\n    dev {\n        cli {\n            style c;\n        }\n        packages [ jq ];\n    }\n}\n"
+             users {\n    dev {\n        packages [ jq ];\n    }\n}\n"
         );
-        assert_eq!(s.show(&c, &w("users dev")).unwrap(), "cli {\n    style c;\n}\npackages [ jq ];\n");
+        assert_eq!(s.show(&c, &w("users dev")).unwrap(), "packages [ jq ];\n");
         assert_eq!(s.show(&Config::default(), &[]).unwrap(), "");
         // A path to a leaf or leaf-list shows that statement (review: this used to panic).
         assert_eq!(s.show(&c, &w("system host-name")).unwrap(), "host-name torq;\n");
         assert_eq!(s.show(&c, &w("system packages")).unwrap(), "packages [ htop ripgrep ];\n");
-        assert_eq!(s.show(&c, &w("users dev cli style")).unwrap(), "style c;\n");
+        assert_eq!(s.show(&c, &w("users dev packages")).unwrap(), "packages [ jq ];\n");
         assert_eq!(s.show(&Config::default(), &w("system host-name")).unwrap(), "");
         // An unknown setting or name is an error, not empty output.
         assert!(format!("{:#}", s.show(&c, &w("users nobody")).unwrap_err()).contains("not one of the users"));
@@ -892,8 +890,8 @@ mod tests {
     fn load_checks_names_and_values() {
         let s = schema();
         for (path, body, why) in [
-            ("users/a b/cli.json", r#"{"style":"c"}"#, "not a valid name"),
-            ("users/dev/cli.json", "{\"style\":\"x\\ny\"}", "is not a valid users … cli style"),
+            ("users/a b/packages.json", r#"["vim"]"#, "not a valid name"),
+            ("users/dev/packages.json", "[\"x\\ny\"]", "is not a valid users … packages"),
             ("system/packages.json", r#"["a.b.c"]"#, "is not a valid system packages"),
             ("system/host.json", r#"{"host-name":"my_laptop"}"#, "is not a valid system host-name"),
         ] {
@@ -910,9 +908,9 @@ mod tests {
     #[test]
     fn no_setting_is_named_like_a_command() {
         let mut v: serde_json::Value = serde_json::from_str(include_str!("schema-fixture.json")).unwrap();
-        v["nodes"]["system commit"] = serde_json::json!({"kind":"container","help":"x"});
+        v["nodes"]["system all"] = serde_json::json!({"kind":"container","help":"x"});
         let e = format!("{:#}", Schema::parse(&v.to_string()).unwrap_err());
-        assert!(e.contains("'system commit' uses a word torqcli keeps for commands"), "{e}");
+        assert!(e.contains("'system all' uses a word torqcli keeps for commands"), "{e}");
     }
 
     /// The schema itself: two nodes may only share a file as leaves of one object (review of ef8d7f8).
@@ -939,19 +937,19 @@ mod tests {
             .load([
                 ("system/host.json", br#"{"host-name":"a","time-zone":"UTC"}"#.as_slice()),
                 ("services.json", br#"["ssh"]"#.as_slice()),
-                ("users/dev/cli.json", br#"{"style":"c"}"#.as_slice()),
+                ("users/dev/packages.json", br#"["jq"]"#.as_slice()),
                 ("flake.nix", b"{ outputs = _: { }; }".as_slice()),
                 ("users/dev.nix", b"{ }".as_slice()),
             ])
             .unwrap();
-        assert_eq!(c.files.keys().collect::<Vec<_>>(), ["services.json", "system/host.json", "users/dev/cli.json"]);
+        assert_eq!(c.files.keys().collect::<Vec<_>>(), ["services.json", "system/host.json", "users/dev/packages.json"]);
         for (path, body, why) in [
             ("services.json", r#"{"ssh":true}"#, "must be a JSON list"),
             ("services.json", r#"["ssh", 1]"#, "is not a string"),
             ("system/host.json", r#"["torq"]"#, "must be a JSON object"),
             ("system/host.json", r#"{"host-name":"a","domain":"x"}"#, "\"domain\" is not a setting"),
             ("system/host.json", r#"{"host-name":5}"#, "\"host-name\" is not a string"),
-            ("users/dev/cli.json", "{", "not JSON"),
+            ("users/dev/packages.json", "[", "not JSON"),
         ] {
             let e = format!("{:#}", s.load([(path, body.as_bytes())]).unwrap_err());
             assert!(e.contains(path) && e.contains(why), "{path} {body}: {e}");
@@ -972,7 +970,7 @@ mod tests {
         assert_eq!(
             s.display_set(&c),
             "set services ssh\nset system host-name torq\nset system packages htop\nset system packages ripgrep\n\
-             set system time-zone Europe/Berlin\nset users dev cli style c\nset users dev packages jq\n"
+             set system time-zone Europe/Berlin\nset users dev packages jq\n"
         );
         // ...and reading it back gives the same configuration.
         let mut again = Config::default();
@@ -989,11 +987,11 @@ mod tests {
         let mut new = old.clone();
         s.set(&mut new, &w("system host-name laptop")).unwrap();
         s.set(&mut new, &w("system packages vim")).unwrap();
-        s.delete(&mut new, &w("users dev cli")).unwrap();
+        s.delete(&mut new, &w("users dev packages")).unwrap();
         assert_eq!(
             s.compare(&old, &new),
             "[edit system]\n-   host-name torq;\n+   host-name laptop;\n-   packages [ htop ripgrep ];\n+   packages [ htop ripgrep vim ];\n\
-             [edit users dev cli]\n-   style c;\n"
+             [edit users dev]\n-   packages [ jq ];\n"
         );
         assert_eq!(s.compare(&old, &old), "");
     }
@@ -1013,10 +1011,9 @@ mod tests {
         s.nodes.get_mut("users").unwrap().values.as_mut().unwrap().insert("ana".into(), String::new());
         let mut c = configured();
         s.set(&mut c, &w("users ana packages vim")).unwrap();
-        s.set(&mut c, &w("users ana cli style j")).unwrap();
         s.delete(&mut c, &w("users dev")).unwrap();
         let users: Vec<&String> = c.files.keys().filter(|f| f.starts_with("users/")).collect();
-        assert_eq!(users, ["users/ana/cli.json", "users/ana/packages.json"]);
+        assert_eq!(users, ["users/ana/packages.json"]);
     }
 
     #[test]
@@ -1036,8 +1033,8 @@ mod tests {
 }
 
 /// Whether `path` is one of a person's own data files, the only user-tier files
-/// (`users/<name>/packages.json`, `users/<name>/cli.json`, as the broker's allow-list): the files
+/// (`users/<name>/packages.json`, as the broker's allow-list): the files
 /// that can never change how the system runs (SSH, say).
 pub fn is_user_data(path: &str) -> bool {
-    matches!(path.split('/').collect::<Vec<_>>().as_slice(), ["users", name, "packages.json" | "cli.json"] if !name.is_empty())
+    matches!(path.split('/').collect::<Vec<_>>().as_slice(), ["users", name, "packages.json"] if !name.is_empty())
 }

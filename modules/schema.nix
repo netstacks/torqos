@@ -6,7 +6,7 @@
 # The schema is not the authority: the modules' checks are, at evaluation, whoever wrote the file.
 #
 # A node is keyed by its path in the tree, words separated by spaces, `<name>` for an entry of a
-# list ("users <name> cli style"). Fields:
+# list ("users <name> packages"). Fields:
 #   kind     container | list (entries named by the user, e.g. users) | leaf | leaf-list
 #   help     one line for `?`
 #   file     leaf, leaf-list: the config repo file holding it; `<name>` as in the path

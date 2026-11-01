@@ -79,7 +79,7 @@ sudo torq-broker log && sudo torq-broker verify
 
 ## Current milestone (M1.5) — `torqcli`: TorqOS driven like a network device
 
-A shell with operational and configuration modes, J and C syntax (`switch cli`), a
+A shell with operational and configuration modes, one syntax (the J style, ADR-021), a
 candidate configuration, `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`, and a
 configuration tree that is the config repo's files (ADR-016, `docs/CLI-DESIGN.md`). Built in small,
 reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 image, then an ISO (`docs/ROADMAP.md`); the AI layers are later.
@@ -124,9 +124,9 @@ reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 
   another tool on this VM; never build `/etc/nixos` or any config other than the broker's.
 - **Way of working:** small steps; an independent reviewer agent behind every meaningful change;
   mutation-check new guards (break them, see a test fail); verify in the Nix sandbox and VM test.
-- **M1.5 `torqcli` (ADR-016) is built and live:** both syntaxes, candidate, `commit check`,
+- **M1.5 `torqcli` (ADR-016) is built and live:** one syntax (ADR-021), candidate, `commit check`,
   `commit confirmed` (timer, reboot rollback), `rollback <n>`, the tree (`system host-name /
-  time-zone / packages / cli style`, `services`, `users <name> packages / cli style`) from
+  time-zone / packages`, `services`, `users <name> packages`) from
   `/etc/torq/schema.json`. On 2026-10-30 the VM was cut over to TorqOS (fresh ledger); there the
   first real `torqcli` commit, a confirmed commit, and an expired one rolling back all worked.
 - **Filters and `torqcli <command>` (4b, 4c; ADR-017):** `show … | grep -i x | wc -l` runs the real

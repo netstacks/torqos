@@ -432,39 +432,6 @@
       }
     },
     {
-      "help": "The syntax torqcli speaks on this machine (system/cli.json).",
-      "loc": [
-        "torq",
-        "cli",
-        "style"
-      ],
-      "type": {
-        "name": "enum",
-        "values": [
-          "j",
-          "c"
-        ]
-      }
-    },
-    {
-      "help": "Per-user torqcli syntax, overriding `style` (users/<name>/cli.json).",
-      "loc": [
-        "torq",
-        "cli",
-        "userStyles"
-      ],
-      "type": {
-        "elem": {
-          "name": "enum",
-          "values": [
-            "j",
-            "c"
-          ]
-        },
-        "name": "attrsOf"
-      }
-    },
-    {
       "help": "Development mode: convenience over security while TorqOS itself is being built. Passwordless sudo for wheel, Claude Code + gh + tmux installed, the owner is a t",
       "loc": [
         "torq",

@@ -622,7 +622,6 @@ impl Broker {
                     "refused: {path} must be a regular file holding {} of at most {} KiB",
                     match leaf {
                         "packages.json" => format!("a JSON list of package names (at most {})", policy::MAX_USER_PACKAGES),
-                        "cli.json" => format!(r#"exactly {{"style": ...}}, one of {}"#, policy::CLI_STYLES.join(", ")),
                         _ => "JSON data".to_string(),
                     },
                     USER_DATA_MAX / 1024

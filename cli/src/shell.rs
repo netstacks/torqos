@@ -4,7 +4,6 @@
 
 use crate::candidate::{Candidate, Repo};
 use crate::session::{Configuration, History, Machine, Mode, Session, Ssh, Waiting};
-use crate::syntax::Style;
 use crate::tree::Schema;
 use crate::{broker, check_repo, config_name, evaluate, history, me, run, scratch_dir, Cli, BROKER, REPO};
 use anyhow::{bail, Context, Result};
@@ -474,7 +473,7 @@ fn writes_never_go_through_a_link() {
     let outside = tempfile::tempdir().unwrap();
     fs::create_dir_all(d.path().join("users")).unwrap();
     std::os::unix::fs::symlink(outside.path(), d.path().join("users/dev")).unwrap();
-    let e = format!("{:#}", no_link_on_the_way(d.path(), "users/dev/cli.json").unwrap_err());
+    let e = format!("{:#}", no_link_on_the_way(d.path(), "users/dev/packages.json").unwrap_err());
     assert!(e.contains("users/dev is a link"), "{e}");
     std::os::unix::fs::symlink("/etc/passwd", d.path().join("services.json")).unwrap();
     assert!(no_link_on_the_way(d.path(), "services.json").is_err(), "the file itself too");
@@ -559,19 +558,19 @@ enum Invocation {
     Command(Vec<String>),
 }
 
-const USAGE: &str = "usage: torqcli [--verbose] [--style j|c] [-c \"<command>; <command>…\" | <command>]";
+const USAGE: &str = "usage: torqcli [--verbose] [-c \"<command>; <command>…\" | <command>]";
 
 /// `--verbose`: errors in full (every cause, and where the whole log is) instead of one clear line.
 static VERBOSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Whether torqcli's own options (before the command: `-c …`, `--style …`) ask for `--verbose` — not
+/// Whether torqcli's own options (before the command: `-c …`) ask for `--verbose` — not
 /// a `-v` of the command (`show configuration | grep -v x`).
 fn verbose_flag(args: &[String]) -> bool {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-v" | "--verbose" => return true,
-            "-c" | "--style" => {
+            "-c" => {
                 it.next();
             }
             _ => return false,
@@ -599,16 +598,15 @@ fn describe(e: &anyhow::Error) -> String {
     out
 }
 
-fn parse_args(args: &[String]) -> Result<(Invocation, Option<Style>)> {
+fn parse_args(args: &[String]) -> Result<Invocation> {
     let usage = || anyhow::anyhow!(USAGE);
-    let (mut run, mut style) = (Invocation::Interactive, None);
+    let mut run = Invocation::Interactive;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             // (Read before anything runs: see `describe`.)
             "-v" | "--verbose" => {}
             "-c" if run == Invocation::Interactive => run = Invocation::Script(it.next().ok_or_else(usage)?.clone()),
-            "--style" if style.is_none() => style = Some(Style::parse(it.next().ok_or_else(usage)?).ok_or_else(usage)?),
             "-h" | "--help" => return Err(usage()),
             o if o.starts_with('-') => return Err(usage()),
             _ if run == Invocation::Interactive => {
@@ -620,19 +618,19 @@ fn parse_args(args: &[String]) -> Result<(Invocation, Option<Style>)> {
                 if w.is_empty() {
                     return Err(usage());
                 }
-                return Ok((Invocation::Command(w), style));
+                return Ok(Invocation::Command(w));
             }
             _ => return Err(usage()),
         }
     }
-    Ok((run, style))
+    Ok(run)
 }
 
 #[cfg(test)]
 #[test]
 fn verbose_is_torqclis_own_option_only() {
     let v = |s: &str| verbose_flag(&s.split(' ').map(String::from).collect::<Vec<_>>());
-    assert!(v("--verbose show system alarms") && v("-v -c configure") && v("--style c -v show") && v("-c configure -v"));
+    assert!(v("--verbose show system alarms") && v("-v -c configure") && v("-c configure -v"));
     assert!(!v("show configuration | grep -v x") && !v("-c configure") && !v("show -v"));
 }
 
@@ -641,21 +639,20 @@ fn verbose_is_torqclis_own_option_only() {
 fn a_command_on_the_command_line() {
     let a = |s: &[&str]| parse_args(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
     let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-    assert_eq!(a(&[]).unwrap(), (Invocation::Interactive, None));
-    assert_eq!(a(&["show", "system", "alarms"]).unwrap().0, Invocation::Command(w(&["show", "system", "alarms"])));
-    assert_eq!(a(&["show configuration | grep 'a b'"]).unwrap().0, Invocation::Command(w(&["show", "configuration", "|", "grep", "a b"])), "one argument: a line");
-    assert_eq!(a(&["show", "configuration", "|", "grep", "a b"]).unwrap().0, Invocation::Command(w(&["show", "configuration", "|", "grep", "a b"])), "words as given");
-    assert_eq!(a(&["--style", "c", "show", "running-config"]).unwrap(), (Invocation::Command(w(&["show", "running-config"])), Some(Style::C)));
-    assert_eq!(a(&["show", "--style", "c"]).unwrap().0, Invocation::Command(w(&["show", "--style", "c"])), "options come first");
-    assert_eq!(a(&["-c", "show; show"]).unwrap().0, Invocation::Script("show; show".into()));
-    for bad in [&["-c", "x", "show"][..], &["-c", "x", "-c", "y"], &["-x"], &["-c"], &["--style", "vi", "show"], &[""]] {
+    assert_eq!(a(&[]).unwrap(), Invocation::Interactive);
+    assert_eq!(a(&["show", "system", "alarms"]).unwrap(), Invocation::Command(w(&["show", "system", "alarms"])));
+    assert_eq!(a(&["show configuration | grep 'a b'"]).unwrap(), Invocation::Command(w(&["show", "configuration", "|", "grep", "a b"])), "one argument: a line");
+    assert_eq!(a(&["show", "configuration", "|", "grep", "a b"]).unwrap(), Invocation::Command(w(&["show", "configuration", "|", "grep", "a b"])), "words as given");
+    assert_eq!(a(&["show", "-v"]).unwrap(), Invocation::Command(w(&["show", "-v"])), "options come first");
+    assert_eq!(a(&["-c", "show; show"]).unwrap(), Invocation::Script("show; show".into()));
+    for bad in [&["-c", "x", "show"][..], &["-c", "x", "-c", "y"], &["-x"], &["-c"], &["--style", "j", "show"], &[""]] {
         assert!(a(bad).is_err(), "{bad:?}");
     }
     let e = format!("{:#}", a(&["configure"]).unwrap_err());
     assert!(e.contains("torqcli -c"), "{e}");
 }
 fn run_shell(args: &[String]) -> Result<i32> {
-    let (run, style) = parse_args(args)?;
+    let run = parse_args(args)?;
     // The overrides exist only in a development build (`cargo build`): the released torqcli (the Nix
     // package, a release build) always manages the machine's repo through its broker (second audit, L2).
     let env = |k: &str, d: &str| if cfg!(debug_assertions) { std::env::var(k).unwrap_or_else(|_| d.to_string()) } else { d.to_string() };
@@ -668,19 +665,9 @@ fn run_shell(args: &[String]) -> Result<i32> {
     let tree = crate::nixos::Tree::parse(&fs::read_to_string(NIXOS_SCHEMA).with_context(|| format!("reading {NIXOS_SCHEMA} (is this TorqOS, from S1 on?)"))?)?;
     let machine = Real { cli: &cli };
     let who = me()?;
-    // Scripts and commands speak J style unless told otherwise (they must not change meaning with a
-    // setting); the interactive shell speaks your style (users <you> cli style, else system cli
-    // style). Piped input is a script too: the same rule (and it stops at its first error, below).
-    let piped = !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
-    let style = match (style, &run) {
-        (Some(s), _) => s,
-        (None, Invocation::Script(_) | Invocation::Command(_)) => Style::J,
-        (None, Invocation::Interactive) if piped => Style::J,
-        (None, Invocation::Interactive) => configured_style(&who),
-    };
     // Only the interactive shell keeps a candidate between runs; a script's is its own.
     let saved = if run == Invocation::Interactive { Some(Candidate::default_path()?) } else { None };
-    let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who, style);
+    let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who);
     s.screen = || crate::ui::columns(false);
     let fail = |line: &str, e: anyhow::Error| {
         say_error(&format!("{}: {}", history::one_line(line, 80), describe(&e)));
@@ -739,28 +726,15 @@ fn say(text: &str) {
     }
 }
 
-/// The prompt: `user@host> ` in operational mode, `[edit]` then `user@host# ` in configuration mode.
-/// The style this machine's configuration gives `user` (/etc/torq/cli.json, modules/cli.nix).
-fn configured_style(user: &str) -> Style {
-    let v: serde_json::Value = fs::read(CLI_STYLES).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    v["users"][user].as_str().or(v["style"].as_str()).and_then(Style::parse).unwrap_or(Style::J)
-}
-
-const CLI_STYLES: &str = "/etc/torq/cli.json";
-
-/// The prompt, and a line above it: J style `[edit system]` then `user@host# `; C style
-/// `user@host(config-system)# `. Operational mode: `user@host> ` in both.
+/// The prompt, and a line above it: `[edit system]` then `user@host# ` in configuration mode;
+/// `user@host> ` in operational mode.
 fn prompt(s: &Session, user: &str, host: &str) -> (Option<String>, String) {
     let path: Vec<String> = s.edit_path().iter().map(|w| history::clean(w)).collect();
-    match (s.mode, s.style) {
-        (Mode::Operational, _) => (None, format!("{user}@{host}> ")),
-        (Mode::Configuration, Style::J) => {
+    match s.mode {
+        Mode::Operational => (None, format!("{user}@{host}> ")),
+        Mode::Configuration => {
             let at = if path.is_empty() { "[edit]".to_string() } else { format!("[edit {}]", path.join(" ")) };
             (Some(format!("\n{at}")), format!("{user}@{host}# "))
-        }
-        (Mode::Configuration, Style::C) => {
-            let at = if path.is_empty() { "config".to_string() } else { format!("config-{}", path.join("-")) };
-            (None, format!("{user}@{host}({at})# "))
         }
     }
 }
@@ -828,7 +802,7 @@ mod editor {
     #[derive(Clone)]
     struct Help {
         know: Arc<complete::Know>,
-        /// Where the session is: mode, style, edit path (updated before each line is read).
+        /// Where the session is: mode, edit path (updated before each line is read).
         at: Arc<Mutex<complete::At>>,
     }
 
@@ -871,7 +845,7 @@ mod editor {
     impl Validator for Help {}
     impl rustyline::Helper for Help {}
 
-    /// `?`: list what may come next, J style, and redraw the line as it was.
+    /// `?`: list what may come next, and redraw the line as it was.
     struct Question(Help);
     impl ConditionalEventHandler for Question {
         fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
@@ -897,7 +871,7 @@ mod editor {
     }
 
     pub fn run(s: &mut Session, user: &str, host: &str) -> Result<i32> {
-        let at = |s: &Session| complete::At { mode: s.mode, style: s.style, edit: s.edit_path().to_vec() };
+        let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data() };
         let know = complete::Know { schema: s.schema.clone(), tree: s.tree.clone() };
         let help = Help { know: Arc::new(know), at: Arc::new(Mutex::new(at(s))) };
         let config = rustyline::Config::builder().completion_type(rustyline::CompletionType::List).auto_add_history(true).build();
@@ -955,10 +929,10 @@ fn only_own_folder(tier: &str, files: &[String], me: &str) -> bool {
 #[test]
 fn only_ones_own_folder_goes_without_asking() {
     let f = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    assert!(only_own_folder("user", &f(&["users/viper/packages.json", "users/viper/cli.json"]), "viper"));
-    assert!(!only_own_folder("user", &f(&["users/viper/packages.json", "users/eve/cli.json"]), "viper"), "someone else's");
+    assert!(only_own_folder("user", &f(&["users/viper/packages.json"]), "viper"));
+    assert!(!only_own_folder("user", &f(&["users/viper/packages.json", "users/eve/packages.json"]), "viper"), "someone else's");
     assert!(!only_own_folder("user", &f(&["users/viperx/packages.json"]), "viper"), "a longer name is not yours");
-    assert!(!only_own_folder("user", &f(&["users/viper/../eve/cli.json"]), "viper"));
+    assert!(!only_own_folder("user", &f(&["users/viper/../eve/packages.json"]), "viper"));
     assert!(!only_own_folder("system", &f(&["users/viper/packages.json"]), "viper"), "the system tier always asks");
     assert!(!only_own_folder("user", &[], "viper"), "no files: nothing known, ask");
 }

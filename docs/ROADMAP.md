@@ -28,7 +28,7 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 - [x] Schema-driven tree: `system packages/host-name/time-zone/cli`, `services`,
       `users <name> packages/cli`; `/etc/torq/schema.json` in the system; fixed output
       `nixosConfigurations.torq`. `system/host.json` (host-name, time-zone; 2b),
-      `system/cli.json` + `users/<name>/cli.json` (CLI style, user tier; 2c), the schema (2d), with
+      `system/cli.json` + `users/<name>/cli.json` (CLI style, user tier; 2c; removed by ADR-021), the schema (2d), with
       an evaluation test (`tests/tree.nix`).
 - [x] Environment variables: covered by the tree (S3, 2026-10-31): system-wide ones are NixOS's own
       `environment variables <NAME> <value>`, system tier, shown and approved like any setting (the
@@ -37,8 +37,8 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       (Reopen if per-user variables delivered by TorqOS are wanted.)
 - [x] `torqcli` shell: operational + configuration modes, J style, pipes, `?`, Tab, history
       (3a–3d; a pasted block runs line by line).
-- [x] C style and `switch cli` (4a: one command model, both syntaxes, round-trip tested; edit
-      / up / top; `delete … all`; reserved words).
+- [x] One command model (4a: round-trip tested; edit / up / top; `delete … all`). The C style
+      and `switch cli` were built here and removed by ADR-021 (2026-11-01): one syntax.
 - [x] Filters after any `show`: the real Linux tools (`grep`, `wc`, `head`, `tail`, `sort`, `uniq`,
       `cut`, `tr`; ADR-017, 4b); shell-style quoting; `torqcli <command>` without `-c` (4c);
       `| display detail` and `| display diff` (4d).

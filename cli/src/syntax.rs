@@ -1,40 +1,14 @@
-//! torqcli's commands as one model (`Op`) with two syntaxes (ADR-016, "One grammar, two
-//! renderings"): a line in J or C style parses to an `Op`, and every `Op` renders in either
-//! style. The session executes `Op`s; nothing else knows a syntax. A property test checks that
-//! rendering in one style and parsing in the other gives the same `Op`.
+//! torqcli's commands as one model (`Op`) and one syntax (ADR-016, ADR-021): a line parses to an
+//! `Op`. The session executes `Op`s; nothing else knows the syntax. A property test
+//! checks that every `Op`, rendered as it is typed, parses back to itself.
 
 use crate::session::Mode;
 use crate::filter::Filter;
 use anyhow::{bail, Context, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Style {
-    J,
-    C,
-}
-
-impl Style {
-    pub fn name(self) -> &'static str {
-        match self {
-            Style::J => "j",
-            Style::C => "c",
-        }
-    }
-    pub fn parse(s: &str) -> Option<Style> {
-        match s {
-            "j" => Some(Style::J),
-            "c" => Some(Style::C),
-            _ => None,
-        }
-    }
-}
-
-/// Words a C style bare path could be mistaken for: no setting may be named one of these
-/// (Schema::parse refuses it), so a command word is never also a path.
-pub const RESERVED: &[&str] = &[
-    "no", "do", "exit", "end", "top", "up", "show", "commit", "rollback", "set", "delete", "edit", "configure", "config",
-    "run", "switch", "quit", "request", "all", "help", "diff", "file", "save", "load",
-];
+/// Words with a meaning of their own after a path (`delete <path> all`, `set <place> config <file>`):
+/// no list entry may be named one (settings.rs, tree.rs), so a line never means two things.
+pub const RESERVED: &[&str] = &["all", "config"];
 
 /// `| display …` after a `show`: what each view offers (CLI-DESIGN principle 5: internals only when
 /// asked).
@@ -88,7 +62,7 @@ pub struct CommitOptions {
 pub enum Op {
     // Operational mode.
     Configure,
-    /// `show configuration [path] [| display set|detail]` (C style: `show running-config`).
+    /// `show configuration [path] [| display set|detail]`.
     ShowActive { path: Vec<String>, display: Option<Display> },
     ShowCommits { display: Option<Display> },
     ShowRollback { n: usize, compare: Option<usize>, display: Option<Display> },
@@ -106,28 +80,27 @@ pub enum Op {
     /// `load override|merge|set <file>`: a saved configuration into the candidate, all or nothing.
     Load { how: LoadHow, file: String },
     // Configuration mode.
-    /// A leaf's value or leaf-list elements: the words after `set` (C style: the bare path).
+    /// A leaf's value or leaf-list elements: the words after `set`.
     Set { words: Vec<String> },
-    /// `delete <path>` (C style: `no <path>`); `all` deletes a whole container or list entry.
+    /// `delete <path>`; `all` deletes a whole container or list entry.
     Delete { words: Vec<String>, all: bool },
-    /// Go down to a container or list entry (C style: its bare path, a submode).
+    /// `edit <path>`: go down to a container or list entry.
     Edit { words: Vec<String> },
     Up,
     Top,
-    /// The candidate (C style: `show configuration`).
+    /// `show [path]`: the candidate.
     ShowCandidate { path: Vec<String>, display: Option<Display> },
-    /// What the candidate changes (J style `show | compare`, C style `show configuration diff`).
+    /// `show | compare`: what the candidate changes.
     Compare { display: Option<Display> },
     Rollback { n: usize },
     Commit(CommitOptions),
-    /// An operational command from configuration mode (J style `run`, C style `do`).
+    /// `run <command>`: an operational command from configuration mode.
     Run(Box<Op>),
-    /// Up one level, or out of configuration mode at the top (both styles' `exit`); in operational
-    /// mode, leave torqcli.
+    /// `exit`: up one level, or out of configuration mode at the top; in operational mode, leave
+    /// torqcli.
     Exit,
-    /// Out of configuration mode from anywhere (C style `end`, J style `exit configuration-mode`).
+    /// `exit configuration-mode`: out of configuration mode from anywhere.
     End,
-    SwitchCli,
 }
 
 /// How `load` takes a saved configuration: as the whole candidate, onto it, or as `set` lines.
@@ -253,7 +226,7 @@ fn split_filters(w: &[String]) -> Result<(Vec<String>, Vec<Filter>)> {
 }
 
 /// Whether `op` prints output a filter can work on.
-fn shows(op: &Op) -> bool {
+pub fn shows(op: &Op) -> bool {
     match op {
         Op::ShowActive { .. } | Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowLedger { .. } => true,
         Op::ShowCandidate { .. } | Op::Compare { .. } => true,
@@ -263,9 +236,9 @@ fn shows(op: &Op) -> bool {
 }
 
 /// Parse one line: the command (`parse`) and the filters after it.
-pub fn parse_line(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]) -> bool) -> Result<(Op, Vec<Filter>)> {
+pub fn parse_line(mode: Mode, w: &[String]) -> Result<(Op, Vec<Filter>)> {
     let (head, filters) = split_filters(w)?;
-    let op = parse(style, mode, &head, is_place)?;
+    let op = parse(mode, &head)?;
     if !filters.is_empty() && !shows(&op) {
         let tool = &w[head.len() + 1];
         let packages = |o: &Op| matches!(o, Op::ShowPackages { .. });
@@ -307,25 +280,16 @@ pub fn parse_commit(w: &[String]) -> Result<CommitOptions> {
     Ok(CommitOptions { check: false, confirm, comment })
 }
 
-/// The operational commands, the same words in both styles except `show running-config` (C style)
-/// and `configure` / `config` (both accepted in both).
-fn parse_operational(style: Style, w: &[String]) -> Result<Op> {
+/// The operational commands (`configure` and `config` both enter configuration mode).
+fn parse_operational(w: &[String]) -> Result<Op> {
     let s: Vec<&str> = w.iter().map(String::as_str).collect();
     Ok(match s.as_slice() {
         ["configure" | "config"] | ["configure", "terminal"] => Op::Configure,
         ["exit" | "quit"] => Op::Exit,
-        ["switch", "cli"] => Op::SwitchCli,
-        ["show", "configuration", ..] if style == Style::J => {
+        ["show", "configuration", ..] => {
             let (path, compare, display) = split_pipes(&w[2..])?;
             if compare {
                 bail!("| compare is for the candidate, in configuration mode");
-            }
-            Op::ShowActive { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
-        }
-        ["show", "running-config", ..] if style == Style::C => {
-            let (path, compare, display) = split_pipes(&w[2..])?;
-            if compare {
-                bail!("| compare is for the candidate: `show configuration diff` in configuration mode");
             }
             Op::ShowActive { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
         }
@@ -348,86 +312,47 @@ fn parse_operational(style: Style, w: &[String]) -> Result<Op> {
         ["request", ..] => Op::Request { words: w[1..].to_vec() },
         ["file", ..] => parse_file(&w[1..], Mode::Operational)?,
         [] => bail!("empty command"),
-        [other, ..] => {
-            let show = if style == Style::C { "show running-config" } else { "show configuration" };
-            bail!("unknown command: {other}; one of: configure, {show}, show system …, show services, request, switch cli, exit")
-        }
+        [other, ..] => bail!("unknown command: {other}; one of: configure, show configuration, show system …, show services, request, file, exit"),
     })
 }
 
-/// Parse one line's words in `style` and `mode`. `is_place(words)`: whether the words name a
-/// container or list entry (somewhere to go), not a setting — what a C style bare path means
-/// depends on it.
-pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]) -> bool) -> Result<Op> {
+/// Parse one line's words in `mode`.
+pub fn parse(mode: Mode, w: &[String]) -> Result<Op> {
     if w.is_empty() {
         bail!("empty command");
     }
     if mode == Mode::Operational {
-        return parse_operational(style, w);
+        return parse_operational(w);
     }
     let s: Vec<&str> = w.iter().map(String::as_str).collect();
-    match style {
-        Style::J => Ok(match s.as_slice() {
-            ["set", ..] => Op::Set { words: w[1..].to_vec() },
-            ["delete", .., "all"] => Op::Delete { words: w[1..w.len() - 1].to_vec(), all: true },
-            ["delete", ..] => Op::Delete { words: w[1..].to_vec(), all: false },
-            ["edit", ..] => Op::Edit { words: w[1..].to_vec() },
-            ["up"] => Op::Up,
-            ["top"] => Op::Top,
-            ["show", ..] => {
-                let (path, compare, display) = split_pipes(&w[1..])?;
-                match (compare, path.is_empty()) {
-                    (true, true) => Op::Compare { display: offered("a comparison", OF_COMPARISON, display)? },
-                    (true, false) => bail!("| compare compares the whole candidate: `show | compare`"),
-                    (false, _) => Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? },
-                }
+    Ok(match s.as_slice() {
+        ["set", ..] => Op::Set { words: w[1..].to_vec() },
+        ["delete", .., "all"] => Op::Delete { words: w[1..w.len() - 1].to_vec(), all: true },
+        ["delete", ..] => Op::Delete { words: w[1..].to_vec(), all: false },
+        ["edit", ..] => Op::Edit { words: w[1..].to_vec() },
+        ["up"] => Op::Up,
+        ["top"] => Op::Top,
+        ["show", ..] => {
+            let (path, compare, display) = split_pipes(&w[1..])?;
+            match (compare, path.is_empty()) {
+                (true, true) => Op::Compare { display: offered("a comparison", OF_COMPARISON, display)? },
+                (true, false) => bail!("| compare compares the whole candidate: `show | compare`"),
+                (false, _) => Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? },
             }
-            ["save", f] => Op::Save { file: f.to_string() },
-            ["save", ..] => bail!("save <file>: one file (the whole candidate is saved, from the top)"),
-            ["load", ..] => parse_load(&w[1..])?,
-            ["file", ..] => parse_file(&w[1..], mode)?,
-            ["rollback"] => Op::Rollback { n: 0 },
-            ["rollback", n] => Op::Rollback { n: number(n)? },
-            ["commit", ..] => Op::Commit(parse_commit(&w[1..])?),
-            ["run", ..] => Op::Run(Box::new(parse_operational(style, &w[1..])?)),
-            ["exit", "configuration-mode"] => Op::End,
-            ["exit" | "quit"] => Op::Exit,
-            ["switch", "cli"] => Op::SwitchCli,
-            [other, ..] => bail!("unknown command: {other}; one of: set, delete, edit, up, top, show, commit, rollback, run, exit"),
-            [] => unreachable!(),
-        }),
-        Style::C => Ok(match s.as_slice() {
-            ["no", .., "all"] => Op::Delete { words: w[1..w.len() - 1].to_vec(), all: true },
-            ["no", ..] => Op::Delete { words: w[1..].to_vec(), all: false },
-            ["exit"] => Op::Exit,
-            ["top"] => Op::Top,
-            ["end"] => Op::End,
-            ["show", "configuration", "diff", ..] => Op::Compare { display: view_pipes("a comparison", &w[3..], OF_COMPARISON)? },
-            ["show", "configuration", ..] => {
-                let (path, compare, display) = split_pipes(&w[2..])?;
-                if compare {
-                    bail!("the comparison is `show configuration diff`");
-                }
-                Op::ShowCandidate { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
-            }
-            ["save", f] => Op::Save { file: f.to_string() },
-            ["save", ..] => bail!("save <file>: one file (the whole candidate is saved, from the top)"),
-            ["load", ..] => parse_load(&w[1..])?,
-            ["file", ..] => parse_file(&w[1..], mode)?,
-            ["rollback", "configuration"] => Op::Rollback { n: 0 },
-            ["rollback", "configuration", n] => Op::Rollback { n: number(n)? },
-            ["commit", ..] => Op::Commit(parse_commit(&w[1..])?),
-            ["do", ..] => Op::Run(Box::new(parse_operational(style, &w[1..])?)),
-            ["switch", "cli"] => Op::SwitchCli,
-            [first, ..] if RESERVED.contains(first) => {
-                bail!("unknown command: {first}; in C style: <path> [value], no <path>, exit, end, top, show configuration [diff], commit, rollback configuration <n>, do <command>")
-            }
-            // A bare path: a container or list entry is somewhere to go (a submode); anything else
-            // sets a value.
-            _ if is_place(w) => Op::Edit { words: w.to_vec() },
-            _ => Op::Set { words: w.to_vec() },
-        }),
-    }
+        }
+        ["save", f] => Op::Save { file: f.to_string() },
+        ["save", ..] => bail!("save <file>: one file (the whole candidate is saved, from the top)"),
+        ["load", ..] => parse_load(&w[1..])?,
+        ["file", ..] => parse_file(&w[1..], mode)?,
+        ["rollback"] => Op::Rollback { n: 0 },
+        ["rollback", n] => Op::Rollback { n: number(n)? },
+        ["commit", ..] => Op::Commit(parse_commit(&w[1..])?),
+        ["run", ..] => Op::Run(Box::new(parse_operational(&w[1..])?)),
+        ["exit", "configuration-mode"] => Op::End,
+        ["exit" | "quit"] => Op::Exit,
+        [other, ..] => bail!("unknown command: {other}; one of: set, delete, edit, up, top, show, commit, rollback, run, save, load, file, exit"),
+        [] => unreachable!(),
+    })
 }
 
 // Rendering (Op → text) is what the round-trip test checks the parser against; nothing else prints
@@ -457,9 +382,9 @@ fn sep(prefix: &str, w: &[String]) -> String {
     if w.is_empty() { prefix.to_string() } else { format!("{prefix} {}", join(w)) }
 }
 
-/// How `op` is typed in `style`. The inverse of `parse` (tested).
+/// How `op` is typed. The inverse of `parse` (tested).
 #[cfg(test)]
-pub fn render(style: Style, op: &Op) -> String {
+pub fn render(op: &Op) -> String {
     let commit = |o: &CommitOptions| {
         let mut s = String::from("commit");
         if o.check {
@@ -473,21 +398,20 @@ pub fn render(style: Style, op: &Op) -> String {
         }
         s
     };
-    match (style, op) {
-        (_, Op::Configure) => "configure".into(),
-        (Style::J, Op::ShowActive { path, display }) => format!("{}{}", sep("show configuration", path), display_text(display)),
-        (Style::C, Op::ShowActive { path, display }) => format!("{}{}", sep("show running-config", path), display_text(display)),
-        (_, Op::ShowCommits { display }) => format!("show system commit{}", display_text(display)),
-        (_, Op::ShowRollback { n, compare: None, display }) => format!("show system rollback {n}{}", display_text(display)),
-        (_, Op::ShowRollback { n, compare: Some(m), display }) => format!("show system rollback {n} compare {m}{}", display_text(display)),
-        (_, Op::ShowAlarms { display }) => format!("show system alarms{}", display_text(display)),
-        (_, Op::ShowServices) => "show services".into(),
-        (_, Op::ShowLedger { count: None }) => "show system ledger".into(),
-        (_, Op::ShowLedger { count: Some(n) }) => format!("show system ledger {n}"),
-        (_, Op::ShowPackages { terms }) => sep("show packages available", terms),
-        (_, Op::Request { words }) => sep("request", words),
-        (_, Op::Save { file }) => format!("save {}", quote(file)),
-        (_, Op::Load { how, file }) => {
+    match op {
+        Op::Configure => "configure".into(),
+        Op::ShowActive { path, display } => format!("{}{}", sep("show configuration", path), display_text(display)),
+        Op::ShowCommits { display } => format!("show system commit{}", display_text(display)),
+        Op::ShowRollback { n, compare: None, display } => format!("show system rollback {n}{}", display_text(display)),
+        Op::ShowRollback { n, compare: Some(m), display } => format!("show system rollback {n} compare {m}{}", display_text(display)),
+        Op::ShowAlarms { display } => format!("show system alarms{}", display_text(display)),
+        Op::ShowServices => "show services".into(),
+        Op::ShowLedger { count: None } => "show system ledger".into(),
+        Op::ShowLedger { count: Some(n) } => format!("show system ledger {n}"),
+        Op::ShowPackages { terms } => sep("show packages available", terms),
+        Op::Request { words } => sep("request", words),
+        Op::Save { file } => format!("save {}", quote(file)),
+        Op::Load { how, file } => {
             let h = match how {
                 LoadHow::Override => "override",
                 LoadHow::Merge => "merge",
@@ -495,7 +419,7 @@ pub fn render(style: Style, op: &Op) -> String {
             };
             format!("load {h} {}", quote(file))
         }
-        (_, Op::File { action, path }) => {
+        Op::File { action, path } => {
             let a = match action {
                 FileAction::Show => "show",
                 FileAction::Edit => "edit",
@@ -504,28 +428,18 @@ pub fn render(style: Style, op: &Op) -> String {
             };
             sep(&format!("file {a}"), &path.iter().cloned().collect::<Vec<_>>())
         }
-        (Style::J, Op::Set { words }) => sep("set", words),
-        (Style::C, Op::Set { words }) => join(words),
-        (Style::J, Op::Delete { words, all }) => format!("{}{}", sep("delete", words), if *all { " all" } else { "" }),
-        (Style::C, Op::Delete { words, all }) => format!("{}{}", sep("no", words), if *all { " all" } else { "" }),
-        (Style::J, Op::Edit { words }) => sep("edit", words),
-        (Style::C, Op::Edit { words }) => join(words),
-        (Style::J, Op::Up) => "up".into(),
-        (Style::C, Op::Up) => "exit".into(),
-        (_, Op::Top) => "top".into(),
-        (Style::J, Op::ShowCandidate { path, display }) => format!("{}{}", sep("show", path), display_text(display)),
-        (Style::C, Op::ShowCandidate { path, display }) => format!("{}{}", sep("show configuration", path), display_text(display)),
-        (Style::J, Op::Compare { display }) => format!("show | compare{}", display_text(display)),
-        (Style::C, Op::Compare { display }) => format!("show configuration diff{}", display_text(display)),
-        (Style::J, Op::Rollback { n }) => format!("rollback {n}"),
-        (Style::C, Op::Rollback { n }) => format!("rollback configuration {n}"),
-        (_, Op::Commit(o)) => commit(o),
-        (Style::J, Op::Run(op)) => format!("run {}", render(style, op)),
-        (Style::C, Op::Run(op)) => format!("do {}", render(style, op)),
-        (_, Op::Exit) => "exit".into(),
-        (Style::J, Op::End) => "exit configuration-mode".into(),
-        (Style::C, Op::End) => "end".into(),
-        (_, Op::SwitchCli) => "switch cli".into(),
+        Op::Set { words } => sep("set", words),
+        Op::Delete { words, all } => format!("{}{}", sep("delete", words), if *all { " all" } else { "" }),
+        Op::Edit { words } => sep("edit", words),
+        Op::Up => "up".into(),
+        Op::Top => "top".into(),
+        Op::ShowCandidate { path, display } => format!("{}{}", sep("show", path), display_text(display)),
+        Op::Compare { display } => format!("show | compare{}", display_text(display)),
+        Op::Rollback { n } => format!("rollback {n}"),
+        Op::Commit(o) => commit(o),
+        Op::Run(op) => format!("run {}", render(op)),
+        Op::Exit => "exit".into(),
+        Op::End => "exit configuration-mode".into(),
     }
 }
 
@@ -536,13 +450,8 @@ mod tests {
     fn w(s: &str) -> Vec<String> {
         crate::session::words(s).unwrap()
     }
-    /// The fixture schema's places (containers and list entries), as the session decides it.
-    fn is_place(words: &[String]) -> bool {
-        let s = crate::tree::Schema::parse(include_str!("schema-fixture.json")).unwrap();
-        s.resolve(words).is_ok_and(|t| t.values.is_empty() && !t.node.is_empty() && matches!(s.nodes[&t.node].kind, crate::tree::Kind::Container | crate::tree::Kind::List))
-    }
-    fn p(style: Style, mode: Mode, line: &str) -> Op {
-        parse(style, mode, &w(line), &is_place).unwrap_or_else(|e| panic!("{line}: {e:#}"))
+    fn p(mode: Mode, line: &str) -> Op {
+        parse(mode, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"))
     }
 
     /// Every operation, in both modes it exists in.
@@ -568,14 +477,14 @@ mod tests {
             (Mode::Operational, Op::ShowPackages { terms: v("rip grep") }),
             (Mode::Operational, Op::Request { words: v("system repair") }),
             (Mode::Operational, Op::Exit),
-            (Mode::Operational, Op::SwitchCli),
             (Mode::Configuration, Op::Set { words: v("system host-name torq") }),
             (Mode::Configuration, Op::Set { words: v("system packages [ htop vim ]") }),
-            (Mode::Configuration, Op::Set { words: v("users dev cli style c") }),
+            (Mode::Configuration, Op::Set { words: v("users dev packages jq") }),
             (Mode::Configuration, Op::Delete { words: v("system packages htop"), all: false }),
             (Mode::Configuration, Op::Delete { words: v("system"), all: true }),
             (Mode::Configuration, Op::Edit { words: v("system") }),
             (Mode::Configuration, Op::Edit { words: v("users dev") }),
+            (Mode::Configuration, Op::Up),
             (Mode::Configuration, Op::Top),
             (Mode::Configuration, Op::ShowCandidate { path: vec![], display: None }),
             (Mode::Configuration, Op::ShowCandidate { path: v("system"), display: set }),
@@ -598,81 +507,61 @@ mod tests {
             (Mode::Configuration, Op::Run(Box::new(Op::ShowRollback { n: 1, compare: Some(0), display: diff }))),
             (Mode::Configuration, Op::Exit),
             (Mode::Configuration, Op::End),
-            (Mode::Configuration, Op::SwitchCli),
         ]
     }
 
-    /// One grammar, two renderings: every operation rendered in either style parses back to itself,
-    /// so the two styles say exactly the same things.
+    /// Every operation, rendered as it is typed, parses back to itself.
     #[test]
-    fn every_op_round_trips_in_both_styles() {
+    fn every_op_round_trips() {
         for (mode, op) in ops() {
-            for style in [Style::J, Style::C] {
-                let line = render(style, &op);
-                assert_eq!(p(style, mode, &line), op, "{} {line:?}", style.name());
-            }
+            let line = render(&op);
+            assert_eq!(p(mode, &line), op, "{line:?}");
         }
-        // J style's `up` has no C style word of its own (C style's `exit` goes up, or out at the top).
-        assert_eq!(p(Style::J, Mode::Configuration, "up"), Op::Up);
     }
 
+    /// One syntax: a line is a command, never a bare path; the other syntax's words are unknown.
     #[test]
-    fn the_same_change_in_each_style() {
-        for (j, c) in [
-            ("set system packages jq", "system packages jq"),
-            ("delete system packages jq", "no system packages jq"),
-            ("edit system", "system"),
-            ("show | compare", "show configuration diff"),
-            ("show | compare | display diff", "show configuration diff | display diff"),
-            ("rollback 1", "rollback configuration 1"),
-            ("run show system alarms", "do show system alarms"),
-            ("exit configuration-mode", "end"),
+    fn commands_only() {
+        for (mode, line, want) in [
+            (Mode::Configuration, "system host-name x", "unknown command: system"),
+            (Mode::Configuration, "no system packages jq", "unknown command: no"),
+            (Mode::Configuration, "do show system alarms", "unknown command: do"),
+            (Mode::Configuration, "end", "unknown command: end"),
+            (Mode::Configuration, "switch cli", "unknown command: switch"),
+            (Mode::Operational, "show running-config", "unknown command: show"),
+            (Mode::Operational, "switch cli", "unknown command: switch"),
         ] {
-            assert_eq!(p(Style::J, Mode::Configuration, j), p(Style::C, Mode::Configuration, c), "{j} / {c}");
+            let e = format!("{:#}", parse(mode, &w(line)).unwrap_err());
+            assert!(e.contains(want), "{line}: {e}");
         }
-        assert_eq!(p(Style::J, Mode::Operational, "show configuration system"), p(Style::C, Mode::Operational, "show running-config system"));
     }
 
-    /// In C style a line's first word is a command or a path, never both: the reserved words
-    /// are refused as paths (and Schema::parse refuses a setting named one of them).
-    #[test]
-    fn command_words_are_never_paths() {
-        for line in ["set system host-name x", "edit system", "delete system packages", "up", "show system", "run show system alarms"] {
-            let e = format!("{:#}", parse(Style::C, Mode::Configuration, &w(line), &is_place).unwrap_err());
-            assert!(e.contains("in C style"), "{line}: {e}");
-        }
-        let e = format!("{:#}", parse(Style::J, Mode::Configuration, &w("system host-name x"), &is_place).unwrap_err());
-        assert!(e.contains("unknown command: system"), "{e}");
+    fn pl(mode: Mode, line: &str) -> Result<(Op, Vec<Filter>)> {
+        parse_line(mode, &w(line))
     }
-
-    fn pl(style: Style, mode: Mode, line: &str) -> Result<(Op, Vec<Filter>)> {
-        parse_line(style, mode, &w(line), &is_place)
-    }
-    fn err(style: Style, mode: Mode, line: &str) -> String {
-        format!("{:#}", pl(style, mode, line).unwrap_err())
+    fn err(mode: Mode, line: &str) -> String {
+        format!("{:#}", pl(mode, line).unwrap_err())
     }
     fn f(tool: &str, args: &str) -> Filter {
         Filter { tool: tool.into(), args: w(args) }
     }
 
-    /// Every show, with filters after it, in either style parses back to itself and its filters.
+    /// Every show, with filters after it, parses back to itself and its filters.
     #[test]
-    fn filters_follow_every_show_in_both_styles() {
+    fn filters_follow_every_show() {
         let filters = vec![f("grep", "-Ei \"host|name\""), f("sort", "-r"), f("wc", "-l")];
         let mut n = 0;
         for (mode, op) in ops().into_iter().filter(|(_, op)| shows(op)) {
-            for style in [Style::J, Style::C] {
-                let line = format!("{} | grep -Ei \"host|name\" | sort -r | wc -l", render(style, &op));
-                assert_eq!(pl(style, mode, &line).unwrap_or_else(|e| panic!("{line}: {e:#}")), (op.clone(), filters.clone()), "{line}");
-                n += 1;
-            }
+            let line = format!("{} | grep -Ei \"host|name\" | sort -r | wc -l", render(&op));
+            assert_eq!(pl(mode, &line).unwrap_or_else(|e| panic!("{line}: {e:#}")), (op.clone(), filters.clone()), "{line}");
+            n += 1;
         }
-        assert!(n >= 16, "the shows are all there ({n})");
+        assert!(n >= 8, "the shows are all there ({n})");
     }
 
     #[test]
     fn each_view_has_its_own_displays() {
-        let (j, o, c) = (Style::J, Mode::Operational, Mode::Configuration);
+        let (o, c) = (Mode::Operational, Mode::Configuration);
         for (mode, line, want) in [
             (o, "show system commit | display set", "| display set: not for show system commit (it has | display detail)"),
             (o, "show system alarms | display diff", "not for show system alarms"),
@@ -684,24 +573,21 @@ mod tests {
             (c, "show | compare | display set", "not for a comparison"),
             (c, "show | display diff", "not for a configuration"),
         ] {
-            let e = err(j, mode, line);
+            let e = err(mode, line);
             assert!(e.contains(want), "{line}: {e}");
         }
-        let e = err(Style::C, c, "show configuration diff | display detail");
-        assert!(e.contains("not for a comparison"), "{e}");
     }
 
     #[test]
     fn filters_come_after_the_commands_own_pipes() {
-        let (j, o, c) = (Style::J, Mode::Operational, Mode::Configuration);
-        assert_eq!(pl(j, o, "show configuration | grep 'a b'").unwrap().1, [f("grep", "\"a b\"")]);
-        assert_eq!(pl(j, o, "show configuration | grep \"a|b\"").unwrap().1, [f("grep", "\"a|b\"")], "a quoted | is the pattern's");
-        assert_eq!(pl(j, c, "show | compare | grep x").unwrap(), (Op::Compare { display: None }, vec![f("grep", "x")]));
-        let (op, fs) = pl(j, c, "show system | display set | wc -l").unwrap();
+        let (o, c) = (Mode::Operational, Mode::Configuration);
+        assert_eq!(pl(o, "show configuration | grep 'a b'").unwrap().1, [f("grep", "\"a b\"")]);
+        assert_eq!(pl(o, "show configuration | grep \"a|b\"").unwrap().1, [f("grep", "\"a|b\"")], "a quoted | is the pattern's");
+        assert_eq!(pl(c, "show | compare | grep x").unwrap(), (Op::Compare { display: None }, vec![f("grep", "x")]));
+        let (op, fs) = pl(c, "show system | display set | wc -l").unwrap();
         assert_eq!((op, fs), (Op::ShowCandidate { path: w("system"), display: Some(Display::Set) }, vec![f("wc", "-l")]));
-        assert_eq!(pl(Style::C, c, "show configuration diff | grep x").unwrap().0, Op::Compare { display: None });
-        assert_eq!(pl(Style::C, c, "do show system alarms | wc -l").unwrap().0, Op::Run(Box::new(Op::ShowAlarms { display: None })));
-        assert_eq!(pl(j, c, "show").unwrap().1, [], "no pipe, no filter");
+        assert_eq!(pl(c, "run show system alarms | wc -l").unwrap().0, Op::Run(Box::new(Op::ShowAlarms { display: None })));
+        assert_eq!(pl(c, "show").unwrap().1, [], "no pipe, no filter");
         for (line, want) in [
             ("show configuration | grep a | display set", "| display set must come before | grep"),
             ("show configuration | grep x |", "a | needs something after it"),
@@ -710,18 +596,16 @@ mod tests {
             ("show configuration | sh -c x", "unknown pipe: | sh -c x"),
             ("show packages available rg | grep x", "cannot be filtered"),
         ] {
-            let e = err(j, o, line);
+            let e = err(o, line);
             assert!(e.contains(want), "{line}: {e}");
         }
         for line in ["set system host-name a | wc -l", "commit | grep x", "rollback 1 | head", "run show packages available x | wc -l"] {
-            let e = err(j, c, line);
+            let e = err(c, line);
             assert!(e.contains("filtered"), "{line}: {e}");
         }
-        let e = err(Style::C, c, "system host-name a | grep a");
-        assert!(e.contains("only the output of a show command"), "{e}");
         let many = format!("show configuration{}", " | wc -l".repeat(MAX_FILTERS));
-        assert!(pl(j, o, &many).is_ok());
-        let e = err(j, o, &format!("{many} | wc -l"));
+        assert!(pl(o, &many).is_ok());
+        let e = err(o, &format!("{many} | wc -l"));
         assert!(e.contains("at most 16 filters"), "{e}");
     }
 }

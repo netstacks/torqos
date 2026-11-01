@@ -150,20 +150,15 @@ fn word_end(s: &str) -> Option<usize> {
     }
 }
 
-/// The prompt (`alice@host> `, `…# `, `…(config-system)# `): the user cyan, the host blue, where
-/// configuration mode is dim, the mark bold.
+/// The prompt (`alice@host> `, `alice@host# `): the user cyan, the host blue, the mark bold.
 pub fn prompt(p: &str, ui: &Ui) -> String {
     if !ui.color {
         return p.to_string();
     }
     let Some((user, rest)) = p.split_once('@') else { return p.to_string() };
-    let host_end = rest.find(['>', '#', '(']).unwrap_or(rest.len());
-    let (host, rest) = rest.split_at(host_end);
-    let (place, mark) = match rest.find(')') {
-        Some(i) if rest.starts_with('(') => rest.split_at(i + 1),
-        _ => ("", rest),
-    };
-    format!("{}{}{}{}{}", ui.cyan(user), ui.dim("@"), ui.blue(host), ui.dim(place), ui.bold(mark))
+    let host_end = rest.find(['>', '#']).unwrap_or(rest.len());
+    let (host, mark) = rest.split_at(host_end);
+    format!("{}{}{}{}", ui.cyan(user), ui.dim("@"), ui.blue(host), ui.bold(mark))
 }
 
 /// A `?` list line: `  word   help` — the word cyan, the help dim; a help's further lines (indented
@@ -202,7 +197,7 @@ mod tests {
         out
     }
 
-    const SAMPLE: &str = "networking {\n    hostName torq-utm;\n    firewall {\n        allowedTCPPorts [ 80 443 ];\n    }\n}\n\"a b\" x;\n## software: torq 2026-10-31\n[edit services openssh]\n+   enable true;\n-   enable false;\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n! TorqOS comes from a folder\n  that; wraps\nset networking hostName x\ncommit complete (change #42)\n  ✓ This machine is exactly as its history says.\n  ⚠ not as its history says\n    21:07   ✓ H4 live check\n\nPossible completions:\n  c  C syntax\n  j  J syntax that\n     wraps\n";
+    const SAMPLE: &str = "networking {\n    hostName torq-utm;\n    firewall {\n        allowedTCPPorts [ 80 443 ];\n    }\n}\n\"a b\" x;\n## software: torq 2026-10-31\n[edit services openssh]\n+   enable true;\n-   enable false;\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n! TorqOS comes from a folder\n  that; wraps\nset networking hostName x\ncommit complete (change #42)\n  ✓ This machine is exactly as its history says.\n  ⚠ not as its history says\n    21:07   ✓ H4 live check\n\nPossible completions:\n  merge  Set the file's settings\n  set    Run the file's lines that\n         wrap\n";
 
     #[test]
     fn the_same_text_coloured_and_nothing_when_colour_is_off() {
@@ -220,15 +215,15 @@ mod tests {
         assert!(line("## software").starts_with("\x1b[2m"));
         assert!(line("✓ This machine").contains("\x1b[32m✓") && line("⚠").contains("\x1b[33m⚠"));
         assert!(line("21:07").contains("\x1b[32m✓"), "a history row's mark");
-        assert!(line("  c  C syntax").contains("\x1b[36mc\x1b[0m") && line("  c  C syntax").contains("\x1b[2mC syntax"));
+        assert!(line("  merge  Set").contains("\x1b[36mmerge\x1b[0m") && line("  merge  Set").contains("\x1b[2mSet the file"));
         assert!(line("  that; wraps").starts_with("  \x1b[33mthat; wraps"), "a warning's next line: yellow, not a setting");
-        assert!(line("     wraps").starts_with("     \x1b[2mwraps"), "a help's next line: dim, not a word");
+        assert!(line("         wrap").starts_with("         \x1b[2mwrap"), "a help's next line: dim, not a word");
     }
 
     #[test]
     fn the_prompt_coloured_and_its_text_unchanged() {
         let on = Ui { color: true, ..Ui::plain() };
-        for p in ["viper@torq-utm> ", "viper@torq-utm# ", "viper@torq-utm(config-system)# "] {
+        for p in ["viper@torq-utm> ", "viper@torq-utm# "] {
             assert_eq!(strip(&prompt(p, &on)), p);
             assert!(prompt(p, &on).starts_with("\x1b[36mviper"), "{p}");
         }

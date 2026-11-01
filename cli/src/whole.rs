@@ -2,7 +2,7 @@
 //! config repo's two kinds of data files. Most settings live in `nixos/<top-level>.json`
 //! (settings.rs), checked against the system's own NixOS settings (nixos.rs). A few keep the files
 //! TorqOS gave them before (tree.rs and the hand-made schema), for their own checks and tiers — above
-//! all a person's own packages and CLI style, which are user tier: changed without a question.
+//! a person's own packages, which are user tier: changed without a question.
 //!
 //! `MAP` says which, and what each was called before: those names still work (`set system host-name
 //! x`), the tree always shows the NixOS one (`networking hostName`).
@@ -21,9 +21,7 @@ pub const MAP: &[(&str, &str, bool)] = &[
     ("networking hostName", "system host-name", true),
     ("time timeZone", "system time-zone", true),
     ("torq packages system", "system packages", true),
-    ("torq cli style", "system cli style", true),
     ("torq packages user <name>", "users <name> packages", true),
-    ("torq cli userStyles <name>", "users <name> cli style", true),
     // Not an alias: NixOS has its own `services` (`services printing` is NixOS's and the catalog's).
     ("torq services enabled", "services", false),
 ];
@@ -198,7 +196,7 @@ impl Whole<'_> {
     /// `delete <words> [all]`: a setting, one value of a list, an attached config file (`<place>
     /// config`), or (with `all`) everything shown below a place — from every kind of file — or an old
     /// name's place (`delete users dev all`).
-    pub fn delete(&self, d: &mut Data, words: &[String], all: bool, del: &str, typed: &[String]) -> Result<()> {
+    pub fn delete(&self, d: &mut Data, words: &[String], all: bool, typed: &[String]) -> Result<()> {
         if software_words(words).is_some() || words == ["system", "software"] || words == ["system", "software", "torq"] {
             bail!("the software's source can be changed (`set system software torq source …`), not deleted: a machine always has one");
         }
@@ -230,7 +228,7 @@ impl Whole<'_> {
             // A place, or a whole list or set of values, goes only with `all`.
             ty.is_none() || (values.is_empty() && ty.is_some_and(|t| t.name.starts_with("listOf") || t.name.starts_with("attrsOf")))
         };
-        self.check_all(whole, all, del, &typed)?;
+        self.check_all(whole, all, &typed)?;
         if !all {
             return match hand {
                 Some(h) => self.schema.delete(&mut d.config, &h),
@@ -243,7 +241,9 @@ impl Whole<'_> {
         let below: Vec<Vec<String>> = self.schema.entries(&d.config).into_iter().map(|(w, _)| w).collect();
         for h in below {
             let nixos = translate(&h, 1, false).unwrap_or_else(|| h.clone());
-            if nixos.starts_with(words) || old_place.is_some() && h.starts_with(words) {
+            // By its NixOS path, by an old place (`users dev`), or by an old name for this one setting
+            // (`system packages all`: the whole list).
+            if nixos.starts_with(words) || old_place.is_some() && h.starts_with(words) || hand.as_ref().is_some_and(|hp| h.starts_with(hp)) {
                 self.schema.delete(&mut d.config, &h)?;
                 gone += 1;
             }
@@ -261,18 +261,18 @@ impl Whole<'_> {
         Ok(())
     }
 
-    fn check_all(&self, whole: bool, all: bool, del: &str, typed: &str) -> Result<()> {
+    fn check_all(&self, whole: bool, all: bool, typed: &str) -> Result<()> {
         let typed = if typed.is_empty() { String::new() } else { format!("{typed} ") };
         if whole && !all {
-            bail!("{del} {typed}deletes everything below it — say `{del} {typed}all`");
+            bail!("delete {typed}deletes everything below it — say `delete {typed}all`");
         }
         if all && !whole {
-            bail!("{del} {typed}all: `all` is for a whole place or list");
+            bail!("delete {typed}all: `all` is for a whole place or list");
         }
         Ok(())
     }
 
-    /// Whether `words` name a place (somewhere `edit` can go, a C style submode), not a setting.
+    /// Whether `words` name a place (somewhere `edit` can go), not a setting.
     pub fn is_place(&self, words: &[String]) -> bool {
         !words.is_empty() && matches!(self.tree.locate(words), Ok((_, None, _)))
     }
@@ -350,18 +350,18 @@ mod tests {
             "networking hostName laptop",
             "system time-zone UTC",
             "torq packages user dev [ htop ]",
-            "users dev cli style c",
+            "system packages vim",
             "virtualisation docker enable true",
             "networking firewall allowedTCPPorts [ 22 ]",
             "torq services enabled ssh",
         ] {
             x.set(&mut d, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
-        assert_eq!(d.config.files.len(), 4, "host.json, the user's packages and cli, services.json: {:?}", d.config.files.keys());
+        assert_eq!(d.config.files.len(), 4, "host.json, the system's and the user's packages, services.json: {:?}", d.config.files.keys());
         assert_eq!(settings::files(&d.settings).keys().collect::<Vec<_>>(), ["nixos/networking.json", "nixos/virtualisation.json"]);
         assert_eq!(
             x.show(&d, &[]).unwrap(),
-            "networking {\n    firewall {\n        allowedTCPPorts [ 22 ];\n    }\n    hostName laptop;\n}\ntime {\n    timeZone UTC;\n}\ntorq {\n    cli {\n        userStyles {\n            dev c;\n        }\n    }\n    packages {\n        user {\n            dev [ htop ];\n        }\n    }\n    services {\n        enabled [ ssh ];\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
+            "networking {\n    firewall {\n        allowedTCPPorts [ 22 ];\n    }\n    hostName laptop;\n}\ntime {\n    timeZone UTC;\n}\ntorq {\n    packages {\n        system [ vim ];\n        user {\n            dev [ htop ];\n        }\n    }\n    services {\n        enabled [ ssh ];\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
         );
         assert_eq!(x.show(&d, &w("networking hostName")).unwrap(), "hostName laptop;\n", "one setting");
         assert_eq!(x.show(&d, &w("system host-name")).unwrap(), "hostName laptop;\n", "by its old name too");
@@ -385,13 +385,13 @@ mod tests {
         for line in ["virtualisation docker enable true", "virtualisation docker rootless enable true", "networking firewall allowedTCPPorts [ 22 80 ]", "torq packages user dev [ htop jq ]"] {
             x.set(&mut d, &w(line)).unwrap();
         }
-        let e = format!("{:#}", x.delete(&mut d, &w("virtualisation docker"), false, "delete", &w("virtualisation docker")).unwrap_err());
+        let e = format!("{:#}", x.delete(&mut d, &w("virtualisation docker"), false, &w("virtualisation docker")).unwrap_err());
         assert!(e.contains("say `delete virtualisation docker all`"), "{e}");
-        let e = format!("{:#}", x.delete(&mut d, &w("networking firewall allowedTCPPorts"), false, "delete", &w("networking firewall allowedTCPPorts")).unwrap_err());
+        let e = format!("{:#}", x.delete(&mut d, &w("networking firewall allowedTCPPorts"), false, &w("networking firewall allowedTCPPorts")).unwrap_err());
         assert!(e.contains("all`"), "a whole list too: {e}");
-        x.delete(&mut d, &w("networking firewall allowedTCPPorts 80"), false, "delete", &w("networking firewall allowedTCPPorts 80")).unwrap();
-        x.delete(&mut d, &w("virtualisation docker rootless"), true, "delete", &w("virtualisation docker rootless")).unwrap();
-        x.delete(&mut d, &w("torq packages user dev jq"), false, "delete", &w("torq packages user dev jq")).unwrap();
+        x.delete(&mut d, &w("networking firewall allowedTCPPorts 80"), false, &w("networking firewall allowedTCPPorts 80")).unwrap();
+        x.delete(&mut d, &w("virtualisation docker rootless"), true, &w("virtualisation docker rootless")).unwrap();
+        x.delete(&mut d, &w("torq packages user dev jq"), false, &w("torq packages user dev jq")).unwrap();
         assert_eq!(x.display_set(&d, &[]).unwrap(), "set networking firewall allowedTCPPorts 22\nset torq packages user dev htop\nset virtualisation docker enable true\n");
         let e = format!("{:#}", x.set(&mut d, &w("services ssh")).unwrap_err());
         assert!(e.contains("`torq services enabled ssh`"), "{e}");
@@ -440,18 +440,25 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     let x = Whole { schema: &schema, tree: &tree };
     let w = |s: &str| crate::session::words(s).unwrap();
     let mut d = Data::default();
-    for line in ["networking hostName laptop", "networking firewall allowedTCPPorts [ 22 ]", "torq packages user dev [ htop ]", "users dev cli style c", "system time-zone UTC"] {
+    for line in ["networking hostName laptop", "networking firewall allowedTCPPorts [ 22 ]", "torq packages user dev [ htop ]", "system packages vim", "system time-zone UTC"] {
         x.set(&mut d, &w(line)).unwrap();
     }
+    // A whole list by its old name, as by its NixOS one (`delete system packages all`).
+    for name in ["system packages", "torq packages system"] {
+        let mut e = d.clone();
+        x.set(&mut e, &w("system packages [ htop vim ]")).unwrap();
+        x.delete(&mut e, &w(name), true, &w(name)).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+        assert!(!x.show(&e, &[]).unwrap().contains("vim"), "{name}");
+    }
     // `delete networking all`: everything shown below it, from both kinds of files.
-    x.delete(&mut d, &w("networking"), true, "delete", &w("networking")).unwrap();
+    x.delete(&mut d, &w("networking"), true, &w("networking")).unwrap();
     assert!(!x.show(&d, &[]).unwrap().contains("networking"), "{}", x.show(&d, &[]).unwrap());
     // An old name's place deletes what it always did.
-    x.delete(&mut d, &w("users dev"), true, "delete", &w("users dev")).unwrap();
+    x.delete(&mut d, &w("users dev"), true, &w("users dev")).unwrap();
     assert!(!x.show(&d, &[]).unwrap().contains("dev"));
-    x.delete(&mut d, &w("system"), true, "delete", &w("system")).unwrap();
+    x.delete(&mut d, &w("system"), true, &w("system")).unwrap();
     assert_eq!(x.show(&d, &[]).unwrap(), "");
-    let e = format!("{:#}", x.delete(&mut d, &w("virtualisation"), true, "delete", &w("virtualisation")).unwrap_err());
+    let e = format!("{:#}", x.delete(&mut d, &w("virtualisation"), true, &w("virtualisation")).unwrap_err());
     assert!(e.contains("nothing set below it"), "{e}");
     // Text that would draw lines of its own: refused when set, and when read.
     let e = format!("{:#}", x.set(&mut d, &[w("services httpd virtualHosts a documentRoot"), vec!["/x\nKeys that will".into()]].concat()).unwrap_err());
@@ -461,6 +468,6 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     // One setting, one place: a kept one in a nixos/ file is refused, naming where it lives.
     let e = format!("{:#}", settings::load([("nixos/networking.json", br#"{"hostName":"x"}"# as &[u8])]).unwrap_err());
     assert!(e.contains("networking hostName is kept in its own file (`system host-name`)"), "{e}");
-    let e = format!("{:#}", settings::load([("nixos/torq.json", br#"{"cli":{"userStyles":{"dev":"c"}}}"# as &[u8])]).unwrap_err());
-    assert!(e.contains("torq cli userStyles is kept in its own file"), "{e}");
+    let e = format!("{:#}", settings::load([("nixos/torq.json", br#"{"packages":{"system":["vim"]}}"# as &[u8])]).unwrap_err());
+    assert!(e.contains("torq packages system is kept in its own file"), "{e}");
 }

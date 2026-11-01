@@ -2,15 +2,14 @@
 
 Status: **plan** (milestone M1.5 in `ROADMAP.md`; ADR-016). TorqOS is driven like a network
 device: a shell with an operational mode and a configuration mode, a private *candidate*
-configuration, `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`. Two syntaxes over
-one model — J style and C style — switchable at any time with `switch cli`. (Network operating systems do this too.)
-Anyone who has run a router already knows how to drive TorqOS.
+configuration, `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`. One syntax, the
+J style (`set`, `delete`, `edit`, `show | compare`; ADR-021). Anyone who has run a router already
+knows how to drive TorqOS.
 
 ## Principles
 
-1. **One model, two syntaxes.** Everything below exists in both styles; they parse to the same
-   operations. The style is a setting (`users <you> cli style`), and `switch cli` flips it for the
-   session.
+1. **One model, one syntax.** Every command is one operation (`Op`); the J style is the only way to
+   type it (ADR-021: one clean language, its help and errors in one voice).
 2. **The configuration is a tree, and the tree is the config repo's files.** Every setting has a
    path; `show configuration` renders the repo; a commit is a diff of files. Settings are declared in
    a schema (TorqOS's YANG), which also drives `?` help, Tab completion and syntax checks.
@@ -40,24 +39,27 @@ $ torqcli show system alarms                # one command, for scripts
 $ torqcli -c "configure; set users viper packages htop; commit"
 ```
 
-| | J style | C style |
-|---|---|---|
-| operational prompt | `viper@torq-utm>` | `viper@torq-utm>` |
-| enter configuration | `configure` | `config` |
-| configuration prompt | `[edit system]` line, then `viper@torq-utm#` | `viper@torq-utm(config-system)#` |
-| add / change | `set system packages jq` | `system packages jq` |
-| remove | `delete system packages jq` | `no system packages jq` |
-| go down / up / to the top | `edit system` · `up` (or `exit`) · `top` | `system` · `exit` · `top` |
-| compare with the active configuration | `show \| compare` | `show configuration diff` |
-| show the configuration | `show` (candidate) / `show configuration` (operational) | `show configuration` (candidate) / `show running-config` (operational) |
-| leave configuration | `exit` at the top, or `exit configuration-mode` | `exit` at the top, or `end` |
+| | |
+|---|---|
+| operational prompt | `viper@torq-utm>` |
+| enter configuration | `configure` (or `config`) |
+| configuration prompt | `[edit system]` line, then `viper@torq-utm#` |
+| add / change | `set system packages jq` |
+| remove | `delete system packages jq` (a whole place or list: `delete <place> all`) |
+| go down / up / to the top | `edit system` · `up` (or `exit`) · `top` |
+| compare with the active configuration | `show \| compare` |
+| show the configuration | `show` (candidate) / `show configuration` (operational) |
+| run an operational command | `run <command>` |
+| leave configuration | `exit` at the top, or `exit configuration-mode` |
 
 Turning SSH on (`set services ssh`) shows at `commit` exactly which keys will be able to log in, as
 the changed configuration has them, and refuses if there are none (nobody could log in) — 4g, as
 `torq service enable ssh` did.
 
-The same in both: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`,
-`rollback <n>`, `show system commit`, `switch cli`, `?` help, Tab completion, history (↑).
+And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`,
+`rollback <n>`, `show system commit`, `?` help, Tab completion, history (↑). `?` lists what may come
+next, `|` after any whole `show`, and `<[Enter]>` when the line would run as it is (decided as the
+session decides it: `set` by the tree's own check, `delete` of a place only with `all`).
 
 **Pipes**: `| compare`, and one `| display`: `set` (a configuration as `set` commands), `detail` (what
 is behind a view: the config repo files and commit of a configuration, the commit ids of `show system
@@ -65,29 +67,22 @@ commit`, the broker's commits and store paths in `show system alarms`), `diff` (
 raw diff of the files: for the candidate exactly what `commit` proposes; between two commits, the
 files as committed). Each view refuses what it does not offer. Then any
 number of **filters**, the real Linux tools with their own options (ADR-017): `| grep`, `| wc`, `| head`,
-`| tail`, `| sort`, `| uniq`, `| cut`, `| tr`, after any `show` in either style — e.g.
+`| tail`, `| sort`, `| uniq`, `| cut`, `| tr`, after any `show` — e.g.
 `show configuration | grep -i host`, `show system commit | head -n 5 | wc -l`. They read the show's
 output inside a sandbox that has nothing else (no files, no network), from the system's own
 coreutils and grep; words are split as a shell does (`'single'` quotes are literal).
 
-**One grammar, two renderings.** Both styles parse to one set of operations; a property test renders
-every operation in one style and parses it in the other. Words a C style bare path could collide
-with are reserved and can never name a container (`no`, `do`, `exit`, `end`, `top`, `up`, `show`,
-`commit`, `rollback`, `set`, `delete`, `edit`, `configure`, `config`, `run`, `switch`). Deleting a
-whole container needs `delete <container> all` / `no <container> all`. In C style configuration mode
-`do <command>` runs an operational command; rollback is `rollback configuration <n>` there.
+**One grammar.** Every line parses to one operation; a property test renders every operation as it
+is typed and parses it back. `all` is reserved: it can never name a list entry, since `delete
+<place> all` deletes a whole place.
 
-As built (4a, cli/src/syntax.rs): both styles parse to one `Op`; a test renders every `Op` in each
-style and parses it back. A C style bare path to a container or list entry is a submode (the prompt
-shows `(config-system)`), any other bare path sets. The interactive shell starts in your style
-(`users <you> cli style`, else `system cli style`, from /etc/torq/cli.json); `switch cli` changes it
-for the session. `?` and Tab follow the style and where you are. In a `?` list each help is its
-setting's first sentence (NixOS's doc markup taken out, `…` where it was cut), at most three lines
-(see "Layout" below).
+As built (4a, cli/src/syntax.rs; C style removed by ADR-021): the line editor's `?` and Tab follow
+where you are. In a `?` list each help is its setting's first sentence (NixOS's doc markup taken
+out, `…` where it was cut), at most three lines (see "Layout" below).
 
 **Scripts (`torqcli -c`)** use a private candidate that exists only for that invocation — never your
 interactive candidate, so a script cannot commit your half-done edits or leave edits behind. They
-stop at the first error, always use the J style unless `--style c` is given, and quote
+stop at the first error, and quote
 values containing `;` or `|` with double quotes. `torqcli <command>` runs one operational command
 the same way (`torqcli show system alarms`, `torqcli show configuration '|' grep host`): its words as
 your shell split them, or one argument read as a whole line (`torqcli "show configuration | grep
@@ -108,14 +103,12 @@ setting them, and the tree shows the NixOS one:
 | `networking hostName` | `system host-name` | `system/host.json` |
 | `time timeZone` | `system time-zone` | `system/host.json` |
 | `torq packages system` | `system packages` | `system/packages.json` |
-| `torq cli style` | `system cli style` | `system/cli.json` |
 | `torq services enabled` | (`services`: now NixOS's own) | `services.json` |
 | `torq packages user <name>` | `users <name> packages` | `users/<name>/packages.json` (user tier) |
-| `torq cli userStyles <name>` | `users <name> cli style` | `users/<name>/cli.json` (user tier) |
 
 Old names set and delete (and `delete users dev all`, `delete system all` take what they always
 did), but the old *places* are not places to go: `edit users dev` is gone, as the tree now groups
-by NixOS. A setting lives in exactly one place: the seven above are refused inside `nixos/` files (by
+by NixOS. A setting lives in exactly one place: the five above are refused inside `nixos/` files (by
 torqcli on reading, and by the evaluation). Text with a line break or another control character is
 refused in the tree: multi-line text goes in a config file. Whether a commit turns SSH on is read
 from the evaluated configuration, before and after, so every way counts; outside the catalog the
@@ -131,10 +124,8 @@ settings (more are added one schema entry at a time):
 |---|---|---|
 | `system packages <name>` | `system/packages.json` | system |
 | `system host-name <name>` · `system time-zone <tz>` | `system/host.json` (done: `modules/host.nix`) | system |
-| `system cli style j\|c` | `system/cli.json` (done: `modules/cli.nix`, installed as `/etc/torq/cli.json`) | system |
 | `services <name>` (catalog: ssh, …) | `services.json` | system |
 | `users <name> packages <pkg>` | `users/<name>/packages.json` | user |
-| `users <name> cli style j\|c` | `users/<name>/cli.json` | user |
 
 Validation (enforced by the NixOS modules' types, the authority — the shell's schema only gives early
 errors and help): host names are RFC 1123 labels of at most 63 characters; time zones must exist in
@@ -274,7 +265,6 @@ line by line.
 | `request system repair` | return a machine changed outside TorqOS to its last commit |
 | `request system revert <change>` | undo one change (a new change forward; asks unless it is only your own folder) |
 | `configure` / `config` | enter configuration mode |
-| `switch cli` | J style ↔ C style for this session |
 
 Later: `commit at <time>`, `configure exclusive`. (`save` / `load`: built, S5.)
 
@@ -374,10 +364,9 @@ The broker stays small; its additions for this model:
   of a sudo `secure_path`. The CLI calls sudo and the broker by absolute path. Without root
   (tests), flags apply.
 - User-tier files are an explicit allow-list in `policy.rs` (`USER_LEAVES`, kept in step with the
-  module's): `users/<name>/packages.json` and `users/<name>/cli.json` (2c) — a leaf joins only with
-  its typed reader. Each must be a regular file (git mode 100644) of at most 64 KiB holding exactly
-  its leaf's shape (`packages.json`: a list of at most 256 names; `cli.json`: exactly
-  `{"style": "j"|"c"}`). Evaluation rejects unknown files and symlinks under `users/` and
+  module's): `users/<name>/packages.json` (`cli.json`, the CLI style, until ADR-021) — a leaf joins
+  only with its typed reader. Each must be a regular file (git mode 100644) of at most 64 KiB holding
+  exactly its leaf's shape (`packages.json`: a list of at most 256 names). Evaluation rejects unknown files and symlinks under `users/` and
   names that are not normal users.
 - The broker builds the commit, never the working tree: `{flake}` in its commands is
   `git+file://<repo>?rev=<commit>` (H4 of the second audit, 2026-10-31).
@@ -416,11 +405,11 @@ arguments. **JSON-escaped is not terminal-safe**: the CLI neutralises every stri
 
 ## Acceptance criteria
 
-- A network engineer drives it without reading this page, in either style.
+- A network engineer drives it without reading this page.
 - Someone who has never seen a router installs a package, undoes it and reads the history with only
   `?` and Tab.
 - No command prints a commit hash, store path, ledger kind, `Caused by:` or a git hint by default.
-- Every command has a snapshot test of its output (success, refusal, failure), in both styles.
+- Every command has a snapshot test of its output (success, refusal, failure).
 - VM tests: commit confirmed expires and restores; a reboot before confirming rolls back; a stale
   candidate is refused; `rollback <n>` never changes `flake.lock`.
 

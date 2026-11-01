@@ -3,7 +3,6 @@
 //! asks, this answers.
 
 use crate::session::Mode;
-use crate::syntax::Style;
 use crate::tree::{Kind, Schema};
 
 /// One possible next word: the word, or a `<placeholder>` for a value of a type (not insertable),
@@ -44,7 +43,6 @@ const CONFIGURATION: &[(&str, &str)] = &[
     ("save", "Save the whole candidate, and its config files, to a file"),
     ("set", "Set a value"),
     ("show", "Show the candidate configuration"),
-    ("switch", "Switch to the C style"),
     ("top", "Back to the top of the configuration"),
     ("up", "Up one level"),
 ];
@@ -53,70 +51,29 @@ const CONFIGURATION: &[(&str, &str)] = &[
 /// (the word being typed, possibly empty).
 #[cfg(test)]
 pub fn choices(k: &Know, mode: Mode, words: &[String], partial: &str) -> Vec<Choice> {
-    choices_at(k, &At { mode, style: Style::J, edit: vec![] }, words, partial)
+    choices_at(k, &At { mode, edit: vec![], data: crate::whole::Data::default() }, words, partial)
 }
 
-/// Where the line is typed: the mode, the style, and where configuration mode is.
+/// Where the line is typed: the mode, where configuration mode is, and the configuration a line is
+/// dry-run against for `<[Enter]>` (the candidate in configuration mode, the active one in
+/// operational mode: Session::help_data).
 #[derive(Debug, Clone)]
 pub struct At {
     pub mode: Mode,
-    pub style: Style,
     pub edit: Vec<String>,
+    pub data: crate::whole::Data,
 }
 
-const C_CONFIGURATION: &[(&str, &str)] = &[
-    ("commit", "Make the candidate the machine's configuration"),
-    ("do", "Run an operational-mode command"),
-    ("end", "Leave configuration mode (an uncommitted candidate is kept)"),
-    ("exit", "Up one level (out of configuration mode at the top)"),
-    ("file", "The configuration's Nix files (list, show, edit, delete)"),
-    ("load", "Load a saved configuration into the candidate (override, merge, set)"),
-    ("no", "Remove a setting"),
-    ("rollback", "Load an earlier configuration into the candidate"),
-    ("save", "Save the whole candidate, and its config files, to a file"),
-    ("show", "Show the candidate, or what it changes"),
-    ("switch", "Switch to the J style"),
-    ("top", "Back to the top of the configuration"),
-];
+/// `<[Enter]>`, offered when the words so far are already a whole command.
+const ENTER: (&str, &str) = ("<[Enter]>", "Execute this command");
 
-/// What may follow `words` at `at`.
+/// What may follow `words` at `at`: the next words, `|` after a whole `show`, and `<[Enter]>` when
+/// the line could run as it is.
 pub fn choices_at(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
     let here = |rest: &[String]| -> Vec<String> { at.edit.iter().chain(rest).cloned().collect() };
     let first = words.first().map(String::as_str);
-    let all = match (at.mode, at.style, first) {
-        (Mode::Configuration, Style::C, None) => {
-            // A path from here, or a command.
-            let mut c = tree_choices(k, &at.edit, "set");
-            c.retain(|x| x.word != "|");
-            c.extend(table(C_CONFIGURATION));
-            c
-        }
-        (Mode::Configuration, Style::C, Some("no")) => tree_choices(k, &here(&words[1..]), "delete"),
-        (Mode::Configuration, Style::C, Some("do")) => {
-            choices_at(k, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial)
-        }
-        (Mode::Configuration, Style::C, Some("show")) => match &words[1..] {
-            [] => table(&[("configuration", "The candidate")]),
-            [w] if w == "configuration" => table(&[("diff", "What the candidate changes")]),
-            [c, d, b] if c == "configuration" && d == "diff" && b == "|" => table(DISPLAY),
-            [c, d, b, x] if c == "configuration" && d == "diff" && b == "|" && x == "display" => table(OF_COMPARISON),
-            [c, .., b] if c == "configuration" && b == "|" => table(DISPLAY),
-            [c, .., b, x] if c == "configuration" && b == "|" && x == "display" => table(OF_CONFIGURATION),
-            _ => vec![],
-        },
-        (Mode::Configuration, Style::C, Some("rollback")) => match &words[1..] {
-            [] => table(&[("configuration", "Load an earlier configuration into the candidate")]),
-            [w] if w == "configuration" => vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")],
-            _ => vec![],
-        },
-        (Mode::Configuration, Style::C, Some("switch")) if words.len() == 1 => table(&[("cli", "Switch to the J style")]),
-        (Mode::Configuration, Style::C, Some("commit")) => commit_choices(&words[1..]),
-        // The same in both styles.
-        (Mode::Configuration, Style::C, Some("file" | "load" | "save")) => choices_j(k, at, words, partial),
-        (Mode::Configuration, Style::C, Some(_)) if C_CONFIGURATION.iter().any(|(w, _)| Some(*w) == first) => vec![],
-        // A bare path.
-        (Mode::Configuration, Style::C, Some(_)) => tree_choices(k, &here(words), "set"),
-        (Mode::Configuration, Style::J, Some(cmd @ ("set" | "delete" | "show" | "edit"))) => {
+    let all = match (at.mode, first) {
+        (Mode::Configuration, Some(cmd @ ("set" | "delete" | "show" | "edit"))) => {
             let rest = &words[1..];
             if let Some(p) = pipe_choices(cmd, rest) {
                 p
@@ -130,14 +87,55 @@ pub fn choices_at(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Cho
         }
         _ => choices_j(k, at, words, partial),
     };
-    let all = with_filters(words, all);
+    let mut all = with_filters(words, all);
+    // (`run …`: the operational choices it lists already have them. After a filter's own name, its
+    // options are its own: `| grep ?` lists nothing.)
+    let is_filter = |w: &String| crate::filter::FILTERS.iter().any(|(f, _)| f == w);
+    if partial.is_empty() && !words.last().is_some_and(is_filter) {
+        if let Some((op, _)) = crate::syntax::parse_line(at.mode, words).ok().filter(|(op, _)| !matches!(op, crate::syntax::Op::Run(_))) {
+            if crate::syntax::shows(&op) && !all.iter().any(|c| c.word == "|") {
+                all.push(Choice::new("|", "Pipe the output through another (display, grep, wc, …)"));
+            }
+            if complete(k, at, &op) {
+                all.insert(0, Choice::new(ENTER.0, ENTER.1));
+            }
+        }
+    }
     all.into_iter().filter(|c| c.is_placeholder() || c.word.starts_with(partial)).collect()
+}
+
+/// Whether `op` would run as it is, decided as the session decides it: `set`, `delete` and `show`
+/// are dry-run on a copy of the configuration the line would change or show (whole.rs, the same
+/// code the session runs); `edit` needs a place, `up` somewhere to go up from.
+fn complete(k: &Know, at: &At, op: &crate::syntax::Op) -> bool {
+    use crate::syntax::Op;
+    let whole = crate::whole::Whole { schema: &k.schema, tree: &k.tree };
+    let here = |w: &[String]| -> Vec<String> { at.edit.iter().chain(w).cloned().collect() };
+    match op {
+        Op::Set { words } => whole.set(&mut at.data.clone(), &here(words)).is_ok(),
+        Op::Delete { words, all } => whole.delete(&mut at.data.clone(), &here(words), *all, words).is_ok(),
+        Op::Edit { words } => !words.is_empty() && whole.is_place(&here(words)),
+        Op::Up => !at.edit.is_empty(),
+        Op::ShowCandidate { path, .. } => whole.show(&at.data, &here(path)).is_ok(),
+        Op::ShowActive { path, .. } => whole.show(&at.data, path).is_ok(),
+        Op::Request { words } => {
+            let w: Vec<&str> = words.iter().map(String::as_str).collect();
+            let number = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+            match w.as_slice() {
+                ["system", "update"] | ["system", "update", "all"] | ["system", "repair"] => true,
+                ["system", "revert", n] | ["system", "software", "rollback", n] => number(n),
+                _ => false,
+            }
+        }
+        Op::Run(op) => complete(k, &At { mode: Mode::Operational, ..at.clone() }, op),
+        _ => true,
+    }
 }
 
 /// After a `|` in a `show`: the filters (filter.rs), which work on any show's output and, once one is
 /// used, are the only pipes left. Their own options are theirs (`grep --help`).
 fn with_filters(words: &[String], mut all: Vec<Choice>) -> Vec<Choice> {
-    // (`run show …` and `do show …` get theirs from the operational choices.)
+    // (`run show …` gets its own from the operational choices.)
     if words.first().map(String::as_str) != Some("show") {
         return all;
     }
@@ -195,7 +193,7 @@ fn choices_j(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> 
     match (mode, words.first().map(String::as_str)) {
         (Mode::Operational, None) => table(OPERATIONAL),
         (Mode::Configuration, None) => table(CONFIGURATION),
-        (Mode::Operational, Some("show")) => operational_show(at.style, &words[1..]),
+        (Mode::Operational, Some("show")) => operational_show(k, &words[1..]),
         (Mode::Operational, Some("request")) => match words[1..].iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             [] => table(&[("system", "This machine")]),
             ["system"] => table(&[
@@ -234,7 +232,6 @@ fn choices_j(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> 
             table(&t)
         }
         (_, Some("file")) if words.len() == 2 && words[1] != "list" => vec![Choice::new("<file>", "A .nix file of the config repo (file list)")],
-        (_, Some("switch")) if words.len() == 1 => table(&[("cli", "Switch between the J and C styles")]),
         _ => vec![],
     }
 }
@@ -243,25 +240,21 @@ fn table(t: &[(&str, &str)]) -> Vec<Choice> {
     t.iter().map(|(w, h)| Choice::new(w, h)).collect()
 }
 
-fn operational_show(style: Style, rest: &[String]) -> Vec<Choice> {
-    let configuration = match style {
-        Style::J => "configuration",
-        Style::C => "running-config",
-    };
-    let mut words: Vec<&str> = rest.iter().map(String::as_str).collect();
-    if words.first() == Some(&configuration) {
-        words[0] = "configuration";
-    } else if words.first() == Some(&"configuration") {
-        words[0] = "(not in this style)";
-    }
+fn operational_show(k: &Know, rest: &[String]) -> Vec<Choice> {
+    let words: Vec<&str> = rest.iter().map(String::as_str).collect();
     match words.as_slice() {
-        [] => {
-            let mut c = table(&[
-                ("packages", "Software you can install"),
-                ("services", "The services TorqOS offers, and which are on"),
-                ("system", "This machine"),
-            ]);
-            c.insert(0, Choice::new(configuration, "The configuration in effect"));
+        [] => table(&[
+            ("configuration", "The configuration in effect"),
+            ("packages", "Software you can install"),
+            ("services", "The services TorqOS offers, and which are on"),
+            ("system", "This machine"),
+        ]),
+        // The places below, as `show` in configuration mode has them (no `| compare` here).
+        ["configuration", path @ ..] if !path.contains(&"|") => {
+            let mut c = tree_choices(k, &rest[1..], "show");
+            for x in c.iter_mut().filter(|x| x.word == "|") {
+                x.help = "Pipe the output (display set, grep, wc, …)".into();
+            }
             c
         }
         ["system"] => table(&[
@@ -302,7 +295,7 @@ fn pipe_choices(cmd: &str, rest: &[String]) -> Option<Vec<Choice>> {
 }
 
 /// What `?` and Tab know: the hand-made schema (the values of the settings TorqOS keeps in its own
-/// files: time zones, styles, user names) and every NixOS setting of the system (the tree's paths).
+/// files: time zones, user names) and every NixOS setting of the system (the tree's paths).
 pub struct Know {
     pub schema: Schema,
     pub tree: crate::nixos::Tree,
@@ -387,7 +380,7 @@ fn hand_tree_choices(schema: &Schema, rest: &[String], cmd: &str) -> Vec<Choice>
     }
 }
 
-/// `?`: the choices, J style, laid out to fit a window `fit` wide (ui.rs): each help wrapped under the help
+/// `?`: the choices, laid out to fit a window `fit` wide (ui.rs): each help wrapped under the help
 /// column, never back to the left edge.
 pub fn render(choices: &[Choice], fit: usize) -> String {
     if choices.is_empty() {
@@ -514,9 +507,9 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "file", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["compare"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "revert", "software", "update"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show", "switch"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "file", "request", "show", "exit"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
     }
@@ -529,12 +522,11 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set virtualisation docker"), "")), ["config", "enable", "rootless"]);
         assert!(choices(&s, Mode::Configuration, &w("set virtualisation docker"), "")[1].help.starts_with("This option enables docker"), "NixOS's own help");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd virtualHosts"), "")), ["<name>"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking firewall allowedTCPPorts"), "")), ["<[ a number … ]>"]);
+        // (An empty list is a value the session takes, so the line would run as it is.)
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking firewall allowedTCPPorts"), "")), ["<[Enter]>", "<[ a number … ]>"]);
         // The settings TorqOS keeps in its own files: their values, as before.
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set torq cli style"), "")), ["c", "j"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set torq cli userStyles dev"), "")), ["c", "j"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking hostName"), "")), ["<host-name>"]);
-        assert!(choices(&s, Mode::Configuration, &w("set networking hostName torq"), "").is_empty(), "a leaf has its value");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set networking hostName torq"), "")), ["<[Enter]>"], "a leaf has its value: nothing more");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set time timeZone"), "Europe/Be")), ["Europe/Belfast", "Europe/Belgrade", "Europe/Berlin"]);
         assert!(choices(&s, Mode::Configuration, &w("set nonsense"), "").is_empty());
         // Config files: `config` at a place, then a file.
@@ -562,9 +554,6 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system commit | display"), "")), ["detail"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2 | display"), "")), ["detail", "set"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2 compare 0 | display"), "")), ["diff"]);
-        let c = At { mode: Mode::Configuration, style: Style::C, edit: vec![] };
-        assert_eq!(words_of(&choices_at(&s, &c, &w("show configuration diff | display"), "")), ["diff"]);
-        assert_eq!(words_of(&choices_at(&s, &c, &w("show configuration system | display"), "")), ["detail", "set"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "")), ["display", "cut", "grep", "head", "sort", "tail", "tr", "uniq", "wc"]);
     }
 
@@ -582,21 +571,19 @@ mod tests {
         assert!(choices(&s, Mode::Configuration, &w("show | grep x | display"), "").is_empty(), "after a filter, no display");
         assert!(choices(&s, Mode::Operational, &w("show packages available x |"), "").is_empty(), "a search cannot be filtered");
         assert!(choices(&s, Mode::Configuration, &w("set system |"), "").is_empty(), "only a show");
-        let c = At { mode: Mode::Configuration, style: Style::C, edit: vec![] };
-        assert_eq!(words_of(&choices_at(&s, &c, &w("show configuration |"), "")), with_display);
-        assert_eq!(words_of(&choices_at(&s, &c, &w("do show running-config |"), "")), with_display);
     }
 
     #[test]
     fn requests_for_the_software() {
         let s = schema();
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "revert", "software", "update"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["all"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["<[Enter]>", "all"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system revert"), "")), ["<change>"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system ledger"), "")), ["<count>"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system ledger"), "")), ["<[Enter]>", "<count>", "|"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system software"), "")), ["rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run request system software rollback"), "")), ["<number>"]);
-        assert!(choices(&s, Mode::Operational, &w("request system update all"), "").is_empty());
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update all"), "")), ["<[Enter]>"]);
+        assert!(choices(&s, Mode::Operational, &w("request system revert"), "").iter().all(|c| c.word != "<[Enter]>"), "a change number is missing");
     }
 
     #[test]
@@ -611,29 +598,64 @@ mod tests {
         assert!(t("set networking hostName", "").is_empty(), "a placeholder is not inserted");
     }
 
-    /// C style: in configuration mode the first word is a path from where you are, or a
-    /// command; `no` takes a path; operational `show running-config`.
+    /// As Junos has it: `<[Enter]>` when the line would run as it is (dry-run as the session runs it,
+    /// on the candidate), `|` after any whole `show`, and `show configuration` lists the places below.
     #[test]
-    fn c_style_and_where_you_are() {
+    fn enter_pipes_and_places() {
         let s = schema();
-        let at = |mode, edit: &str| At { mode, style: Style::C, edit: w(edit) };
-        let top = choices_at(&s, &at(Mode::Configuration, ""), &[], "");
-        let words = words_of(&top);
-        assert!(words.contains(&"networking") && words.contains(&"no") && words.contains(&"end") && !words.contains(&"set"), "{words:?}");
-        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, "networking"), &[], "h")), ["hostName"], "from where you are");
-        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("no time"), "t")), ["timeZone"]);
-        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("torq cli userStyles dev"), "")), ["c", "j"]);
-        assert_eq!(words_of(&choices_at(&s, &at(Mode::Configuration, ""), &w("show configuration"), "")), ["diff"]);
-        assert_eq!(words_of(&choices_at(&s, &at(Mode::Operational, ""), &w("show"), "r")), ["running-config"]);
-        let j = At { mode: Mode::Configuration, style: Style::J, edit: w("virtualisation docker") };
-        assert_eq!(words_of(&choices_at(&s, &j, &w("set"), "")), ["config", "enable", "rootless"], "J style, from where you are");
+        // A candidate with something in it: what `delete` may take.
+        let mut data = crate::whole::Data::default();
+        let x = crate::whole::Whole { schema: &s.schema, tree: &s.tree };
+        for line in ["networking hostName torq", "system packages [ htop ]", "virtualisation docker enable true", "services httpd config httpd.nix"] {
+            x.set(&mut data, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
+        let at = |mode, edit: &str| At { mode, edit: w(edit), data: data.clone() };
+        let c = |mode, line: &str| words_of(&choices_at(&s, &at(mode, ""), &w(line), "")).iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let enter = |mode, line: &str| c(mode, line).first().is_some_and(|x| x == "<[Enter]>");
+        let (o, k) = (Mode::Operational, Mode::Configuration);
+        let top = c(o, "show configuration");
+        assert_eq!((top.first().map(String::as_str), top.last().map(String::as_str)), (Some("<[Enter]>"), Some("|")), "{top:?}");
+        assert!(top.iter().any(|x| x == "networking") && top.iter().any(|x| x == "virtualisation"), "the places below: {top:?}");
+        let net = c(o, "show configuration networking");
+        assert!(net[0] == "<[Enter]>" && net.iter().any(|x| x == "hostName") && net.last().is_some_and(|x| x == "|"), "{net:?}");
+        assert!(!enter(o, "show configuration nonsense") && !enter(k, "show nonsense"), "refused: no such setting");
+        assert_eq!(c(o, "show system commit"), ["<[Enter]>", "|"]);
+        assert_eq!(c(o, "show services"), ["<[Enter]>", "|"]);
+        assert!(!enter(o, "show"), "show alone is not a command");
+        assert_eq!(c(k, "commit"), ["<[Enter]>", "check", "comment", "confirmed"]);
+        assert_eq!(c(k, "rollback"), ["<[Enter]>", "<number>"]);
+        assert!(enter(k, "show") && c(k, "show").last().is_some_and(|x| x == "|"));
+        // Pipes after pipes: each whole show takes another; a filter's own options are its own.
+        assert!(enter(k, "show | compare") && c(k, "show | compare").contains(&"|".to_string()));
+        assert!(enter(k, "show | display set") && c(k, "show | display set").contains(&"|".to_string()));
+        assert!(enter(k, "show | grep x") && c(k, "show | grep x").contains(&"|".to_string()), "{:?}", c(k, "show | grep x"));
+        assert!(c(k, "show | grep").is_empty(), "grep's options are grep's");
+        // delete: what the session would delete, by either name; a place or a whole list with `all`.
+        for line in ["delete networking hostName", "delete system host-name", "delete networking all", "delete system packages htop", "delete system packages all", "delete torq packages system all", "delete services httpd config", "delete virtualisation docker enable"] {
+            assert!(enter(k, line), "{line}: {:?}", c(k, line));
+        }
+        for line in ["delete networking", "delete system packages", "delete time timeZone", "delete nonsense", "delete services nginx config"] {
+            assert!(!enter(k, line), "{line}: refused, so no <[Enter]>");
+        }
+        assert!(enter(k, "edit networking") && !enter(k, "edit") && !enter(k, "edit networking hostName"));
+        assert!(!enter(k, "set") && !enter(k, "set virtualisation docker"), "a place is not a value");
+        assert_eq!(c(k, "set virtualisation docker enable false"), ["<[Enter]>"]);
+        assert!(!enter(k, "up"), "already at the top");
+        assert!(words_of(&choices_at(&s, &at(k, "networking"), &w("up"), ""))[0] == "<[Enter]>");
+        assert_eq!(c(k, "run show system alarms"), ["<[Enter]>", "|"]);
+        // From where configuration mode is.
+        let docker = at(k, "virtualisation docker");
+        assert_eq!(words_of(&choices_at(&s, &docker, &w("set"), "")), ["config", "enable", "rootless"], "from where you are");
+        assert_eq!(words_of(&choices_at(&s, &docker, &w("set enable true"), "")), ["<[Enter]>"]);
+        // Tab never inserts `<[Enter]>`.
+        assert!(tab(&choices(&s, k, &w("commit"), "")).iter().all(|(t, _)| t != "<[Enter]>"));
     }
 
     #[test]
     fn question_mark_lists_with_help() {
         let s = schema();
-        let out = render(&choices(&s, Mode::Configuration, &w("set torq cli style"), ""), 80);
-        assert!(out.starts_with("Possible completions:\n  c  C syntax"), "{out}");
+        let out = render(&choices(&s, Mode::Configuration, &w("load"), ""), 80);
+        assert!(out.starts_with("Possible completions:\n  merge     Set the file's settings onto the candidate\n"), "{out}");
         let out = render(&choices(&s, Mode::Configuration, &w("set time timeZone"), ""), 80);
         assert!(out.contains("… and 537 more"), "{out}");
     }

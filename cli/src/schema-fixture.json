@@ -17,22 +17,6 @@
       "kind": "container",
       "tier": "system"
     },
-    "system cli": {
-      "help": "The torqcli shell",
-      "kind": "container",
-      "tier": "system"
-    },
-    "system cli style": {
-      "file": "system/cli.json",
-      "help": "Syntax torqcli speaks on this machine",
-      "key": "style",
-      "kind": "leaf",
-      "tier": "system",
-      "values": {
-        "c": "C syntax: no …, show running-config",
-        "j": "J syntax: set/delete, show | compare, commit"
-      }
-    },
     "system host-name": {
       "file": "system/host.json",
       "help": "This machine's name on the network (one label: letters, digits, hyphens)",
@@ -667,22 +651,6 @@
       "help": "One person's own settings",
       "kind": "container",
       "tier": "user"
-    },
-    "users <name> cli": {
-      "help": "The torqcli shell, for this person",
-      "kind": "container",
-      "tier": "user"
-    },
-    "users <name> cli style": {
-      "file": "users/<name>/cli.json",
-      "help": "Syntax torqcli speaks for this person (overrides system cli style)",
-      "key": "style",
-      "kind": "leaf",
-      "tier": "user",
-      "values": {
-        "c": "C syntax: no …, show running-config",
-        "j": "J syntax: set/delete, show | compare, commit"
-      }
     },
     "users <name> packages": {
       "file": "users/<name>/packages.json",

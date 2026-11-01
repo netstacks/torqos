@@ -168,7 +168,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Decision:**
   - `torqcli` is the shell (interactive, or one command per invocation for scripts). Two syntaxes
     over one model — J style and C style — switched with `switch cli`;
-    the default is a setting. The earlier `torq pkg/service/update/log/undo/status` are removed.
+    the default is a setting. (Superseded by ADR-021: one syntax, the J style.) The earlier `torq pkg/service/update/log/undo/status` are removed.
   - The configuration is a tree whose containers are the config repo's folders and whose leaves are
     small data files; each setting is declared in a schema next to its NixOS module and installed
     with the system (help, completion, syntax); the modules' types, not the schema, are the authority.
@@ -258,3 +258,20 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   rustix (safe wrappers) is. The standard library and dependencies still use `unsafe` inside;
   this covers TorqOS's own code. The filter's process-group kill is kept as insurance for a race
   no test now reproduces.
+
+## ADR-021 — One syntax: the J style
+- **Context:** torqcli spoke two syntaxes over one command model (ADR-016): the J style (`set`,
+  `delete`, `edit`, `show | compare`) and the C style (bare paths, `no`, `do`, `end`, `show
+  running-config`), switched with `switch cli` and chosen by a setting (`system cli style`, `users
+  <name> cli style`). Every help text, error, completion and test existed twice, and small
+  differences between the two kept surfacing as oddities.
+- **Decision:** One clean language: the J style. The C style is removed everywhere — its parsing,
+  completion, prompt, `switch cli`, `--style`, the `cli style` settings and their files
+  (`system/cli.json`, `users/<name>/cli.json`), `modules/cli.nix` and `/etc/torq/cli.json`, and the
+  broker's `cli.json` user leaf. The command model (`Op`) stays: the session executes operations,
+  and a round-trip test still checks every one parses back from how it is typed. Only `all` and
+  `config` stay reserved as entry names (they mean something after a path).
+- **Consequences:** `packages.json` is the only user-tier leaf. A leftover `users/<name>/cli.json`
+  is refused at evaluation, like any file a person's folder may not hold, and the broker treats it
+  as system tier. The other syntax's words (`no`, `do`, `end`, `switch`, `show running-config`) are
+  unknown commands, never another meaning.

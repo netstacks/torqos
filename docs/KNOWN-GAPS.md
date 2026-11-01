@@ -94,9 +94,9 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    share one saved candidate, the last save wins.
 6i. **User tier: whose folder?** The broker accepts `users/<name>/<leaf>` for any well-formed name;
    that `<name>` is a normal user of the machine is checked only at evaluation (modules/packages.nix),
-   so `users/root/cli.json` is refused late — by the failed rebuild, which is undone — not at
+   so `users/root/packages.json` is refused late — by the failed rebuild, which is undone — not at
    propose. And a user-tier change may write *any* user's folder: `approved_by` is not tied to
-   `<name>`. Today that only lets one user change another's package list or CLI style; before a
+   `<name>`. Today that only lets one user change another's package list; before a
    leaf that matters more joins the user tier, tie user-tier approval to the folder's owner (with
    the socket's `SO_PEERCRED`, #4) and check the name against the machine's users at propose.
 6h. **`commit confirmed` limits.** The timer's broker still takes its repo and state directory
