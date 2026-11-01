@@ -163,6 +163,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    when it starts over (nothing else uses them before change #1). On a set-up machine it stays
    manual: remove `/root/.cache/nix` (only a cache; rebuilt as needed). The broker could do that
    itself when a build fails that way, with a test that damages the cache.
+   (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
 
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is

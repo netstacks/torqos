@@ -26,6 +26,11 @@ in
 
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
+      # A power cut mid-change must not leave the store broken: by default Nix records a path as
+      # there before its files reach the disk, and a cut can leave it empty ("file is empty (possible
+      # filesystem corruption)"), failing every later build. Found by cutting the power during
+      # first-boot setup. Slower builds of many small paths; a machine that works after a cut.
+      fsync-store-paths = true;
       # Only root (i.e. the broker via sudo/systemd) may drive system builds.
       trusted-users = [ "root" ];
       allowed-users = [ "root" "@wheel" ];

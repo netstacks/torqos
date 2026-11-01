@@ -303,3 +303,14 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** Nothing for the project to host but release files. An update takes a few
   minutes more than a pure download. A cache of TorqOS's own pieces can be added later without
   changing machines' design (a public key in their configuration), if that ever matters.
+
+## ADR-024 — The store survives a power cut
+- **Context:** Cutting the power during first-boot setup's build (M2) left the Nix store broken: Nix
+  by default records a store path as there before its files reach the disk (`fsync-store-paths =
+  false`), and the cut left a recorded file empty. Every later build failed on it; setup could never
+  finish. Any TorqOS machine losing power during a change could end up the same.
+- **Decision:** `fsync-store-paths = true` on every TorqOS machine (modules/base.nix). Nix's caches
+  in root's home are not covered by it (they are written without waiting either): setup clears them
+  when it starts over; on a set-up machine they stay a known gap (KNOWN-GAPS 6t).
+- **Consequences:** Builds that write many small paths are slower; a machine works after a power cut
+  mid-change. Tried by cutting the power during setup in the image (docs/INSTALL.md).
