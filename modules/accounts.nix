@@ -4,10 +4,12 @@
 # is a hash in a file only the system reads, /var/lib/torq/secrets/passwords/<user>, that their
 # account points at. No file: no password — an account that logs in by key only, or not at all.
 # First-boot setup writes the owner's; `request system password` changes one (ledgered, never the hash).
-{ lib, ... }:
+{ config, lib, ... }:
 
 let
   dir = "/var/lib/torq/secrets/passwords";
+  # The people whose password is their file here.
+  people = lib.attrNames (lib.filterAttrs (name: u: u.isNormalUser && u.hashedPasswordFile == "${dir}/${name}") config.users.users);
 in
 {
   # Every person's account (isNormalUser) points at its file, unless the tree says otherwise.
@@ -19,6 +21,29 @@ in
 
   config = {
     users.mutableUsers = false;
+
+    # A machine from before this (its passwords set with `passwd`, in /etc/shadow only): each
+    # person's password is carried into their file before the accounts are written — otherwise
+    # those would lock every account without a file, its owner's too. Once, for whoever has no file
+    # yet and a real password; never a locked or empty one.
+    system.activationScripts.torqPasswords = {
+      deps = [ "specialfs" ];
+      text = ''
+        install -d -m 0700 /var/lib/torq/secrets ${dir}
+        for person in ${lib.escapeShellArgs people}; do
+          file=${dir}/$person
+          [ -e "$file" ] && continue
+          while IFS=: read -r name hash _; do
+            if [ "$name" = "$person" ]; then
+              case "$hash" in
+                '$'*) (umask 077; printf '%s\n' "$hash" > "$file.new") && mv "$file.new" "$file" ;;
+              esac
+            fi
+          done < /etc/shadow
+        done
+      '';
+    };
+    system.activationScripts.users.deps = [ "torqPasswords" ];
     systemd.tmpfiles.rules = [
       "d /var/lib/torq/secrets 0700 root root -"
       "d ${dir} 0700 root root -"

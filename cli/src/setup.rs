@@ -137,11 +137,13 @@ pub fn run() -> Result<()> {
         bail!("setup is the image's first boot, run as root on the console");
     }
     let repo = Path::new(REPO);
-    if repo.join("flake.nix").exists() {
+    // Set up means taken over by the broker (a history), not merely written: a setup cut short
+    // after writing the files starts again.
+    if repo.join(".git").exists() {
         bail!("this machine is already set up ({REPO})");
     }
     loop {
-        // Anything a setup cut short left (flake.nix is written last): gone, to start clean.
+        // Anything a setup cut short left: gone, to start clean.
         let _ = std::fs::remove_dir_all(repo);
         println!("\nWelcome to TorqOS. This machine has no configuration yet: a few questions set it up.\n");
         let a = ask()?;
@@ -175,7 +177,7 @@ fn ask() -> Result<Answers> {
             println!("  They differ; once more.");
             continue;
         }
-        break sha_crypt::sha512_simple(&p, &sha_crypt::Sha512Params::default()).map_err(|e| anyhow::anyhow!("hashing the password: {e:?}"))?;
+        break hash(&p)?;
     };
     println!("\nLogging in from other machines (SSH):\n  1  not at all\n  2  with your password\n  3  with an SSH key\n  4  with either");
     let remote = until(
@@ -214,9 +216,12 @@ fn apply(a: &Answers) -> Result<()> {
         other => bail!("TorqOS is not built for {other}"),
     };
     let files = files(a, &source.join("templates/config"), image, &source.to_string_lossy(), system)?;
-    // The password first, outside the repo, readable by the system only.
+    // The password first, outside the repo, readable by the system only: a new file (whatever was
+    // there before, a link included, is gone first).
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(PASSWORDS)?;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(Path::new(PASSWORDS).join(&a.user))?;
+    let file = Path::new(PASSWORDS).join(&a.user);
+    let _ = std::fs::remove_file(&file);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?;
     writeln!(f, "{}", a.hash)?;
     for (rel, bytes) in &files {
         let p = Path::new(REPO).join(rel);
@@ -270,9 +275,18 @@ fn secret(question: &str) -> Result<String> {
     std::io::stdout().flush()?;
     let _hidden = crate::shell::Echo::set(false);
     let mut s = String::new();
-    std::io::stdin().lock().read_line(&mut s)?;
+    if std::io::stdin().lock().read_line(&mut s)? == 0 {
+        bail!("the console closed");
+    }
     println!();
     Ok(s.trim_end_matches(['\n', '\r']).to_string())
+}
+
+/// A password as NixOS reads it: SHA-512 crypt, with many rounds (slow to guess, quick to check
+/// once). `request system password` uses the same.
+pub fn hash(password: &str) -> Result<String> {
+    let params = sha_crypt::Sha512Params::new(200_000).map_err(|e| anyhow::anyhow!("hashing the password: {e:?}"))?;
+    sha_crypt::sha512_simple(password, &params).map_err(|e| anyhow::anyhow!("hashing the password: {e:?}"))
 }
 
 #[cfg(test)]
@@ -320,13 +334,15 @@ mod tests {
         std::fs::write(image.path().join("flake.lock"), "{\"lock\":1}\n").unwrap();
         std::fs::write(image.path().join("hardware-configuration.nix"), "{ ... }: { }\n").unwrap();
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtorq alice@laptop";
-        let f = files(&answers(Remote::Both, Some(key)), &template, image.path(), "/nix/store/abc-source", "x86_64-linux").unwrap();
+        let src = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source";
+        let f = files(&answers(Remote::Both, Some(key)), &template, image.path(), src, "x86_64-linux").unwrap();
         let get = |name: &str| String::from_utf8(f.iter().find(|(p, _)| p == name).unwrap_or_else(|| panic!("{name}")).1.clone()).unwrap();
         assert_eq!(f.last().unwrap().0, "flake.nix", "written last: setup runs while it is missing");
         let flake = get("flake.nix");
-        assert!(flake.contains("torq.url = \"path:/nix/store/abc-source\";") && flake.contains("system = \"x86_64-linux\";"), "{flake}");
-        assert_eq!(crate::software::source_of(&flake).as_deref(), Some("path:/nix/store/abc-source"));
-        assert!(!crate::software::writable_folder("path:/nix/store/abc-source"), "a store path: any machine's");
+        assert!(flake.contains(&format!("torq.url = \"path:{src}\";")) && flake.contains("system = \"x86_64-linux\";"), "{flake}");
+        assert_eq!(crate::software::source_of(&flake), Some(format!("path:{src}")));
+        assert!(!crate::software::writable_folder(&format!("path:{src}")), "a store path: any machine's");
+        assert!(hash("correct horse").unwrap().starts_with("$6$rounds=200000$"), "slow to guess");
         assert_eq!(serde_json::from_str::<serde_json::Value>(&get("nixos/torq.json")).unwrap(), json!({ "user": "alice", "ssh": { "passwords": true } }));
         assert_eq!(serde_json::from_str::<serde_json::Value>(&get("system/host.json")).unwrap(), json!({ "host-name": "web-01", "time-zone": "UTC" }));
         assert_eq!(get("services.json").trim(), "[\n  \"ssh\"\n]");

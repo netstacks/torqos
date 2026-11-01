@@ -119,8 +119,10 @@ impl Real<'_> {
             Err(why) => bail!("couldn't check this machine: {why}"),
         };
         let last = crate::read_ledger(self.cli).ok().and_then(|l| history::last_change(&l));
-        let report = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &crate::ui::Ui::plain_at(fit));
-
+        let ui = crate::ui::Ui::plain_at(fit);
+        let mut report = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &ui);
+        let sshd = std::fs::read_to_string("/etc/ssh/sshd_config").ok();
+        report.text.push_str(&crate::status::notes(sshd.as_deref(), &ui));
         Ok((v, report))
     }
 }
@@ -289,7 +291,7 @@ impl Machine for Real<'_> {
         if typed("Again")? != new {
             bail!("not changed: the two differ");
         }
-        let hash = sha_crypt::sha512_simple(&new, &sha_crypt::Sha512Params::default()).map_err(|e| anyhow::anyhow!("hashing the password: {e:?}"))?;
+        let hash = crate::setup::hash(&new)?;
         // To the broker as a diff goes: a private file, gone as soon as it is read.
         let scratch = crate::scratch_dir()?;
         let file = scratch.path().join("hash");

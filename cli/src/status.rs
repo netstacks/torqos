@@ -99,10 +99,42 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
     Report { text, exit: 1, fix }
 }
 
+/// What is worth knowing about how this machine is reached, though nothing is wrong (docs/INSTALL.md,
+/// "SSH"): from the running SSH server's own settings (`sshd_config`, `None` when there is none). Its
+/// first `PasswordAuthentication` is the one that holds (as sshd reads it); none means its default,
+/// yes.
+pub fn notes(sshd_config: Option<&str>, ui: &Ui) -> String {
+    let Some(config) = sshd_config else { return String::new() };
+    let passwords = config
+        .lines()
+        .filter_map(|l| l.split_whitespace().collect::<Vec<_>>().get(..2).map(|kv| (kv[0].to_ascii_lowercase(), kv[1].to_ascii_lowercase())))
+        .find(|(k, _)| k == "passwordauthentication")
+        .is_none_or(|(_, v)| v == "yes");
+    if !passwords {
+        return String::new();
+    }
+    format!(
+        "{}\n",
+        ui.dim(&ui.line("    Note: ", "SSH accepts passwords as well as keys: anyone who can reach this machine can try one (repeated wrong guesses are blocked)."))
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_note_when_ssh_takes_passwords() {
+        let note = notes(Some("UsePAM yes\nPasswordAuthentication yes\nPermitRootLogin no\n"), &Ui::plain());
+        assert!(note.starts_with("    Note: SSH accepts passwords as well as keys"), "{note}");
+        assert!(notes(Some("passwordauthentication YES\n"), &Ui::plain()).contains("SSH accepts passwords"), "any case, as sshd reads it");
+        assert!(notes(Some("UsePAM yes\n"), &Ui::plain()).contains("SSH accepts passwords"), "sshd's default is yes");
+        assert_eq!(notes(Some("PasswordAuthentication no\nPasswordAuthentication yes\n"), &Ui::plain()), "", "the first holds");
+        assert_eq!(notes(None, &Ui::plain()), "", "no SSH server");
+        let narrow = notes(Some("PasswordAuthentication yes\n"), &Ui { fit: Some(30), ..Ui::plain() });
+        assert!(narrow.lines().all(|l| crate::ui::width(l) <= 30), "{narrow}");
+    }
 
     fn ok() -> Value {
         json!({ "ok": true, "busy": null, "head": "c1", "ledgered_commit": "c1", "dirty": false,

@@ -58,6 +58,8 @@ pub struct Broker {
     passwords_dir: PathBuf,
     /// What sets a password in the running system at once: `user:hash` lines on its input.
     password_cmd: String,
+    /// The machine's account list, to tell people from system accounts.
+    passwd: PathBuf,
 }
 
 /// A `commit confirmed` waiting for `confirm`: an `applied` entry with a `confirm` record and no
@@ -404,7 +406,24 @@ impl Broker {
             anchor_settings: false,
             passwords_dir: PathBuf::from("/var/lib/torq/secrets/passwords"),
             password_cmd: "chpasswd -e".into(),
+            passwd: PathBuf::from("/etc/passwd"),
         }
+    }
+
+    /// Whether `user` is a person's account in this machine's account list (`/etc/passwd`): uid 1000
+    /// to 59999, as NixOS numbers normal users.
+    fn is_person(&self, user: &str) -> Result<bool> {
+        let list = std::fs::read_to_string(&self.passwd).with_context(|| format!("reading {}", self.passwd.display()))?;
+        Ok(list.lines().any(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            f.len() >= 3 && f[0] == user && f[2].parse::<u32>().is_ok_and(|uid| (1000..60000).contains(&uid))
+        }))
+    }
+
+    /// The account list people are read from (tests: a file of their own).
+    pub fn with_passwd(mut self, path: impl Into<PathBuf>) -> Self {
+        self.passwd = path.into();
+        self
     }
 
     /// Where password hashes go, and the command that sets one at once (tests: a scratch folder and
@@ -604,8 +623,14 @@ impl Broker {
     ///   difference, and `repair` returns the machine to it.
     pub fn set_up(&self) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
+        self.refuse_if_interrupted()?;
         if !self.ledger.read_all()?.is_empty() {
             bail!("this machine is already set up: it has a ledger");
+        }
+        // Only a repo setup has just written, never one with a history of its own: a failed build
+        // removes the history this call made, and must never remove anything else.
+        if self.repo.is_initialised() {
+            bail!("the config repo already has a history: setup takes over only a repo first-boot setup has just written");
         }
         if switch_running() {
             bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then set up");
@@ -636,8 +661,10 @@ impl Broker {
     pub fn set_password(&self, user: &str, hash: &str, by: &str) -> Result<Entry> {
         let _lock = Lock::acquire(&self.state_dir)?;
         self.ledger.verify().context("cannot change a password on a broken ledger")?;
-        if !policy::user_name_ok(user) {
-            bail!("'{user}' is not a user name");
+        // A person's account only (uid 1000 up, as NixOS gives them): never root or a system account,
+        // whose password nothing keeps (accounts.nix points people's accounts at their files only).
+        if !policy::user_name_ok(user) || !self.is_person(user)? {
+            bail!("'{user}' is not a person's account on this machine");
         }
         let shaped = ["$6$", "$y$", "$2b$"].iter().any(|p| hash.starts_with(p)) && hash.len() < 512 && !hash.contains([':', '\n', '\r']);
         if !shaped {

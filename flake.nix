@@ -74,6 +74,7 @@
         broker = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         trust-loop = import ./tests/trust-loop.nix { inherit pkgs self; };
         tree = import ./tests/tree.nix { inherit pkgs self; };
+        accounts = import ./tests/accounts.nix { inherit pkgs self; };
       });
 
       # ── Dev shell (works on the Mac too) ─────────────────────────────────────

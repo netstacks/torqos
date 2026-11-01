@@ -58,6 +58,10 @@ in
     # Evaluating the new machine reads both sources: they are in the image, not fetched.
     system.extraDependencies = [ src.outPath pkgs.path ];
 
+    # Setup is the only way in: the image never takes over a repo by itself (`init` would ledger
+    # files an interrupted setup left, unbuilt, as the machine's, with no account to log in to).
+    systemd.services.torq-broker-init.enable = false;
+
     systemd.services.torq-setup = {
       description = "TorqOS first-boot setup";
       wantedBy = [ "multi-user.target" ];
@@ -65,9 +69,10 @@ in
       conflicts = [ "getty@tty1.service" ];
       # Setup runs the broker, which switches to the new system — where this unit does not exist. A
       # switch stops units it removes, which would kill setup and the broker mid-switch: this one
-      # finishes instead, and exits by itself.
+      # finishes instead, and exits by itself. Set up means the broker took the repo over (it has a
+      # history): a setup cut short, its files written or not, runs again at the next boot.
       unitConfig = {
-        ConditionPathExists = "!${repo}/flake.nix";
+        ConditionPathExists = "!${repo}/.git";
         X-StopOnRemoval = false;
       };
       restartIfChanged = false;

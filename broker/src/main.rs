@@ -283,8 +283,14 @@ fn run(mut cli: Cli) -> Result<()> {
         }
         Cmd::Password { user, hash_file, approved_by } => {
             // (A file, as a diff is passed: the caller's standard input is sudo's, for its own password.)
+            // A plain file, never followed through a link (it is opened as root).
+            use std::os::unix::fs::OpenOptionsExt;
+            let f = std::fs::OpenOptions::new().read(true).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(&hash_file).context("reading the hash (a plain file, not a link)")?;
+            if !f.metadata()?.is_file() {
+                anyhow::bail!("the hash file is not a plain file");
+            }
             let mut hash = String::new();
-            std::io::Read::read_to_string(&mut std::io::Read::take(std::fs::File::open(&hash_file).context("reading the hash")?, 1024), &mut hash)?;
+            std::io::Read::read_to_string(&mut std::io::Read::take(f, 1024), &mut hash)?;
             let e = b.set_password(&user, hash.trim_end(), &approved_by)?;
             if json {
                 return print_entry(&e);

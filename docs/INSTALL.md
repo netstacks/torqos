@@ -21,8 +21,12 @@ boot.
 5. **Setup writes the machine's configuration** — the config repo at `/var/lib/torq/config`, from the
    template, with those answers as tree files — and the owner's password to a file only the system
    can read (`/var/lib/torq/secrets/passwords/<user>`, never in the repo). The broker then takes the
-   repo over (`init`: the ledger's first entry, change #1, "TorqOS set up") and switches the machine
-   to it. Setup never runs again.
+   repo over: it builds it first (a configuration that does not build changes nothing, and setup
+   asks again), switches to it, and records change #1, "TorqOS set up", with the system it switched
+   to. The broker runs as a service of its own, so the switch (which brings back the console's
+   login prompt) cannot cut it short. A machine is set up once its repo has a history: a setup cut
+   short before that, by a power cut say, simply runs again at the next boot; the image never
+   takes over a repo by itself. Setup never runs again.
 6. **The console shows a login prompt.** From here it is TorqOS as everywhere: `torqcli`, every
    change through the broker.
 
@@ -45,7 +49,12 @@ needs only what differs from the image (the host name, the user): usually nothin
   `/var/lib/torq/secrets/passwords/<user>` (0600, root), which their account points at
   (`hashedPasswordFile`). No file: no password (an account that logs in by key only, or not at all).
 - Changing a password is a TorqOS command (`request system password [<user>]`): the broker writes the
-  file and the ledger records that it changed, when and by whom — never the hash.
+  file and the ledger records that it changed, when and by whom — never the hash. People's accounts
+  only (uid 1000 up): never root's or a system account's.
+- A machine from before this (passwords set with `passwd`, in `/etc/shadow` only) keeps them: on the
+  switch, each person's password is carried into their file before the accounts are written. Only
+  for someone with no file yet and a real password (a locked account stays locked); a file once
+  there is never replaced. (`tests/accounts.nix`.)
 
 ## SSH
 
@@ -55,11 +64,21 @@ needs only what differs from the image (the host name, the user): usually nothin
 
 ## Steps
 
+Done (2026-11-01; tried end to end in QEMU: the image boots to setup, setup switches, the owner
+logs in, change #1 is in the history and `show system alarms` is clean):
+
 1. The image: a qcow2 of the factory system that boots in UTM/QEMU (aarch64 first).
-2. Setup on the console (`torqcli setup`, as root, only while there is no config repo).
-3. Passwords outside the repo, and `request system password`.
-4. SSH by password, protected.
-5. The image's own TorqOS as the config repo's source (`path:` in the store, locked).
+2. Setup on the console (`torqcli setup`, as root, only while the repo has no history).
+3. Passwords outside the repo, and `request system password`; existing passwords carried over.
+4. SSH by password, protected, and noted by `show system alarms`.
+5. The image's own TorqOS as the config repo's source (`path:` in the store, locked: exactly
+   `/nix/store/<hash>-<name>`, nothing after it).
+
+Next:
+
 6. A VM test: the image boots, setup, a commit, a rollback.
 7. The release: checksum and signature (`ssh-keygen -Y`), and how to check them.
 8. Then the ISO for real hardware (disk choice added).
+
+Known: setup runs on the first text console (tty1) only. A VM started with a serial console alone
+shows login prompts there, with no account to log in to: give it a display (UTM does by default).

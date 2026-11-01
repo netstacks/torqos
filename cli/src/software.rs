@@ -45,7 +45,18 @@ pub fn with_source(flake: &str, url: &str) -> Result<String> {
 /// mode). A path in the store cannot change — an image's own TorqOS (docs/INSTALL.md) — and is
 /// any machine's.
 pub fn writable_folder(url: &str) -> bool {
-    url.starts_with("path:") && !(url.starts_with("path:/nix/store/") && !url.contains(".."))
+    url.strip_prefix("path:").is_some_and(|p| !store_path(p))
+}
+
+/// Exactly one store path, `/nix/store/<hash>-<name>`, and nothing after it: no `/`, no `%` (Nix
+/// decodes `%2e%2e` to `..`), no `..` — the form Nix itself gives, which cannot lead anywhere else.
+fn store_path(p: &str) -> bool {
+    let Some((hash, name)) = p.strip_prefix("/nix/store/").and_then(|r| r.split_once('-')) else { return false };
+    hash.len() == 32
+        && hash.chars().all(|c| "0123456789abcdfghijklmnpqrsvwxyz".contains(c))
+        && !name.is_empty()
+        && !name.starts_with('.')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || "+._?=-".contains(c))
 }
 
 pub fn valid(url: &str) -> Result<()> {
@@ -68,8 +79,20 @@ mod tests {
 
     #[test]
     fn only_a_folder_that_can_change_is_dev_only() {
-        assert!(writable_folder("path:/home/viper/torq") && writable_folder("path:/nix/store/../home/x"));
-        assert!(!writable_folder("path:/nix/store/abc-source") && !writable_folder("github:netstacks/torqos"));
+        let store = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source";
+        assert!(!writable_folder(&format!("path:{store}")) && !writable_folder("github:netstacks/torqos"));
+        for folder in [
+            "path:/home/viper/torq".to_string(),
+            "path:/nix/store/../home/x".into(),
+            "path:/nix/store/%2e%2e/%2e%2e/home/u/torq".into(),
+            format!("path:{store}/../../home/x"),
+            format!("path:{store}/sub"),
+            "path:/nix/store/short-source".into(),
+            "path:/nix/store/0123456789abcdfghijklmnpqrsvwxyz-%2e%2e".into(),
+            "path:/nix/store/0123456789ABCDFGHIJKLMNPQRSVWXYZ-source".into(),
+        ] {
+            assert!(writable_folder(&folder), "{folder}: only exactly a store path is any machine's");
+        }
     }
 
     #[test]

@@ -1,0 +1,53 @@
+# NixOS VM test: accounts are the configuration's (modules/accounts.nix), and moving a machine to
+# that keeps its people's passwords. A machine from before has its passwords in /etc/shadow only
+# (set with `passwd`); activation carries each into its file before writing the accounts, so nobody
+# is locked out. A locked account stays locked, and a file once there is never replaced.
+{ pkgs, self }:
+
+pkgs.testers.runNixOSTest {
+  name = "torq-accounts";
+
+  nodes.machine = {
+    imports = [ self.nixosModules.default ];
+    torq.user = "alice";
+    torq.desktop.enable = false;
+    users.users.bob.isNormalUser = true;
+    users.users.carol.isNormalUser = true;
+  };
+
+  testScript = ''
+    machine.wait_for_unit("multi-user.target")
+    pw = "/var/lib/torq/secrets/passwords"
+
+    def shadow(user):
+        return machine.succeed(f"getent shadow {user} | cut -d: -f2").strip()
+
+    # No files yet: every account is locked (no password), as a new machine's are before setup.
+    machine.succeed(f"test ! -e {pw}/alice && test ! -e {pw}/bob")
+    assert shadow("alice").startswith("!"), shadow("alice")
+    machine.succeed(f"stat -c %a /var/lib/torq/secrets {pw} | grep -qx 700")
+
+    # A machine from before: alice set a password with `passwd`, bob is locked, carol has a file.
+    old = "$6$saltsalt$" + "x" * 86
+    machine.succeed(f"usermod -p '{old}' alice")
+    machine.succeed(f"(umask 077; echo '$6$carol$kept' > {pw}/carol)")
+    machine.succeed("/run/current-system/activate")
+
+    # alice's password carried into her file, and her account still has it.
+    assert machine.succeed(f"cat {pw}/alice").strip() == old
+    machine.succeed(f"stat -c '%a %U' {pw}/alice | grep -qx '600 root'")
+    assert shadow("alice") == old, shadow("alice")
+    # bob's lock is not a password: no file, still locked.
+    machine.succeed(f"test ! -e {pw}/bob")
+    assert shadow("bob").startswith("!"), shadow("bob")
+    # carol's file is hers: kept, and her account follows it.
+    assert machine.succeed(f"cat {pw}/carol").strip() == "$6$carol$kept"
+    assert shadow("carol") == "$6$carol$kept", shadow("carol")
+
+    # Once there, a file is what counts: a later `passwd` change does not replace it, and the next
+    # activation puts the account back to the file.
+    machine.succeed("usermod -p '$6$other$changed' alice")
+    machine.succeed("/run/current-system/activate")
+    assert shadow("alice") == old, shadow("alice")
+  '';
+}
