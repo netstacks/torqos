@@ -252,6 +252,13 @@ impl Whole<'_> {
                 let now = OLD_SERVICES.iter().find(|(old, _)| old == name).map_or("services <name> enable true", |(_, new)| new);
                 bail!("torq services enabled is the old list of services: `set {now}` turns it on (TorqOS's protections apply however it is turned on)");
             }
+            if let Ok(t) = self.schema.resolve_in(&h, Some(&d.config)) {
+                if self.schema.nodes.get(&t.node).and_then(|n| n.ty.as_deref()) == Some("package") {
+                    for p in t.values.iter().filter(|v| *v != "[" && *v != "]") {
+                        self.tree.package(p)?;
+                    }
+                }
+            }
             return self.schema.set(&mut d.config, &h);
         }
         settings::set(self.tree, &mut d.settings, words).map_err(|e| self.hint(words, e))

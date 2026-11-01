@@ -86,6 +86,9 @@ in
         fence = (import ./settings-fence.nix { inherit lib; }).patterns;
         # A person's password: never in the tree (settings-fence.nix, rule 3).
         passwords = (import ./settings-fence.nix { inherit lib; }).passwords;
+        # The packages of this machine's nixpkgs, by name (only the names: nothing is evaluated), for
+        # torqcli to check and complete them as they are set.
+        packages = builtins.attrNames pkgs;
       });
   };
 }

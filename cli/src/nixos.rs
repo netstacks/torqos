@@ -140,6 +140,9 @@ struct File {
     /// A person's password, in NixOS's forms: never in the tree (settings-fence.nix, rule 3).
     #[serde(default)]
     passwords: Vec<Vec<String>>,
+    /// This machine's nixpkgs, by name.
+    #[serde(default)]
+    packages: std::collections::BTreeSet<String>,
 }
 
 /// One point of the tree: a setting (with its type and help), what is below it, or both (a set of
@@ -171,6 +174,8 @@ pub struct Tree {
     pub root: Node,
     fence: Vec<Vec<String>>,
     passwords: Vec<Vec<String>>,
+    /// The packages of this machine's nixpkgs, by name (none known: not checked).
+    pub packages: std::collections::BTreeSet<String>,
 }
 
 impl Tree {
@@ -193,7 +198,7 @@ impl Tree {
                 n.free = Some(Box::new(Node { setting: Some((free, help)), ..Node::default() }));
             }
         }
-        Ok(Tree { root, fence: f.fence, passwords: f.passwords })
+        Ok(Tree { root, fence: f.fence, passwords: f.passwords, packages: f.packages })
     }
 
     /// Whether `loc` (entry names in place of `<name>`) is, or is below, a setting the tree may never
@@ -202,6 +207,24 @@ impl Tree {
     pub fn fenced(&self, loc: &[String]) -> bool {
         // The tree holds data only: a name starting with `_` is a module directive (`_type`, `_module`).
         loc.iter().any(|s| s.starts_with('_')) || matches_any(&self.fence, loc) || self.password(loc)
+    }
+
+    /// Whether `name` is a package of this machine's nixpkgs (`python3Packages.rich`: its set is), and
+    /// if not, why — with the names closest to it.
+    pub fn package(&self, name: &str) -> Result<()> {
+        let first = name.split('.').next().unwrap_or(name);
+        if self.packages.is_empty() || self.packages.contains(first) {
+            return Ok(());
+        }
+        let mut near: Vec<(usize, &String)> = self.packages.iter().map(|p| (distance(p, name), p)).filter(|(d, _)| *d <= 2).collect();
+        near.sort();
+        // Only the closest (btopp: btop, not htop too).
+        let closest = near.first().map(|(d, _)| *d);
+        let hint = match near.iter().filter(|(d, _)| Some(*d) == closest).take(3).map(|(_, p)| p.as_str()).collect::<Vec<_>>().as_slice() {
+            [] => String::new(),
+            n => format!(" (did you mean {}?)", n.join(", ")),
+        };
+        bail!("'{name}' is not a package in this machine's nixpkgs{hint}: `show packages <word>` searches them")
     }
 
     /// Whether `loc` is a person's password (settings-fence.nix, rule 3): never in the tree.
@@ -372,6 +395,18 @@ fn matches_any(pats: &[Vec<String>], loc: &[String]) -> bool {
         None => pat == s,
     };
     pats.iter().any(|pat| loc.len() >= pat.len() && pat.iter().zip(loc).all(|(p, s)| seg(p, s)))
+}
+
+/// The package names in `v`, a value of type `ty` (what `Tree::package` checks).
+pub fn packages_in<'v>(ty: &Type, v: &'v Value) -> Vec<&'v str> {
+    match (ty.kind(), v) {
+        ("package", Value::String(s)) => vec![s.as_str()],
+        ("listOf", Value::Array(items)) => ty.elem.as_deref().map(|e| items.iter().flat_map(|i| packages_in(e, i)).collect()).unwrap_or_default(),
+        ("nullOr", _) => ty.elem.as_deref().map(|e| packages_in(e, v)).unwrap_or_default(),
+        ("attrsOf" | "lazyAttrsOf", Value::Object(o)) => ty.elem.as_deref().map(|e| o.values().flat_map(|x| packages_in(e, x)).collect()).unwrap_or_default(),
+        ("either", _) => [ty.left.as_deref(), ty.right.as_deref()].into_iter().flatten().flat_map(|t| packages_in(t, v)).collect(),
+        _ => vec![],
+    }
 }
 
 /// Whether a setting takes its value right here (rather than holding settings below it): everything

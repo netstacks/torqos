@@ -89,6 +89,7 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
                 if verb == "edit" {
                     c.retain(|x| x.word != "|");
                 }
+                let packages = takes_packages(k, &path);
                 // Where an entry is named: the ones the configuration has, first.
                 if c.iter().any(|x| x.word == "<name>") {
                     let at_loc = k.tree.locate(&path).map(|l| l.0).unwrap_or(path.clone());
@@ -97,6 +98,11 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
                     out.extend(names.into_iter().map(|n| Choice::new(&n, "In the configuration")));
                 }
                 out.extend(c);
+                // Where a package is named: this machine's nixpkgs, by name, after what it is (`?`
+                // shows the first; the word typed narrows them).
+                if packages {
+                    out.extend(k.tree.packages.iter().map(|p| Choice::new(p, "")));
+                }
             }
         }
     }
@@ -125,6 +131,18 @@ fn complete(k: &Know, at: &At, op: &crate::syntax::Op) -> bool {
 
 /// After a `|` in a `show`: the filters (filter.rs), which work on any show's output and, once one is
 /// used, are the only pipes left. Their own options are theirs (`grep --help`).
+/// Whether the setting at `path` takes packages: one of TorqOS's software lists, or a NixOS setting
+/// of a package type (a package, or a list of them).
+fn takes_packages(k: &Know, path: &[String]) -> bool {
+    if let Some(h) = crate::whole::hand_words(path) {
+        return k.schema.resolve_in(&h, None).is_ok_and(|t| k.schema.nodes.get(&t.node).and_then(|n| n.ty.as_deref()) == Some("package"));
+    }
+    k.tree.resolve(path).is_ok_and(|r| {
+        let elem = |t: &crate::nixos::Type| t.name == "package";
+        elem(r.ty) || r.ty.elem.as_deref().is_some_and(elem)
+    })
+}
+
 /// What a line is read with: the hand-made schema, and NixOS's tree.
 pub struct Know<'a> {
     pub schema: &'a Schema,
@@ -614,6 +632,21 @@ mod tests {
         assert!(checked > 60, "the walk reached {checked} lines");
     }
 
+    /// Where a package is named, `?` offers this machine's nixpkgs by name, and the word typed
+    /// narrows them; `set` refuses a name it does not have, saying the closest.
+    #[test]
+    fn package_names_are_offered_and_checked() {
+        let s = schema();
+        let names = |line: &str, partial: &str| words_of(&choices(&s, Mode::Configuration, &w(line), partial)).into_iter().map(String::from).collect::<Vec<_>>();
+        assert_eq!(names("set system packages", "bt"), ["<package>", "btop"]);
+        assert_eq!(names("set environment systemPackages", "h"), ["<package>", "hello", "htop"]);
+        assert!(names("set users users dev packages", "").contains(&"ripgrep".to_string()));
+        let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
+        let e = format!("{:#}", whole.set(&mut crate::whole::Data::default(), &w("system packages btopp")).unwrap_err());
+        assert_eq!(e, "'btopp' is not a package in this machine's nixpkgs (did you mean btop?): `show packages <word>` searches them");
+        assert!(whole.set(&mut crate::whole::Data::default(), &w("system packages python3Packages.rich")).is_ok(), "in a set nixpkgs has");
+    }
+
     /// A configuration number: `?` lists the configurations themselves, newest first.
     #[test]
     fn rollback_lists_the_configurations() {
@@ -664,9 +697,9 @@ mod tests {
         assert!(narrow.lines().all(|l| crate::ui::width(l) <= 30), "{narrow}");
         // The old name, as its NixOS path.
         for line in ["set system packages", "set environment systemPackages"] {
-            assert_eq!(words_of(&choices(&s, Mode::Configuration, &w(line), "")), ["<package>"], "{line}");
+            assert_eq!(words_of(&choices(&s, Mode::Configuration, &w(line), ""))[0], "<package>", "{line}");
         }
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set system packages"), "b")), ["<package>"], "while typing a name");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set system packages"), "b")), ["<package>", "btop"], "while typing a name");
     }
 
     #[test]

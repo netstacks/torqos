@@ -687,5 +687,17 @@
       "*",
       "passwordFile"
     ]
+  ],
+  "packages": [
+    "btop",
+    "curl",
+    "git",
+    "hello",
+    "htop",
+    "jq",
+    "nginx",
+    "python3Packages",
+    "ripgrep",
+    "vim"
   ]
 }

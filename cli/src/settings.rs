@@ -151,6 +151,9 @@ pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     }
     // A value that is not one: said with what the setting is (its help often says the form).
     let new = crate::nixos::value(r.ty, &r.values).map_err(|e| anyhow::anyhow!("{}: {e:#}{}", r.loc.join(" "), crate::complete::about(r.help)))?;
+    for p in crate::nixos::packages_in(r.ty, &new) {
+        tree.package(p).with_context(|| r.loc.join(" "))?;
+    }
     if control_text(&mut r.loc.clone(), &new).is_some() {
         bail!("{}: a line break or another control character in a value: multi-line text goes in a config file", r.loc.join(" "));
     }
