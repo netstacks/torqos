@@ -623,6 +623,31 @@
         }
       },
       "help": "Specifies the hashed password for the user."
+    },
+    {
+      "loc": [
+        "services",
+        "openssh",
+        "settings"
+      ],
+      "free": {
+        "name": "nullOr",
+        "elem": {
+          "name": "either",
+          "left": {
+            "name": "bool"
+          },
+          "right": {
+            "name": "either",
+            "left": {
+              "name": "int"
+            },
+            "right": {
+              "name": "str"
+            }
+          }
+        }
+      }
     }
   ],
   "passwords": [

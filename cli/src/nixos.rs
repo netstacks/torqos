@@ -118,12 +118,16 @@ fn is_str(k: &str) -> bool {
     matches!(k, "str" | "nonEmptyStr" | "singleLineStr" | "separatedString" | "strMatching" | "lines" | "commas" | "envVar" | "passwdEntry")
 }
 
+/// One entry of the schema: a setting (its type and help), or a section that takes any key (`free`:
+/// the type each key's value has — RFC 42's `settings`).
 #[derive(Debug, Deserialize)]
 struct Entry {
     loc: Vec<String>,
     #[serde(rename = "type")]
-    ty: Type,
+    ty: Option<Type>,
+    #[serde(default)]
     help: String,
+    free: Option<Type>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +148,9 @@ struct File {
 pub struct Node {
     pub setting: Option<(Type, String)>,
     pub children: BTreeMap<String, Node>,
+    /// A section that takes any key besides its own (NixOS passes them on as written): what each
+    /// such key is.
+    pub free: Option<Box<Node>>,
 }
 
 /// Where words lead in the tree.
@@ -178,7 +185,13 @@ impl Tree {
             for w in &e.loc {
                 n = n.children.entry(w.clone()).or_default();
             }
-            n.setting = Some((e.ty, e.help));
+            if let Some(ty) = e.ty {
+                n.setting = Some((ty, e.help));
+            }
+            if let Some(free) = e.free {
+                let help = "A key of its own: NixOS passes it on to the program as it is written".to_string();
+                n.free = Some(Box::new(Node { setting: Some((free, help)), ..Node::default() }));
+            }
         }
         Ok(Tree { root, fence: f.fence, passwords: f.passwords })
     }
@@ -284,14 +297,19 @@ impl Tree {
                 };
             }
         }
-        w.node
+        let mut out: Vec<(String, String)> = w
+            .node
             .children
             .iter()
             .map(|(name, c)| {
                 let help = c.setting.as_ref().map(|(_, h)| h.clone()).unwrap_or_else(|| section_help(c));
                 (name.clone(), help)
             })
-            .collect()
+            .collect();
+        if w.node.free.is_some() {
+            out.push(("<key>".into(), "Any other key: NixOS passes it on to the program as it is written".into()));
+        }
+        out
     }
 }
 
@@ -321,6 +339,10 @@ fn step<'a>(n: &'a Node, w: &str) -> Step<'a> {
     }
     if let Some(e) = n.children.get("<name>") {
         return if w == "<name>" { Step::None } else { Step::Entry(e) };
+    }
+    // A section that takes any key: a key of its own, never guessed at (as an entry's name).
+    if let Some(f) = &n.free {
+        return if w.starts_with('<') { Step::None } else { Step::Name(f, w.to_string()) };
     }
     let begins: Vec<(&String, &Node)> = n.children.iter().filter(|(k, _)| !w.is_empty() && k.starts_with(w)).collect();
     match begins.as_slice() {
@@ -560,6 +582,23 @@ mod tests {
 
     /// A setting's name abbreviates as command words do: a unique beginning is the name (stored as
     /// the name); several are named; an entry's name is never guessed at.
+    /// A section that takes any key (RFC 42's `settings`): a key of its own is a setting, as written,
+    /// with the section's type; the section's own settings come first; `?` says so.
+    #[test]
+    fn a_free_section_takes_any_key() {
+        let t = tree();
+        let w = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        let r = t.resolve(&w("services openssh settings ClientAliveInterval 60")).unwrap();
+        assert_eq!((r.loc.last().map(String::as_str), r.values.clone()), (Some("ClientAliveInterval"), w("60")));
+        assert_eq!(value(r.ty, &r.values).unwrap(), serde_json::json!(60), "the section's type: a number here");
+        assert_eq!(t.resolve(&w("services openssh settings LogLevel INFO")).unwrap().loc, w("services openssh settings LogLevel"), "its own first");
+        assert!(t.next(&w("services openssh settings")).iter().any(|(x, _)| x == "<key>"));
+        assert!(t.resolve(&w("services openssh settin ClientAliveInterval 60")).is_ok(), "the section itself still abbreviates");
+        // Inside it, names are exact: a beginning of one of its own is a key of its own, as written
+        // (`Port` must not become a declared `Ports`). Tab completes its own names.
+        assert_eq!(t.resolve(&w("services openssh settings LogLev x")).unwrap().loc.last().map(String::as_str), Some("LogLev"));
+    }
+
     #[test]
     fn names_abbreviate_entries_do_not() {
         let t = tree();

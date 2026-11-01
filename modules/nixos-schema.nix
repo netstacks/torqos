@@ -57,8 +57,17 @@ let
       subs = builtins.tryEval (opt.type.getSubOptions opt.loc);
       below = if visible == true && subs.success && subs.value != { } then walk subs.value else [ ];
       entry = { loc = lib.drop prefix opt.loc; type = typeOf 4 opt.type; help = help (opt.description or ""); };
+      # A section that takes any key (RFC 42's `settings`: a freeform type, attrsOf of what each key
+      # takes): where, in the tree, and the type of each key's value. Where entries are named (an
+      # attrsOf or listOf of submodules), at the entry.
+      free = builtins.tryEval (if subs.success then (subs.value._module.freeformType.value or null) else null);
+      at = opt.loc ++ (if builtins.elem (opt.type.name or "") [ "attrsOf" "lazyAttrsOf" ] then [ "<name>" ] else if (opt.type.name or "") == "listOf" then [ "*" ] else [ ]);
+      freeform =
+        if visible == true && free.success && free.value != null && builtins.elem (free.value.name or "") [ "attrsOf" "lazyAttrsOf" ] && free.value.nestedTypes ? elemType
+        then [ { loc = lib.drop prefix at; free = typeOf 4 free.value.nestedTypes.elemType; } ]
+        else [ ];
     in
-    (if shown then [ entry ] else [ ]) ++ below
+    (if shown then [ entry ] ++ freeform else [ ]) ++ below
   ) (lib.collect lib.isOption opts);
 in
 {
