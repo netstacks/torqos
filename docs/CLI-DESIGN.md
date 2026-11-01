@@ -386,6 +386,9 @@ The broker stays small; its additions for this model:
 ## The broker's JSON interface (ADR-014)
 
 `torq-broker --json <command>` prints exactly one JSON value on stdout; `log --json` one per line.
+torqcli itself has no `--json` (it is for people; programs use the broker's); `torqcli --verbose`
+(`-v`, before the command) prints an error with every cause and where the whole log of the last
+broker or Nix command is, instead of one line.
 These shapes are an interface: change them deliberately, with tests on both sides.
 
 | Command | stdout |

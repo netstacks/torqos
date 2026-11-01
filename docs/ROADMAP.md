@@ -20,7 +20,7 @@ In an ARM NixOS VM (UTM on the M4 Mac):
 Target and acceptance criteria: `docs/CLI-DESIGN.md`.
 
 **`torqcli`: the network-device model (ADR-016)** — replaces `torq pkg/service/update/log/undo/status`:
-- [ ] Broker: `propose --base`, `apply --confirm` (test activation, anchor), `confirm`, `expire-confirm`
+- [x] Broker: `propose --base`, `apply --confirm` (test activation, anchor), `confirm`, `expire-confirm`
       (transient timer, direct restore, boot check), pending-confirm interlock, `revert`, JSON-only
       user-tier files at `users/<name>/<leaf>.json`; VM tests. Done so far: `--base` (1c), `revert`
       (1d), user-tier JSON files, fixed settings + cleared environment for a root broker (1e),
@@ -30,8 +30,11 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       `nixosConfigurations.torq`. `system/host.json` (host-name, time-zone; 2b),
       `system/cli.json` + `users/<name>/cli.json` (CLI style, user tier; 2c), the schema (2d), with
       an evaluation test (`tests/tree.nix`).
-- [ ] Environment variables: their own design first (allow-list, per-user delivery, escaping,
-      never reaching root or the broker, secrets check) — review N2/N3.
+- [x] Environment variables: covered by the tree (S3, 2026-10-31): system-wide ones are NixOS's own
+      `environment variables <NAME> <value>`, system tier, shown and approved like any setting (the
+      fence keeps the broker's out; control characters are refused; no secrets: the repo is
+      world-readable, KNOWN-GAPS 6r); a person's own are theirs, in their home. No design of their own.
+      (Reopen if per-user variables delivered by TorqOS are wanted.)
 - [x] `torqcli` shell: operational + configuration modes, J style, pipes, `?`, Tab, history
       (3a–3d; a pasted block runs line by line).
 - [x] C style and `switch cli` (4a: one command model, both syntaxes, round-trip tested; edit
@@ -63,12 +66,15 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       descriptions, not diffs; one result line with the change number and how to undo it.
 - [x] Quiet progress: phase + elapsed time; full log to `~/.local/state/torq/last.log`, shown
       on failure.
-- [ ] Errors say what, why and what to do; no `Caused by:`, git hints, hashes or store paths by
-      default — done; still to add: CLI `--verbose` and `--json` (only `--diff` exists).
+- [x] Errors say what, why and what to do; no `Caused by:`, git hints, hashes or store paths by
+      default; `torqcli --verbose` (`-v`) shows each cause and where the whole log is. No torqcli
+      `--json`: machine-readable output is the broker's (`torq-broker --json`, ADR-014), and the
+      configuration as data is `| display set` and `save`.
 - [x] Tier visible in every prompt: system changes marked and defaulting to No.
 - [x] Colour with meaning; plain text for `NO_COLOR` and non-terminals; fits 80 columns.
-- [ ] Snapshot tests of every command's output — done for log, status, rows and errors; still to
-      do: whole-command snapshots of pkg/service/update/undo (success, refusal, failure).
+- [x] Snapshot tests of every command's output: log, status, rows and errors; torqcli's session
+      tests assert whole outputs (show, compare, commit questions, refusals). The old
+      pkg/service/update/undo commands were retired (4g).
 - [x] New, small: "did you mean" for misspelled packages; `torq status --repair` to return a
       drifted machine to its ledgered system (asks first; ADR-012 still: never automatic).
 - [ ] Terminal look (prompt, colours) in torqcli itself.

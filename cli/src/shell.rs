@@ -534,10 +534,11 @@ pub fn main(args: &[String]) -> i32 {
         say(&format!("torqcli {}\n", env!("CARGO_PKG_VERSION")));
         return 0;
     }
+    let _ = VERBOSE.set(verbose_flag(args));
     match run_shell(args) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {}", history::one_line(&format!("{e:#}"), 300));
+            eprintln!("error: {}", describe(&e));
             1
         }
     }
@@ -555,7 +556,45 @@ enum Invocation {
     Command(Vec<String>),
 }
 
-const USAGE: &str = "usage: torqcli [--style j|c] [-c \"<command>; <command>…\" | <command>]";
+const USAGE: &str = "usage: torqcli [--verbose] [--style j|c] [-c \"<command>; <command>…\" | <command>]";
+
+/// `--verbose`: errors in full (every cause, and where the whole log is) instead of one clear line.
+static VERBOSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether torqcli's own options (before the command: `-c …`, `--style …`) ask for `--verbose` — not
+/// a `-v` of the command (`show configuration | grep -v x`).
+fn verbose_flag(args: &[String]) -> bool {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-v" | "--verbose" => return true,
+            "-c" | "--style" => {
+                it.next();
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// An error as torqcli says it: one clear line; with `--verbose`, each cause on its own line, then
+/// the log the last broker or Nix command wrote (cleaned of anything that could fool a terminal).
+fn describe(e: &anyhow::Error) -> String {
+    if !VERBOSE.get().copied().unwrap_or(false) {
+        return history::one_line(&format!("{e:#}"), 300);
+    }
+    let mut out = String::new();
+    for (i, cause) in e.chain().enumerate() {
+        let text = history::clean(&cause.to_string());
+        if i == 0 { out.push_str(&text) } else { out.push_str(&format!("\n  because: {text}")) }
+    }
+    if let Ok(log) = run::log_path() {
+        if log.exists() {
+            out.push_str(&format!("\n  the whole log of the last broker or Nix command: {}", log.display()));
+        }
+    }
+    out
+}
 
 fn parse_args(args: &[String]) -> Result<(Invocation, Option<Style>)> {
     let usage = || anyhow::anyhow!(USAGE);
@@ -563,6 +602,8 @@ fn parse_args(args: &[String]) -> Result<(Invocation, Option<Style>)> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            // (Read before anything runs: see `describe`.)
+            "-v" | "--verbose" => {}
             "-c" if run == Invocation::Interactive => run = Invocation::Script(it.next().ok_or_else(usage)?.clone()),
             "--style" if style.is_none() => style = Some(Style::parse(it.next().ok_or_else(usage)?).ok_or_else(usage)?),
             "-h" | "--help" => return Err(usage()),
@@ -582,6 +623,14 @@ fn parse_args(args: &[String]) -> Result<(Invocation, Option<Style>)> {
         }
     }
     Ok((run, style))
+}
+
+#[cfg(test)]
+#[test]
+fn verbose_is_torqclis_own_option_only() {
+    let v = |s: &str| verbose_flag(&s.split(' ').map(String::from).collect::<Vec<_>>());
+    assert!(v("--verbose show system alarms") && v("-v -c configure") && v("--style c -v show") && v("-c configure -v"));
+    assert!(!v("show configuration | grep -v x") && !v("-c configure") && !v("show -v"));
 }
 
 #[cfg(test)]
@@ -630,7 +679,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
     let saved = if run == Invocation::Interactive { Some(Candidate::default_path()?) } else { None };
     let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who, style);
     let fail = |line: &str, e: anyhow::Error| {
-        eprintln!("error: {}: {}", history::one_line(line, 80), history::one_line(&format!("{e:#}"), 300));
+        eprintln!("error: {}: {}", history::one_line(line, 80), describe(&e));
         Ok(1)
     };
     match run {
@@ -745,7 +794,7 @@ fn run_line(s: &mut Session, line: &str) -> bool {
             true
         }
         Err(e) => {
-            println!("error: {}", history::one_line(&format!("{e:#}"), 300));
+            println!("error: {}", describe(&e));
             false
         }
     }
