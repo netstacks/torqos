@@ -287,15 +287,6 @@ impl Tree {
         at
     }
 
-    /// Whether the last of `words` names an entry of a set of named ones (`virtualHosts example.com`).
-    pub fn is_entry(&self, words: &[String]) -> bool {
-        let Some((last, parent)) = words.split_last() else { return false };
-        match self.walk(parent) {
-            Ok(w) if w.values.is_empty() => matches!(step(w.node, last), Step::Entry(_)),
-            _ => false,
-        }
-    }
-
     /// Where `words` lead, setting or not: the path as the tree names it, the setting there if it
     /// takes a value, and the words after it. `delete` names places as well as settings.
     pub fn locate(&self, words: &[String]) -> Result<(Vec<String>, Option<&Type>, Vec<String>)> {

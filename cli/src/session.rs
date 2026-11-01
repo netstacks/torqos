@@ -480,13 +480,9 @@ impl<'a> Session<'a> {
 
     /// Up one level: out of a list entry (its name and the list), else one word.
     fn up(&mut self) {
-        // Out of a named entry means out of its set too (`services httpd virtualHosts example.com` →
-        // `services httpd`), as on network devices: the entry and its set are one step.
-        let entry = self.edit.len() >= 2 && self.tree.is_entry(&self.edit);
+        // One level: a set of named entries is a level of its own (`… virtualHosts example.com` →
+        // `… virtualHosts`), as a network device's `interfaces` is above `ge-0/0/0`.
         self.edit.pop();
-        if entry {
-            self.edit.pop();
-        }
     }
 
     /// Out of configuration mode, saying if the candidate holds changes.
@@ -2976,7 +2972,9 @@ mod tests {
         assert_eq!(s.edit_path(), w("services httpd virtualHosts example.com"));
         assert_eq!(s.exec("show").unwrap(), "forceSSL true;\n");
         run(&mut s, &["up"]);
-        assert_eq!(s.edit_path(), w("services httpd"), "out of an entry and its set: one step");
+        assert_eq!(s.edit_path(), w("services httpd virtualHosts"), "one level: the set of entries is a level of its own");
+        run(&mut s, &["up"]);
+        assert_eq!(s.edit_path(), w("services httpd"));
         assert!(format!("{:#}", s.exec("edit enable").unwrap_err()).contains("a setting, not a place to go: `set enable <value>`"));
         run(&mut s, &["top", "edit system", "set time-zone UTC"]);
         // (Its NixOS place is `time`, not `system`: seen from the top.)
@@ -3140,15 +3138,16 @@ mod tests {
         assert!(format!("{:#}", run_err(&mut s, &["configure"], "load merge terminal")).contains("no terminal"));
     }
 
-    /// Out of a list entry is out of the list; a bare list is nowhere to stand; a command word cannot
-    /// name an entry (review of f705cc8).
+    /// Out of an entry is into its set, a place of its own (as a network device's `interfaces`); a
+    /// command word cannot name an entry (review of f705cc8).
     #[test]
-    fn up_leaves_a_list_entry_whole() {
+    fn up_goes_one_level_at_a_time() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "edit services httpd virtualHosts example.com", "up"]);
-        assert_eq!(s.edit_path(), w("services httpd"));
-        run(&mut s, &["up", "up"]);
+        assert_eq!(s.edit_path(), w("services httpd virtualHosts"));
+        assert!(s.exec("set example.org forceSSL true").is_ok(), "an entry, from its set");
+        run(&mut s, &["up", "up", "up"]);
         assert!(s.edit_path().is_empty());
         // `config` as an entry's name would be ambiguous (`<place> config <file>`); `all` is a name now.
         assert!(format!("{:#}", s.exec("set services httpd virtualHosts config forceSSL true").unwrap_err()).contains("keeps the word for a command"));
