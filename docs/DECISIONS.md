@@ -291,3 +291,15 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   configuration (warned at once, refused at `commit`), never line by line.
 - **Consequences:** `all` is no longer a reserved word (`config` still is). `show | compare` and
   `commit` remain where a person sees exactly what a delete takes before it happens.
+
+## ADR-023 — Updates as NixOS does them; no service for the project to run
+- **Context:** M2 planned a signed binary cache of every release so no machine ever compiles. The
+  owner wants no service to run for users, and protecting TorqOS's source by shipping only binaries
+  would not work anyway (built programs can be taken apart; a licence is what protects code).
+- **Decision:** Updates work as NixOS's do: almost everything (kernel, services, applications) comes
+  pre-built and signed from NixOS's own cache (cache.nixos.org); each machine builds TorqOS's own
+  few small pieces (torqcli, the broker, its modules) itself, in minutes. Releases are plain files on
+  a release page: the image and a checksum signed with a TorqOS release key (`ssh-keygen -Y`).
+- **Consequences:** Nothing for the project to host but release files. An update takes a few
+  minutes more than a pure download. A cache of TorqOS's own pieces can be added later without
+  changing machines' design (a public key in their configuration), if that ever matters.

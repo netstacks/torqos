@@ -81,9 +81,11 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       torqcli in colour (`show | compare`, `show configuration`, its prompt, errors, `?`; paint.rs).
 - [ ] Usability check: someone new to TorqOS installs, removes, undoes and reads the log unaided.
 
-### M2 — Install: TorqOS as a ready image, never compiled by its users
-Nobody compiles TorqOS: releases are built once (CI), shipped as images, updated from a signed
-binary cache. Ease of use first.
+### M2 — Install: TorqOS as a ready image
+Nobody has to build TorqOS to install it: a release is an image to download and boot. Updates work
+as NixOS's do (ADR-023): almost everything comes signed from NixOS's own binary cache; the machine
+builds TorqOS's few small pieces itself, in minutes — no service for the project to run. Ease of use
+first.
 
 - [ ] **qcow2 image** (aarch64 first, testable here; then x86_64): download, boot in any VM (UTM,
       QEMU, Proxmox), log in. The config repo and ledger are created on first boot.
@@ -98,8 +100,8 @@ binary cache. Ease of use first.
 - [ ] **Releases** (`v0.1.0`, …) at one URL machines fetch from; `request system update` moves to
       the newest one. (The repo is private: where releases are published is decided before any
       machine outside this VM needs updates.)
-- [ ] **Signed binary cache** of every release, so an update downloads instead of compiling
-      (only the machine's own small config files are built locally).
+- [ ] **Downloads checked:** each image published with a checksum signed by a TorqOS release key
+      (plain files on the release page; checked with `ssh-keygen -Y verify`, nothing to install).
 - [ ] **ISO installer** for real hardware: the same image and first-boot setup, plus disk choice.
 - [ ] **VM tests:** the image boots on a blank VM, first-boot setup, a commit, a rollback, an update.
 - [ ] **Designs to settle first** (audits of 2026-10-31; KNOWN-GAPS 6r): where first-boot passwords
