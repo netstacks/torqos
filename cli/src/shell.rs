@@ -844,14 +844,28 @@ fn paged(text: &str) {
             return;
         }
         let shown: usize = lines[..next].iter().map(|l| height(l)).sum();
-        say(&format!("---(more {}%)---", shown * 100 / total));
-        let key = key();
-        say("\r\x1b[K");
-        match key {
-            Some(b' ' | b'f') => room = rows - 1,
-            Some(b'\r' | b'\n' | b'j') => room = 1,
-            Some(b'n' | b'N') => return say(&lines[next..].concat()),
-            _ => return,
+        let more = format!("---(more {}%)---", shown * 100 / total);
+        say(&more);
+        // A key that means nothing here is not a reason to lose the rest: asked again (`h`: the keys).
+        loop {
+            let key = key();
+            say("\r\x1b[K");
+            match key {
+                Some(b' ' | b'f') => room = rows - 1,
+                Some(b'\r' | b'\n' | b'j') => room = 1,
+                Some(b'n' | b'N') => return say(&lines[next..].concat()),
+                // q, Ctrl-C (it reaches here as a key), the end of input: stop.
+                Some(b'q' | b'Q' | 3) | None => return,
+                Some(b'h' | b'H' | b'?') => {
+                    say(&format!("Space: next page · Enter: one line · n: the rest · q: stop  {more}"));
+                    continue;
+                }
+                Some(_) => {
+                    say(&more);
+                    continue;
+                }
+            }
+            break;
         }
     }
 }
@@ -1138,7 +1152,8 @@ mod editor {
         // already, so they are one batch (below), and none is lost (rustyline's buffer-redux).
         let config = rustyline::Config::builder()
             .completion_type(rustyline::CompletionType::List)
-            .auto_add_history(true)
+            // (Added by hand: a line of only spaces is not one to come back to.)
+            .auto_add_history(false)
             .bracketed_paste(false)
             .build();
         let mut ed: rustyline::Editor<Help, rustyline::history::DefaultHistory> = rustyline::Editor::with_config(config)?;
@@ -1161,6 +1176,9 @@ mod editor {
                 // paste unseen. (No timing decides that; timing only tells which lines came before
                 // a question: those still waiting when it was asked.)
                 Ok(text) => {
+                    if !text.trim().is_empty() {
+                        let _ = ed.add_history_entry(text.as_str());
+                    }
                     // Typed, not pasted: the prompt waited for it (a paste's later lines come at once).
                     let typed = asked.elapsed() >= WAITING;
                     if typed {
@@ -1205,12 +1223,15 @@ mod editor {
                 Err(ReadlineError::Interrupted) => continue,
                 // Ctrl-D: as `exit` from wherever it is, out of configuration mode (saying what is
                 // kept) and out of torqcli.
+                // Ctrl-D: out of configuration mode (as on a network device), or, from operational
+                // mode, out of torqcli — each as its `exit` is, saying what is kept.
                 Err(ReadlineError::Eof) => {
                     println!();
-                    let way_out = if s.mode == Mode::Configuration { vec!["exit configuration-mode", "exit"] } else { vec!["exit"] };
-                    for line in way_out {
-                        run_line(s, line, false);
+                    if s.mode == Mode::Configuration {
+                        run_line(s, "exit configuration-mode", false);
+                        continue;
                     }
+                    run_line(s, "exit", false);
                     return Ok(0);
                 }
                 Err(e) => return Err(e.into()),
