@@ -377,6 +377,8 @@ The broker stays small; its additions for this model:
   its leaf's shape (`packages.json`: a list of at most 256 names; `cli.json`: exactly
   `{"style": "j"|"c"}`). Evaluation rejects unknown files and symlinks under `users/` and
   names that are not normal users.
+- The broker builds the commit, never the working tree: `{flake}` in its commands is
+  `git+file://<repo>?rev=<commit>` (H4 of the second audit, 2026-10-31).
 - The configuration the broker builds is always `nixosConfigurations.torq`, never derived from the
   host name (a VM test changes the host name, then commits again).
 - The single-change undo is renamed `revert <seq>`, so "rollback" means one thing.

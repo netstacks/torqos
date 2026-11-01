@@ -35,7 +35,7 @@ pub struct Broker {
     pub repo: Repo,
     pub ledger: Ledger,
     state_dir: PathBuf,
-    /// Shell command run after each commit. `{repo}` is replaced with the repo path.
+    /// Shell command run after each commit: `{flake}` (the config repo at the commit), `{repo}` (its path).
     rebuild_cmd: String,
     /// The link to the running system (`/run/current-system`), recorded after every rebuild.
     current_system: PathBuf,
@@ -541,7 +541,7 @@ impl Broker {
         if switch_running() {
             bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then repair");
         }
-        let rebuilt = self.rebuild(&lock).is_ok();
+        let rebuilt = self.rebuild(&lock, &head).is_ok();
         // A switch sets the running system and the next boot alike; if they differ afterwards,
         // something else changed one of them, and this was not a repair.
         // A switch started meanwhile would set both alike, so look for one too; and a profile that
@@ -924,8 +924,30 @@ impl Broker {
         })
     }
 
-    fn rebuild(&self, lock: &Lock) -> Result<()> {
-        self.run_shell(lock, "rebuild", &self.rebuild_cmd.replace("{repo}", &self.repo.root().to_string_lossy()))
+    /// Rebuild and switch to `rev`: the commit the caller made or restored, given rather than read
+    /// again from HEAD, so not even an outside commit in between could be built in its place.
+    fn rebuild(&self, lock: &Lock, rev: &str) -> Result<()> {
+        let mut cmd = self.rebuild_cmd.replace("{repo}", &self.repo.root().to_string_lossy());
+        if cmd.contains("{flake}") {
+            cmd = cmd.replace("{flake}", &shell_quote(&self.flake_at(rev)?));
+        }
+        self.run_shell(lock, "rebuild", &cmd)
+    }
+
+    /// The configuration to build: the config repo at commit `rev` (`{flake}`), not its working tree —
+    /// so what is built is exactly a commit the ledger names, by construction rather than by "only
+    /// the broker writes there" (KNOWN-GAPS 5; second audit, H4).
+    fn flake_at(&self, rev: &str) -> Result<String> {
+        let root = self.repo.root().to_string_lossy();
+        // A URL is built from it: an absolute path of plain characters only, a full commit id.
+        let plain = root.starts_with('/') && root.chars().all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c));
+        if !plain {
+            bail!("the config repo's path {root} is not an absolute path of plain characters (needed to build it by commit)");
+        }
+        if rev.len() != 40 || !rev.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            bail!("not a commit id to build: {rev:?}");
+        }
+        Ok(format!("git+file://{root}?rev={rev}"))
     }
 
     /// Run one of the configured commands with its placeholders replaced by shell-quoted values.
@@ -979,7 +1001,7 @@ impl Broker {
     /// restore rebuild succeeded.
     fn restore(&self, before: &str, lock: &Lock) -> Result<bool> {
         self.repo.hard_reset(before)?;
-        Ok(self.rebuild(lock).is_ok())
+        Ok(self.rebuild(lock, before).is_ok())
     }
 
     fn failure_reason(what: &str, before: &str, restored: bool) -> String {
@@ -1114,7 +1136,7 @@ impl Broker {
         // next operation or by the timer.
         let activated = match (confirm, &anchor_system) {
             (Some(minutes), Some(anchor)) => self
-                .build_system(&lock)
+                .build_system(&lock, &commit)
                 .and_then(|system| {
                     let deadline = self.schedule_rollback(&lock, next_seq, minutes)?;
                     self.run_command(&lock, "activation", &self.activate_cmd, &[("system", &system)])?;
@@ -1131,7 +1153,7 @@ impl Broker {
                     "boot_id": self.boot_id(),
                 })))
                 .map_err(|e| (e, Some(anchor))),
-            _ => self.rebuild(&lock).map(|()| None).map_err(|e| (e, None)),
+            _ => self.rebuild(&lock, &commit).map(|()| None).map_err(|e| (e, None)),
         };
         let confirm_record = match activated {
             Ok(c) => c,
@@ -1176,9 +1198,10 @@ impl Broker {
     /// Build the committed config without activating it; returns the system's store path (the last
     /// line the build command prints). It stays a GC root (`state/confirm-system`) until the change
     /// settles: a garbage collection between build and activation must not delete it.
-    fn build_system(&self, lock: &Lock) -> Result<String> {
+    fn build_system(&self, lock: &Lock, rev: &str) -> Result<String> {
         let link = self.build_link();
-        let vars = [("repo", &*self.repo.root().to_string_lossy()), ("link", &*link.to_string_lossy())];
+        let flake = if self.build_cmd.contains("{flake}") { self.flake_at(rev)? } else { String::new() };
+        let vars = [("repo", &*self.repo.root().to_string_lossy()), ("flake", flake.as_str()), ("link", &*link.to_string_lossy())];
         let out = self.run_command_output(lock, "build", &self.build_cmd, &vars)?;
         let system = out.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string();
         if !system.starts_with('/') {
@@ -1462,7 +1485,7 @@ impl Broker {
         let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg))?;
         pending.commit = Some(new_commit.clone());
         self.write_pending(&pending)?;
-        if let Err(e) = self.rebuild(&lock) {
+        if let Err(e) = self.rebuild(&lock, &new_commit) {
             let restored = self.restore(&before, &lock)?;
             self.ledger.append(NewEntry {
                 actor: "broker".into(),

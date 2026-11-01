@@ -36,10 +36,11 @@ in
     rebuildCommand = lib.mkOption {
       type = lib.types.str;
       # --no-update-lock-file: a flake.lock that does not match flake.nix fails, never re-locked as root.
-      default = "nixos-rebuild switch --no-update-lock-file --flake {repo}#${cfg.configName}";
-      defaultText = lib.literalExpression ''"nixos-rebuild switch --no-update-lock-file --flake {repo}#''${config.torq.broker.configName}"'';
+      default = "nixos-rebuild switch --no-update-lock-file --flake {flake}#${cfg.configName}";
+      defaultText = lib.literalExpression ''"nixos-rebuild switch --no-update-lock-file --flake {flake}#''${config.torq.broker.configName}"'';
       description = ''
-        What the broker runs after each commit; `{repo}` is replaced with the config repo's path.
+        What the broker runs after each commit: `{flake}` is the config repo at the commit just made
+        (`git+file://…?rev=…`: that commit, never the working tree), `{repo}` its path.
         Part of the broker's fixed settings (/etc/torq/broker.json): a root broker refuses any other
         command from its caller. Tests set it to `true`.
       '';
@@ -48,9 +49,9 @@ in
     # broker/src/config.rs for what each does and its placeholders.
     buildCommand = lib.mkOption {
       type = lib.types.str;
-      default = "nix build --no-update-lock-file --out-link {link} --print-out-paths {repo}#nixosConfigurations.${cfg.configName}.config.system.build.toplevel";
+      default = "nix build --no-update-lock-file --out-link {link} --print-out-paths {flake}#nixosConfigurations.${cfg.configName}.config.system.build.toplevel";
       defaultText = lib.literalExpression
-        ''"nix build --no-update-lock-file --out-link {link} --print-out-paths {repo}#nixosConfigurations.''${config.torq.broker.configName}.config.system.build.toplevel"'';
+        ''"nix build --no-update-lock-file --out-link {link} --print-out-paths {flake}#nixosConfigurations.''${config.torq.broker.configName}.config.system.build.toplevel"'';
       description = ''
         Build a commit confirmed's system without activating it; prints its store path. `{link}` is
         a GC root the broker removes once the change settles.

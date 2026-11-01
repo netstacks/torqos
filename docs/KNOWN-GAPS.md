@@ -38,11 +38,12 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    The second audit (H1, H5) is this item: the approver and the actor are whoever the caller says,
    so ledger attribution, and the agent's restrictions (which key on `--actor agent`), hold only
    for callers that do not lie. Not fixed by patches: the M3 socket takes identity from the kernel.
-   The broker under sudo is not sandboxed either (L3; the socket service will be).5. **`torq.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
-   is copied into the store on every evaluation. Prefer `git+file://`. Related: the rebuild
-   builds the config repo's *working tree*; building the exact ledgered commit
-   (`git+file://…?rev=<commit>`) would make "running system = ledgered commit" hold by
-   construction instead of by fsync discipline (second audit, H4). A `path:` source (the dev VM's)
+   The broker under sudo is not sandboxed either (L3; the socket service will be).
+5. **`torq.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
+   is copied into the store on every evaluation. Prefer `git+file://`. (Fixed for the config repo
+   itself: the broker builds the exact commit, `git+file://<repo>?rev=<commit>` (`{flake}`), never
+   its working tree, so "running system = ledgered commit" holds by construction; second audit,
+   H4.) A `path:` source (the dev VM's)
    is allowed only with `torq dev enable true` (second audit, M3).
 
 6a. **User tier is not bound to a user:** `users/alice/packages.json` is user tier whoever proposes

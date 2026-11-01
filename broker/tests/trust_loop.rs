@@ -1977,3 +1977,49 @@ fn an_agent_says_its_base_and_no_proposal_is_huge() {
     let err = format!("{:#}", b.propose(&big, "x", Actor::User, false).unwrap_err());
     assert!(err.contains("at most"), "{err}");
 }
+
+/// The second audit (H4): the rebuild built the config repo's working tree, so "the running system is
+/// the ledgered commit" held only because nothing else writes there. `{flake}` is the repo at the
+/// commit: exactly the one just made, or, after a failed rebuild, the one restored to.
+#[test]
+fn the_rebuild_builds_exactly_the_commit() {
+    let (dir, _b) = setup("true");
+    let seen = dir.path().join("flake");
+    let b = Broker::new(dir.path().join("config"), dir.path().join("state"), format!("echo {{flake}} >> '{}'", seen.display()));
+    let p = b.propose(&write_diff(dir.path(), "theme.diff", THEME), "x", Actor::User, false).unwrap();
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+    let commit = a.body.data["commit"].as_str().unwrap().to_string();
+    let root = b.repo.root().display().to_string();
+    assert_eq!(fs::read_to_string(&seen).unwrap(), format!("git+file://{root}?rev={commit}\n"));
+    // A failed rebuild: the restore builds the commit before, by its id too.
+    let before = b.repo.head().unwrap();
+    let failing = Broker::new(dir.path().join("config"), dir.path().join("state"), format!("echo {{flake}} >> '{}'; [ \"$(wc -l < '{}')\" -gt 2 ]", seen.display(), seen.display()));
+    let p = failing.propose(&write_diff(dir.path(), "nl.diff", NIGHT_LIGHT), "x", Actor::User, false).unwrap();
+    assert!(failing.apply(p.body.seq, "casey", false).is_err());
+    let lines: Vec<String> = fs::read_to_string(&seen).unwrap().lines().map(String::from).collect();
+    assert_eq!(lines.last().unwrap(), &format!("git+file://{root}?rev={before}"), "{lines:?}");
+}
+
+/// A commit confirmed's build too: `{flake}` is the config repo at the commit it builds.
+#[test]
+fn the_confirmed_build_builds_exactly_the_commit() {
+    let m = Confirmable::new_with("echo flake {flake} >> LOG && echo SYS2", ACTIVATE, SCHEDULE);
+    let seq = m.propose_theme();
+    let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    let commit = a.body.data["commit"].as_str().unwrap();
+    assert!(m.log().contains(&format!("flake git+file://{}?rev={commit}", m.b.repo.root().display())), "{}", m.log());
+}
+
+/// `{flake}` is a URL: built only from an absolute path of plain characters (and a full commit id).
+#[test]
+fn the_flake_needs_a_plain_absolute_repo_path() {
+    let base = tempfile::tempdir().unwrap();
+    let odd = base.path().join("con fig");
+    let (dir, repo) = config_dir();
+    fs::rename(&repo, &odd).unwrap();
+    let b = Broker::new(&odd, dir.path().join("state"), "echo {flake}");
+    b.init().unwrap();
+    let p = b.propose(&write_diff(dir.path(), "theme.diff", THEME), "x", Actor::User, false).unwrap();
+    let err = format!("{:#}", b.apply(p.body.seq, "casey", false).unwrap_err());
+    assert!(err.contains("not an absolute path of plain characters"), "{err}");
+}

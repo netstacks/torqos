@@ -15,6 +15,7 @@ pkgs.testers.runNixOSTest {
     # TORQ_REBUILD_CMD from its caller). What a real machine would run is checked below.
     torq.broker.rebuildCommand = "true";
     environment.etc."torq-test/default-rebuild".text = options.torq.broker.rebuildCommand.default;
+    environment.etc."torq-test/default-build".text = options.torq.broker.buildCommand.default;
     # commit confirmed: the "build" is a prebuilt specialisation (the VM cannot build systems), and
     # the boot default is the system profile only (the test VM has no boot loader). The activations —
     # into that system and back — the rollback timer, the old broker it runs, and the boot-time check
@@ -62,7 +63,9 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test ! -e /run/torq/drift")
     # The broker builds the fixed configuration `torq`, not one named after the host (this host is
     # "machine"): changing the host name must never leave rebuilds looking for a missing config.
-    machine.succeed("grep -qx 'nixos-rebuild switch --no-update-lock-file --flake {repo}#torq' /etc/torq-test/default-rebuild")
+    machine.succeed("grep -qx 'nixos-rebuild switch --no-update-lock-file --flake {flake}#torq' /etc/torq-test/default-rebuild")
+    # The build of a commit confirmed builds the commit too.
+    machine.succeed("grep -q -- '--print-out-paths {flake}#nixosConfigurations.torq' /etc/torq-test/default-build")
     machine.succeed("jq -e '.rebuild == \"true\" and .repo == \"/var/lib/torq/config\"' /etc/torq/broker.json")
     # Undo's tools come from fixed store paths, not only from the (changeable) running system.
     machine.succeed("jq -r .path /etc/torq/broker.json | tr : '\\n' | head -1 | grep -q '^/nix/store/.*nixos-rebuild'")

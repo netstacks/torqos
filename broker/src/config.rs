@@ -19,10 +19,10 @@ pub const FIXED: &str = "/etc/torq/broker.json";
 pub struct Settings {
     pub repo: PathBuf,
     pub state_dir: PathBuf,
-    /// Run after each commit; `{repo}` is replaced with the repo path.
+    /// Run after each commit; `{flake}` is the config repo at the commit, `{repo}` its path.
     pub rebuild: String,
     /// `commit confirmed`: build the config without activating it; prints the system's store path
-    /// (the last line of its output). `{repo}`.
+    /// (the last line of its output). `{flake}`, `{repo}`.
     pub build: String,
     /// Activate a system that already exists, without changing the boot default (a commit
     /// confirmed, and its rollback). `{system}`.
@@ -57,13 +57,15 @@ pub struct Requested {
 }
 
 /// The default commands (a TorqOS machine's come from the fixed file, with the configuration name).
-/// In `rebuild`, `{repo}` is replaced as is; in the others every placeholder is replaced with a
+/// `{flake}` is the config repo at the commit being built (`git+file://<repo>?rev=<commit>`, never its
+/// working tree), `{repo}` its path. In `rebuild`, `{repo}` is replaced as is; otherwise every
+/// placeholder (and `{flake}` everywhere) is replaced with a
 /// shell-quoted value (`'/var/lib/torq/config'#torq` is still one word): never quote them here.
 /// `--no-update-lock-file`: the committed flake.lock is what was approved; one that does not match
 /// flake.nix fails the build, never quietly re-locked (and fetched) as root.
-pub const REBUILD: &str = "nixos-rebuild switch --no-update-lock-file --flake {repo}";
+pub const REBUILD: &str = "nixos-rebuild switch --no-update-lock-file --flake {flake}#torq";
 /// `{link}`: a GC root for the built system until it settles (confirmed or rolled back).
-pub const BUILD: &str = "nix build --no-update-lock-file --out-link {link} --print-out-paths {repo}#nixosConfigurations.torq.config.system.build.toplevel";
+pub const BUILD: &str = "nix build --no-update-lock-file --out-link {link} --print-out-paths {flake}#nixosConfigurations.torq.config.system.build.toplevel";
 pub const ACTIVATE: &str = "{system}/bin/switch-to-configuration test";
 pub const BOOT: &str = "nix-env -p {profile} --set {system} && {system}/bin/switch-to-configuration boot";
 /// A transient wall-clock timer: it fires at the deadline even if the machine slept through it
@@ -228,7 +230,7 @@ mod tests {
         Settings {
             repo: "/var/lib/torq/config".into(),
             state_dir: "/var/lib/torq/state".into(),
-            rebuild: "nixos-rebuild switch --no-update-lock-file --flake {repo}#torq".into(),
+            rebuild: "nixos-rebuild switch --no-update-lock-file --flake {flake}#torq".into(),
             build: BUILD.into(),
             activate: ACTIVATE.into(),
             boot: BOOT.into(),

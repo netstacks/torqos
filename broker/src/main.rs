@@ -71,12 +71,12 @@ fn command_line() -> clap::Command {
         .arg(opt(
             "rebuild-cmd",
             "TORQ_REBUILD_CMD",
-            "Command run after each commit; `{repo}` is replaced with the repo path [default: nixos-rebuild switch --no-update-lock-file --flake {repo}].",
+            "Command run after each commit; `{flake}` is the config repo at the commit (git+file://…?rev=…), `{repo}` its path [default: nixos-rebuild switch --no-update-lock-file --flake {flake}#torq].",
         ))
         .arg(opt(
             "build-cmd",
             "TORQ_BUILD_CMD",
-            "`apply --confirm`: build the system and print its store path; `{repo}` [default: nix build --no-update-lock-file --out-link {link} --print-out-paths {repo}#nixosConfigurations.torq...].",
+            "`apply --confirm`: build the system and print its store path; `{flake}`, `{repo}` [default: nix build --no-update-lock-file --out-link {link} --print-out-paths {flake}#nixosConfigurations.torq...].",
         ))
         .arg(opt("activate-cmd", "TORQ_ACTIVATE_CMD", "Activate an existing system (rollback of an unconfirmed commit); `{system}`."))
         .arg(opt("boot-cmd", "TORQ_BOOT_CMD", "Make a system the boot default (`confirm`); `{system}`, `{profile}`."))
