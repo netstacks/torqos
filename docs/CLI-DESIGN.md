@@ -243,8 +243,17 @@ the broker builds it). A system change, or a change to another user's folder, sh
 comparison and needs a person's yes at a terminal; a change to your own folder does not (as
 `torq pkg --yes` did; KNOWN-GAPS #4). Every value reaches the broker as `--name=value`. If the broker's
 answer to a commit is lost, the ledger decides whether it was made (the candidate is discarded
-only if it was). On a terminal the shell has history, Tab and `?`; a pasted block of commands runs
-line by line.
+only if it was). On a terminal the shell has history, Tab and `?`.
+
+**Pasting** (how configurations travel): a paste arrives as typed — each line runs at its newline,
+none is lost however the terminal sends it (with or without bracketed paste; rustyline keeps what it
+read past one line). Lines that were already waiting when the shell asked for the next (a paste,
+keys typed while a command ran) are one **batch**: every line of it runs and each error names its
+line, as on a network device — but a `commit` after a failed line of the same batch is refused, so
+a commit never takes part of a paste. A question (`Commit? [y/N]`) takes only an answer typed after
+it: it ends the batch, and each line pasted after it is shown as not run. While a command runs,
+keys typed are not echoed over its output; they wait for the next line. Scripts (`-c`, piped
+input) still stop at their first error.
 
 ## Operational commands
 

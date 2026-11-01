@@ -253,22 +253,18 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"[edit system]\"')}", timeout=30)
         as_dev("tmux send-keys -t t top Enter")
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -v \"^$\" | tail -n 2 | head -n 1 | grep -qxF \"[edit]\"')}", timeout=30)
-        # A pasted block stops at its first error: nothing after a refused line runs.
+        # A paste runs every line as it arrives (no Enter after it), each error naming its line — but
+        # a commit after a failed line of the same paste is refused: it never commits part of one.
         as_dev("tmux send-keys -t t C-u")
-        as_dev("printf 'set system host-name my_laptop\\nset users dev packages vim\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")
-        as_dev("tmux send-keys -t t Enter")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"pasted lines after it were not run\"')}", timeout=30)
-        as_dev("tmux send-keys -t t 'show | compare' Enter")
-        machine.sleep(3)
-        after = as_dev(screen).split("were not run")[-1]
-        assert "show | compare" in after and "vim" not in after, after
-        # A pasted block of commands (bracketed paste) runs line by line.
-        as_dev("tmux send-keys -t t C-u")
-        as_dev("printf 'set users dev packages htop\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")
-        as_dev("tmux send-keys -t t Enter")
-        # (the compare's output, not the pasted command: both lines ran)
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"+   dev [ htop ];\"')}", timeout=30)
-        # Leave (one line at a time: keys typed before the next prompt are not kept).
+        as_dev("printf 'set system host-name my_laptop\\nset users dev packages vim\\ncommit\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qE \"^\\+   dev \\[.* vim \\];\"')}", timeout=30)
+        out = as_dev(screen)
+        assert "error: set system host-name my_laptop:" in out, out
+        assert "error: commit: not committed: 1 line of this paste failed" in out, out
+        # Without bracketed paste (a serial console, screen): the same, and no line is lost.
+        as_dev("printf 'set users dev packages htop\\nset users dev packages jq\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -t t")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qE \"^\\+   dev \\[.* vim htop .*\\];\"')}", timeout=30)
+        # Leave.
         last_line = screen + " | grep -v '^$' | tail -n 1"
         as_dev("tmux send-keys -t t exit Enter")
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(last_line + ' | grep -q \"dev@machine>\"')}", timeout=30)

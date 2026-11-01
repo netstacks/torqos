@@ -424,12 +424,29 @@ impl Machine for Real<'_> {
             return false;
         }
         // Only an answer typed after the question counts: anything already waiting (typed or pasted
-        // ahead, e.g. a "y" after "commit") is thrown away.
-        let _ = rustix::termios::tcflush(std::io::stdin(), rustix::termios::QueueSelector::IFlush);
+        // ahead, e.g. a "y" after "commit") is not run — a question ends a batch; the line editor
+        // names what it had already read (editor::run), and what the terminal still holds is said here.
+        ASKED.store(true, std::sync::atomic::Ordering::Relaxed);
+        let stdin = std::io::stdin();
+        if rustix::io::ioctl_fionread(&stdin).is_ok_and(|n| n > 0) {
+            let _ = rustix::termios::tcflush(&stdin, rustix::termios::QueueSelector::IFlush);
+            println!("(the rest of what was typed or pasted ahead is not run: a question takes only an answer typed after it)");
+        }
         print!("{}[y/N] ", crate::paint::paint(question, &crate::ui::Ui::for_terminal(false)));
         let _ = std::io::stdout().flush();
+        // The answer is seen as it is typed (the shell turns echo off while a command runs).
+        let was = rustix::termios::tcgetattr(&stdin).ok();
+        if let Some(t) = &was {
+            let mut echo = t.clone();
+            echo.local_modes.insert(rustix::termios::LocalModes::ECHO);
+            let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &echo);
+        }
         let mut answer = String::new();
-        std::io::stdin().lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
+        let yes = stdin.lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes");
+        if let Some(t) = &was {
+            let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, t);
+        }
+        yes
     }
     fn edit(&self, path: &str, text: &str) -> Result<Option<String>> {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -761,7 +778,7 @@ fn interactive(s: &mut Session) -> Result<i32> {
         }
         // Piped lines are a script: stop at the first error, so a later `commit` cannot commit
         // what an earlier failed line did not change.
-        if !run_line(s, line.trim()) {
+        if !run_line(s, line.trim(), true) {
             return Ok(1);
         }
         if s.done {
@@ -770,15 +787,20 @@ fn interactive(s: &mut Session) -> Result<i32> {
     }
 }
 
-/// Run one line; false if it failed (the error is printed).
-fn run_line(s: &mut Session, line: &str) -> bool {
+/// Set when a question was asked (`Real::ask`): it ends the batch the line was part of.
+static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Run one line; false if it failed (the error is printed — `named`: with the line, as when it was
+/// one of several pasted or piped).
+fn run_line(s: &mut Session, line: &str, named: bool) -> bool {
     match s.exec(line) {
         Ok(out) => {
             print_clean(&out);
             true
         }
         Err(e) => {
-            print!("{}", crate::ui::Ui::for_terminal(false).error(&describe(&e)));
+            let what = if named { format!("{}: {}", history::one_line(line, 80), describe(&e)) } else { describe(&e) };
+            print!("{}", crate::ui::Ui::for_terminal(false).error(&what));
             false
         }
     }
@@ -786,7 +808,8 @@ fn run_line(s: &mut Session, line: &str) -> bool {
 
 /// The line editor: rustyline, with Tab and `?` answered by complete.rs.
 mod editor {
-    use super::{prompt, run_line};
+    use super::{prompt, run_line, say_error, ASKED};
+    use std::sync::atomic::Ordering;
     use crate::complete;
     use crate::session::{words, Session};
     use anyhow::Result;
@@ -845,6 +868,33 @@ mod editor {
     impl Validator for Help {}
     impl rustyline::Helper for Help {}
 
+    /// A line that was read sooner than this after the prompt was waiting already: no person types a
+    /// whole command in a quarter of a second.
+    const WAITING: std::time::Duration = std::time::Duration::from_millis(250);
+
+    /// The terminal's echo off while a command runs, back on after: keys typed meanwhile are kept
+    /// (the line editor shows them on the next line) but not drawn over the command's output.
+    struct NoEcho(Option<rustix::termios::Termios>);
+    impl NoEcho {
+        fn new() -> Self {
+            let stdin = std::io::stdin();
+            let was = rustix::termios::tcgetattr(&stdin).ok();
+            if let Some(t) = &was {
+                let mut quiet = t.clone();
+                quiet.local_modes.remove(rustix::termios::LocalModes::ECHO);
+                let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &quiet);
+            }
+            NoEcho(was)
+        }
+    }
+    impl Drop for NoEcho {
+        fn drop(&mut self) {
+            if let Some(t) = &self.0 {
+                let _ = rustix::termios::tcsetattr(std::io::stdin(), rustix::termios::OptionalActions::Now, t);
+            }
+        }
+    }
+
     /// `?`: list what may come next, and redraw the line as it was.
     struct Question(Help);
     impl ConditionalEventHandler for Question {
@@ -874,30 +924,63 @@ mod editor {
         let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data() };
         let know = complete::Know { schema: s.schema.clone(), tree: s.tree.clone() };
         let help = Help { know: Arc::new(know), at: Arc::new(Mutex::new(at(s))) };
-        let config = rustyline::Config::builder().completion_type(rustyline::CompletionType::List).auto_add_history(true).build();
+        // Bracketed paste off: a paste arrives as typed, each line running at its newline as on a network
+        // device (not held as one block until another Enter); the lines after the first were waiting
+        // already, so they are one batch (below), and none is lost (rustyline's buffer-redux).
+        let config = rustyline::Config::builder()
+            .completion_type(rustyline::CompletionType::List)
+            .auto_add_history(true)
+            .bracketed_paste(false)
+            .build();
         let mut ed: rustyline::Editor<Help, rustyline::history::DefaultHistory> = rustyline::Editor::with_config(config)?;
         ed.set_helper(Some(help.clone()));
         ed.bind_sequence(KeyEvent::from('?'), EventHandler::Conditional(Box::new(Question(help.clone()))));
+        // Lines of the current batch that failed; whether a question ended it.
+        let (mut failed, mut after_question) = (0usize, false);
         loop {
             *help.at.lock().unwrap() = at(s);
             let (above, p) = prompt(s, user, host);
             if let Some(a) = above {
                 println!("{}", crate::paint::paint(&a, &crate::ui::Ui::for_terminal(false)));
             }
+            let asked = std::time::Instant::now();
             match ed.readline(&p) {
-                // A paste of several lines (bracketed paste) arrives as one: run each, in order, as
-                // if typed — pasting a block of `set` commands is how configurations travel.
+                // A batch: lines that were already waiting when the shell asked (a paste, keys typed
+                // ahead). As on a network device, every line of it runs, and each error names its
+                // line — but a `commit` after a failed line of the same batch is refused: a commit
+                // never takes part of a paste.
                 Ok(text) => {
-                    // Stop at the first error, as `-c` does: a later `commit` must not commit part
-                    // of what was pasted.
+                    let waiting = asked.elapsed() < WAITING;
+                    if !waiting {
+                        (failed, after_question) = (0, false);
+                    }
                     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-                    for (i, line) in lines.iter().enumerate() {
-                        if !run_line(s, line) {
-                            if i + 1 < lines.len() {
-                                println!("(the {} pasted lines after it were not run)", lines.len() - i - 1);
-                            }
-                            break;
+                    let named = lines.len() > 1 || waiting;
+                    let mut lines = lines.into_iter();
+                    while let Some(line) = lines.next() {
+                        // A question ended this batch: what came after it was pasted, not answered.
+                        if after_question {
+                            println!("(not run, from before the question: {})", crate::history::one_line(&crate::history::clean(line), 80));
+                            continue;
                         }
+                        if failed > 0 && s.commits(line) {
+                            say_error(&format!(
+                                "{line}: not committed: {failed} line{} of this paste failed (above); fix {}, look at `show | compare`, then commit",
+                                if failed == 1 { "" } else { "s" },
+                                if failed == 1 { "it" } else { "them" }
+                            ));
+                            failed += 1;
+                            continue;
+                        }
+                        // (Typing goes on while a command runs: keys wait, unseen, for the next line.)
+                        let ok = {
+                            let _quiet = NoEcho::new();
+                            run_line(s, line, named)
+                        };
+                        if !ok {
+                            failed += 1;
+                        }
+                        after_question = ASKED.swap(false, Ordering::Relaxed);
                         if s.done {
                             break;
                         }

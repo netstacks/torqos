@@ -248,6 +248,13 @@ impl<'a> Session<'a> {
         self.exec_words(&words(line)?)
     }
 
+    /// Whether `line` would commit (not `commit check`): the shell refuses it in a paste where an
+    /// earlier line failed, so a commit never takes part of a paste.
+    pub fn commits(&self, line: &str) -> bool {
+        let Ok(w) = words(line) else { return false };
+        matches!(syntax::parse_line(self.mode, &w), Ok((Op::Commit(o), _)) if !o.check)
+    }
+
     /// Run one command, already split into words (`torqcli <command>`: as the calling shell split
     /// them; a word that is exactly `|` is a pipe).
     pub fn exec_words(&mut self, w: &[String]) -> Result<String> {

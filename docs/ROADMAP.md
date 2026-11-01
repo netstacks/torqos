@@ -36,7 +36,7 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       world-readable, KNOWN-GAPS 6r); a person's own are theirs, in their home. No design of their own.
       (Reopen if per-user variables delivered by TorqOS are wanted.)
 - [x] `torqcli` shell: operational + configuration modes, J style, pipes, `?`, Tab, history
-      (3a–3d; a pasted block runs line by line).
+      (3a–3d; pasting: every line runs, a commit never takes part of a failed paste).
 - [x] One command model (4a: round-trip tested; edit / up / top; `delete … all`). The C style
       and `switch cli` were built here and removed by ADR-021 (2026-11-01): one syntax.
 - [x] Filters after any `show`: the real Linux tools (`grep`, `wc`, `head`, `tail`, `sort`, `uniq`,
