@@ -39,15 +39,13 @@ pub trait Machine {
     /// outside the config repo, ledgered without the hash.
     fn set_password(&self, user: &str) -> Result<String>;
     /// SSH as the configuration at `base` has it, and as it will with `files` changed — evaluated, so
-    /// every way of turning it on counts (the catalog, `services openssh`, its `sshd` alias, …).
+    /// every way of turning it on counts (`services openssh`, its `sshd` alias, a config file, the old
+    /// list).
     fn ssh(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)>;
     /// Turning SSH on: who it admits, and the keys that will be able to log in as them — read from
     /// the configuration at `base` with `files` changed, as it will be. One line per key (and a
     /// warning line above a key with options); none: nobody could log in.
     fn ssh_keys(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)>;
-    /// Whether sshd is on outside the catalog with password logins allowed (`services.openssh.enable`
-    /// in a .nix file): `show services` must not say SSH is off then.
-    fn ssh_outside(&self) -> Result<bool>;
     /// `show system ledger <count>`: the ledger's last entries, as a person reads them.
     fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String>;
     /// `request system revert <change>`: undo that one change (a new change forward), asked as a
@@ -89,8 +87,7 @@ pub struct Configuration {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Ssh {
     pub on: bool,
-    /// By TorqOS's catalog (`torq services enabled ssh`): keys only, only the owner.
-    pub catalog: bool,
+    /// Passwords as well as keys (`services openssh settings PasswordAuthentication`).
     pub passwords: bool,
 }
 
@@ -638,22 +635,39 @@ impl<'a> Session<'a> {
             }
             Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail), self.fit),
             Op::ShowServices => {
-                let active = self.configuration_of("HEAD")?.config;
-                let on: Vec<String> = match active.files.get("services.json") {
-                    Some(crate::tree::Data::List(l)) => l.clone(),
+                // What the configuration in effect turns on: NixOS's services (`services <name> enable`,
+                // `virtualisation <name> enable`), and what the old list still turns on.
+                let head = self.repo.head()?;
+                let active = self.configuration_of(&head)?;
+                let on_in_tree = self.whole().entries(&active).into_iter().filter_map(|(w, v)| match (w.as_slice(), &v) {
+                    ([top, name, enable], crate::tree::Val::One(t)) if (top == "services" || top == "virtualisation") && enable == "enable" && t == "true" => Some(vec![top.clone(), name.clone()]),
+                    _ => None,
+                });
+                let old: Vec<&str> = match active.config.files.get("services.json") {
+                    Some(crate::tree::Data::List(l)) => l.iter().filter_map(|n| crate::whole::OLD_SERVICES.iter().find(|(old, _)| old == n)).map(|(_, new)| *new).collect(),
                     _ => vec![],
                 };
-                let catalog = self.schema.nodes.get("services").and_then(|n| n.values.clone()).unwrap_or_default();
-                let width = catalog.keys().map(|k| k.len()).max().unwrap_or(0);
-                let mut out: String = catalog
-                    .iter()
-                    .map(|(name, what)| format!("{} {name:<width$}  {what}\n", if on.contains(name) { "on " } else { "off" }))
-                    .collect();
-                if !on.iter().any(|s| s == "ssh") && self.machine.ssh_outside()? {
-                    let what = "SSH is on, outside TorqOS's catalog (`services openssh` set in the tree or a config \
-                                file), with password logins allowed: `set torq services enabled ssh` makes it the catalog's \
-                                SSH — keys only, only the owner";
-                    out.push_str(&format!("{}\n", self.ui().line("! ", what)));
+                let from_old: Vec<Vec<String>> = old.iter().map(|new| new.split(' ').take(2).map(String::from).collect()).collect();
+                let on: std::collections::BTreeSet<Vec<String>> = on_in_tree.chain(from_old.iter().cloned()).collect();
+                if on.is_empty() {
+                    return Ok(format!("{}\n", self.ui().line("", "No services are turned on in the configuration: `set services <name> enable true` turns one on (`help <word>` finds it).")));
+                }
+                let fit = self.ui().width();
+                let mut rows = Vec::new();
+                for place in &on {
+                    let mut help = self.tree.resolve(&[place.clone(), vec!["enable".into()]].concat()).map(|r| r.help.to_string()).unwrap_or_default();
+                    // SSH: how TorqOS has it, as the configuration evaluates (modules/services.nix).
+                    if place[1] == "openssh" {
+                        let (_, ssh) = self.machine.ssh(&head, &[])?;
+                        help = if ssh.passwords { "SSH: passwords and keys, repeated wrong guesses blocked; root never logs in".into() } else { "SSH: keys only; root never logs in".into() };
+                    }
+                    rows.push((place.join(" "), help));
+                }
+                let mut out = format!("Services the configuration turns on:\n{}", crate::complete::table(&rows, fit));
+                if !old.is_empty() {
+                    let moves: Vec<String> = old.iter().map(|new| format!("`set {new}`")).collect();
+                    let how = format!("Some come from the old list of services (services.json). To move them: {}, `delete torq services enabled`, then commit.", moves.join(", "));
+                    out.push_str(&format!("{}\n", self.ui().line("! ", &how)));
                 }
                 Ok(out)
             }
@@ -1000,34 +1014,17 @@ impl<'a> Session<'a> {
         let mut shown: String = compare.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
         // The comparison as it is; the sentences around it fit the window (ui.rs).
         let ui = self.ui();
-        // The catalog's SSH admits its owner's keys only: with none, nobody could log in; with some,
-        // approving it approves exactly those (as the changed configuration has them).
-        // Whether this turns SSH on is read from the evaluated configurations, before and after: every
-        // way counts (the catalog, `services openssh`, its `sshd` alias, a config file). Only tree and Nix files can.
+        // SSH admits keys only unless passwords are allowed (modules/services.nix, however it is turned
+        // on): keys only and none, nobody could log in; with some, approving it approves exactly those
+        // (as the changed configuration has them). Whether this turns SSH on is read from the
+        // evaluated configurations, before and after: every way counts. Only tree and Nix files can.
         // Any system-tier change can (a software update too: TorqOS's own modules may change how SSH is
         // set up; audit of 2026-10-31) — only a person's own data files cannot.
         let ssh_relevant = files.iter().any(|(p, _)| self.schema.tier_of(p) != Some("user"));
         let (was, now) = if ssh_relevant { self.machine.ssh(&base, &files)? } else { Default::default() };
         if now.on && !was.on {
             let (owner, keys) = self.machine.ssh_keys(&base, &files)?;
-            if now.catalog {
-                if keys.is_empty() {
-                    bail!(
-                        "not committed: SSH here lets in {owner}'s keys only, and they have none, so nobody could \
-                         log in; add a public key to ~/.ssh/authorized_keys first"
-                    );
-                }
-                shown.push_str(&format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")));
-            } else {
-                // Turned on outside TorqOS's catalog: its rules (keys only, only the owner) are not there.
-                shown.push_str(&format!("{}\n", ui.line("", "SSH is turned on outside TorqOS's catalog: its rules (keys only, only the owner) do not apply.")));
-                if now.passwords {
-                    shown.push_str(&format!("{}\n", ui.line("! ", "Password logins are allowed (services openssh settings PasswordAuthentication).")));
-                }
-                if !keys.is_empty() {
-                    shown.push_str(&format!("Keys that will be able to log in as {owner}, among others:\n{}\n", keys.join("\n")));
-                }
-            }
+            shown.push_str(&ssh_turned_on(&owner, &keys, now.passwords, "committed", &ui)?);
         }
         // How the machine boots: a mistake shows only at the next restart (no `commit confirmed` timer runs
         // on a system that does not come up), so say so before anyone approves it.
@@ -1556,6 +1553,26 @@ fn settings_changed(compare: &str) -> usize {
     seen.len()
 }
 
+/// What turning SSH on lets in, said before a person approves it (a commit, a revert — `verb`):
+/// passwords as well as keys, or keys only (modules/services.nix) — and keys only with none: nobody
+/// could log in, so refused.
+pub fn ssh_turned_on(owner: &str, keys: &[String], passwords: bool, verb: &str, ui: &crate::ui::Ui) -> Result<String> {
+    let mut out = String::new();
+    if passwords {
+        out.push_str(&format!("{}\n", ui.line("! ", "SSH will accept passwords as well as keys (services openssh settings PasswordAuthentication): repeated wrong guesses are blocked.")));
+    } else if keys.is_empty() {
+        bail!(
+            "not {verb}: SSH here lets in {owner}'s keys only, and they have none, so nobody could log in; \
+             add a public key to ~/.ssh/authorized_keys first, or allow passwords too \
+             (`set services openssh settings PasswordAuthentication true`)"
+        );
+    }
+    if !keys.is_empty() {
+        out.push_str(&format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")));
+    }
+    Ok(out)
+}
+
 /// "1 change", "3 changes".
 fn changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
@@ -1618,8 +1635,6 @@ mod tests {
         ledger: Option<Vec<Configuration>>,
         /// Where the ledger says the repo is, if a test says (else: its newest configuration).
         ledger_at: Option<String>,
-        /// sshd on outside the catalog.
-        ssh_outside: bool,
         /// SSH before and after a commit, if a test says.
         ssh_state: Option<(Ssh, Ssh)>,
         /// The keys turning SSH on would admit, and what was asked about.
@@ -1679,11 +1694,9 @@ mod tests {
         fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String> {
             Ok(format!("ledger {count} fitting {fit:?}\n"))
         }
-        fn ssh_outside(&self) -> Result<bool> {
-            Ok(self.ssh_outside)
-        }
-        /// As the evaluator would: the catalog's `ssh`, or `services openssh|sshd enable true` in the
-        /// changed files (a test may say otherwise).
+        /// As the evaluator would: `services openssh|sshd enable true` in the changed files, or the old
+        /// list's `ssh`; passwords only where PasswordAuthentication is true (modules/services.nix: keys
+        /// only otherwise). A test may say otherwise.
         fn ssh(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)> {
             *self.ssh_calls.borrow_mut() += 1;
             if let Some(s) = self.ssh_state {
@@ -1692,9 +1705,11 @@ mod tests {
             let has = |path: &str, f: &dyn Fn(&serde_json::Value) -> bool| {
                 files.iter().any(|(p, c)| p == path && c.as_deref().and_then(|c| serde_json::from_str(c).ok()).is_some_and(|v| f(&v)))
             };
-            let catalog = has("services.json", &|v| v.as_array().is_some_and(|a| a.iter().any(|x| x == "ssh")));
-            let nixos = has("nixos/services.json", &|v| v.pointer("/openssh/enable") == Some(&serde_json::Value::Bool(true)) || v.pointer("/sshd/enable") == Some(&serde_json::Value::Bool(true)));
-            Ok((Ssh::default(), Ssh { on: catalog || nixos, catalog, passwords: nixos && !catalog }))
+            let yes = Some(&serde_json::Value::Bool(true));
+            let old = has("services.json", &|v| v.as_array().is_some_and(|a| a.iter().any(|x| x == "ssh")));
+            let nixos = has("nixos/services.json", &|v| v.pointer("/openssh/enable") == yes || v.pointer("/sshd/enable") == yes);
+            let passwords = has("nixos/services.json", &|v| v.pointer("/openssh/settings/PasswordAuthentication") == yes);
+            Ok((Ssh::default(), Ssh { on: old || nixos, passwords }))
         }
         fn ssh_keys(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)> {
             self.ssh_asked.borrow_mut().push(files.to_vec());
@@ -2079,15 +2094,18 @@ mod tests {
     fn turning_ssh_on_shows_the_keys_it_admits_and_needs_one() {
         let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set torq services enabled ssh"]);
+        run(&mut s, &["configure", "set services openssh enable true"]);
         let e = format!("{:#}", s.exec("commit").unwrap_err());
-        assert!(e.contains("lets in dev's keys only, and they have none"), "{e}");
+        assert!(e.contains("lets in dev's keys only, and they have none") && e.contains("PasswordAuthentication true"), "{e}");
         assert!(m.commits.borrow().is_empty() && m.asked.borrow().is_empty(), "nothing asked, nothing committed");
-        assert_eq!(m.ssh_asked.borrow()[0], vec![("services.json".to_string(), Some("[\n  \"ssh\"\n]\n".to_string()))], "as the change will have it");
+        assert_eq!(m.ssh_asked.borrow()[0][0].0, "nixos/services.json", "as the change will have it");
+        // The old list is never added to: it says what to set instead.
+        let e = format!("{:#}", s.exec("set torq services enabled ssh").unwrap_err());
+        assert!(e.contains("old list of services: `set services openssh enable true` turns it on"), "{e}");
 
         let m = Fake { answer: true, keys: vec!["    256 SHA256:abc dev@mac (ED25519)  (from /home/dev/.ssh/authorized_keys)".into()], ..Default::default() };
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set torq services enabled ssh"]);
+        run(&mut s, &["configure", "set services openssh enable true"]);
         assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
         let q = m.asked.borrow()[0].clone();
         assert!(q.contains("Keys that will be able to log in as dev:\n    256 SHA256:abc dev@mac (ED25519)  (from /home/dev/.ssh/authorized_keys)\n"), "{q}");
@@ -2104,13 +2122,15 @@ mod tests {
     }
 
     #[test]
-    fn show_services_says_when_ssh_runs_outside_the_catalog() {
-        let (d, m) = (repo(), Fake { ssh_outside: true, ..Default::default() });
-        let mut s = session(d.path(), None, &m);
-        let out = s.exec("show services").unwrap();
-        assert!(out.lines().any(|l| l.starts_with("off ssh")) && out.contains("! SSH is on, outside TorqOS's catalog") && out.contains("`set torq services enabled ssh`"), "{out}");
+    fn show_services_lists_what_the_configuration_turns_on() {
         let (d, m) = (repo(), Fake::default());
-        assert!(!session(d.path(), None, &m).exec("show services").unwrap().contains('!'));
+        assert!(session(d.path(), None, &m).exec("show services").unwrap().starts_with("No services are turned on"));
+        sh(d.path(), "mkdir -p nixos && printf '{\\n  \"openssh\": { \"enable\": true },\\n  \"printing\": { \"enable\": false }\\n}\\n' > nixos/services.json && printf '[\\n  \"podman\"\\n]\\n' > services.json && git add -A && git commit -qm on");
+        let out = session(d.path(), None, &m).exec("show services").unwrap();
+        assert!(out.starts_with("Services the configuration turns on:\n"), "{out}");
+        assert!(out.contains("  services openssh") && out.contains("SSH: keys only; root never logs in"), "{out}");
+        assert!(out.contains("  virtualisation podman") && !out.contains("printing"), "the old list's too; only what is on: {out}");
+        assert!(out.contains("! Some come from the old list of services (services.json). To move them: `set virtualisation podman enable true`"), "{out}");
     }
 
     /// The whole device: what it runs, and what is set outside the tree, as comments a file keeps.
@@ -2549,22 +2569,22 @@ mod tests {
 
     #[test]
     fn ssh_by_any_path_is_said_as_it_is() {
-        // `services openssh`, or NixOS's `sshd` alias for it: on, outside the catalog — the question
-        // says the catalog's rules do not apply, and that passwords are allowed.
+        // `services openssh`, or NixOS's `sshd` alias for it, with passwords allowed: TorqOS's protections
+        // apply either way, and the question says passwords are allowed (keys or not).
         for line in ["set services openssh enable true", "set services sshd enable true"] {
             let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
             let mut s = session(d.path(), None, &m);
-            run(&mut s, &["configure", line]);
+            run(&mut s, &["configure", line, "set services openssh settings PasswordAuthentication true"]);
             s.exec("commit").unwrap_or_else(|e| panic!("{line}: {e:#}"));
             let q = m.asked.borrow()[0].clone();
-            assert!(q.contains("outside TorqOS's catalog: its rules (keys only, only the owner) do not apply") && q.contains("! Password logins are allowed"), "{line}: {q}");
+            assert!(q.contains("! SSH will accept passwords as well as keys") && q.contains("repeated wrong guesses are blocked"), "{line}: {q}");
         }
         // What the evaluation says counts, not what the files look like: already on, nothing to say.
-        let on = Ssh { on: true, catalog: false, passwords: true };
+        let on = Ssh { on: true, passwords: true };
         let (d, m) = (repo(), Fake { answer: true, ssh_state: Some((on, on)), ..Default::default() });
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set services openssh ports [ 2222 ]", "commit"]);
-        assert!(!m.asked.borrow()[0].contains("SSH is turned on"), "{}", m.asked.borrow()[0]);
+        assert!(!m.asked.borrow()[0].contains("SSH will accept"), "{}", m.asked.borrow()[0]);
         // Any system-tier change is evaluated (a software update too: audit of 2026-10-31); only a
         // person's own data files, which cannot touch SSH, are not.
         let (d, m) = (repo_with_software(), Fake { answer: true, ssh_state: Some((Ssh::default(), on)), ..Default::default() });
@@ -3056,7 +3076,7 @@ mod tests {
         sh(d.path(), "echo '[\"ssh\"]' > services.json && git add -A && git commit -qm ssh");
         let mut s = session(d.path(), None, &m);
         let out = s.exec("show services").unwrap();
-        assert!(out.lines().any(|l| l.starts_with("on  ssh ")) && out.lines().any(|l| l.starts_with("off podman")), "{out}");
+        assert!(out.contains("  services openssh") && out.contains("To move them: `set services openssh enable true`, `delete torq services enabled`, then commit."), "{out}");
         assert_eq!(s.exec("show system alarms").unwrap(), "all well\n");
         assert_eq!(s.exec("show packages ripgrep").unwrap(), "searched ripgrep\n");
         assert_eq!(s.exec("request system repair").unwrap(), "repaired\n");

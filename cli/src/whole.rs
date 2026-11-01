@@ -23,8 +23,17 @@ pub const MAP: &[(&str, &str, bool)] = &[
     // Software: NixOS's own places, kept in TorqOS's files (a person's own: user tier).
     ("environment systemPackages", "system packages", true),
     ("users users <name> packages", "users <name> packages", true),
-    // Not an alias: NixOS has its own `services` (`services printing` is NixOS's and the catalog's).
+    // The old list of services (services.json): shown, and emptied, never added to (OLD_SERVICES).
     ("torq services enabled", "services", false),
+];
+
+/// The old list's names (services.json, before ADR-025), and the NixOS setting each is now
+/// (modules/services.nix maps the old list the same way).
+pub const OLD_SERVICES: &[(&str, &str)] = &[
+    ("ssh", "services openssh enable true"),
+    ("podman", "virtualisation podman enable true"),
+    ("tailscale", "services tailscale enable true"),
+    ("printing", "services printing enable true"),
 ];
 
 /// `words` with a prefix matching one side of MAP (0: NixOS, 1: hand-made) replaced by the other.
@@ -239,6 +248,10 @@ impl Whole<'_> {
             return Ok(());
         }
         if let Some(h) = self.hand(words, &d.config)? {
+            if let ["services", name, ..] = h.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+                let now = OLD_SERVICES.iter().find(|(old, _)| old == name).map_or("services <name> enable true", |(_, new)| new);
+                bail!("torq services enabled is the old list of services: `set {now}` turns it on (TorqOS's protections apply however it is turned on)");
+            }
             return self.schema.set(&mut d.config, &h);
         }
         settings::set(self.tree, &mut d.settings, words).map_err(|e| self.hint(words, e))
@@ -413,15 +426,14 @@ mod tests {
             "system packages vim",
             "virtualisation docker enable true",
             "networking firewall allowedTCPPorts [ 22 ]",
-            "torq services enabled ssh",
         ] {
             x.set(&mut d, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
-        assert_eq!(d.config.files.len(), 4, "host.json, the system's and the user's packages, services.json: {:?}", d.config.files.keys());
+        assert_eq!(d.config.files.len(), 3, "host.json, the system's and the user's packages: {:?}", d.config.files.keys());
         assert_eq!(settings::files(&d.settings).keys().collect::<Vec<_>>(), ["nixos/networking.json", "nixos/virtualisation.json"]);
         assert_eq!(
             x.show(&d, &[]).unwrap(),
-            "environment {\n    systemPackages [ vim ];\n}\nnetworking {\n    firewall {\n        allowedTCPPorts [ 22 ];\n    }\n    hostName laptop;\n}\ntime {\n    timeZone UTC;\n}\ntorq {\n    services {\n        enabled [ ssh ];\n    }\n}\nusers {\n    users {\n        dev {\n            packages [ htop ];\n        }\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
+            "environment {\n    systemPackages [ vim ];\n}\nnetworking {\n    firewall {\n        allowedTCPPorts [ 22 ];\n    }\n    hostName laptop;\n}\ntime {\n    timeZone UTC;\n}\nusers {\n    users {\n        dev {\n            packages [ htop ];\n        }\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
         );
         assert_eq!(x.show(&d, &w("networking hostName")).unwrap(), "hostName laptop;\n", "one setting");
         assert_eq!(x.show(&d, &w("system host-name")).unwrap(), "hostName laptop;\n", "by its old name too");

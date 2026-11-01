@@ -110,11 +110,7 @@ pub fn files(a: &Answers, template: &Path, image: &Path, source: &str, system: &
         bail!("TorqOS's template flake.nix does not name its platform once (`{platform}`)");
     }
     let flake = crate::software::with_source(&flake.replace(platform, &format!("system = \"{system}\";")), &format!("path:{source}"))?;
-    let passwords = matches!(a.remote, Remote::Password | Remote::Both);
-    let mut torq = json!({ "user": a.user });
-    if passwords {
-        torq["ssh"] = json!({ "passwords": true });
-    }
+    let torq = json!({ "user": a.user });
     let pretty = |v: serde_json::Value| format!("{}\n", serde_json::to_string_pretty(&v).unwrap_or_default()).into_bytes();
     let mut out: Vec<(String, Vec<u8>)> = vec![
         ("flake.lock".into(), read(image.join("flake.lock"))?),
@@ -124,8 +120,15 @@ pub fn files(a: &Answers, template: &Path, image: &Path, source: &str, system: &
         ("nixos/torq.json".into(), pretty(torq)),
         ("system/host.json".into(), pretty(json!({ "host-name": a.host, "time-zone": a.zone }))),
     ];
+    // Remote login: NixOS's own SSH (TorqOS's protections apply: modules/services.nix), with
+    // passwords allowed if that was the answer.
     if a.remote != Remote::No {
-        out.push(("services.json".into(), pretty(json!(["ssh"]))));
+        let passwords = matches!(a.remote, Remote::Password | Remote::Both);
+        let mut openssh = json!({ "enable": true });
+        if passwords {
+            openssh["settings"] = json!({ "PasswordAuthentication": true });
+        }
+        out.push(("nixos/services.json".into(), pretty(json!({ "openssh": openssh }))));
     }
     if let Some(key) = &a.key {
         // A public key is not a secret: the configuration declares whose keys log in.
@@ -356,17 +359,17 @@ mod tests {
         assert_eq!(crate::software::source_of(&flake), Some(format!("path:{src}")));
         assert!(!crate::software::writable_folder(&format!("path:{src}")), "a store path: any machine's");
         assert!(hash("correct horse").unwrap().starts_with("$6$rounds=200000$"), "slow to guess");
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&get("nixos/torq.json")).unwrap(), json!({ "user": "alice", "ssh": { "passwords": true } }));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&get("nixos/torq.json")).unwrap(), json!({ "user": "alice" }));
         assert_eq!(serde_json::from_str::<serde_json::Value>(&get("system/host.json")).unwrap(), json!({ "host-name": "web-01", "time-zone": "UTC" }));
-        assert_eq!(get("services.json").trim(), "[\n  \"ssh\"\n]");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&get("nixos/services.json")).unwrap(), json!({ "openssh": { "enable": true, "settings": { "PasswordAuthentication": true } } }));
         assert!(get("nixos/users.json").contains(key));
         assert_eq!(get("flake.lock"), "{\"lock\":1}\n");
         assert!(f.iter().all(|(_, b)| !String::from_utf8_lossy(b).contains("$6$")), "the password is never in the repo");
         // No remote login: no SSH at all; a key only: no passwords over SSH.
         let none = files(&answers(Remote::No, None), &template, image.path(), "/nix/store/abc-source", "aarch64-linux").unwrap();
-        assert!(none.iter().all(|(p, _)| p != "services.json" && p != "nixos/users.json"));
+        assert!(none.iter().all(|(p, _)| p != "nixos/services.json" && p != "nixos/users.json"));
         let keyed = files(&answers(Remote::Key, Some(key)), &template, image.path(), "/nix/store/abc-source", "aarch64-linux").unwrap();
-        let torq = &keyed.iter().find(|(p, _)| p == "nixos/torq.json").unwrap().1;
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(torq).unwrap(), json!({ "user": "alice" }));
+        let services = &keyed.iter().find(|(p, _)| p == "nixos/services.json").unwrap().1;
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(services).unwrap(), json!({ "openssh": { "enable": true } }), "keys only: NixOS's SSH, as TorqOS sets it up");
     }
 }

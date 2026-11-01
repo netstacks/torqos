@@ -88,25 +88,9 @@ impl Real<'_> {
             return Ok(String::new());
         }
         let (owner, keys) = self.ssh_keys(&head, &files)?;
-        if !then.catalog {
-            // Asked at the terminal: its sentences fit it (ui.rs).
-            let ui = crate::ui::Ui::plain_at(crate::ui::fit(crate::ui::columns(false)));
-            let mut out = format!("{}\n", ui.line("", "SSH is turned on outside TorqOS's catalog: its rules (keys only, only the owner) do not apply."));
-            if then.passwords {
-                out.push_str(&format!("{}\n", ui.line("! ", "Password logins are allowed (services openssh settings PasswordAuthentication).")));
-            }
-            if !keys.is_empty() {
-                out.push_str(&format!("Keys that will be able to log in as {owner}, among others:\n{}\n", keys.join("\n")));
-            }
-            return Ok(out);
-        }
-        if keys.is_empty() {
-            bail!(
-                "not reverted: this turns SSH back on, and SSH here lets in {owner}'s keys only — they have none, so nobody \
-                 could log in; add a public key to ~/.ssh/authorized_keys first"
-            );
-        }
-        Ok(format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")))
+        // Asked at the terminal: its sentences fit it (ui.rs).
+        let ui = crate::ui::Ui::plain_at(crate::ui::fit(crate::ui::columns(false)));
+        crate::session::ssh_turned_on(&owner, &keys, then.passwords, "reverted", &ui)
     }
 
 
@@ -344,27 +328,6 @@ impl Machine for Real<'_> {
         Ok((owner, rows))
     }
 
-    /// As `torq service list` did, of the active configuration as committed.
-    fn ssh_outside(&self) -> Result<bool> {
-        let head = Repo::new(&self.cli.repo).head()?;
-        let (_scratch, copy) = self.changed_copy(&head, &[])?;
-        let host = config_name(&copy)?;
-        let out = std::process::Command::new("nix")
-            .args(["eval", "--no-update-lock-file", "--json"])
-            .arg(format!("{}#nixosConfigurations.{host}.config", crate::flake_ref(&copy)))
-            .args([
-                "--apply",
-                "c: c.services.openssh.enable && !(builtins.elem \"ssh\" c.torq.services.enabled) \
-                 && c.services.openssh.settings.PasswordAuthentication != false",
-            ])
-            .output()
-            .context("running nix eval")?;
-        if !out.status.success() {
-            bail!("cannot read this machine's services: {}", history::one_line(&crate::last_error(&out.stderr), 200));
-        }
-        Ok(serde_json::from_slice::<bool>(&out.stdout)?)
-    }
-
     fn ssh(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)> {
         let state = |files: &[(String, Option<String>)]| -> Result<Ssh> {
             let (_scratch, copy) = self.changed_copy(base, files)?;
@@ -374,7 +337,7 @@ impl Machine for Real<'_> {
                 .arg(format!("{}#nixosConfigurations.{host}.config", crate::flake_ref(&copy)))
                 .args([
                     "--apply",
-                    "c: { on = c.services.openssh.enable; catalog = builtins.elem \"ssh\" c.torq.services.enabled; \
+                    "c: { on = c.services.openssh.enable; \
                      passwords = c.services.openssh.settings.PasswordAuthentication != false; }",
                 ])
                 .output()
@@ -383,7 +346,7 @@ impl Machine for Real<'_> {
                 bail!("cannot read the SSH settings: {}", history::one_line(&crate::last_error(&out.stderr), 200));
             }
             let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-            Ok(Ssh { on: v["on"] == true, catalog: v["catalog"] == true, passwords: v["passwords"] == true })
+            Ok(Ssh { on: v["on"] == true, passwords: v["passwords"] == true })
         };
         let _p = run::Progress::start("Reading the SSH settings");
         Ok((state(&[])?, state(files)?))

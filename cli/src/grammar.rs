@@ -228,7 +228,7 @@ static ROOTS: &[Node] = &[
 static SHOW: &[Node] = &[
     fixed("configuration", "The configuration in effect", In::Op).whole(show_active).pipes(Pipes::Views(CONFIGURATION_VIEWS)).then(&[node(Word::Path, "A part of it", In::Op).whole(show_active).pipes(Pipes::Views(CONFIGURATION_VIEWS))]),
     fixed("packages", "Search the software you can install", In::Op).then(&[node(Word::Terms, "Words to search for, in names and descriptions", In::Op).whole(|r| Ok(Op::ShowPackages { terms: r.terms.clone() })).pipes(Pipes::Filters)]),
-    fixed("services", "The services TorqOS offers, and which are on", In::Op).whole(|_| Ok(Op::ShowServices)).pipes(Pipes::Filters),
+    fixed("services", "The services the configuration turns on", In::Op).whole(|_| Ok(Op::ShowServices)).pipes(Pipes::Filters),
     fixed("system", "This machine", In::Op).then(SHOW_SYSTEM),
 ];
 
