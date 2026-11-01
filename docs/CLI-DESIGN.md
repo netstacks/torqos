@@ -424,5 +424,9 @@ arguments. **JSON-escaped is not terminal-safe**: the CLI neutralises every stri
 
 ## Related: the terminal itself
 
-The prompt and colours around the shell are stock NixOS today; a TorqOS look for torqcli itself
-(prompt, colours) is an open M1.5 item. There is no desktop (ADR-019).
+The login shell is TorqOS's (modules/shell.nix): zsh with oh-my-zsh, autosuggestions, syntax
+highlighting, fzf history search and the TorqOS prompt (modules/shell/torq.zsh-theme: who and
+where, the git branch, a warning when the machine is not as its history says, a marker when a
+candidate of yours is waiting; plain Unicode, no patched font). All defaults: `set programs zsh
+ohMyZsh theme <any oh-my-zsh theme>`, `set users defaultUserShell …`, a person's own ~/.zshrc, or
+`torq shell enable false`. There is no desktop (ADR-019).

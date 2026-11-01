@@ -212,6 +212,23 @@ pkgs.testers.runNixOSTest {
         out = machine.fail(dev_sh("torqcli configure 2>&1"))
         assert "torqcli -c" in out, out
 
+    with subtest("TorqOS's shell: zsh with oh-my-zsh and its prompt, for every user, at once"):
+        import shlex
+        def dev(cmd):
+            return machine.succeed(f"su - dev -c {shlex.quote(cmd)}")
+        machine.succeed("getent passwd dev | cut -d: -f7 | grep -q '/zsh$'")
+        dev("rm -f ~/.zshrc ~/.local/state/torq/candidate.json")
+        dev("tmux new-session -d -s z -x 120 -y 30 zsh")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote('tmux capture-pane -p -t z | grep -q ❯')}", timeout=60)
+        out = dev("tmux capture-pane -p -t z")
+        # No set-up questions for a new user; who and where, and nothing of TorqOS's to say.
+        assert "dev@machine" in out and "configuration function" not in out and "candidate" not in out, out
+        # A candidate waiting shows in the next prompt.
+        dev("mkdir -p ~/.local/state/torq && echo '{}' > ~/.local/state/torq/candidate.json")
+        dev("tmux send-keys -t z Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote('tmux capture-pane -p -t z | grep -q \"● candidate\"')}", timeout=30)
+        dev("rm -f ~/.local/state/torq/candidate.json; tmux kill-session -t z")
+
     with subtest("torqcli on a terminal: ? lists what may come next, Tab completes"):
         import shlex
         def as_dev(cmd, ok=True):

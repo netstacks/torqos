@@ -40,6 +40,7 @@ modules/               the distribution, as NixOS modules (torq.* options)
   security.nix         hardening (boot chain and TPM: later)
   desktop.nix          a desktop (niri), off by default since ADR-019; kept to bring back later
   broker.nix           the privileged change broker service + config repo
+  shell.nix            the login shell: zsh + oh-my-zsh and the TorqOS prompt (shell/torq.zsh-theme)
   ai.nix               local model runtime + agent service (a stub: the AI layers are later)
 hosts/
   dev-vm/              throwaway VM (`.#nixosConfigurations.dev-vm-{aarch64,x86_64}`)
