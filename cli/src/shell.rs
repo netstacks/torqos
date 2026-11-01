@@ -231,9 +231,9 @@ impl Machine for Real<'_> {
         Ok(out)
     }
 
-    fn search(&self, terms: &[String], fit: Option<usize>) -> Result<String> {
+    fn search(&self, terms: &[String], installed: &std::collections::BTreeSet<String>, fit: Option<usize>) -> Result<String> {
         if let Some(t) = terms.iter().find(|t| t.starts_with('-')) {
-            bail!("show packages available: '{t}' is not a search term");
+            bail!("'{t}' is not a word to search for (names and descriptions are searched)");
         }
         let log = run::start_log()?;
         let found = {
@@ -243,11 +243,22 @@ impl Machine for Real<'_> {
         if found.is_empty() {
             return Ok(format!("No package matches {}.\n", terms.join(" ")));
         }
-        // A table: name and version, then the description as a sentence beside them (ui.rs).
+        // A table: name and version, then the description as a sentence beside them (ui.rs); `*`: in
+        // the configuration already, as on a network device.
         let ui = crate::ui::Ui::plain_at(fit);
         let name = found.iter().map(|(n, _, _)| n.chars().count()).max().unwrap_or(0).min(30);
         let version = found.iter().map(|(_, v, _)| v.chars().count()).max().unwrap_or(0).min(16);
-        Ok(found.iter().map(|(n, v, d)| format!("{}\n", ui.line(&format!("{n:<name$}  {v:<version$}  "), d))).collect())
+        let mut out: String = found
+            .iter()
+            .map(|(n, v, d)| {
+                let mark = if installed.contains(n) { "* " } else { "  " };
+                format!("{}\n", ui.line(&format!("{mark}{n:<name$}  {v:<version$}  "), d))
+            })
+            .collect();
+        if found.iter().any(|(n, _, _)| installed.contains(n)) {
+            out.push_str("* installed by this configuration\n");
+        }
+        Ok(out)
     }
 
     /// Only when the report says a repair can fix what is wrong, and only

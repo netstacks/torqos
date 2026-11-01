@@ -32,7 +32,9 @@ pub trait Machine {
     /// `detail`, the broker's facts behind it (commits, store paths).
     fn alarms(&self, detail: bool, fit: Option<usize>) -> Result<String>;
     /// `show packages <term>…`.
-    fn search(&self, terms: &[String], fit: Option<usize>) -> Result<String>;
+    /// `show packages <words>`: nixpkgs searched, closest first; `installed` (the configuration's)
+    /// marked.
+    fn search(&self, terms: &[String], installed: &std::collections::BTreeSet<String>, fit: Option<usize>) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
     fn repair(&self) -> Result<String>;
     /// `request system password [<user>]`: a person types the new password; it is set and kept
@@ -669,7 +671,22 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowPackages { terms } => self.machine.search(&terms, self.fit),
+            Op::ShowPackages { terms } => {
+                // What the configuration in effect installs, for everyone or for anyone.
+                let head = self.repo.head()?;
+                let active = self.configuration_of(&head)?;
+                let installed = self
+                    .whole()
+                    .entries(&active)
+                    .into_iter()
+                    .filter(|(w, _)| w.as_slice() == ["environment", "systemPackages"] || (w.len() == 4 && w[0] == "users" && w[3] == "packages"))
+                    .flat_map(|(_, v)| match v {
+                        crate::tree::Val::One(p) => vec![p],
+                        crate::tree::Val::Many(ps) => ps,
+                    })
+                    .collect();
+                self.machine.search(&terms, &installed, self.fit)
+            }
             Op::ShowVersion => {
                 let head = self.repo.head()?;
                 let software = self.software(&head)?.unwrap_or_else(|| "(its flake.lock names no inputs)".into());
@@ -1743,7 +1760,7 @@ mod tests {
         fn alarms(&self, detail: bool, _: Option<usize>) -> Result<String> {
             Ok(if detail { "all well\n  running system /nix/store/x\n".into() } else { "all well\n".into() })
         }
-        fn search(&self, terms: &[String], _: Option<usize>) -> Result<String> {
+        fn search(&self, terms: &[String], _: &std::collections::BTreeSet<String>, _: Option<usize>) -> Result<String> {
             Ok(format!("searched {}\n", terms.join(" ")))
         }
         fn repair(&self) -> Result<String> {

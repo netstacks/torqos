@@ -128,12 +128,15 @@ fn search(repo: &Path, terms: &[String], log: &Path) -> Result<Vec<(String, Stri
         }
         bail!("searching nixpkgs: {why}");
     }
-    search_results(&out.stdout)
+    search_results(&out.stdout, terms)
 }
 
 /// `nix search --json`'s answer as (name, version, description), sorted: each name as it is typed
 /// (`set system packages <name>`), without nix's `legacyPackages.<system>.` in front.
-fn search_results(json: &[u8]) -> Result<Vec<(String, String, String)>> {
+/// nix search's answer as (name, version, description), closest first: the name itself, then a
+/// set's package of that name, names beginning with the words, names holding them, then the rest
+/// (found by their description) — each group by name.
+fn search_results(json: &[u8], terms: &[String]) -> Result<Vec<(String, String, String)>> {
     let found: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(json).context("reading nix search's answer")?;
     let mut out: Vec<(String, String, String)> = found
         .into_iter()
@@ -143,7 +146,23 @@ fn search_results(json: &[u8]) -> Result<Vec<(String, String, String)>> {
             (history::one_line(&name, 80), s("version"), s("description"))
         })
         .collect();
-    out.sort();
+    let words: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+    let rank = |name: &str| {
+        let n = name.to_lowercase();
+        let last = n.rsplit('.').next().unwrap_or(&n).to_string();
+        if words.len() == 1 && n == words[0] {
+            0
+        } else if words.len() == 1 && last == words[0] {
+            1
+        } else if words.iter().all(|w| last.starts_with(w.as_str())) {
+            2
+        } else if words.iter().all(|w| n.contains(w.as_str())) {
+            3
+        } else {
+            4
+        }
+    };
+    out.sort_by(|a, b| rank(&a.0).cmp(&rank(&b.0)).then(a.0.cmp(&b.0)));
     Ok(out)
 }
 
@@ -152,13 +171,17 @@ fn search_results(json: &[u8]) -> Result<Vec<(String, String, String)>> {
 fn search_results_are_names_as_typed() {
     let json = br#"{"legacyPackages.aarch64-linux.htop":{"pname":"htop","version":"3.4.1","description":"An interactive process viewer"},"legacyPackages.aarch64-linux.python3Packages.rich":{"pname":"rich","version":"13.9","description":"Rich text\nin the terminal"}}"#;
     assert_eq!(
-        search_results(json).unwrap(),
+        search_results(json, &["htop".to_string()]).unwrap(),
         [
             ("htop".to_string(), "3.4.1".to_string(), "An interactive process viewer".to_string()),
             ("python3Packages.rich".to_string(), "13.9".to_string(), "Rich text in the terminal".to_string()),
         ]
     );
-    assert!(search_results(b"{}").unwrap().is_empty());
+    assert!(search_results(b"{}", &[]).unwrap().is_empty());
+    // Closest first: the name itself, names beginning with it, names holding it, then the rest.
+    let json = br#"{"x.y.chickenEggs.jq":{"version":"1","description":"jq for eggs"},"x.y.jq":{"version":"1.7","description":"JSON"},"x.y.gojq":{"version":"0.1","description":"jq in Go"},"x.y.jqp":{"version":"1","description":"TUI"},"x.y.yq":{"version":"3","description":"like jq"}}"#;
+    let names: Vec<String> = search_results(json, &["jq".to_string()]).unwrap().into_iter().map(|r| r.0).collect();
+    assert_eq!(names, ["jq", "chickenEggs.jq", "jqp", "gojq", "yq"]);
 }
 
 /// The config repo as a flake. `path:`, not a plain path: the repo belongs to root, and git refuses
