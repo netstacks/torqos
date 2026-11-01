@@ -121,6 +121,14 @@ pub fn entries(s: &Settings) -> Vec<(Vec<String>, Val)> {
                     path.pop();
                 }
             }
+            // A list of entries (each with settings of its own): each by its number, from 1.
+            Value::Array(a) if !a.is_empty() && a.iter().all(Value::is_object) => {
+                for (i, x) in a.iter().enumerate() {
+                    path.push((i + 1).to_string());
+                    walk(path, x, out);
+                    path.pop();
+                }
+            }
             Value::Array(a) => out.push((path.clone(), Val::Many(a.iter().map(word).collect()))),
             other => out.push((path.clone(), Val::One(word(other)))),
         }
@@ -157,11 +165,27 @@ pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     if control_text(&mut r.loc.clone(), &new).is_some() {
         bail!("{}: a line break or another control character in a value: multi-line text goes in a config file", r.loc.join(" "));
     }
+    let items = tree.item_positions(&r.loc);
     let (top, rest) = r.loc.split_first().context("a setting has a path")?;
     let mut at = s.entry(top.clone()).or_insert_with(|| Value::Object(Map::new()));
-    for k in rest {
-        let o = at.as_object_mut().with_context(|| format!("{}: holds a value, not settings", r.loc.join(" ")))?;
-        at = o.entry(k.clone()).or_insert_with(|| Value::Object(Map::new()));
+    for (j, k) in rest.iter().enumerate() {
+        if items.contains(&(j + 1)) {
+            // A list of entries: by number; the next one adds an entry.
+            if at.as_object().is_some_and(Map::is_empty) {
+                *at = Value::Array(Vec::new());
+            }
+            let list = at.as_array_mut().with_context(|| format!("{}: holds a value, not a list of entries", r.loc[..=j].join(" ")))?;
+            let (i, len): (usize, usize) = (k.parse().context("an entry's number")?, list.len());
+            if i == len + 1 {
+                list.push(Value::Object(Map::new()));
+            } else if i > len + 1 {
+                bail!("{}: {} — {} adds one", r.loc[..=j].join(" "), match len { 0 => "it has no entries".to_string(), 1 => "it has 1 entry".to_string(), n => format!("it has {n} entries") }, len + 1);
+            }
+            at = &mut list[i - 1];
+        } else {
+            let o = at.as_object_mut().with_context(|| format!("{}: holds a value, not settings", r.loc.join(" ")))?;
+            at = o.entry(k.clone()).or_insert_with(|| Value::Object(Map::new()));
+        }
     }
     match (at, new) {
         (Value::Array(have), Value::Array(add)) => {
@@ -209,8 +233,21 @@ pub fn delete(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
 /// Remove `path` below `v` (with `what`: only those list elements, or that entry of a set). Whether
 /// anything was there; objects left empty are removed on the way back.
 fn remove_at(v: &mut Value, path: &[String], what: Option<&Value>) -> Result<bool> {
-    let Some(o) = v.as_object_mut() else { return Ok(false) };
     let Some((k, rest)) = path.split_first() else { return Ok(false) };
+    // A list of entries, by number: the entry (those after it renumber), or what is inside it.
+    if let Value::Array(list) = v {
+        let Some(i) = k.parse::<usize>().ok().filter(|i| (1..=list.len()).contains(i)) else { return Ok(false) };
+        if rest.is_empty() {
+            list.remove(i - 1);
+            return Ok(true);
+        }
+        let found = remove_at(&mut list[i - 1], rest, what)?;
+        if list[i - 1].as_object().is_some_and(Map::is_empty) {
+            list.remove(i - 1);
+        }
+        return Ok(found);
+    }
+    let Some(o) = v.as_object_mut() else { return Ok(false) };
     let found = if rest.is_empty() {
         match (o.get_mut(k), what) {
             (None, _) => false,
@@ -243,7 +280,7 @@ fn remove_at(v: &mut Value, path: &[String], what: Option<&Value>) -> Result<boo
         match o.get_mut(k) {
             Some(child) => {
                 let found = remove_at(child, rest, what)?;
-                if child.as_object().is_some_and(|c| c.is_empty()) {
+                if child.as_object().is_some_and(|c| c.is_empty()) || child.as_array().is_some_and(|c| c.is_empty()) {
                     o.remove(k);
                 }
                 found
@@ -263,6 +300,29 @@ mod tests {
     }
     fn w(s: &str) -> Vec<String> {
         crate::session::words(s).unwrap()
+    }
+
+    /// A list of entries with no names (an interface's addresses): each by its number; the next one
+    /// adds an entry, one past it is refused; deleting one renumbers those after it; in the files, a
+    /// JSON list, as NixOS reads it.
+    #[test]
+    fn a_list_of_entries_by_number() {
+        let t = tree();
+        let w = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        let mut s = Settings::new();
+        for line in ["networking interfaces eth0 ipv4 addresses 1 address 10.0.0.1", "networking interfaces eth0 ipv4 addresses 1 prefixLength 24", "networking interfaces eth0 ipv4 addresses 2 address 10.0.0.2"] {
+            set(&t, &mut s, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
+        assert_eq!(s["networking"]["interfaces"]["eth0"]["ipv4"]["addresses"], serde_json::json!([{ "address": "10.0.0.1", "prefixLength": 24 }, { "address": "10.0.0.2" }]));
+        let e = format!("{:#}", set(&t, &mut s, &w("networking interfaces eth0 ipv4 addresses 9 address x")).unwrap_err());
+        assert_eq!(e, "networking interfaces eth0 ipv4 addresses: it has 2 entries — 3 adds one");
+        assert!(format!("{:#}", set(&t, &mut s, &w("networking interfaces eth0 ipv4 addresses x address y")).unwrap_err()).contains("'x' is not an entry's number"));
+        let shown: Vec<String> = entries(&s).into_iter().map(|(p, _)| p.join(" ")).collect();
+        assert_eq!(shown, ["networking interfaces eth0 ipv4 addresses 1 address", "networking interfaces eth0 ipv4 addresses 1 prefixLength", "networking interfaces eth0 ipv4 addresses 2 address"]);
+        delete(&t, &mut s, &w("networking interfaces eth0 ipv4 addresses 1")).unwrap();
+        assert_eq!(s["networking"]["interfaces"]["eth0"]["ipv4"]["addresses"], serde_json::json!([{ "address": "10.0.0.2" }]), "the one after it is 1 now");
+        delete(&t, &mut s, &w("networking interfaces eth0 ipv4 addresses 1 address")).unwrap();
+        assert!(!s.contains_key("networking"), "what is left empty goes too");
     }
 
     #[test]

@@ -648,6 +648,69 @@
           }
         }
       }
+    },
+    {
+      "loc": [
+        "networking",
+        "interfaces"
+      ],
+      "type": {
+        "name": "attrsOf",
+        "elem": {
+          "name": "submodule"
+        }
+      },
+      "help": "The configuration for each network interface."
+    },
+    {
+      "loc": [
+        "networking",
+        "interfaces",
+        "<name>",
+        "ipv4",
+        "addresses"
+      ],
+      "type": {
+        "name": "listOf",
+        "elem": {
+          "name": "submodule"
+        }
+      },
+      "help": "List of IPv4 addresses that will be statically assigned to the interface."
+    },
+    {
+      "loc": [
+        "networking",
+        "interfaces",
+        "<name>",
+        "ipv4",
+        "addresses",
+        "*",
+        "address"
+      ],
+      "type": {
+        "name": "str"
+      },
+      "help": "IPv4 address of the interface."
+    },
+    {
+      "loc": [
+        "networking",
+        "interfaces",
+        "<name>",
+        "ipv4",
+        "addresses",
+        "*",
+        "prefixLength"
+      ],
+      "type": {
+        "name": "intBetween",
+        "range": [
+          0,
+          32
+        ]
+      },
+      "help": "Subnet mask of the interface, as the number of bits in the prefix (24)."
     }
   ],
   "passwords": [

@@ -248,11 +248,12 @@ impl Tree {
                     loc.push(name);
                     n = c;
                 }
-                Step::Entry(e) => {
+                Step::Entry(e) | Step::Item(e) => {
                     loc.push(w.clone());
                     n = e;
                 }
                 Step::Many(names) => bail!("'{w}' is ambiguous{}: {}", if loc.is_empty() { String::new() } else { format!(" (after `{}`)", loc.join(" ")) }, names.join(", ")),
+                Step::None if n.children.contains_key("*") => bail!("'{w}' is not an entry's number (after `{}`): 1, 2, … — the next number adds one", loc.join(" ")),
                 Step::None => bail!("{}: no such setting{}", path_text(&loc, w), did_you_mean(n, w)),
             }
         }
@@ -270,13 +271,30 @@ impl Tree {
         }
     }
 
+    /// Where in `words` a list's entry is numbered (`… ipv4 addresses 2 address` → [5]), as far as
+    /// the words lead.
+    pub fn item_positions(&self, words: &[String]) -> Vec<usize> {
+        let (mut n, mut at) = (&self.root, Vec::new());
+        for (i, w) in words.iter().enumerate() {
+            n = match step(n, w) {
+                Step::Name(c, _) | Step::Entry(c) => c,
+                Step::Item(c) => {
+                    at.push(i);
+                    c
+                }
+                _ => break,
+            };
+        }
+        at
+    }
+
     /// Where in `words` an entry is named (`services httpd virtualHosts example.com` → [3]), as far
     /// as the words lead.
     pub fn entry_positions(&self, words: &[String]) -> Vec<usize> {
         let (mut n, mut at) = (&self.root, Vec::new());
         for (i, w) in words.iter().enumerate() {
             n = match step(n, w) {
-                Step::Name(c, _) => c,
+                Step::Name(c, _) | Step::Item(c) => c,
                 Step::Entry(e) => {
                     at.push(i);
                     e
@@ -311,6 +329,9 @@ impl Tree {
                 };
             }
         }
+        if w.node.children.contains_key("*") {
+            return vec![("<n>".into(), "An entry by its number: 1, 2, … (the next number adds one)".into())];
+        }
         let mut out: Vec<(String, String)> = w
             .node
             .children
@@ -338,6 +359,8 @@ struct Walk<'a> {
 enum Step<'a> {
     /// A name below: the node, and the name as the tree has it.
     Name(&'a Node, String),
+    /// An entry of a list of them, by its number (1, 2, …).
+    Item(&'a Node),
     /// An entry's name, of a set of named ones.
     Entry(&'a Node),
     /// The beginning of several names.
@@ -348,8 +371,12 @@ enum Step<'a> {
 /// What `w` is below `n`: a name (exactly, or a unique beginning of one), or an entry's name where
 /// entries are named — as written (an entry is named, never guessed at).
 fn step<'a>(n: &'a Node, w: &str) -> Step<'a> {
-    if let Some(c) = n.children.get(w).filter(|_| w != "<name>") {
+    if let Some(c) = n.children.get(w).filter(|_| w != "<name>" && w != "*") {
         return Step::Name(c, w.to_string());
+    }
+    // A list of entries with no names (NixOS's listOf submodule): each by its number, from 1.
+    if let Some(item) = n.children.get("*") {
+        return if w.parse::<usize>().is_ok_and(|i| i >= 1) { Step::Item(item) } else { Step::None };
     }
     if let Some(e) = n.children.get("<name>") {
         return if w == "<name>" { Step::None } else { Step::Entry(e) };

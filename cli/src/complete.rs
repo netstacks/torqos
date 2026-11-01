@@ -96,11 +96,21 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
                 }
                 let packages = takes_packages(k, &path);
                 // Where an entry is named: the ones the configuration has, first.
-                if c.iter().any(|x| x.word == "<name>") {
+                // (A list's entries by number: those it has, and the next, which adds one.)
+                let numbered = c.iter().any(|x| x.word == "<n>");
+                if numbered || c.iter().any(|x| x.word == "<name>") {
                     let at_loc = k.tree.locate(&path).map(|l| l.0).unwrap_or(path.clone());
                     let whole = crate::whole::Whole { schema: k.schema, tree: k.tree };
                     let names: std::collections::BTreeSet<String> = whole.entries(&at.data).into_iter().filter(|(w, _)| w.len() > at_loc.len() && w.starts_with(&at_loc)).map(|(w, _)| w[at_loc.len()].clone()).collect();
+                    let next = names.len() + 1;
+                    let mut names: Vec<String> = names.into_iter().collect();
+                    if numbered {
+                        names.sort_by_key(|n| n.parse::<usize>().unwrap_or(usize::MAX));
+                    }
                     out.extend(names.into_iter().map(|n| Choice::new(&n, "In the configuration")));
+                    if numbered {
+                        out.push(Choice::new(&next.to_string(), "A new entry"));
+                    }
                 }
                 out.extend(c);
                 // Where a package is named: this machine's nixpkgs, by name, after what it is (`?`
@@ -665,6 +675,19 @@ mod tests {
         let at = At { files: vec!["hardware-configuration.nix".into(), "services/httpd.nix".into()], ..at };
         assert_eq!(words_of(&choices_at(&s, &at, &w("file show"), "s")), ["<nix-file>", "services/httpd.nix"]);
         assert_eq!(words_of(&choices_at(&s, &at, &w("save"), "")), ["<file>"]);
+    }
+
+    /// A list's entries by number: those the configuration has, then the next, which adds one.
+    #[test]
+    fn a_lists_entries_are_offered_by_number() {
+        let s = schema();
+        let mut data = crate::whole::Data::default();
+        let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
+        whole.set(&mut data, &w("networking interfaces eth0 ipv4 addresses 1 address 10.0.0.1")).unwrap();
+        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: vec![], files: vec![] };
+        let c = choices_at(&s, &at, &w("set networking interfaces eth0 ipv4 addresses"), "");
+        assert_eq!(words_of(&c), ["1", "2", "<n>"]);
+        assert_eq!(c[1].help, "A new entry");
     }
 
     /// Where an entry is named, `?` offers the ones the configuration already has (Tab completes them).
