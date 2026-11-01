@@ -143,6 +143,9 @@ pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     if let Some(k) = r.loc.iter().find(|k| k.starts_with('_')) {
         bail!("{}: a name starting with _ is a NixOS module directive, not a setting: the tree holds data only", k);
     }
+    if tree.password(&r.loc) {
+        bail!("{}: a password is never in the configuration (everyone can read it, and its history keeps it): `request system password {}` sets one", r.loc.join(" "), r.loc.get(2).map_or("<user>", String::as_str));
+    }
     if tree.fenced(&r.loc) {
         bail!("{}: not settable in the configuration tree (it reaches the broker or TorqOS itself)", r.loc.join(" "));
     }

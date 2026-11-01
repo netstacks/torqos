@@ -15,6 +15,10 @@
 # its identity (KNOWN-GAPS #4, M3). Changing what is fenced here is a change to TorqOS itself, or a
 # reviewed .nix file.
 #
+#  3. A person's password is never in the configuration: everyone on the machine can read it, and
+#     its history keeps every value forever (a hash there can be cracked offline). Passwords live
+#     in /var/lib/torq/secrets (modules/accounts.nix); `request system password` changes one.
+#
 # A pattern is a path; a segment ending in `*` matches any entry name starting with what precedes it.
 { lib }:
 
@@ -49,14 +53,20 @@ rec {
     builtins.length path == builtins.length pat && builtins.all lib.id (lib.zipListsWith segmentMatches pat path)
   ) elsewhere;
 
+  # Rule 3: an account's password, in any of NixOS's forms.
+  passwords = map (p: [ "users" "users" "*" p ]) [ "password" "hashedPassword" "initialPassword" "initialHashedPassword" "hashedPasswordFile" "passwordFile" ];
+
   segmentMatches = pat: seg:
     if lib.hasSuffix "*" pat then lib.hasPrefix (lib.removeSuffix "*" pat) seg else pat == seg;
 
-  # Whether `path` (a list of words) is, or is below, a fenced setting.
-  fenced = path: builtins.any (pat:
+  # Whether `path` (a list of words) is, or is below, one of `pats`.
+  matchesAny = pats: path: builtins.any (pat:
     builtins.length path >= builtins.length pat
     && builtins.all lib.id (lib.zipListsWith segmentMatches pat (lib.take (builtins.length pat) path))
-  ) patterns;
+  ) pats;
+
+  # Whether `path` is, or is below, a fenced setting.
+  fenced = matchesAny patterns;
 
   # Where an /etc entry lands: its `target`, else its name, without a leading `/` or `./`.
   etcTarget = name: e:
@@ -80,6 +90,7 @@ rec {
     in
     if underscore != null then "${here}.${underscore}: a key starting with _ is a NixOS module directive (mkForce, mkMerge, …), not a setting: the tree holds data only"
     else if keptElsewhere path then "${here}: kept in its own file by TorqOS (as torqcli writes it), not in nixos/"
+    else if matchesAny passwords path then "${here}: a password is never in the configuration (everyone can read it, and its history keeps it): `request system password <user>` sets one"
     else if fenced path then "${here}: not settable in the configuration tree (it reaches the broker or TorqOS itself)"
     else if landsInTorq != null then "environment.etc.${landsInTorq}: lands in /etc/torq, the broker's: not settable in the configuration tree"
     else lib.findFirst (p: p != null) null inner;

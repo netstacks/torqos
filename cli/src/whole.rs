@@ -583,6 +583,22 @@ fn a_person_added_in_the_candidate_can_have_software_in_it() {
 
 #[cfg(test)]
 #[test]
+fn a_password_is_never_in_the_configuration() {
+    let (schema, tree) = (Schema::parse(include_str!("schema-fixture.json")).unwrap(), Tree::parse(include_str!("nixos-fixture.json")).unwrap());
+    let x = Whole { schema: &schema, tree: &tree };
+    let w = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+    let e = format!("{:#}", x.set(&mut Data::default(), &w("users users dev hashedPassword $6$x$y")).unwrap_err());
+    assert_eq!(e, "users users dev hashedPassword: a password is never in the configuration (everyone can read it, and its history keeps it): `request system password dev` sets one");
+    assert!(!tree.next(&w("users users dev")).iter().any(|(x, _)| x == "hashedPassword") || tree.password(&w("users users dev hashedPassword")), "known as one");
+    // The same list as the evaluation's (settings-fence.nix).
+    let Ok(fence) = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../modules/settings-fence.nix")) else { return };
+    for p in ["password", "hashedPassword", "initialPassword", "initialHashedPassword", "hashedPasswordFile", "passwordFile"] {
+        assert!(fence.contains(&format!("\"{p}\"")) && tree.password(&w(&format!("users users anyone {p}"))), "{p}");
+    }
+}
+
+#[cfg(test)]
+#[test]
 fn the_module_keeps_them_out_of_nixos_too() {
     // modules/settings-fence.nix's `elsewhere` must name every setting MAP keeps in TorqOS's own files
     // (`*` where an entry is named): the evaluation refuses them in nixos/, whoever wrote it.

@@ -2,14 +2,14 @@
   "nodes": {
     "services": {
       "file": "services.json",
-      "help": "Services from the TorqOS catalog, each with TorqOS's defaults",
+      "help": "The old list of services: each is now NixOS's own setting (`services openssh enable true`)",
       "kind": "leaf-list",
       "tier": "system",
       "values": {
-        "podman": "Containers: rootless Podman for each user, with a `docker` command (no root API socket)",
-        "printing": "Printing (CUPS, on localhost only)",
-        "ssh": "SSH server: keys only, no root login, only dev may log in; opens TCP 22 on every network",
-        "tailscale": "Tailscale VPN (then `sudo tailscale up`); its own settings, e.g. Tailscale SSH, live outside the ledger"
+        "podman": "Now `virtualisation podman enable true`",
+        "printing": "Now `services printing enable true`",
+        "ssh": "Now `services openssh enable true`",
+        "tailscale": "Now `services tailscale enable true`"
       }
     },
     "system": {

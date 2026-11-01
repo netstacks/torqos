@@ -608,6 +608,59 @@
         }
       },
       "help": "The set of packages that should be made available to the user."
+    },
+    {
+      "loc": [
+        "users",
+        "users",
+        "<name>",
+        "hashedPassword"
+      ],
+      "type": {
+        "name": "nullOr",
+        "elem": {
+          "name": "passwdEntry"
+        }
+      },
+      "help": "Specifies the hashed password for the user."
     }
+  ],
+  "passwords": [
+    [
+      "users",
+      "users",
+      "*",
+      "password"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "hashedPassword"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "initialPassword"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "initialHashedPassword"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "hashedPasswordFile"
+    ],
+    [
+      "users",
+      "users",
+      "*",
+      "passwordFile"
+    ]
   ]
 }

@@ -133,6 +133,9 @@ struct File {
     /// What the tree may never change (modules/settings-fence.nix).
     #[serde(default)]
     fence: Vec<Vec<String>>,
+    /// A person's password, in NixOS's forms: never in the tree (settings-fence.nix, rule 3).
+    #[serde(default)]
+    passwords: Vec<Vec<String>>,
 }
 
 /// One point of the tree: a setting (with its type and help), what is below it, or both (a set of
@@ -160,6 +163,7 @@ pub struct Resolved<'a> {
 pub struct Tree {
     pub root: Node,
     fence: Vec<Vec<String>>,
+    passwords: Vec<Vec<String>>,
 }
 
 impl Tree {
@@ -176,20 +180,20 @@ impl Tree {
             }
             n.setting = Some((e.ty, e.help));
         }
-        Ok(Tree { root, fence: f.fence })
+        Ok(Tree { root, fence: f.fence, passwords: f.passwords })
     }
 
     /// Whether `loc` (entry names in place of `<name>`) is, or is below, a setting the tree may never
     /// change — as modules/settings-fence.nix decides it (a segment ending in `*` matches entry names
     /// starting with what precedes it). The system's evaluation refuses it anyway; this says so early.
     pub fn fenced(&self, loc: &[String]) -> bool {
-        let seg = |pat: &String, s: &String| match pat.strip_suffix('*') {
-            Some(prefix) => s.starts_with(prefix),
-            None => pat == s,
-        };
         // The tree holds data only: a name starting with `_` is a module directive (`_type`, `_module`).
-        loc.iter().any(|s| s.starts_with('_'))
-            || self.fence.iter().any(|pat| loc.len() >= pat.len() && pat.iter().zip(loc).all(|(p, s)| seg(p, s)))
+        loc.iter().any(|s| s.starts_with('_')) || matches_any(&self.fence, loc) || self.password(loc)
+    }
+
+    /// Whether `loc` is a person's password (settings-fence.nix, rule 3): never in the tree.
+    pub fn password(&self, loc: &[String]) -> bool {
+        matches_any(&self.passwords, loc)
     }
 
     /// Where `words` lead: the path as the tree names it (a unique beginning of a name is that name,
@@ -336,6 +340,16 @@ fn section_help(n: &Node) -> String {
         k if k <= SHOWN => format!("Settings: {}", names.join(", ")),
         k => format!("Settings: {}, and {} more", names[..SHOWN].join(", "), k - SHOWN),
     }
+}
+
+/// Whether `loc` is, or is below, one of `pats` — as settings-fence.nix matches them (a segment ending
+/// in `*` matches entry names starting with what precedes it).
+fn matches_any(pats: &[Vec<String>], loc: &[String]) -> bool {
+    let seg = |pat: &String, s: &String| match pat.strip_suffix('*') {
+        Some(prefix) => s.starts_with(prefix),
+        None => pat == s,
+    };
+    pats.iter().any(|pat| loc.len() >= pat.len() && pat.iter().zip(loc).all(|(p, s)| seg(p, s)))
 }
 
 /// Whether a setting takes its value right here (rather than holding settings below it): everything

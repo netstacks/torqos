@@ -75,6 +75,8 @@ in
         settings = walk options;
         # What the tree may never change (settings-fence.nix), for torqcli to refuse early.
         fence = (import ./settings-fence.nix { inherit lib; }).patterns;
+        # A person's password: never in the tree (settings-fence.nix, rule 3).
+        passwords = (import ./settings-fence.nix { inherit lib; }).passwords;
       });
   };
 }

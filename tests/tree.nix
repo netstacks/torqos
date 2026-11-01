@@ -54,7 +54,7 @@ let
   # Each bad case, forced only where it is bad (tryEval catches a throw, not a missing attribute).
   nixosInvalid = {
     nixos-bad-type = c: c.virtualisation.docker.enable;
-    nixos-bad-package = c: map (p: p.outPath) c.environment.systemPackages;
+    nixos-bad-package = c: c.services.httpd.package.outPath;
     nixos-bad-option = c: c.virtualisation.docker.enable;
     # The fence (modules/settings-fence.nix): what reaches the broker's guard is not the tree's.
     nixos-fence-broker = c: c.torq.broker.rebuildCommand;
@@ -73,6 +73,9 @@ let
     nixos-fence-etc-target = c: c.environment.etc.innocent.target;
     # A setting TorqOS keeps in its own file is not also in nixos/ (one setting, one place).
     nixos-elsewhere = c: c.networking.hostName;
+    nixos-elsewhere-packages = c: map (p: p.outPath or p) c.environment.systemPackages;
+    # A person's password is never in the configuration (settings-fence.nix, rule 3).
+    nixos-password = c: c.users.users.dev.hashedPassword;
     # Config files: only .nix files inside the config repo (config-files.json).
     config-bad-dotdot = c: c.networking.hostName;
     config-bad-abs = c: c.networking.hostName;
