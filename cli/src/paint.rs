@@ -159,10 +159,14 @@ pub fn prompt(p: &str, ui: &Ui) -> String {
     format!("{}{}{}{}{}", ui.cyan(user), ui.dim("@"), ui.blue(host), ui.dim(place), ui.bold(mark))
 }
 
-/// A `?` list line: `  word   help` — the word cyan, the help dim.
+/// A `?` list line: `  word   help` — the word cyan, the help dim; a help's further lines (indented
+/// under the help column, complete::render) dim.
 fn completion(line: &str, ui: &Ui) -> String {
     let t = line.trim_start();
     let indent = &line[..line.len() - t.len()];
+    if indent.len() > 2 {
+        return format!("{indent}{}", ui.dim(t));
+    }
     match t.find("  ") {
         Some(i) => {
             let (word, rest) = t.split_at(i);
@@ -191,7 +195,7 @@ mod tests {
         out
     }
 
-    const SAMPLE: &str = "networking {\n    hostName torq-utm;\n    firewall {\n        allowedTCPPorts [ 80 443 ];\n    }\n}\n\"a b\" x;\n## software: torq 2026-10-31\n[edit services openssh]\n+   enable true;\n-   enable false;\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n! TorqOS comes from a folder\nset networking hostName x\ncommit complete (change #42)\n  ✓ This machine is exactly as its history says.\n  ⚠ not as its history says\n    21:07   ✓ H4 live check\n\nPossible completions:\n  c  C syntax\n  j  J syntax\n";
+    const SAMPLE: &str = "networking {\n    hostName torq-utm;\n    firewall {\n        allowedTCPPorts [ 80 443 ];\n    }\n}\n\"a b\" x;\n## software: torq 2026-10-31\n[edit services openssh]\n+   enable true;\n-   enable false;\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n! TorqOS comes from a folder\nset networking hostName x\ncommit complete (change #42)\n  ✓ This machine is exactly as its history says.\n  ⚠ not as its history says\n    21:07   ✓ H4 live check\n\nPossible completions:\n  c  C syntax\n  j  J syntax that\n     wraps\n";
 
     #[test]
     fn the_same_text_coloured_and_nothing_when_colour_is_off() {
@@ -210,6 +214,7 @@ mod tests {
         assert!(line("✓ This machine").contains("\x1b[32m✓") && line("⚠").contains("\x1b[33m⚠"));
         assert!(line("21:07").contains("\x1b[32m✓"), "a history row's mark");
         assert!(line("  c  C syntax").contains("\x1b[36mc\x1b[0m") && line("  c  C syntax").contains("\x1b[2mC syntax"));
+        assert!(line("     wraps").starts_with("     \x1b[2mwraps"), "a help's next line: dim, not a word");
     }
 
     #[test]

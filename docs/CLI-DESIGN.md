@@ -81,7 +81,9 @@ As built (4a, cli/src/syntax.rs): both styles parse to one `Op`; a test renders 
 style and parses it back. A C style bare path to a container or list entry is a submode (the prompt
 shows `(config-system)`), any other bare path sets. The interactive shell starts in your style
 (`users <you> cli style`, else `system cli style`, from /etc/torq/cli.json); `switch cli` changes it
-for the session. `?` and Tab follow the style and where you are.
+for the session. `?` and Tab follow the style and where you are. A `?` list fits the terminal:
+each help is its setting's first sentence (NixOS's doc markup taken out, `…` where it was cut), wrapped
+under the help column, at most three lines.
 
 **Scripts (`torqcli -c`)** use a private candidate that exists only for that invocation — never your
 interactive candidate, so a script cannot commit your half-done edits or leave edits behind. They

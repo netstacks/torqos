@@ -872,11 +872,16 @@ mod editor {
     impl ConditionalEventHandler for Question {
         fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
             let (choices, _) = self.0.choices(&ctx.line()[..ctx.pos()])?; // in quotes: a plain '?'
-            let text: String = complete::render(&choices).lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
+            let text: String = complete::render(&choices, columns()).lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
             let text = crate::paint::paint(&text, &crate::ui::Ui::for_terminal(false));
             print!("?\r\n{}", text.replace('\n', "\r\n"));
             Some(Cmd::Repaint)
         }
+    }
+
+    /// How wide the terminal is (80 when it cannot say).
+    fn columns() -> usize {
+        rustix::termios::tcgetwinsize(std::io::stdout()).map(|w| usize::from(w.ws_col)).ok().filter(|&c| c > 0).unwrap_or(crate::ui::WIDTH)
     }
 
     #[cfg(test)]
