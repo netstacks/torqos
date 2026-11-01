@@ -1,21 +1,36 @@
 //! How `torq` looks (docs/CLI-DESIGN.md): plain language, one visual language, colour with
 //! meaning only — and plain text when colour is off (NO_COLOR, not a terminal), so nothing depends
-//! on colour to be understood. Everything here is a pure function of its input, for snapshot tests.
-
+//! on colour to be understood.
+//!
+//! The layout, in one place (CLI-DESIGN.md, "Layout"): lines fit the window, 20 to 80 columns
+//! (`fit`); a sentence is wrapped by whoever writes it, under where its text starts (`Ui::line`,
+//! `hang`); tables lay out to the same width; data (a configuration, a comparison, a diff) is never
+//! wrapped. Without a window to fit (a script, or a filter reading the output) nothing is wrapped:
+//! a line stays one line. Everything here but `columns` is a pure function, for snapshot tests.
 
 use std::time::Duration;
 
+/// The widest a line is laid out: wider windows get 80 columns too, so text stays readable.
 pub const WIDTH: usize = 80;
+/// The narrowest: below it, lines are laid out for 20 columns and the terminal wraps them.
+const NARROWEST: usize = 20;
 
 #[derive(Clone, Copy)]
 pub struct Ui {
     pub color: bool,
+    /// The window's width to fit (`fit`), or None: nothing to fit, nothing wrapped.
+    pub fit: Option<usize>,
 }
 
 impl Ui {
-    /// No colour (tests, and text the shell cleans before printing).
+    /// No colour, nothing to fit: for tests, which must not depend on the terminal they run in.
+    #[cfg(test)]
     pub fn plain() -> Self {
-        Ui { color: false }
+        Ui { color: false, fit: None }
+    }
+    /// No colour, fitting `fit`: text the shell cleans, then paints, before printing.
+    pub fn plain_at(fit: Option<usize>) -> Self {
+        Ui { color: false, fit }
     }
 
     fn paint(&self, code: &str, s: &str) -> String {
@@ -46,40 +61,161 @@ impl Ui {
         self.paint("34", s)
     }
 
-    /// Colour on a terminal only, and never with NO_COLOR set (any value) or TERM=dumb: for what goes
-    /// to standard output (`err`: to standard error).
+    /// For what is printed straight to standard output (`err`: standard error): colour on a
+    /// terminal only, and never with NO_COLOR set (any value) or TERM=dumb; that terminal's width.
     pub fn for_terminal(err: bool) -> Self {
         use std::io::IsTerminal;
         let tty = if err { std::io::stderr().is_terminal() } else { std::io::stdout().is_terminal() };
         let off = std::env::var_os("NO_COLOR").is_some() || std::env::var("TERM").is_ok_and(|t| t == "dumb");
-        Ui { color: tty && !off }
+        Ui { color: tty && !off, fit: fit(columns(err)) }
     }
 
-    /// `✓ what` … `right` (right-aligned to 80 columns when it fits).
-    pub fn ok(&self, what: &str, right: &str) -> String {
-        format!("  {} {}", self.green("✓"), self.with_right(what, right, 4))
+    /// How wide a table's line is: the window's (`fit`), else 80.
+    pub fn width(&self) -> usize {
+        self.fit.unwrap_or(WIDTH)
     }
+
+    /// A sentence after `lead` (an indent, a mark, `error: `), its own line(s): wrapped under where
+    /// it starts when there is a window to fit (`hang`). No newline at the end.
+    pub fn line(&self, lead: &str, text: &str) -> String {
+        let mut s = hang(lead, text, self.fit, usize::MAX);
+        s.pop();
+        s
+    }
+
+    /// `✓ what`, a sentence.
+    pub fn ok(&self, what: &str) -> String {
+        self.line(&format!("  {} ", self.green("✓")), what)
+    }
+    /// `⚠ what`, a sentence.
     pub fn warn(&self, what: &str) -> String {
-        format!("  {} {what}", self.yellow("⚠"))
+        self.line(&format!("  {} ", self.yellow("⚠")), what)
+    }
+    /// `error: what`; each further line of `what` (`  because: …`) under its own indent.
+    pub fn error(&self, what: &str) -> String {
+        let mut out = String::new();
+        for (i, l) in what.lines().enumerate() {
+            let t = l.trim_start();
+            let lead = if i == 0 { format!("{} ", self.red("error:")) } else { l[..l.len() - t.len()].to_string() };
+            out.push_str(&hang(&lead, t, self.fit, usize::MAX));
+        }
+        if out.is_empty() {
+            out = format!("{}\n", self.red("error:"));
+        }
+        out
     }
 
-    /// `left` with `right` (dimmed) at the end of the 80-column line, or two spaces after `left`
-    /// when it does not fit. `indent` is how many columns precede `left` on its line.
+    /// `left` with `right` (dimmed) at the end of the table's line (`width`), or two spaces after
+    /// `left` when it does not fit. `indent` is how many columns precede `left` on its line.
     pub fn with_right(&self, left: &str, right: &str, indent: usize) -> String {
         if right.is_empty() {
             return left.to_string();
         }
         let used = indent + width(left) + width(right);
-        let gap = if used + 2 <= WIDTH { WIDTH - used } else { 2 };
+        let gap = if used + 2 <= self.width() { self.width() - used } else { 2 };
         format!("{left}{}{}", " ".repeat(gap), self.dim(right))
     }
+}
 
+/// How many columns the terminal on standard output (`err`: standard error) has, if it is one —
+/// read each time, as the window may have been resized.
+pub fn columns(err: bool) -> Option<usize> {
+    let size = if err { rustix::termios::tcgetwinsize(std::io::stderr()) } else { rustix::termios::tcgetwinsize(std::io::stdout()) };
+    size.ok().map(|w| usize::from(w.ws_col)).filter(|&c| c > 0)
+}
+
+/// The width to fit for a window `columns` wide: 20 to 80. None (no window): None.
+pub fn fit(columns: Option<usize>) -> Option<usize> {
+    columns.map(|c| c.clamp(NARROWEST, WIDTH))
+}
+
+/// `lead` then `text`, as lines, each ending in a newline. With a window `fit` wide and `text` too
+/// long for the line: wrapped under where it starts (never back to the left edge), or — with less
+/// than 20 columns beside a `lead` wider than 4 — on the lines after it, indented 4; at most `max` lines, the last
+/// ending in `…` when there was more. Otherwise one line, exactly as it is.
+///
+/// What follows a `lead` that ends in `! ` starts where its text started: paint.rs keeps those
+/// lines yellow by that.
+pub fn hang(lead: &str, text: &str, fit: Option<usize>, max: usize) -> String {
+    let Some(fit) = fit.filter(|&f| width(lead) + width(text) > f) else { return format!("{lead}{text}\n") };
+    // Under it only gains room when `lead` is wider than the 4 columns it would be indented.
+    let beside = width(lead) <= 4 || fit.saturating_sub(width(lead)) >= NARROWEST;
+    let column = if beside { width(lead) } else { 4 };
+    let room = fit.saturating_sub(column).max(1);
+    let mut lines = wrap(text, room, room);
+    if lines.len() > max.max(1) {
+        lines.truncate(max.max(1));
+        if let Some(last) = lines.last_mut() {
+            while width(last) + 1 > room {
+                last.pop();
+            }
+            let keep = last.trim_end().len();
+            last.truncate(keep);
+            last.push('…');
+        }
+    }
+    let mut out = String::new();
+    if !beside {
+        out.push_str(&format!("{}\n", lead.trim_end()));
+    }
+    for (i, line) in lines.iter().enumerate() {
+        let start = if i == 0 && beside { lead.to_string() } else { " ".repeat(column) };
+        out.push_str(&format!("{start}{line}\n"));
+    }
+    out
+}
+
+/// `text` in lines: the first at most `first` characters, the rest at most `room`, broken between
+/// words (spaces collapsed; a word longer than a line is broken inside).
+pub fn wrap(text: &str, first: usize, room: usize) -> Vec<String> {
+    let mut lines: Vec<String> = vec![String::new()];
+    let mut words: Vec<String> = text.split_whitespace().map(String::from).collect();
+    words.reverse();
+    while let Some(word) = words.pop() {
+        let limit = if lines.len() == 1 { first } else { room }.max(1);
+        let Some(line) = lines.last_mut() else { break };
+        let len = width(line);
+        let need = if len == 0 { width(&word) } else { len + 1 + width(&word) };
+        if need <= limit {
+            if len > 0 {
+                line.push(' ');
+            }
+            line.push_str(&word);
+        } else if len == 0 {
+            // Longer than a whole line: as much as fits, the rest on the next.
+            line.push_str(&word.chars().take(limit).collect::<String>());
+            words.push(word.chars().skip(limit).collect());
+            lines.push(String::new());
+        } else {
+            words.push(word);
+            lines.push(String::new());
+        }
+    }
+    if lines.len() > 1 && lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
 }
 
 /// Display width, counting each character as one column (the text here is our own wording and
-/// already-cleaned names; wide characters only make a line a little longer, never break it).
+/// already-cleaned names; wide characters only make a line a little longer, never break it), and
+/// our own colour codes (`\x1b[…m`) as none.
 pub fn width(s: &str) -> usize {
-    s.chars().count()
+    let mut n = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // A control sequence: `[`, then parameters, up to its final letter.
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Elapsed time as people say it: "3s", "1m 12s".
@@ -92,21 +228,77 @@ pub fn elapsed(d: Duration) -> String {
 mod tests {
     use super::*;
 
+    fn at(fit: usize) -> Ui {
+        Ui { color: false, fit: Some(fit) }
+    }
+
     #[test]
     fn plain_has_no_escapes_colour_has() {
         let p = Ui::plain();
-        assert_eq!(p.ok("Installed htop", "change 23"), format!("  ✓ Installed htop{}change 23", " ".repeat(80 - 4 - 14 - 9)));
-        assert!(!p.warn("x").contains('\x1b'));
-        assert!(Ui { color: true }.ok("x", "").contains("\x1b[32m"));
+        assert_eq!(p.with_right("Installed htop", "change 23", 4), format!("Installed htop{}change 23", " ".repeat(80 - 4 - 14 - 9)));
+        assert!(!p.warn("x").contains('\x1b') && !p.error("x").contains('\x1b'));
+        assert!(Ui { color: true, ..Ui::plain() }.ok("x").contains("\x1b[32m"));
+    }
+
+    #[test]
+    fn one_width_rule() {
+        assert_eq!(fit(None), None, "no window: nothing to fit");
+        assert_eq!(fit(Some(200)), Some(80));
+        assert_eq!(fit(Some(50)), Some(50));
+        assert_eq!(fit(Some(8)), Some(20));
+        assert_eq!(Ui::plain().width(), 80, "a table without a window: 80");
+        assert_eq!(at(50).width(), 50);
+    }
+
+    #[test]
+    fn colour_takes_no_room() {
+        assert_eq!(width("\x1b[31merror:\x1b[0m x"), 8);
+        assert_eq!(width("✓ ok"), 4);
+        let red = Ui { color: true, fit: Some(30) };
+        let e = red.error("the configuration has changed since this change was prepared");
+        assert!(e.lines().all(|l| width(l) <= 30), "{e:?}");
+        assert!(e.lines().nth(1).is_some_and(|l| l.starts_with("       c")), "under the text, past `error: `: {e:?}");
+    }
+
+    #[test]
+    fn wrap_and_hang() {
+        assert_eq!(wrap("a bb  ccc dddd", 6, 6), ["a bb", "ccc", "dddd"], "spaces collapsed, between words");
+        assert_eq!(wrap("abcdefgh", 3, 3), ["abc", "def", "gh"], "a word longer than a line, broken");
+        assert_eq!(wrap("ab cd", 0, 0), ["a", "b", "c", "d"], "no room still ends");
+        assert_eq!(wrap("", 5, 5), [""]);
+        let lead = "0   d  ";
+        let text = "one two three four five six seven eight nine ten eleven";
+        assert_eq!(hang(lead, text, None, usize::MAX), format!("{lead}{text}\n"), "no window: one line");
+        assert_eq!(hang(lead, "a  b", Some(30), usize::MAX), "0   d  a  b\n", "fits: exactly as it is");
+        assert_eq!(hang(lead, text, Some(30), usize::MAX), "0   d  one two three four five\n       six seven eight nine\n       ten eleven\n");
+        assert_eq!(hang(lead, text, Some(26), usize::MAX), "0   d\n    one two three four\n    five six seven eight\n    nine ten eleven\n", "under it");
+        assert_eq!(hang(lead, text, Some(30), 2), "0   d  one two three four five\n       six seven eight nine…\n", "at most 2 lines");
+        assert_eq!(hang("! ", "TorqOS comes from a folder (path:): whoever can write to it decides.", Some(30), usize::MAX), "! TorqOS comes from a folder\n  (path:): whoever can write\n  to it decides.\n");
+    }
+
+    #[test]
+    fn sentences_fit_the_window_and_only_with_one() {
+        let long = "This machine is exactly as its history says, and has been for a while.";
+        for w in [20, 33, 50, 80] {
+            for s in [at(w).ok(long), at(w).warn(long), at(w).line("    · ", long), at(w).error(&format!("{long}\n  because: {long}"))] {
+                assert!(s.lines().all(|l| width(l) <= w), "{w}: {s}");
+            }
+        }
+        assert_eq!(Ui::plain().ok(long), format!("  ✓ {long}"), "no window: one line");
+        assert_eq!(Ui::plain().error("a\n  because: b"), "error: a\n  because: b\n");
+        assert_eq!(at(33).error("short\n  because: the reason, long enough to wrap"), "error: short\n  because: the reason, long\n            enough to wrap\n".replace("            ", "  "));
+        assert_eq!(Ui::plain().error(""), "error:\n");
     }
 
     #[test]
     fn lines_fit_80_columns() {
         let p = Ui::plain();
-        let line = p.ok("Installed htop", "change 23 · rolled back");
+        let line = format!("  ✓ {}", p.with_right("Installed htop", "change 23 · rolled back", 4));
         assert_eq!(width(&line), 80, "{line:?}");
-        let long = p.ok(&"x".repeat(70), "change 23 · rolled back");
+        let long = p.with_right(&"x".repeat(70), "change 23 · rolled back", 4);
         assert!(long.contains("  change 23"), "falls back to two spaces when it cannot fit");
+        let narrow = at(40).with_right("Installed htop", "change 23", 4);
+        assert_eq!(4 + width(&narrow), 40, "right-aligned to a narrower window: {narrow:?}");
     }
 
     #[test]

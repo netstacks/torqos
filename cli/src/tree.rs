@@ -76,9 +76,9 @@ impl Data {
 pub struct Target {
     /// The schema node: its key, e.g. "users <name> cli style".
     pub node: String,
-    /// The words naming it, e.g. ["users", "viper", "cli", "style"].
+    /// The words naming it, e.g. ["users", "alice", "cli", "style"].
     pub words: Vec<String>,
-    /// The list entry name, if the path passes through a list (`users viper …`).
+    /// The list entry name, if the path passes through a list (`users alice …`).
     pub name: Option<String>,
     /// The words after the node: a leaf's value, a leaf-list's elements.
     pub values: Vec<String>,

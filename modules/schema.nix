@@ -18,7 +18,7 @@
 #            name against it before putting it into a path)
 #
 # `set` and `delete` act on leaves (one key of one file) and leaf-lists (one element of one file's
-# list). `delete` of a container or a list entry ("delete users viper") deletes every setting below
+# list). `delete` of a container or a list entry ("delete users alice") deletes every setting below
 # it, each in its own file; nothing else maps a command to a file. A path has no other meaning: a
 # leaf or leaf-list has no children, so no value can be read as a further node. (So per-service
 # settings, `services ssh port 2222`, will turn `services` from a leaf-list into a list.)

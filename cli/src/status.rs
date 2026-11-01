@@ -23,11 +23,12 @@ pub struct Report {
 }
 
 /// `v`: the broker's `status --json`. `last`: the latest change, for the all-well line.
-/// `repo`: the config repo, where a person would look.
+/// `repo`: the config repo, where a person would look. Each line a sentence, written to fit `ui`'s
+/// window (ui.rs).
 pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
     if v["busy"].is_string() {
         return Report {
-            text: format!("  {} A change is being applied right now. Check again when it is done.\n", ui.dim("⋯")),
+            text: format!("{}\n", ui.line(&format!("  {} ", ui.dim("⋯")), "A change is being applied right now. Check again when it is done.")),
             exit: 75,
             fix: Fix::Nothing,
         };
@@ -75,13 +76,13 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
     }
     if found.is_empty() {
         let text = if v["checked_running_system"] == true {
-            let last = last.map(|l| format!("    {}\n", ui.dim(&format!("Last change: {}", one_line(l, 60))))).unwrap_or_default();
-            format!("{}\n{last}", ui.ok("This machine is exactly as its history says.", ""))
+            let last = last.map(|l| format!("{}\n", ui.dim(&ui.line("    ", &format!("Last change: {}", one_line(l, 60)))))).unwrap_or_default();
+            format!("{}\n{last}", ui.ok("This machine is exactly as its history says."))
         } else {
             format!(
-                "{}\n    {}\n",
-                ui.ok("This machine is as its history says, as far as recorded.", ""),
-                ui.dim("(the running system is checked from the next change on)")
+                "{}\n{}\n",
+                ui.ok("This machine is as its history says, as far as recorded."),
+                ui.dim(&ui.line("    ", "(the running system is checked from the next change on)"))
             )
         };
         return Report { text, exit: 0, fix: Fix::Nothing };
@@ -89,11 +90,11 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
     let fix = if found.iter().any(|(_, f)| *f == Fix::Person) { Fix::Person } else { Fix::Repair };
     let mut text = format!("{}\n", ui.warn("This machine is not as its history says."));
     for (what, _) in &found {
-        text.push_str(&format!("    · {what}\n"));
+        text.push_str(&format!("{}\n", ui.line("    · ", what)));
     }
     text.push_str(&match fix {
-        Fix::Repair => format!("    To return it to its history:  request system repair   {}\n", ui.dim("(asks first)")),
-        _ => format!("    This needs a person: look at {} (request system repair won't touch it).\n", one_line(repo, 40)),
+        Fix::Repair => format!("{}\n", ui.line("    ", &format!("To return it to its history:  request system repair   {}", ui.dim("(asks first)")))),
+        _ => format!("{}\n", ui.line("    ", &format!("This needs a person: look at {} (request system repair won't touch it).", one_line(repo, 40)))),
     });
     Report { text, exit: 1, fix }
 }
@@ -114,6 +115,8 @@ mod tests {
         let r = render(&ok(), Some("Install htop for viper"), "/var/lib/torq/config", &Ui::plain());
         assert_eq!((r.exit, r.fix), (0, Fix::Nothing));
         assert_eq!(r.text, "  ✓ This machine is exactly as its history says.\n    Last change: Install htop for viper\n");
+        let narrow = render(&ok(), Some("Install htop for viper"), "/var/lib/torq/config", &Ui { fit: Some(30), ..Ui::plain() });
+        assert_eq!(narrow.text, "  ✓ This machine is exactly as\n    its history says.\n    Last change: Install htop\n    for viper\n", "a narrow terminal");
     }
 
     #[test]

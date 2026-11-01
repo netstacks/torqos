@@ -267,7 +267,7 @@ pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock
         if e.tainted {
             who.push_str(" ⚠ tainted");
         }
-        let room = crate::ui::WIDTH.saturating_sub(4 + 5 + 3 + 2 + crate::ui::width(&right) + 2 + crate::ui::width(&who));
+        let room = ui.width().saturating_sub(4 + 5 + 3 + 2 + crate::ui::width(&right) + 2 + crate::ui::width(&who));
         let text = format!("{}{who}", one_line(&text, room.max(10)));
         let symbol = match symbol {
             "✓" => ui.green(symbol),
@@ -280,7 +280,7 @@ pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock
     if shown.is_empty() {
         out.push_str("  Nothing has changed yet.\n");
     } else {
-        out.push_str(&format!("{}\n", ui.dim("\n  undo one change: request system revert <change>")));
+        out.push_str(&format!("\n{}\n", ui.dim(&ui.line("  ", "undo one change: request system revert <change>"))));
     }
     out
 }
@@ -390,6 +390,11 @@ mod tests {
         assert_eq!(out.trim_end(), expected, "\n{out}");
         assert!(out.lines().all(|l| crate::ui::width(l) <= crate::ui::WIDTH), "80 columns");
         assert_eq!(render(&ledger(), 2, &Ui::plain(), &clock()).lines().filter(|l| l.starts_with("    ")).count(), 2);
+        // A narrow terminal: each row fits it, its change number still at the end.
+        let narrow = render(&ledger(), 100, &Ui { fit: Some(50), ..Ui::plain() }, &clock());
+        assert!(narrow.lines().all(|l| crate::ui::width(l) <= 50), "\n{narrow}");
+        let row = narrow.lines().find(|l| l.contains("Install htop for viper")).unwrap_or_default();
+        assert!(crate::ui::width(row) == 50 && row.ends_with(" 3"), "right-aligned to 50: {row:?}");
     }
 
     #[test]

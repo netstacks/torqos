@@ -90,9 +90,11 @@ impl Real<'_> {
         }
         let (owner, keys) = self.ssh_keys(&head, &files)?;
         if !then.catalog {
-            let mut out = "SSH is turned on outside TorqOS's catalog: its rules (keys only, only the owner) do not apply.\n".to_string();
+            // Asked at the terminal: its sentences fit it (ui.rs).
+            let ui = crate::ui::Ui::plain_at(crate::ui::fit(crate::ui::columns(false)));
+            let mut out = format!("{}\n", ui.line("", "SSH is turned on outside TorqOS's catalog: its rules (keys only, only the owner) do not apply."));
             if then.passwords {
-                out.push_str("! Password logins are allowed (services openssh settings PasswordAuthentication).\n");
+                out.push_str(&format!("{}\n", ui.line("! ", "Password logins are allowed (services openssh settings PasswordAuthentication).")));
             }
             if !keys.is_empty() {
                 out.push_str(&format!("Keys that will be able to log in as {owner}, among others:\n{}\n", keys.join("\n")));
@@ -111,14 +113,14 @@ impl Real<'_> {
 
     /// The broker's status as `show system alarms` reports it — without colour (the shell cleans its
     /// output, which would show colour codes as text), naming the shell's own commands.
-    fn status_report(&self) -> Result<(serde_json::Value, crate::status::Report)> {
+    fn status_report(&self, fit: Option<usize>) -> Result<(serde_json::Value, crate::status::Report)> {
         let log = run::start_log()?;
         let v = match run::broker_status(broker(self.cli, &["status"]), &log)? {
             Ok(v) => v,
             Err(why) => bail!("couldn't check this machine: {why}"),
         };
         let last = crate::read_ledger(self.cli).ok().and_then(|l| history::last_change(&l));
-        let report = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &crate::ui::Ui::plain());
+        let report = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &crate::ui::Ui::plain_at(fit));
 
         Ok((v, report))
     }
@@ -213,8 +215,8 @@ impl Machine for Real<'_> {
         v["seq"].as_u64().context("the broker did not say what it recorded")
     }
 
-    fn alarms(&self, detail: bool) -> Result<String> {
-        let (v, report) = self.status_report()?;
+    fn alarms(&self, detail: bool, fit: Option<usize>) -> Result<String> {
+        let (v, report) = self.status_report(fit)?;
         let mut out = report.text;
         if let Some(seq) = v["pending_confirm"]["applied"].as_u64() {
             out.push_str(&format!(
@@ -255,7 +257,8 @@ impl Machine for Real<'_> {
     /// Only when the report says a repair can fix what is wrong, and only
     /// with a person's yes — it rebuilds and switches the whole system.
     fn repair(&self) -> Result<String> {
-        let (_, report) = self.status_report()?;
+        // Shown with a question, at the terminal: fitting it.
+        let (_, report) = self.status_report(crate::ui::fit(crate::ui::columns(false)))?;
         match report.fix {
             crate::status::Fix::Repair => {}
             crate::status::Fix::Nothing if report.exit == 0 => return Ok(format!("{}  Nothing to repair.\n", report.text)),
@@ -336,9 +339,9 @@ impl Machine for Real<'_> {
         Ok((state(&[])?, state(files)?))
     }
 
-    fn ledger(&self, count: usize) -> Result<String> {
+    fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String> {
         let entries = crate::read_ledger(self.cli)?;
-        Ok(history::render(&entries, count, &crate::ui::Ui::plain(), &history::Clock::system()))
+        Ok(history::render(&entries, count, &crate::ui::Ui::plain_at(fit), &history::Clock::system()))
     }
 
     /// As `torq undo` did, with a commit's rule for asking: a change only to your own folder goes
@@ -678,6 +681,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
     // Only the interactive shell keeps a candidate between runs; a script's is its own.
     let saved = if run == Invocation::Interactive { Some(Candidate::default_path()?) } else { None };
     let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who, style);
+    s.screen = || crate::ui::columns(false);
     let fail = |line: &str, e: anyhow::Error| {
         say_error(&format!("{}: {}", history::one_line(line, 80), describe(&e)));
         Ok(1)
@@ -718,7 +722,7 @@ fn print_clean(out: &str) {
 /// `error: …` to standard error, the word in red on a terminal.
 fn say_error(msg: &str) {
     let ui = crate::ui::Ui::for_terminal(true);
-    eprintln!("{} {}", ui.red("error:"), msg);
+    eprint!("{}", ui.error(msg));
 }
 
 /// Write to standard output. Whoever reads it stopped (`torqcli show configuration | head`): stop
@@ -800,7 +804,7 @@ fn run_line(s: &mut Session, line: &str) -> bool {
             true
         }
         Err(e) => {
-            println!("{} {}", crate::ui::Ui::for_terminal(false).red("error:"), describe(&e));
+            print!("{}", crate::ui::Ui::for_terminal(false).error(&describe(&e)));
             false
         }
     }
@@ -872,17 +876,13 @@ mod editor {
     impl ConditionalEventHandler for Question {
         fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
             let (choices, _) = self.0.choices(&ctx.line()[..ctx.pos()])?; // in quotes: a plain '?'
-            let text: String = complete::render(&choices, columns()).lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
+            let text: String = complete::render(&choices, crate::ui::Ui::for_terminal(false).width()).lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
             let text = crate::paint::paint(&text, &crate::ui::Ui::for_terminal(false));
             print!("?\r\n{}", text.replace('\n', "\r\n"));
             Some(Cmd::Repaint)
         }
     }
 
-    /// How wide the terminal is (80 when it cannot say).
-    fn columns() -> usize {
-        rustix::termios::tcgetwinsize(std::io::stdout()).map(|w| usize::from(w.ws_col)).ok().filter(|&c| c > 0).unwrap_or(crate::ui::WIDTH)
-    }
 
     #[cfg(test)]
     #[test]

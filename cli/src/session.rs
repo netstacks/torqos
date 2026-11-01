@@ -27,7 +27,7 @@ pub trait Machine {
     fn edit(&self, path: &str, text: &str) -> Result<Option<String>>;
     /// `show system alarms`: what is not as the ledger says (and a commit confirmed waiting); with
     /// `detail`, the broker's facts behind it (commits, store paths).
-    fn alarms(&self, detail: bool) -> Result<String>;
+    fn alarms(&self, detail: bool, fit: Option<usize>) -> Result<String>;
     /// `show packages available <term>…`.
     fn search(&self, terms: &[String]) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
@@ -43,7 +43,7 @@ pub trait Machine {
     /// in a .nix file): `show services` must not say SSH is off then.
     fn ssh_outside(&self) -> Result<bool>;
     /// `show system ledger <count>`: the ledger's last entries, as a person reads them.
-    fn ledger(&self, count: usize) -> Result<String>;
+    fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String>;
     /// `request system revert <change>`: undo that one change (a new change forward), asked as a
     /// commit is (`me`: who is asking; their own folder needs no question).
     fn revert(&self, seq: u64, me: &str) -> Result<String>;
@@ -121,6 +121,12 @@ pub struct Session<'a> {
     machine: &'a dyn Machine,
     /// Who is at the shell (their login name): their own folder needs no question.
     me: String,
+    /// How wide the terminal the output goes to is, read for each command (it may be resized);
+    /// None: not a terminal (a script, a test). The shell sets it.
+    pub screen: fn() -> Option<usize>,
+    /// The width to lay this command's output out to: the screen's, unless a filter reads it
+    /// (`| grep` and `| wc -l` count lines, so a line stays one line).
+    fit: Option<usize>,
     /// Set by `exit` in operational mode (or `quit`).
     pub done: bool,
 }
@@ -201,7 +207,7 @@ fn word(out: &mut Vec<String>, w: String) -> Result<()> {
 
 impl<'a> Session<'a> {
     pub fn new(schema: Schema, tree: crate::nixos::Tree, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str, style: Style) -> Self {
-        Session { schema, tree, repo, saved, mode: Mode::Operational, style, edit: Vec::new(), candidate: None, machine, me: me.into(), done: false }
+        Session { schema, tree, repo, saved, mode: Mode::Operational, style, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false }
     }
 
     /// The whole tree over both kinds of files (whole.rs).
@@ -259,7 +265,14 @@ impl<'a> Session<'a> {
             self.candidate()?;
         }
         let (op, filters) = syntax::parse_line(self.style, self.mode, w, &|ws| self.is_place(ws))?;
+        self.fit = if filters.is_empty() { crate::ui::fit((self.screen)()) } else { None };
         crate::filter::apply(&filters, self.run(op)?)
+    }
+
+    /// How this command's sentences and tables are laid out (ui.rs): to fit the window, unless a
+    /// filter reads them. Plain: the shell cleans, then paints, what is printed.
+    fn ui(&self) -> crate::ui::Ui {
+        crate::ui::Ui::plain_at(self.fit)
     }
 
     /// Whether `words`, from where configuration mode is, name a place (somewhere to go), not a setting.
@@ -504,7 +517,8 @@ impl<'a> Session<'a> {
                 let all = &h.configurations;
                 let width = all.iter().map(|c| c.who.chars().count()).max().unwrap_or(0);
                 for (n, c) in all.iter().enumerate() {
-                    out.push_str(&format!("{n:<3} {}  {:<width$}  {}\n", c.date, c.who, c.what));
+                    let row = format!("{n:<3} {}  {:<width$}  ", c.date, c.who);
+                    out.push_str(&format!("{}\n", self.ui().line(&row, &c.what)));
                     if display == Some(Display::Detail) {
                         let seq = c.seq.map(|s| format!("  (ledger #{s})")).unwrap_or_default();
                         out.push_str(&format!("    commit {}{seq}\n", crate::history::one_line(&c.id, 64)));
@@ -539,7 +553,7 @@ impl<'a> Session<'a> {
                     }
                 }
             }
-            Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail)),
+            Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail), self.fit),
             Op::ShowServices => {
                 let active = self.configuration_of("HEAD")?.config;
                 let on: Vec<String> = match active.files.get("services.json") {
@@ -553,13 +567,14 @@ impl<'a> Session<'a> {
                     .map(|(name, what)| format!("{} {name:<width$}  {what}\n", if on.contains(name) { "on " } else { "off" }))
                     .collect();
                 if !on.iter().any(|s| s == "ssh") && self.machine.ssh_outside()? {
-                    out.push_str("! SSH is on anyway, outside the catalog, with password logins allowed (a .nix file sets \
-                                  services.openssh.enable): `set services ssh` makes it keys only, once that line is gone\n");
+                    let what = "SSH is on anyway, outside the catalog, with password logins allowed (a .nix file sets \
+                                services.openssh.enable): `set services ssh` makes it keys only, once that line is gone";
+                    out.push_str(&format!("{}\n", self.ui().line("! ", what)));
                 }
                 Ok(out)
             }
             Op::ShowPackages { terms } => self.machine.search(&terms),
-            Op::ShowLedger { count } => self.machine.ledger(count.unwrap_or(20)),
+            Op::ShowLedger { count } => self.machine.ledger(count.unwrap_or(20), self.fit),
             other => bail!("not an operational show: {other:?}"),
         }
     }
@@ -796,6 +811,8 @@ impl<'a> Session<'a> {
         self.machine.check(&base, &files)?;
         let compare = a.compare(&self.whole())?;
         let mut shown: String = compare.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
+        // The comparison as it is; the sentences around it fit the window (ui.rs).
+        let ui = self.ui();
         // The catalog's SSH admits its owner's keys only: with none, nobody could log in; with some,
         // approving it approves exactly those (as the changed configuration has them).
         // Whether this turns SSH on is read from the evaluated configurations, before and after: every
@@ -816,9 +833,9 @@ impl<'a> Session<'a> {
                 shown.push_str(&format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")));
             } else {
                 // Turned on outside TorqOS's catalog: its rules (keys only, only the owner) are not there.
-                shown.push_str("SSH is turned on outside TorqOS's catalog: its rules (keys only, only the owner) do not apply.\n");
+                shown.push_str(&format!("{}\n", ui.line("", "SSH is turned on outside TorqOS's catalog: its rules (keys only, only the owner) do not apply.")));
                 if now.passwords {
-                    shown.push_str("! Password logins are allowed (services openssh settings PasswordAuthentication).\n");
+                    shown.push_str(&format!("{}\n", ui.line("! ", "Password logins are allowed (services openssh settings PasswordAuthentication).")));
                 }
                 if !keys.is_empty() {
                     shown.push_str(&format!("Keys that will be able to log in as {owner}, among others:\n{}\n", keys.join("\n")));
@@ -832,10 +849,10 @@ impl<'a> Session<'a> {
             || files.iter().any(|(p, _)| p == "hardware-configuration.nix");
         // A folder as the source: the approval is of its content as it is now (the lock's hash).
         if a.data.source.as_deref().is_some_and(|s| s.starts_with("path:")) && files.iter().any(|(p, _)| p == "flake.nix" || p == "flake.lock") {
-            shown.push_str("! TorqOS comes from a folder (path:): whoever can write to it decides what the next `request system update` installs.\n");
+            shown.push_str(&format!("{}\n", ui.line("! ", "TorqOS comes from a folder (path:): whoever can write to it decides what the next `request system update` installs.")));
         }
         if boots {
-            shown.push_str("! This changes how the machine starts (file systems, boot): a mistake shows only at the next restart, where `commit confirmed` cannot undo it; the earlier configurations stay in the boot menu.\n");
+            shown.push_str(&format!("{}\n", ui.line("! ", "This changes how the machine starts (file systems, boot): a mistake shows only at the next restart, where `commit confirmed` cannot undo it; the earlier configurations stay in the boot menu.")));
         }
         let why = match (tier, others.is_empty()) {
             ("system", _) => Some("This changes the system (all users).".to_string()),
@@ -843,7 +860,7 @@ impl<'a> Session<'a> {
             _ => None,
         };
         if let Some(why) = why {
-            if !self.machine.ask(&format!("{shown}{why} Commit? ")) {
+            if !self.machine.ask(&format!("{shown}{} ", ui.line("", &format!("{why} Commit?")))) {
                 bail!("not committed: this change needs a person to approve it at a terminal");
             }
         }
@@ -1355,7 +1372,7 @@ mod tests {
             self.edited.borrow_mut().push((path.into(), text.into()));
             Ok(self.edit_to.clone())
         }
-        fn alarms(&self, detail: bool) -> Result<String> {
+        fn alarms(&self, detail: bool, _: Option<usize>) -> Result<String> {
             Ok(if detail { "all well\n  running system /nix/store/x\n".into() } else { "all well\n".into() })
         }
         fn search(&self, terms: &[String]) -> Result<String> {
@@ -1364,8 +1381,8 @@ mod tests {
         fn repair(&self) -> Result<String> {
             Ok("repaired\n".into())
         }
-        fn ledger(&self, count: usize) -> Result<String> {
-            Ok(format!("ledger {count}\n"))
+        fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String> {
+            Ok(format!("ledger {count} fitting {fit:?}\n"))
         }
         fn ssh_outside(&self) -> Result<bool> {
             Ok(self.ssh_outside)
@@ -1616,6 +1633,25 @@ mod tests {
         assert!(e.contains("flake.lock at") && e.contains("is not a plain file"), "{e}");
     }
 
+    #[test]
+    fn a_long_reason_wraps_on_a_screen_not_into_a_filter() {
+        let d = repo();
+        let head = Repo::new(d.path()).head().unwrap();
+        let long = "Install htop and jq for viper, and turn on the firewall";
+        let m = Fake { ledger: Some(vec![Configuration { id: head, date: "d".into(), who: "viper".into(), what: long.into(), seq: Some(1) }]), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("show system commit").unwrap(), format!("0   d  viper  {long}\n"), "no screen (a script): one line");
+        s.screen = || Some(44);
+        assert_eq!(s.exec("show system commit").unwrap(), "0   d  viper  Install htop and jq for viper,\n              and turn on the firewall\n");
+        s.screen = || Some(30);
+        assert_eq!(s.exec("show system commit").unwrap(), "0   d  viper\n    Install htop and jq for\n    viper, and turn on the\n    firewall\n", "too narrow beside it: under it");
+        #[cfg(target_os = "linux")] // the filters' sandbox
+        {
+            s.screen = || Some(44);
+            assert_eq!(s.exec("show system commit | wc -l").unwrap(), "1\n", "a filter reads one line per commit");
+        }
+    }
+
     /// After a commit confirmed rolls back, the config repo is reset to the commit before it: git's
     /// history no longer has it, the ledger does. The numbers are the ledger's.
     #[test]
@@ -1680,7 +1716,12 @@ mod tests {
     fn the_ledger_and_reverting_one_change() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        assert_eq!(s.exec("show system ledger").unwrap(), "ledger 20\n");
+        assert_eq!(s.exec("show system ledger").unwrap(), "ledger 20 fitting None\n", "no window");
+        s.screen = || Some(50);
+        assert_eq!(s.exec("show system ledger").unwrap(), "ledger 20 fitting Some(50)\n", "fitting the window");
+        #[cfg(target_os = "linux")] // the filters' sandbox
+        assert_eq!(s.exec("show system ledger | head").unwrap(), "ledger 20 fitting None\n", "a filter reads whole rows, as before");
+        s.screen = || None;
         assert_eq!(s.exec("show system ledger 5 | wc -l").unwrap(), "1\n");
         assert!(format!("{:#}", s.exec("show system ledger 0").unwrap_err()).contains("1 to 10000"));
         assert_eq!(s.exec("request system revert 7").unwrap(), "reverted 7 for dev\n");
@@ -1871,6 +1912,40 @@ mod tests {
         let mut d2 = crate::whole::Data::default();
         s.whole().set(&mut d2, &w("config a.nix")).unwrap();
         assert_eq!(crate::attach::load(crate::attach::render(&d2.attached).as_deref().map(str::as_bytes)).unwrap(), d2.attached, "a top-level attachment reads back");
+    }
+
+    /// The layout (ui.rs), through real commands at every window size: each sentence fits the window,
+    /// wrapped under where its text starts; the comparison is exactly as it is; without a window,
+    /// nothing is wrapped. A window over 80 columns is laid out to 80.
+    #[test]
+    fn every_window_size() {
+        let fits = |text: &str, fit: usize| text.lines().all(|l| crate::ui::width(l) <= fit);
+        for (screen, fit) in [(None, None), (Some(12), Some(20)), (Some(40), Some(40)), (Some(80), Some(80)), (Some(200), Some(80))] {
+            let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+            let mut s = session(d.path(), None, &m);
+            s.screen = match screen {
+                None => || None,
+                Some(12) => || Some(12),
+                Some(40) => || Some(40),
+                Some(80) => || Some(80),
+                _ => || Some(200),
+            };
+            run(&mut s, &["configure", "set boot loader timeout 3"]);
+            let compare = s.exec("show | compare").unwrap();
+            run(&mut s, &["commit"]);
+            let asked = m.asked.borrow()[0].clone();
+            assert!(asked.starts_with(&compare), "{fit:?}: the comparison as it is:\n{asked}");
+            let after = &asked[compare.len()..];
+            assert!(after.starts_with("! This changes how"), "{fit:?}: {after}");
+            assert!(after.ends_with("Commit? "), "{fit:?}: the answer goes on the same line: {after}");
+            match fit {
+                None => assert_eq!(after.lines().count(), 2, "no window: one line each: {after}"),
+                Some(f) => {
+                    assert!(fits(after, f), "{f}: {after}");
+                    assert!(after.lines().nth(1).is_some_and(|l| l.starts_with("  ") && !l.starts_with("   ")), "{f}: under its text: {after}");
+                }
+            }
+        }
     }
 
     /// A change to how the machine starts is said so before anyone approves it; others are not.

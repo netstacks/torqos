@@ -81,9 +81,9 @@ As built (4a, cli/src/syntax.rs): both styles parse to one `Op`; a test renders 
 style and parses it back. A C style bare path to a container or list entry is a submode (the prompt
 shows `(config-system)`), any other bare path sets. The interactive shell starts in your style
 (`users <you> cli style`, else `system cli style`, from /etc/torq/cli.json); `switch cli` changes it
-for the session. `?` and Tab follow the style and where you are. A `?` list fits the terminal:
-each help is its setting's first sentence (NixOS's doc markup taken out, `…` where it was cut), wrapped
-under the help column, at most three lines.
+for the session. `?` and Tab follow the style and where you are. In a `?` list each help is its
+setting's first sentence (NixOS's doc markup taken out, `…` where it was cut), at most three lines
+(see "Layout" below).
 
 **Scripts (`torqcli -c`)** use a private candidate that exists only for that invocation — never your
 interactive candidate, so a script cannot commit your half-done edits or leave edits behind. They
@@ -438,3 +438,20 @@ its help dim, the prompt (user, host, mode) and `error:` in colour. It is added 
 already cleaned of anything that could fool a terminal, so a value can never bring its own codes;
 and never with NO_COLOR, TERM=dumb, or when the output is not a terminal. There is no desktop
 (ADR-019).
+
+**Layout** (cli/src/ui.rs) — one set of rules for everything torqcli prints:
+
+- **One width:** the window's, read for each command (a resized window is followed), at most 80
+  columns and at least 20 (`ui::fit`).
+- **A sentence is wrapped by the code that writes it** (`Ui::line`, `ok`, `warn`, `error`, with
+  `ui::hang` underneath): its next lines start where its text started (after `! `, `✓ `, `error: `,
+  a commit's date and author), never back at the left edge. Beside a lead wider than 4 with under
+  20 columns left, the text goes on the lines after it, indented 4. Nothing guesses at print time
+  which lines are sentences.
+- **Tables** (`show system ledger`, the `?` list) lay out to the same width.
+- **Data is never wrapped or cut:** a configuration, `show | compare`, a diff, `| display set`;
+  the terminal wraps a long line itself.
+- **No window, nothing wrapped:** when a filter reads the output (`| grep`, `| wc -l` count lines)
+  or it does not go to a terminal (a script), every sentence and row stays one line, as before.
+- **Colour takes no room:** widths do not count colour codes. The test `every_window_size` runs
+  real commands at 20, 40, 80 and 200 columns and without a window.

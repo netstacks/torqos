@@ -13,17 +13,24 @@ pub fn paint(text: &str, ui: &Ui) -> String {
     }
     let mut out = String::new();
     let mut completions = false;
+    // Where a `! warning`'s text starts: its next lines start there too (ui::hang), and stay yellow.
+    let mut warning: Option<usize> = None;
     for line in text.split_inclusive('\n') {
         let (body, end) = line.strip_suffix('\n').map_or((line, ""), |b| (b, "\n"));
         if body.is_empty() {
             completions = false;
         }
+        let t = body.trim_start();
+        let indent = body.len() - t.len();
         let painted = if body == "Possible completions:" {
             completions = true;
             ui.bold(body)
         } else if completions {
             completion(body, ui)
+        } else if warning == Some(indent) && !t.is_empty() {
+            format!("{}{}", &body[..indent], ui.yellow(t))
         } else {
+            warning = t.starts_with("! ").then_some(indent + 2);
             one(body, ui)
         };
         out.push_str(&painted);
@@ -143,7 +150,7 @@ fn word_end(s: &str) -> Option<usize> {
     }
 }
 
-/// The prompt (`viper@torq-utm> `, `…# `, `…(config-system)# `): the user cyan, the host blue, where
+/// The prompt (`alice@host> `, `…# `, `…(config-system)# `): the user cyan, the host blue, where
 /// configuration mode is dim, the mark bold.
 pub fn prompt(p: &str, ui: &Ui) -> String {
     if !ui.color {
@@ -195,11 +202,11 @@ mod tests {
         out
     }
 
-    const SAMPLE: &str = "networking {\n    hostName torq-utm;\n    firewall {\n        allowedTCPPorts [ 80 443 ];\n    }\n}\n\"a b\" x;\n## software: torq 2026-10-31\n[edit services openssh]\n+   enable true;\n-   enable false;\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n! TorqOS comes from a folder\nset networking hostName x\ncommit complete (change #42)\n  ✓ This machine is exactly as its history says.\n  ⚠ not as its history says\n    21:07   ✓ H4 live check\n\nPossible completions:\n  c  C syntax\n  j  J syntax that\n     wraps\n";
+    const SAMPLE: &str = "networking {\n    hostName torq-utm;\n    firewall {\n        allowedTCPPorts [ 80 443 ];\n    }\n}\n\"a b\" x;\n## software: torq 2026-10-31\n[edit services openssh]\n+   enable true;\n-   enable false;\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n! TorqOS comes from a folder\n  that; wraps\nset networking hostName x\ncommit complete (change #42)\n  ✓ This machine is exactly as its history says.\n  ⚠ not as its history says\n    21:07   ✓ H4 live check\n\nPossible completions:\n  c  C syntax\n  j  J syntax that\n     wraps\n";
 
     #[test]
     fn the_same_text_coloured_and_nothing_when_colour_is_off() {
-        let on = Ui { color: true };
+        let on = Ui { color: true, ..Ui::plain() };
         let painted = paint(SAMPLE, &on);
         assert_eq!(strip(&painted), SAMPLE, "colour only: not a character of the text changes");
         assert_eq!(paint(SAMPLE, &Ui::plain()), SAMPLE);
@@ -214,12 +221,13 @@ mod tests {
         assert!(line("✓ This machine").contains("\x1b[32m✓") && line("⚠").contains("\x1b[33m⚠"));
         assert!(line("21:07").contains("\x1b[32m✓"), "a history row's mark");
         assert!(line("  c  C syntax").contains("\x1b[36mc\x1b[0m") && line("  c  C syntax").contains("\x1b[2mC syntax"));
+        assert!(line("  that; wraps").starts_with("  \x1b[33mthat; wraps"), "a warning's next line: yellow, not a setting");
         assert!(line("     wraps").starts_with("     \x1b[2mwraps"), "a help's next line: dim, not a word");
     }
 
     #[test]
     fn the_prompt_coloured_and_its_text_unchanged() {
-        let on = Ui { color: true };
+        let on = Ui { color: true, ..Ui::plain() };
         for p in ["viper@torq-utm> ", "viper@torq-utm# ", "viper@torq-utm(config-system)# "] {
             assert_eq!(strip(&prompt(p, &on)), p);
             assert!(prompt(p, &on).starts_with("\x1b[36mviper"), "{p}");
@@ -232,6 +240,6 @@ mod tests {
     fn a_value_cannot_bring_colour() {
         let cleaned = crate::history::clean("hostName \x1b[31mred;");
         assert!(!cleaned.contains('\x1b'));
-        assert!(!strip(&paint(&cleaned, &Ui { color: true })).contains('\x1b'));
+        assert!(!strip(&paint(&cleaned, &Ui { color: true, ..Ui::plain() })).contains('\x1b'));
     }
 }
