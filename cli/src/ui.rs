@@ -117,6 +117,24 @@ impl Ui {
     }
 }
 
+/// The machine's own text console (TERM=linux) has a small font without ✓ ⚠ ✗ ↶ …: there, plain
+/// characters stand in. Any other terminal (over SSH, a desktop's) shows them as they are.
+pub fn on_console() -> bool {
+    std::env::var("TERM").is_ok_and(|t| t == "linux")
+}
+
+pub fn for_console(text: &str) -> String {
+    console_text(text, on_console())
+}
+
+/// `text` as `console` (the machine's own) shows it.
+fn console_text(text: &str, console: bool) -> String {
+    if !console {
+        return text.to_string();
+    }
+    text.replace('✓', "+").replace('⚠', "!").replace('✗', "x").replace('↶', "<").replace('…', "...")
+}
+
 /// How many columns the terminal on standard output (`err`: standard error) has, if it is one —
 /// read each time, as the window may have been resized.
 pub fn columns(err: bool) -> Option<usize> {
@@ -299,6 +317,13 @@ mod tests {
         assert!(long.contains("  change 23"), "falls back to two spaces when it cannot fit");
         let narrow = at(40).with_right("Installed htop", "change 23", 4);
         assert_eq!(4 + width(&narrow), 40, "right-aligned to a narrower window: {narrow:?}");
+    }
+
+    #[test]
+    fn the_console_gets_plain_characters() {
+        let text = "  ✓ fine\n  ⚠ not\n    21:07   ↶ undone ✗ failed …";
+        assert_eq!(console_text(text, true), "  + fine\n  ! not\n    21:07   < undone x failed ...");
+        assert_eq!(console_text(text, false), text, "any other terminal: as it is");
     }
 
     #[test]

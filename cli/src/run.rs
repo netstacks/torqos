@@ -62,11 +62,12 @@ impl Progress {
         }
         let (flag, phase) = (stop.clone(), phase.to_string());
         let handle = std::thread::spawn(move || {
-            let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            // (The machine's own console has no braille in its font: a plain spinner there.)
+            let frames: &[char] = if crate::ui::on_console() { &['|', '/', '-', '\\'] } else { &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] };
             let started = Instant::now();
             let mut i = 0;
             while !flag.load(Ordering::Relaxed) {
-                let line = format!("  {} {phase}…  {}", frames[i % frames.len()], crate::ui::elapsed(started.elapsed()));
+                let line = crate::ui::for_console(&format!("  {} {phase}…  {}", frames[i % frames.len()], crate::ui::elapsed(started.elapsed())));
                 eprint!("\r\x1b[2K{line}");
                 let _ = std::io::stderr().flush();
                 std::thread::sleep(Duration::from_millis(100));

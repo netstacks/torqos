@@ -767,8 +767,8 @@ fn run_shell(args: &[String]) -> Result<i32> {
 /// checked on load, but the ledger's reasons and messages are not ours).
 fn print_clean(out: &str) {
     let cleaned: String = out.lines().map(|l| format!("{}\n", history::clean(l))).collect();
-    // Colour last, on what is already clean (paint.rs).
-    say(&crate::paint::paint(&cleaned, &crate::ui::Ui::for_terminal(false)));
+    // Colour last, on what is already clean (paint.rs); the console's own characters (ui::for_console).
+    say(&crate::ui::for_console(&crate::paint::paint(&cleaned, &crate::ui::Ui::for_terminal(false))));
 }
 
 /// One cause of an error as a person reads it: the system's own words for a failed file operation
