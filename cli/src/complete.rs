@@ -679,7 +679,7 @@ mod tests {
         assert!(names("set users users dev packages", "").contains(&"ripgrep".to_string()));
         let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
         let e = format!("{:#}", whole.set(&mut crate::whole::Data::default(), &w("system packages btopp")).unwrap_err());
-        assert_eq!(e, "'btopp' is not a package in this machine's nixpkgs (did you mean btop?): `show packages <word>` searches them");
+        assert_eq!(e, "'btopp' is not a package in this machine's nixpkgs; did you mean btop? (`show packages <word>` searches them)");
         assert!(whole.set(&mut crate::whole::Data::default(), &w("system packages python3Packages.rich")).is_ok(), "in a set nixpkgs has");
     }
 

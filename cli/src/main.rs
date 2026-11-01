@@ -12,6 +12,7 @@
 
 mod facts;
 mod grammar;
+mod near;
 mod history;
 mod tree;
 mod candidate;

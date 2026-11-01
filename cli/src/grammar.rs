@@ -582,12 +582,7 @@ fn refused(w: &str, after: &[String], offered: &[String]) -> String {
     if let Some((_, _, advice)) = FOREIGN.iter().find(|(at, word, _)| *at == foreign_at && *word == w) {
         return format!("'{w}' is not a word here{at}: {advice}");
     }
-    // Near enough to be a slip: one letter off in a short word, two in a longer one.
-    let near = offered.iter().filter(|f| {
-        let d = crate::nixos::distance(f, w);
-        d <= if w.chars().count() <= 4 { 1 } else { 2 } && d < w.chars().count()
-    });
-    let hint = near.min_by_key(|f| crate::nixos::distance(f, w)).map(|n| format!(": did you mean {n}?")).unwrap_or_default();
+    let hint = crate::near::hint(w, offered.iter().map(String::as_str));
     format!("'{w}' is not a word here{at}{hint} (one of: {})", offered.join(", "))
 }
 

@@ -216,15 +216,8 @@ impl Tree {
         if self.packages.is_empty() || self.packages.contains(first) {
             return Ok(());
         }
-        let mut near: Vec<(usize, &String)> = self.packages.iter().map(|p| (distance(p, name), p)).filter(|(d, _)| *d <= 2).collect();
-        near.sort();
-        // Only the closest (btopp: btop, not htop too).
-        let closest = near.first().map(|(d, _)| *d);
-        let hint = match near.iter().filter(|(d, _)| Some(*d) == closest).take(3).map(|(_, p)| p.as_str()).collect::<Vec<_>>().as_slice() {
-            [] => String::new(),
-            n => format!(" (did you mean {}?)", n.join(", ")),
-        };
-        bail!("'{name}' is not a package in this machine's nixpkgs{hint}: `show packages <word>` searches them")
+        let hint = crate::near::hint(name, self.packages.iter().map(String::as_str));
+        bail!("'{name}' is not a package in this machine's nixpkgs{hint} (`show packages <word>` searches them)")
     }
 
     /// Whether `loc` is a person's password (settings-fence.nix, rule 3): never in the tree.
@@ -387,7 +380,17 @@ fn step<'a>(n: &'a Node, w: &str) -> Step<'a> {
     if let Some(f) = &n.free {
         return if w.starts_with('<') { Step::None } else { Step::Name(f, w.to_string()) };
     }
-    let begins: Vec<(&String, &Node)> = n.children.iter().filter(|(k, _)| !w.is_empty() && k.starts_with(w)).collect();
+    // The same name in another case (`hostname`: hostName), then a unique beginning — as typed, then
+    // in any case.
+    let lw = w.to_lowercase();
+    let same: Vec<(&String, &Node)> = n.children.iter().filter(|(k, _)| k.to_lowercase() == lw).collect();
+    if let [(name, c)] = same.as_slice() {
+        return Step::Name(c, name.to_string());
+    }
+    let mut begins: Vec<(&String, &Node)> = n.children.iter().filter(|(k, _)| !w.is_empty() && k.starts_with(w)).collect();
+    if begins.is_empty() {
+        begins = n.children.iter().filter(|(k, _)| !w.is_empty() && k.to_lowercase().starts_with(&lw)).collect();
+    }
     match begins.as_slice() {
         [(name, c)] => Step::Name(c, name.to_string()),
         [] => Step::None,
@@ -447,24 +450,7 @@ fn path_text(loc: &[String], w: &str) -> String {
 
 /// A close name at this point, for a misspelling (`virtualisation dokcer` → docker).
 fn did_you_mean(n: &Node, w: &str) -> String {
-    let close = n.children.keys().filter(|k| *k != "<name>").min_by_key(|k| distance(k, w));
-    match close {
-        Some(k) if distance(k, w) <= 2 => format!(" (did you mean {k}?)"),
-        _ => String::new(),
-    }
-}
-
-pub fn distance(a: &str, b: &str) -> usize {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.iter().enumerate() {
-        let mut cur = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            cur.push((prev[j] + usize::from(ca != cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
-        }
-        prev = cur;
-    }
-    prev[b.len()]
+    crate::near::hint(w, n.children.keys().map(String::as_str))
 }
 
 /// A setting's value words as the JSON NixOS will get, checked against its type: `true`/`false`
@@ -600,7 +586,7 @@ mod tests {
             ("services openssh settings LogLevel LOUD", "'LOUD' is not one of: QUIET"),
             ("environment systemPackages [ \"rm -rf\" ]", "not a package name"),
             ("time timeZone", "needs text"),
-            ("virtualisation dokcer enable", "no such setting (did you mean docker?)"),
+            ("virtualisation dokcer enable", "no such setting; did you mean docker?"),
             ("services httpd virtualHosts", "not a setting by itself"),
             ("boot kernel sysctl", "not a setting by itself"),
         ] {

@@ -208,9 +208,7 @@ impl Schema {
         let what = key.replace("<name>", "…");
         if let Some(values) = &n.values {
             if !values.contains_key(value) {
-                let mut near: Vec<&String> = values.keys().filter(|v| v.to_lowercase().contains(&value.to_lowercase())).take(5).collect();
-                near.sort();
-                let hint = if near.is_empty() { String::new() } else { format!(" (did you mean: {}?)", near.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")) };
+                let hint = crate::near::hint(value, values.keys().map(String::as_str));
                 bail!("'{value}' is not a valid {what}{hint}");
             }
             return Ok(());
@@ -794,7 +792,7 @@ mod tests {
         let e = err(s.set(&mut c, &w("system time-zone Europe/Berln")));
         assert!(e.contains("not a valid system time-zone"), "{e}");
         let e = err(s.set(&mut c, &w("system time-zone berlin")));
-        assert!(e.contains("did you mean: Europe/Berlin"), "{e}");
+        assert!(e.contains("; did you mean Europe/Berlin?"), "{e}");
         for bad in ["system host-name my_laptop", "system host-name -x", "system packages ../x", "system packages a.b.c", "services telnet"] {
             assert!(err(s.set(&mut c, &w(bad))).contains("is not a valid"), "{bad}");
         }
