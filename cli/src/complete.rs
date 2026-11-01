@@ -115,23 +115,52 @@ fn next(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
 
 /// Words the grammar offers, for an error: the first dozen, then `…`.
 fn listed(fixed: &[&str]) -> String {
-    let shown: Vec<&str> = fixed.iter().copied().take(12).collect();
-    format!("{}{}", shown.join(", "), if fixed.len() > shown.len() { ", …" } else { "" })
+    fixed.join(", ")
 }
 
-/// When a line is not a whole command but the grammar knows what may follow it, what to say: what
-/// may come next. Only for a line of command words alone (`show system`): where a word stands for a
-/// value (`show system rollback x`), what is wrong is the value, and the command's own error says so.
-pub fn incomplete(k: &Know, at: &At, words: &[String]) -> Option<String> {
-    for i in 0..words.len() {
-        let c = next(k, at, &words[..i], "");
-        if c.iter().any(Choice::is_placeholder) || !c.iter().any(|x| x.word == words[i]) {
+/// What is wrong with a line of command words the grammar does not take as a whole command (the
+/// parser refused it): what may follow it, the value it needs, or that nothing may follow where a
+/// word was added — in the grammar's words, so `?`, Tab and Enter say the same. None where it is
+/// not the grammar's to say: a configuration path (its own check), after a `|` (the filter's), or a
+/// line whose value is what is wrong (`show system rollback x`: the command's own error says why).
+pub fn explain(k: &Know, at: &At, words: &[String]) -> Option<String> {
+    let bar = words.iter().position(|w| w == "|").unwrap_or(words.len());
+    let head = &words[..bar];
+    let mut valued = false;
+    for i in 0..=head.len() {
+        if in_path(at.mode, &head[..i]) {
             return None;
         }
+        let c = next(k, at, &head[..i], "");
+        let Some(w) = head.get(i) else { break };
+        if c.is_empty() {
+            return (i > 0).then(|| format!("'{w}' is not a word here: nothing may follow `{}`", head[..i].join(" ")));
+        }
+        if c.iter().any(Choice::is_placeholder) {
+            valued = true;
+        } else if !c.iter().any(|x| x.word == *w) {
+            return None; // (expand named it already)
+        }
     }
-    let c = next(k, at, words, "");
+    if bar < words.len() || valued || choices_at(k, at, head, "").iter().any(|x| x.word == ENTER.0) {
+        return None;
+    }
+    let c = next(k, at, head, "");
     let fixed: Vec<&str> = c.iter().filter(|x| !x.is_placeholder() && x.word != "|").map(|x| x.word.as_str()).collect();
-    (!words.is_empty() && !fixed.is_empty() && !c.iter().any(Choice::is_placeholder)).then(|| format!("`{}` is not a whole command: one of these may follow: {}", words.join(" "), listed(&fixed)))
+    let hole = c.iter().find(|x| x.is_placeholder());
+    match (hole, fixed.is_empty()) {
+        (None, true) => None,
+        (Some(h), true) => Some(format!("needs {} ({})", h.word, lower(&summary(&h.help)))),
+        (Some(h), false) => Some(format!("not a whole command: {} or one of: {}", h.word, listed(&fixed))),
+        (None, false) => Some(format!("not a whole command: one of these may follow: {}", listed(&fixed))),
+    }
+}
+
+/// A help sentence inside another sentence: its first letter small, no full stop.
+fn lower(help: &str) -> String {
+    let t = help.trim_end_matches('.');
+    let mut c = t.chars();
+    c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// Whether the next word is part of a configuration path (`set networking …`, `show configuration
@@ -801,10 +830,65 @@ mod tests {
         assert!(e.contains("'foo' is not a word here (after `show system`)") && e.contains("alarms, commit, ledger, rollback"), "{e}");
         assert!(x(o, "show configuraton").unwrap_err().contains("did you mean configuration?"));
         assert!(!x(k, "set torq ?").unwrap_or_default().is_empty(), "a path word is never refused here");
-        // A line of command words that is not whole says what may follow; a wrong value does not.
-        assert!(incomplete(&s, &at(o), &w("show system")).is_some_and(|m| m.contains("alarms, commit, ledger, rollback")));
-        assert_eq!(incomplete(&s, &at(o), &w("show system rollback x")), None);
-        assert_eq!(incomplete(&s, &at(o), &w("show system alarms")), None, "whole: nothing follows");
+        // A line of command words that is not whole says what may follow, what value it needs, or that
+        // nothing may follow; a wrong value is the command's to say.
+        let e = |mode, line: &str| explain(&s, &at(mode), &w(line));
+        assert!(e(o, "show system").is_some_and(|m| m == "not a whole command: one of these may follow: alarms, commit, ledger, rollback"));
+        assert_eq!(e(o, "show packages available").as_deref(), Some("needs <term> (words to search for)"));
+        assert_eq!(e(o, "request system revert").as_deref(), Some("needs <change> (the change number (show system ledger))"));
+        assert_eq!(e(o, "exit now").as_deref(), Some("'now' is not a word here: nothing may follow `exit`"));
+        assert_eq!(e(o, "show system alarms extra").as_deref(), Some("'extra' is not a word here: nothing may follow `show system alarms`"));
+        assert_eq!(e(o, "show system rollback x"), None, "the value is what is wrong");
+        assert_eq!(e(o, "show system alarms"), None, "whole");
+        assert_eq!(e(k, "set networking foo"), None, "a path is the configuration's to judge");
+        assert_eq!(e(o, "show system commit | grep"), None, "after a pipe, the filter's");
+    }
+
+    /// The whole command language, walked as a person pressing `?` after every word would (a sample
+    /// value where a value goes): wherever `?` offers `<[Enter]>`, Enter runs the line; wherever it
+    /// does not, Enter says why, in the grammar's words or the command's own — never the parser's
+    /// "unknown command".
+    #[test]
+    fn question_mark_and_enter_agree_everywhere() {
+        let s = schema();
+        let sample = |p: &str| match p {
+            "<number>" | "<count>" | "<change>" | "<minutes>" | "<n>" => "1".to_string(),
+            "<user>" => "dev".into(),
+            "<file>" => "services/x.nix".into(),
+            _ => "x".into(),
+        };
+        let mut checked = 0;
+        for mode in [Mode::Operational, Mode::Configuration] {
+            let at = At { mode, edit: vec![], data: crate::whole::Data::default() };
+            let mut todo: Vec<Vec<String>> = vec![vec![]];
+            while let Some(line) = todo.pop() {
+                // Configuration paths are the tree's (tested with it); filters, the filter's.
+                if in_path(mode, &line) || line.iter().any(|x| x == "|") || line.len() > 7 {
+                    continue;
+                }
+                let offered = choices_at(&s, &at, &line, "");
+                if !line.is_empty() {
+                    checked += 1;
+                    let enter = offered.iter().any(|c| c.word == ENTER.0);
+                    let parsed = crate::syntax::parse_line(mode, &line);
+                    if enter {
+                        assert!(parsed.is_ok(), "{mode:?} `{}`: `?` offers <[Enter]>, Enter refuses: {:#}", line.join(" "), parsed.unwrap_err());
+                    } else if let Err(e) = parsed {
+                        let said = explain(&s, &at, &line).unwrap_or_else(|| format!("{e:#}"));
+                        assert!(!said.starts_with("unknown command"), "{mode:?} `{}`: {said}", line.join(" "));
+                    }
+                }
+                for c in offered.iter().filter(|c| c.word != ENTER.0 && c.word != "|") {
+                    let word = if c.is_placeholder() { sample(&c.word) } else { c.word.clone() };
+                    // A value that may repeat (search words): once is enough.
+                    if line.last() == Some(&word) && c.is_placeholder() {
+                        continue;
+                    }
+                    todo.push([line.clone(), vec![word]].concat());
+                }
+            }
+        }
+        assert!(checked > 60, "the walk reached {checked} lines");
     }
 
     #[test]

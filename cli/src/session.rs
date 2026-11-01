@@ -285,7 +285,7 @@ impl<'a> Session<'a> {
         let know = crate::complete::Know { schema: &self.schema, tree: &self.tree };
         let at = crate::complete::At { mode: self.mode, edit: self.edit.clone(), data: Data::default() };
         let w = crate::complete::expand(&know, &at, w)?;
-        syntax::parse_line(self.mode, &w).map_err(|e| crate::complete::incomplete(&know, &at, &w).map_or(e, |what| anyhow::anyhow!(what)))
+        syntax::parse_line(self.mode, &w).map_err(|e| crate::complete::explain(&know, &at, &w).map_or(e, |what| anyhow::anyhow!(what)))
     }
 
     /// Run one command, already split into words (`torqcli <command>`: as the calling shell split
