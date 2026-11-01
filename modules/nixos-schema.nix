@@ -45,6 +45,31 @@ let
     in
     builtins.substring 0 160 (builtins.replaceStrings [ "\n" ] [ " " ] first);
 
+  # What NixOS takes as any text but has a form: an address. TorqOS states the form, for torqcli to
+  # check at `set` (the evaluation would take `999.1.1.1`; the network would not). Data, read by
+  # torqcli's one pattern check like any strMatching type NixOS states itself.
+  ipv4 = "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])([.](25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}";
+  ipv6 = "[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}";
+  # (`form`: what the pattern is, in words — `?` and torqcli's refusals say it, not the pattern.)
+  matching = form: pattern: { name = "strMatching ${lib.strings.escapeNixString pattern}"; inherit form; };
+  v4 = matching "an IPv4 address" ipv4;
+  v6 = matching "an IPv6 address" ipv6;
+  forms = {
+    "networking interfaces <name> ipv4 addresses * address" = v4;
+    "networking interfaces <name> ipv4 routes * address" = v4;
+    "networking interfaces <name> ipv4 routes * via" = { name = "nullOr"; elem = v4; };
+    "networking interfaces <name> ipv6 addresses * address" = v6;
+    "networking interfaces <name> ipv6 routes * address" = v6;
+    "networking interfaces <name> ipv6 routes * via" = { name = "nullOr"; elem = v6; };
+    "networking defaultGateway address" = v4;
+    "networking defaultGateway6 address" = v6;
+    "networking nameservers" = { name = "listOf"; elem = matching "an IP address" "(${ipv4})|(${ipv6})"; };
+  };
+  # Where a set's entries are named after something on the machine (`names`): torqcli offers those.
+  names = {
+    "networking interfaces" = "interfaces";
+  };
+
   # Where this system's options sit in whatever evaluates it (a test evaluates each machine at
   # `nodes.<name>`): paths are written from the system itself.
   prefix = builtins.length options.networking.hostName.loc - 2;
@@ -56,7 +81,8 @@ let
       shown = visible != false && !(opt.internal or false) && !(opt.readOnly or false);
       subs = builtins.tryEval (opt.type.getSubOptions opt.loc);
       below = if visible == true && subs.success && subs.value != { } then walk subs.value else [ ];
-      entry = { loc = lib.drop prefix opt.loc; type = typeOf 4 opt.type; help = help (opt.description or ""); };
+      at' = lib.drop prefix opt.loc;
+      entry = { loc = at'; type = forms.${lib.concatStringsSep " " at'} or (typeOf 4 opt.type // lib.optionalAttrs (names ? ${lib.concatStringsSep " " at'}) { names = names.${lib.concatStringsSep " " at'}; }); help = help (opt.description or ""); };
       # A section that takes any key (RFC 42's `settings`: a freeform type, attrsOf of what each key
       # takes): where, in the tree, and the type of each key's value. Where entries are named (an
       # attrsOf or listOf of submodules), at the entry.

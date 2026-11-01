@@ -185,6 +185,14 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    addresses 1` makes 2 the new 1: a pasted script that deletes one and then sets another by its old
    number changes the wrong entry. `show | compare` shows what each number now holds before commit.
 
+6x. **What a setting's default is, when nothing sets it, is not shown.** `show` says "Nothing is set
+   at …", and `set services openssh ports 2222` does not say it replaces the default 22. Reading
+   every setting's default when the schema is built fails: some defaults raise errors Nix cannot
+   catch (`builtins.tryEval` catches only `throw` and `assert`; a missing attribute, or an option
+   "accessed but has no value defined", ends the evaluation), NixOS's own documented defaults
+   included. Reading one when it is asked for would mean evaluating the configuration (seconds).
+   Possible: defaults written by NixOS's manual build, or an evaluation per setting in its own
+   process.
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing

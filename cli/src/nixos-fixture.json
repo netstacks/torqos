@@ -658,7 +658,8 @@
         "name": "attrsOf",
         "elem": {
           "name": "submodule"
-        }
+        },
+        "names": "interfaces"
       },
       "help": "The configuration for each network interface."
     },
@@ -689,7 +690,8 @@
         "address"
       ],
       "type": {
-        "name": "str"
+        "name": "strMatching \"(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])([.](25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}\"",
+        "form": "an IPv4 address"
       },
       "help": "IPv4 address of the interface."
     },

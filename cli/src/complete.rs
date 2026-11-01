@@ -27,7 +27,7 @@ impl Choice {
 /// (the word being typed, possibly empty).
 #[cfg(test)]
 pub fn choices(k: &Know, mode: Mode, words: &[String], partial: &str) -> Vec<Choice> {
-    choices_at(k, &At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![] }, words, partial)
+    choices_at(k, &At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![], interfaces: vec![] }, words, partial)
 }
 
 /// Where the line is typed: the mode, where configuration mode is, and the configuration a line is
@@ -43,6 +43,8 @@ pub struct At {
     pub configurations: Later,
     /// The configuration's Nix files (`file show ?` lists them).
     pub files: Vec<String>,
+    /// The machine's network interfaces (a set named after them offers them: `networking interfaces`).
+    pub interfaces: Vec<String>,
 }
 
 /// Lines read only when they are asked for: the history is the broker's to read (through sudo), not
@@ -143,7 +145,13 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
                     if numbered {
                         names.sort_by_key(|n| n.parse::<usize>().unwrap_or(usize::MAX));
                     }
+                    // And what the machine has, where the set is named after it (its interfaces).
+                    let machine: Vec<String> = match k.tree.type_at(&at_loc).and_then(|t| t.names.as_deref()) {
+                        Some("interfaces") => at.interfaces.iter().filter(|i| !names.contains(i)).cloned().collect(),
+                        _ => vec![],
+                    };
                     out.extend(names.into_iter().map(|n| Choice::new(&n, "In the configuration")));
+                    out.extend(machine.into_iter().map(|n| Choice::new(&n, "On this machine")));
                     if numbered {
                         out.push(Choice::new(&next.to_string(), "A new entry"));
                     }
@@ -554,7 +562,7 @@ mod tests {
         for line in ["networking hostName torq", "system packages [ htop ]", "virtualisation docker enable true", "services httpd config httpd.nix"] {
             x.set(&mut data, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
-        let at = |mode, edit: &str| At { mode, edit: w(edit), data: data.clone(), configurations: Later::new(Vec::new), files: vec![] };
+        let at = |mode, edit: &str| At { mode, edit: w(edit), data: data.clone(), configurations: Later::new(Vec::new), files: vec![], interfaces: vec![] };
         let c = |mode, line: &str| words_of(&choices_at(&s, &at(mode, ""), &w(line), "")).iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let enter = |mode, line: &str| c(mode, line).first().is_some_and(|x| x == "<[Enter]>");
         let (o, k) = (Mode::Operational, Mode::Configuration);
@@ -648,7 +656,7 @@ mod tests {
         };
         let mut checked = 0;
         for mode in [Mode::Operational, Mode::Configuration] {
-            let at = At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![] };
+            let at = At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![], interfaces: vec![] };
             let mut todo: Vec<Vec<String>> = vec![vec![]];
             while let Some(line) = todo.pop() {
                 // Configuration paths are the tree's (tested with it), past their first word.
@@ -715,7 +723,7 @@ mod tests {
         let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
         whole.set(&mut data, &w("environment systemPackages [ htop jq ]")).unwrap();
         whole.set(&mut data, &w("networking hostName box")).unwrap();
-        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: Later::new(Vec::new), files: vec![] };
+        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: Later::new(Vec::new), files: vec![], interfaces: vec![] };
         assert_eq!(words_of(&choices_at(&s, &at, &w("delete environment systemPackages"), "")), ["<[Enter]>", "htop", "jq"]);
         assert_eq!(words_of(&choices_at(&s, &at, &w("delete networking hostName"), "")), ["<[Enter]>"]);
         let e = format!("{:#}", whole.delete(&mut at.data.clone(), &w("networking hostName extra")).unwrap_err());
@@ -727,7 +735,7 @@ mod tests {
     #[test]
     fn rollback_lists_the_configurations() {
         let s = schema();
-        let at = At { mode: Mode::Configuration, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(|| vec!["2026-11-01 20:10 viper: ssh".into(), "2026-10-31 09:00 viper: htop".into()]), files: vec![] };
+        let at = At { mode: Mode::Configuration, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(|| vec!["2026-11-01 20:10 viper: ssh".into(), "2026-10-31 09:00 viper: htop".into()]), files: vec![], interfaces: vec![] };
         let c = choices_at(&s, &at, &w("rollback"), "");
         assert_eq!(words_of(&c), ["<[Enter]>", "<number>", "0", "1"]);
         assert_eq!(c[2].help, "2026-11-01 20:10 viper: ssh");
@@ -737,6 +745,17 @@ mod tests {
         assert_eq!(words_of(&choices_at(&s, &at, &w("save"), "")), ["<file>"]);
     }
 
+    /// A set named after something on the machine (its interfaces) offers what the machine has, after
+    /// what the configuration has.
+    #[test]
+    fn the_machines_interfaces_are_offered() {
+        let s = schema();
+        let at = At { mode: Mode::Configuration, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![], interfaces: vec!["enp0s1".into(), "wlan0".into()] };
+        let c = choices_at(&s, &at, &w("set networking interfaces"), "");
+        assert_eq!(words_of(&c), ["enp0s1", "wlan0", "<name>"]);
+        assert_eq!(c[0].help, "On this machine");
+    }
+
     /// A list's entries by number: those the configuration has, then the next, which adds one.
     #[test]
     fn a_lists_entries_are_offered_by_number() {
@@ -744,7 +763,7 @@ mod tests {
         let mut data = crate::whole::Data::default();
         let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
         whole.set(&mut data, &w("networking interfaces eth0 ipv4 addresses 1 address 10.0.0.1")).unwrap();
-        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: Later::new(Vec::new), files: vec![] };
+        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: Later::new(Vec::new), files: vec![], interfaces: vec![] };
         let c = choices_at(&s, &at, &w("set networking interfaces eth0 ipv4 addresses"), "");
         assert_eq!(words_of(&c), ["1", "2", "<n>"]);
         assert_eq!(c[1].help, "A new entry");
@@ -757,7 +776,7 @@ mod tests {
         let mut data = crate::whole::Data::default();
         let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
         whole.set(&mut data, &w("users users alice extraGroups wheel")).unwrap();
-        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: Later::new(Vec::new), files: vec![] };
+        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: Later::new(Vec::new), files: vec![], interfaces: vec![] };
         let c = choices_at(&s, &at, &w("set users users"), "");
         assert_eq!(&words_of(&c)[..2], ["alice", "<name>"], "{c:?}");
         assert_eq!(tab(&choices_at(&s, &at, &w("delete users users"), "a")), [("alice".to_string(), "alice ".to_string())]);
@@ -777,7 +796,7 @@ mod tests {
     #[test]
     fn question_mark_says_why_nothing_follows() {
         let s = schema();
-        let at = |mode| At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![] };
+        let at = |mode| At { mode, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![], interfaces: vec![] };
         let out = answer(&s, &at(Mode::Operational), &w("show system packages"), "", 80);
         let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(out.contains("'packages' is not a word here (after `show system`)") && out.contains("alarms, commit, ledger, rollback"), "{out}");

@@ -870,6 +870,13 @@ fn paged(text: &str) {
     }
 }
 
+/// The machine's network interfaces, by name (the kernel's list; the loopback left out).
+fn interfaces() -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir("/sys/class/net").map(|d| d.filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != "lo").collect()).unwrap_or_default();
+    names.sort();
+    names
+}
+
 /// Whether more input is waiting to be read already (a paste).
 fn waiting() -> bool {
     let stdin = std::io::stdin();
@@ -1145,7 +1152,7 @@ mod editor {
         // (Ctrl-C while a command runs: the line editor keeps SIGINT for as long as it lives, so it
         // stops the command's child — nix, the broker — and torqcli says so and stays, its terminal
         // put back by the Echo guard as the command returns.)
-        let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data(), configurations: history.clone(), files: s.nix_files() };
+        let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data(), configurations: history.clone(), files: s.nix_files(), interfaces: super::interfaces() };
         let help = Help { know: Arc::new((s.schema.clone(), s.tree.clone())), at: Arc::new(Mutex::new(at(s))) };
         // Bracketed paste off: a paste arrives as typed, each line running at its newline as on a network
         // device (not held as one block until another Enter); the lines after the first were waiting

@@ -314,9 +314,9 @@ mod tests {
             set(&t, &mut s, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
         assert_eq!(s["networking"]["interfaces"]["eth0"]["ipv4"]["addresses"], serde_json::json!([{ "address": "10.0.0.1", "prefixLength": 24 }, { "address": "10.0.0.2" }]));
-        let e = format!("{:#}", set(&t, &mut s, &w("networking interfaces eth0 ipv4 addresses 9 address x")).unwrap_err());
+        let e = format!("{:#}", set(&t, &mut s, &w("networking interfaces eth0 ipv4 addresses 9 address 10.0.0.9")).unwrap_err());
         assert_eq!(e, "networking interfaces eth0 ipv4 addresses: it has 2 entries — 3 adds one");
-        assert!(format!("{:#}", set(&t, &mut s, &w("networking interfaces eth0 ipv4 addresses x address y")).unwrap_err()).contains("'x' is not an entry's number"));
+        assert!(format!("{:#}", set(&t, &mut s, &w("networking interfaces eth0 ipv4 addresses x address 10.0.0.9")).unwrap_err()).contains("'x' is not an entry's number"));
         let shown: Vec<String> = entries(&s).into_iter().map(|(p, _)| p.join(" ")).collect();
         assert_eq!(shown, ["networking interfaces eth0 ipv4 addresses 1 address", "networking interfaces eth0 ipv4 addresses 1 prefixLength", "networking interfaces eth0 ipv4 addresses 2 address"]);
         delete(&t, &mut s, &w("networking interfaces eth0 ipv4 addresses 1")).unwrap();

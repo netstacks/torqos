@@ -23,6 +23,12 @@ pub struct Type {
     /// A range's bounds (intBetween, numberBetween).
     #[serde(default)]
     pub range: Option<Vec<i64>>,
+    /// What a pattern is, in words (`an IPv4 address`), where TorqOS states it.
+    #[serde(default)]
+    pub form: Option<String>,
+    /// What a set's entries are named after on the machine (`interfaces`), where TorqOS states it.
+    #[serde(default)]
+    pub names: Option<String>,
 }
 
 impl Type {
@@ -95,7 +101,11 @@ impl Type {
                 Some((low, _)) => format!("a number, {low} or more"),
                 None => "a number".into(),
             },
-            "strMatching" => self.pattern().map_or("text".into(), |p| format!("text matching {p}")),
+            "strMatching" => match (&self.form, self.pattern()) {
+                (Some(form), _) => form.clone(),
+                (None, Some(p)) => format!("text matching {p}"),
+                (None, None) => "text".into(),
+            },
             "nonEmptyStr" => "text, not empty".into(),
             k if is_str(k) => "text".into(),
             other => format!("{other} (in a config file)"),
@@ -298,6 +308,12 @@ impl Tree {
             };
         }
         at
+    }
+
+    /// The type NixOS gives the place `words` lead to, whether or not it takes a value here (a set of
+    /// named entries has one too).
+    pub fn type_at(&self, words: &[String]) -> Option<&Type> {
+        self.walk(words).ok().filter(|w| w.values.is_empty()).and_then(|w| w.node.setting.as_ref().map(|(t, _)| t))
     }
 
     /// Where `words` lead, setting or not: the path as the tree names it, the setting there if it
@@ -534,7 +550,10 @@ pub fn value(ty: &Type, words: &[String]) -> Result<Value> {
             // As NixOS checks it (builtins.match): the whole value matches.
             let re = regex::Regex::new(&format!("^(?:{p})$")).with_context(|| format!("this setting's pattern ({p}) is not one torqcli can check: put it in a config file"))?;
             if !re.is_match(w) {
-                bail!("'{w}' is not in the form this setting takes (text matching {p})");
+                match &ty.form {
+                    Some(form) => bail!("'{w}' is not {form}"),
+                    None => bail!("'{w}' is not in the form this setting takes (text matching {p})"),
+                }
             }
             Value::String(w.clone())
         }
@@ -608,7 +627,7 @@ mod tests {
         assert!(value(&host, &w("my-box")).is_ok() && value(&host, &[String::new()]).is_ok(), "^$ is allowed: empty asks DHCP");
         let e = format!("{:#}", value(&host, &w("my_box!")).unwrap_err());
         assert!(e.starts_with("'my_box!' is not in the form this setting takes (text matching ^$|^[[:alnum:]]"), "{e}");
-        let ty = |name: &str, range: Option<Vec<i64>>| Type { name: name.into(), elem: None, left: None, right: None, values: None, range };
+        let ty = |name: &str, range: Option<Vec<i64>>| Type { name: name.into(), elem: None, left: None, right: None, values: None, range, form: None, names: None };
         let pct = ty("intBetween", Some(vec![1, 100]));
         assert!(value(&pct, &w("100")).is_ok());
         assert_eq!(format!("{:#}", value(&pct, &w("101")).unwrap_err()), "101 is out of range: 1 to 100");
@@ -619,6 +638,13 @@ mod tests {
         assert!(value(&ty("passwdEntry", None), &w("a:b")).is_err());
         let date = ty("strMatching \"[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}\"", None);
         assert!(value(&date, &w("2027-01-31")).is_ok() && value(&date, &w("tomorrow")).is_err() && value(&date, &w("2027-01-31x")).is_err(), "the whole value matches");
+        // A form TorqOS states (an address, which NixOS takes as any text): said in words.
+        let v4 = t.resolve(&w("networking interfaces eth0 ipv4 addresses 1 address")).unwrap().ty.clone();
+        assert!(value(&v4, &w("192.168.64.10")).is_ok());
+        for bad in ["999.1.1.1", "192.168.64.10/24", "10.0.0"] {
+            assert_eq!(format!("{:#}", value(&v4, &w(bad)).unwrap_err()), format!("'{bad}' is not an IPv4 address"));
+        }
+        assert_eq!(v4.describe(), "an IPv4 address");
     }
 
     /// A setting's name abbreviates as command words do: a unique beginning is the name (stored as
