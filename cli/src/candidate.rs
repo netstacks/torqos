@@ -102,6 +102,49 @@ impl Repo {
         Ok(())
     }
 
+    /// The files `paths` as reverting commit `after` (whose parent is `before`) leaves them on `head`:
+    /// its own changes undone, later edits elsewhere in the same files kept — as `git revert` does it
+    /// (its reverse patch, applied to `head`). None: it does not apply (a later change conflicts),
+    /// so the broker would refuse the revert. Each file's content, or None if the revert deletes it.
+    pub fn reverted_files(&self, head: &str, before: &str, after: &str, paths: &[&str]) -> Result<Option<Vec<(String, Option<String>)>>> {
+        let mut args = vec!["diff", "--binary", "--no-color", "--no-ext-diff", before, after, "--"];
+        args.extend(paths.iter().copied());
+        let patch = self.git(&args)?;
+        let scratch = tempfile::tempdir()?;
+        let tree = scratch.path().join("tree");
+        std::fs::create_dir(&tree)?;
+        self.archive(head, &tree)?;
+        let file = scratch.path().join("revert.patch");
+        std::fs::write(&file, &patch)?;
+        // A plain folder, not a repo: git apply only patches its files.
+        let mut c = Command::new("git");
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("GIT_") {
+                c.env_remove(&k);
+            }
+        }
+        let st = c
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CEILING_DIRECTORIES", scratch.path())
+            .current_dir(&tree)
+            .args(["-c", "core.hooksPath=/dev/null", "apply", "-R", "--whitespace=nowarn"])
+            .arg(&file)
+            .output()
+            .context("running git apply")?;
+        if !st.status.success() {
+            return Ok(None);
+        }
+        paths
+            .iter()
+            .map(|p| {
+                let f = tree.join(p);
+                Ok((p.to_string(), if f.exists() { Some(std::fs::read_to_string(&f).with_context(|| format!("{p}: not text"))?) } else { None }))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some)
+    }
+
     /// Whether commit `id` (40 hex digits) is in the repo.
     pub fn has_commit(&self, id: &str) -> Result<bool> {
         if !(id.len() == 40 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
@@ -415,6 +458,26 @@ mod tests {
         let st = Command::new("sh").arg("-c").arg(script).current_dir(dir).env("GIT_CONFIG_GLOBAL", "/dev/null").status().unwrap();
         assert!(st.success(), "{script}");
     }
+    /// A revert's result is its reverse patch on HEAD: a later edit elsewhere in the same file is
+    /// kept (as git revert keeps it), a new file goes, and a later change it collides with is None.
+    #[test]
+    fn a_revert_leaves_what_git_revert_leaves() {
+        let d = tempfile::tempdir().unwrap();
+        sh(d.path(), "git init -q -b main && git config user.name t && git config user.email t@t \
+            && printf 'a\\nb\\nc\\nd\\ne\\nf\\ng\\n' > x.nix && git add -A && git commit -qm one \
+            && sed -i s/^a$/A/ x.nix && printf 'new\\n' > y.nix && git add -A && git commit -qm two \
+            && sed -i s/^g$/G/ x.nix && git commit -qam three");
+        let r = Repo::new(d.path());
+        let ids: Vec<String> = r.history(3).unwrap().into_iter().map(|c| c.id).collect();
+        let (head, two, one) = (&ids[0], &ids[1], &ids[2]);
+        let files = r.reverted_files(head, one, two, &["x.nix", "y.nix"]).unwrap().expect("applies");
+        assert_eq!(files, [("x.nix".to_string(), Some("a\nb\nc\nd\ne\nf\nG\n".to_string())), ("y.nix".to_string(), None)]);
+        // A later change to the same line: it does not apply, as git revert would conflict.
+        sh(d.path(), "sed -i s/^A$/AA/ x.nix && git commit -qam four");
+        let head = r.head().unwrap();
+        assert_eq!(r.reverted_files(&head, one, two, &["x.nix"]).unwrap(), None);
+    }
+
     /// A config repo with three configurations, as the broker would have made them.
     fn repo() -> (tempfile::TempDir, Repo) {
         let d = tempfile::tempdir().unwrap();

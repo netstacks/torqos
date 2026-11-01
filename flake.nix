@@ -1,5 +1,5 @@
 {
-  description = "TorqOS — a secure, AI-native, reversible laptop OS built on NixOS";
+  description = "TorqOS — a thin, CLI-only OS built on NixOS, whose configuration is the device";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";

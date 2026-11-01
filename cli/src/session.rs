@@ -653,6 +653,17 @@ impl<'a> Session<'a> {
             bail!("the candidate changes where TorqOS comes from: an earlier configuration's software is of another source (`rollback 0` starts over)");
         }
         let id = self.commit_at(n)?;
+        // A lock belongs to the flake.nix it was committed with: configuration n's, if TorqOS came from
+        // elsewhere then, is not this one's (audit of 2026-10-31).
+        let then = self.repo.file_at(&id, "flake.nix")?.and_then(|b| crate::software::source_of(&String::from_utf8_lossy(&b)));
+        let now = self.base_source()?;
+        if then != now {
+            bail!(
+                "configuration {n}'s software came from {}, not {}: a lock belongs to its source (set the source back first)",
+                then.as_deref().unwrap_or("(a flake.nix TorqOS does not read)"),
+                now.as_deref().unwrap_or("?")
+            );
+        }
         let lock = self.repo.file_at(&id, "flake.lock")?.with_context(|| format!("configuration {n} has no flake.lock"))?;
         let lock = String::from_utf8(lock).with_context(|| format!("configuration {n}'s flake.lock is not text"))?;
         self.load_software(lock, &format!("Configuration {n} has this machine's software already: nothing to load.\n"))
@@ -778,6 +789,7 @@ impl<'a> Session<'a> {
                 short(&head)
             );
         }
+        crate::whole::software_allowed(&a.data)?;
         let tier = self.tier_of(&changes);
         // A person approves at a terminal: a system change, and a change to someone else's folder.
         let others = self.others_folders(&changes);
@@ -788,7 +800,9 @@ impl<'a> Session<'a> {
         // approving it approves exactly those (as the changed configuration has them).
         // Whether this turns SSH on is read from the evaluated configurations, before and after: every
         // way counts (the catalog, `services openssh`, its `sshd` alias, a config file). Only tree and Nix files can.
-        let ssh_relevant = files.iter().any(|(p, _)| p == "services.json" || p.starts_with(crate::settings::DIR) || p == crate::attach::FILE || p.ends_with(".nix"));
+        // Any system-tier change can (a software update too: TorqOS's own modules may change how SSH is
+        // set up; audit of 2026-10-31) — only a person's own data files cannot.
+        let ssh_relevant = files.iter().any(|(p, _)| self.schema.tier_of(p) != Some("user"));
         let (was, now) = if ssh_relevant { self.machine.ssh(&base, &files)? } else { Default::default() };
         if now.on && !was.on {
             let (owner, keys) = self.machine.ssh_keys(&base, &files)?;
@@ -944,14 +958,19 @@ impl<'a> Session<'a> {
         // may import another), except TorqOS's own flake.nix.
         let mut paths: std::collections::BTreeSet<String> = self.repo.paths(&base)?.into_iter().filter(|p| p.ends_with(".nix") && p != "flake.nix").collect();
         paths.extend(nix.keys().cloned());
-        let mut files = Vec::new();
+        let (mut files, mut deleted) = (Vec::new(), Vec::new());
         for rel in paths {
+            // Only names `load` reads back: a saved configuration always loads (audit of 2026-10-31).
+            crate::attach::valid(&rel).with_context(|| format!("{rel}: a Nix file of the configuration whose name a saved configuration cannot hold"))?;
             let content = match nix.get(&rel) {
                 Some(t) => t.clone(),
                 None => self.repo.file_at(&base, &rel)?.map(|b| String::from_utf8(b).with_context(|| format!("{rel}: not text"))).transpose()?,
             };
-            if let Some(content) = content {
-                files.push((rel, content));
+            match content {
+                Some(content) => files.push((rel, content)),
+                // Deleted in the candidate (and there at its base): saved as a deletion, not left out.
+                None if self.repo.file_at(&base, &rel)?.is_some() => deleted.push(rel),
+                None => {}
             }
         }
         for rel in d.attached.values() {
@@ -959,7 +978,10 @@ impl<'a> Session<'a> {
                 bail!("{rel} is attached but not in the configuration: `file edit {rel}`, or `delete <place> config`");
             }
         }
-        let text = crate::saved::render(&tree, &files);
+        let text = crate::saved::render(&tree, &files, &deleted);
+        if text.len() > crate::saved::MAX {
+            bail!("save {file}: the configuration is {} bytes; a saved one is at most {}, so it could not be loaded", text.len(), crate::saved::MAX);
+        }
         write_private(std::path::Path::new(file), text.as_bytes()).with_context(|| format!("save {file}"))?;
         let n = text.lines().count();
         Ok(format!("Wrote {n} line{} of configuration to '{file}'\n", if n == 1 { "" } else { "s" }))
@@ -968,12 +990,14 @@ impl<'a> Session<'a> {
     /// `load override|merge|set <file>`: a saved configuration into the candidate, from the top — all
     /// of it or, if any part is refused, none of it (the candidate is left as it was).
     fn load_from(&mut self, how: LoadHow, file: &str) -> Result<String> {
-        // A configuration is small: a file far bigger is not one (and is not read into memory).
-        let size = std::fs::metadata(file).with_context(|| format!("load {file}"))?.len();
-        if size > 16 << 20 {
-            bail!("load {file}: {size} bytes is not a saved configuration (the most is 16 MiB)");
+        // A configuration is small: a file far bigger is not one, and is never read whole into memory
+        // (read at most one byte past the limit, whatever the file does meanwhile).
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::Read::take(std::fs::File::open(file).with_context(|| format!("load {file}"))?, crate::saved::MAX as u64 + 1), &mut text)
+            .with_context(|| format!("load {file}"))?;
+        if text.len() > crate::saved::MAX {
+            bail!("load {file}: not a saved configuration (bigger than the most, {} bytes)", crate::saved::MAX);
         }
-        let text = std::fs::read_to_string(file).with_context(|| format!("load {file}"))?;
         let before = (self.candidate()?.clone(), self.edit.clone());
         let result = match how {
             LoadHow::Set => self.load_set(&text),
@@ -1030,8 +1054,21 @@ impl<'a> Session<'a> {
                 nix.insert(rel.clone(), Some(content.clone()));
             }
         }
-        // Every attached file has its content (in the file, or the configuration), as `save` requires.
+        for rel in &saved.deleted {
+            if self.repo.file_at(&base, rel)?.is_some() {
+                nix.insert(rel.clone(), None);
+            } else {
+                nix.remove(rel);
+            }
+        }
+        // Every attached file has its content. Override: in the file itself, never this machine's own
+        // (a cut-short file must not load other Nix than it was saved with; audit of 2026-10-31).
+        // Merge: in the file, or the configuration it is merged into.
         for rel in d.attached.values() {
+            let in_file = saved.files.iter().any(|(p, _)| p == rel);
+            if whole && !in_file {
+                bail!("{rel} is attached but its content is not in the file (a saved configuration carries its config files)");
+            }
             if !nix.get(rel).is_some_and(Option::is_some) && self.repo.file_at(&base, rel)?.is_none() {
                 bail!("{rel} is attached but its content is neither in the file nor in the configuration");
             }
@@ -1864,7 +1901,7 @@ mod tests {
     #[test]
     fn the_software_source_is_a_setting() {
         let (d, m) = (repo_with_software(), Fake { answer: true, ..Default::default() });
-        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && git add -A && git commit -qm flake");
+        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && mkdir -p nixos && printf '{ \"dev\": { \"enable\": true } }\\n' > nixos/torq.json && git add -A && git commit -qm flake");
         let saved = d.path().join("candidate.json");
         let mut s = session(d.path(), Some(saved.clone()), &m);
         assert!(s.exec("show configuration system software").unwrap().contains("source github:netstacks/torqos;"));
@@ -1907,7 +1944,7 @@ mod tests {
     #[test]
     fn a_lock_never_outlives_its_source() {
         let (d, m) = (repo_with_software(), Fake { answer: true, ..Default::default() });
-        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && git add -A && git commit -qm flake");
+        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && mkdir -p nixos && printf '{ \"dev\": { \"enable\": true } }\\n' > nixos/torq.json && git add -A && git commit -qm flake");
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set system software torq source github:other/torq"]);
         assert_eq!(s.exec("rollback 1").unwrap(), "load complete\n", "not kept: it was for the other source");
@@ -2005,7 +2042,71 @@ mod tests {
         std::fs::File::create(&big).unwrap().set_len(17 << 20).unwrap();
         assert!(format!("{:#}", s.exec(&format!("load override {}", big.display())).unwrap_err()).contains("not a saved configuration"));
         std::fs::write(&f, "config custom/none.nix;\n").unwrap();
-        assert!(format!("{:#}", s.exec(&format!("load override {}", f.display())).unwrap_err()).contains("neither in the file nor in the configuration"));
+        assert!(format!("{:#}", s.exec(&format!("load override {}", f.display())).unwrap_err()).contains("its content is not in the file"));
+    }
+
+    /// From the audit of 2026-10-31: an earlier configuration's software (its lock) is not loaded onto
+    /// another source than the one it was locked for.
+    #[test]
+    fn software_is_rolled_back_only_within_its_source() {
+        let (d, m) = (repo_with_software(), Fake::default());
+        let flake = |src: &str| format!("printf '{{\\n  inputs = {{\\n    torq.url = \"{src}\";\\n  }};\\n}}\\n' > flake.nix && git add -A && git commit -qm {}", src.replace([':', '/'], "-"));
+        sh(d.path(), &flake("github:a/torq"));
+        sh(d.path(), &flake("github:b/torq"));
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", s.exec("request system software rollback 1").unwrap_err());
+        assert!(e.contains("came from github:a/torq, not github:b/torq"), "{e}");
+    }
+
+    /// From the second audit (M3): a folder as the source only in dev mode — at `set`, and at
+    /// `commit` if dev mode is turned off with a folder still the source.
+    #[test]
+    fn a_folder_as_the_source_only_in_dev_mode() {
+        let (d, m) = (repo_with_software(), Fake { answer: true, ..Default::default() });
+        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && git add -A && git commit -qm flake");
+        let mut s = session(d.path(), None, &m);
+        s.exec("configure").unwrap();
+        let e = s.exec("set system software torq source path:/home/dev/torq").unwrap_err().to_string();
+        assert!(e.contains("torq dev enable true"), "{e}");
+        run(&mut s, &["set system software torq source github:netstacks/torqos/v1"]);
+        // In dev mode it may; turning dev mode off with the folder still the source does not commit.
+        run(&mut s, &["rollback 0", "set torq dev enable true", "set system software torq source path:/home/dev/torq", "set torq dev enable false"]);
+        let e = s.exec("commit").unwrap_err().to_string();
+        assert!(e.contains("torq dev enable true"), "{e}");
+        assert!(m.commits.borrow().is_empty());
+    }
+
+    /// From the audit of 2026-10-31: a deleted Nix file is saved as deleted (not resurrected by a
+    /// load); `load override` takes an attached file's content from the file only, never the
+    /// machine's own; `save` refuses a file whose name `load` could not read back.
+    #[test]
+    fn a_saved_configuration_is_the_candidate_exactly() {
+        let (d, m) = (repo_with_software(), Fake::default());
+        sh(d.path(), "mkdir -p custom && printf '{ ... }: { }\\n' > custom/a.nix && printf '{ ... }: { }\\n' > custom/old.nix && printf '{ \"\": \"custom/a.nix\" }\\n' > config-files.json && git add -A && git commit -qm nix");
+        let f = d.path().join("saved.conf");
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "file delete custom/old.nix", &format!("save {}", f.display())]);
+        assert!(std::fs::read_to_string(&f).unwrap().contains("## config file deleted custom/old.nix\n"));
+        let wanted = s.exec("show | compare").unwrap();
+        run(&mut s, &["rollback 0", &format!("load override {}", f.display())]);
+        assert_eq!(s.exec("show | compare").unwrap(), wanted);
+        assert!(s.exec("file list").unwrap().contains("custom/old.nix (deleted in the candidate)"));
+        // A file without the attached one's content (cut short, or hand-made): override refuses it,
+        // though this machine has a custom/a.nix; merge may use the machine's.
+        std::fs::write(&f, "config custom/a.nix;\n").unwrap();
+        let e = format!("{:#}", s.exec(&format!("load override {}", f.display())).unwrap_err());
+        assert!(e.contains("its content is not in the file"), "{e}");
+        s.exec(&format!("load merge {}", f.display())).unwrap();
+        // A Nix file whose name could not be loaded back: save says so, rather than write it.
+        sh(d.path(), "printf '{ }\\n' > 'bad name.nix' && git add -A && git commit -qm bad");
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", run_err(&mut s, &["configure"], &format!("save {}", f.display())));
+        assert!(e.contains("bad name.nix") && e.contains("cannot hold"), "{e}");
+        // Bigger than `load` reads: refused at `save`, not written to fail later.
+        let (d, m) = (repo(), Fake { edit_to: Some("#".repeat(crate::saved::MAX + 1)), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", run_err(&mut s, &["configure", "file edit big.nix"], &format!("save {}", d.path().join("s").display())));
+        assert!(e.contains("at most") && !d.path().join("s").exists(), "{e}");
     }
 
     #[test]
@@ -2026,11 +2127,16 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set services openssh ports [ 2222 ]", "commit"]);
         assert!(!m.asked.borrow()[0].contains("SSH is turned on"), "{}", m.asked.borrow()[0]);
-        // Not a tree file that could turn it on: not even asked about.
+        // Any system-tier change is evaluated (a software update too: audit of 2026-10-31); only a
+        // person's own data files, which cannot touch SSH, are not.
+        let (d, m) = (repo_with_software(), Fake { answer: true, ssh_state: Some((Ssh::default(), on)), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "run request system update", "commit"]);
+        assert_eq!(*m.ssh_calls.borrow(), 1, "a software update is evaluated for SSH");
         let (d, m) = (repo(), Fake { answer: true, ssh_state: Some((Ssh::default(), on)), ..Default::default() });
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set networking hostName x", "commit"]);
-        assert!(!m.asked.borrow()[0].contains("SSH"), "only services.json and nixos/ files can");
+        run(&mut s, &["configure", "set torq packages user dev [ htop ]", "commit"]);
+        assert_eq!(*m.ssh_calls.borrow(), 0, "a person's own packages cannot turn SSH on");
     }
 
     #[test]

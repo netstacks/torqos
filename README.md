@@ -6,7 +6,7 @@ One configuration tree, every NixOS setting, is changed through `torqcli`, a she
 network device (candidate, `show | compare`, `commit`, `commit confirmed`, `rollback`). A small
 Rust broker is the only writer of the machine's config repo: it applies each change as a git
 commit that becomes a NixOS generation, records every step in a tamper-evident ledger, and can
-undo any change in one command. AI layers come later, and are planned for from the start: an
+undo a change in one command (a later change to the same files is undone first). AI layers come later, and are planned for from the start: an
 AI will only ever propose changes, never change the system directly.
 
 - Start here: [`docs/VISION.md`](docs/VISION.md) → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)

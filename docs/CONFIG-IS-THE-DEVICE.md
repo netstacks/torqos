@@ -1,6 +1,6 @@
 # The configuration is the device (proposal)
 
-Status: **proposed** (2026-10-31), for discussion before anything is built (the focus of TorqOS
+Status: **built** (S1–S5, 2026-10-31): proposed first, then built step by step as below (the focus of TorqOS
 since ADR-019). Becomes ADR-018 once
 agreed.
 
@@ -239,6 +239,7 @@ torq.desktop.enable = true;       →  torq desktop enable true
    the candidate as it goes, so a crash midway leaves it partly loaded, as a paste would). Nothing reaches the machine until `commit`
    shows it and a person approves it. The software's version is not saved, only its source (as
    Junos keeps configuration and software apart): a loaded configuration builds on the newest
+   (or, for the same source, the candidate's already loaded)
    software of that source. On other hardware, the saved `fileSystems`, `boot` and hardware file
    are this machine's: the commit question warns about them (KNOWN-GAPS 6n). Live as change #52:
    this machine saved (80 lines, its hardware file's content in it) and loaded back with `load

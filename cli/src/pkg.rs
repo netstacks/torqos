@@ -39,6 +39,7 @@ pub fn expand_keys_pattern(pattern: &str, home: &str, user: &str, uid: &str) -> 
             Some('%') => out.push('%'),
             Some('h') => out.push_str(home),
             Some('u') => out.push_str(user),
+            Some('U') if uid.is_empty() => anyhow::bail!("AuthorizedKeysFile pattern '{pattern}' names the owner's uid, which is not known yet (none declared, and no such user here)"),
             Some('U') => out.push_str(uid),
             other => anyhow::bail!("AuthorizedKeysFile pattern '{pattern}' uses %{} — not understood here", other.map(String::from).unwrap_or_default()),
         }
@@ -190,6 +191,9 @@ mod tests {
         assert_eq!(e("/odd/%%h").unwrap(), "/odd/%h", "one pass: %% is a literal %");
         assert_eq!(e(".ssh/authorized_keys2").unwrap(), "/home/viper/.ssh/authorized_keys2", "relative to home");
         assert!(e("/keys/%i").is_err() && e("/keys/%").is_err());
+        // A new owner with no uid yet: a pattern naming it cannot say whose file, so it is refused.
+        assert!(expand_keys_pattern("/keys/%U", "/home/new", "new", "").is_err());
+        assert!(expand_keys_pattern("%h/.ssh/authorized_keys", "/home/new", "new", "").is_ok());
     }
 
     #[test]

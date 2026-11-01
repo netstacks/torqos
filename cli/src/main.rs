@@ -43,7 +43,8 @@ const BROKER: &str = "/run/wrappers/bin/sudo /run/current-system/sw/bin/torq-bro
 const CONFIG: &str = "torq";
 
 /// How the shell reaches the machine: its config repo, and how to run the broker (it needs root).
-/// `TORQ_CONFIG_REPO` and `TORQ_BROKER` override them, for testing only, together (check_repo).
+/// `TORQ_CONFIG_REPO` and `TORQ_BROKER` override them, in a development build only (`cargo build`;
+/// the release build ignores them), together (check_repo).
 pub struct Cli {
     pub repo: PathBuf,
     pub broker: String,
@@ -105,7 +106,7 @@ fn me() -> Result<String> {
 
 fn search(repo: &Path, terms: &[String]) -> Result<()> {
     let st = Command::new("nix")
-        .args(["search", "--inputs-from"])
+        .args(["search", "--no-update-lock-file", "--inputs-from"])
         .arg(flake_ref(repo))
         .arg("nixpkgs")
         .args(terms)
@@ -175,12 +176,13 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, Strin
         bail!("'{owner}' is not a valid user name");
     }
     let out = Command::new("nix")
-        .args(["eval", "--json"])
+        .args(["eval", "--no-update-lock-file", "--json"])
         .arg(format!("{}#nixosConfigurations.{host}.config", flake_ref(copy)))
         .arg("--apply")
         .arg(format!(
-            "c: let k = c.users.users.\"{owner}\".openssh.authorizedKeys; in \
-             {{ files = c.services.openssh.authorizedKeysFiles; declared = k.keys ++ map builtins.readFile k.keyFiles; }}"
+            "c: let u = c.users.users.\"{owner}\" or null; k = if u == null then {{ keys = []; keyFiles = []; }} else u.openssh.authorizedKeys; in \
+             {{ files = c.services.openssh.authorizedKeysFiles; declared = k.keys ++ map builtins.readFile k.keyFiles; \
+             exists = c.users.users ? \"{owner}\"; home = c.users.users.\"{owner}\".home or null; uid = c.users.users.\"{owner}\".uid or null; }}"
         ))
         .output()
         .context("running nix eval")?;
@@ -188,13 +190,22 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, Strin
         bail!("cannot read the SSH settings: {}", last_error(&out.stderr));
     }
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    let out = Command::new("getent").args(["passwd", owner]).output().context("running getent")?;
-    let entry = String::from_utf8_lossy(&out.stdout);
-    let fields: Vec<&str> = entry.trim().split(':').collect();
-    let (uid, home) = match fields.as_slice() {
-        [_, _, uid, _, _, home, ..] if !home.is_empty() => (*uid, *home),
-        _ => bail!("no user '{owner}' on this machine"),
+    // The owner's home and uid as the configuration being approved has them — not as the machine has
+    // them now, which the change may alter (audit of 2026-10-31). A uid NixOS assigns itself (none
+    // declared) is this machine's, if the user exists; only a key file named by uid (%U) needs it.
+    if v["exists"] != true {
+        bail!("the configuration being approved has no user '{owner}'");
+    }
+    let home = v["home"].as_str().filter(|h| !h.is_empty()).with_context(|| format!("the configuration gives '{owner}' no home"))?.to_string();
+    let uid = match v["uid"].as_u64() {
+        Some(u) => u.to_string(),
+        None => {
+            let out = Command::new("getent").args(["passwd", owner]).output().context("running getent")?;
+            let entry = String::from_utf8_lossy(&out.stdout).into_owned();
+            entry.trim().split(':').nth(2).filter(|u| !u.is_empty()).map(String::from).unwrap_or_default()
+        }
     };
+    let (uid, home) = (uid.as_str(), home.as_str());
 
     let mut sources: Vec<(String, String)> = Vec::new(); // (where, text)
     for pattern in v["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()) {
@@ -268,7 +279,7 @@ fn check_repo(cli: &Cli) -> Result<()> {
 /// and the config repo must have it.
 fn config_name(repo: &Path) -> Result<String> {
     let out = Command::new("nix")
-        .args(["eval", "--json"])
+        .args(["eval", "--no-update-lock-file", "--json"])
         .arg(format!("{}#nixosConfigurations", flake_ref(repo)))
         .args(["--apply", "builtins.attrNames"])
         .output()
@@ -293,7 +304,7 @@ fn config_name(repo: &Path) -> Result<String> {
 /// report unknown, unfree or unsupported packages, or a broken update, before anything is proposed.
 fn evaluate(copy: &Path, host: &str, log: &Path) -> Result<()> {
     let out = Command::new("nix")
-        .args(["eval", "--raw"])
+        .args(["eval", "--no-update-lock-file", "--raw"])
         .arg(format!("{}#nixosConfigurations.{host}.config.system.build.toplevel.drvPath", flake_ref(copy)))
         .output()
         .context("running nix eval")?;
@@ -324,7 +335,7 @@ fn last_error(stderr: &[u8]) -> String {
 /// torq.lib.mkSystem): without that, a change to them would commit and do nothing.
 fn reads_tree(copy: &Path, host: &str) -> Result<bool> {
     let out = Command::new("nix")
-        .args(["eval", "--json"])
+        .args(["eval", "--no-update-lock-file", "--json"])
         .arg(format!("{}#nixosConfigurations.{host}.config.torq", flake_ref(copy)))
         .args(["--apply", "k: (k.packages.configDir or null) != null"])
         .output()
@@ -333,4 +344,23 @@ fn reads_tree(copy: &Path, host: &str) -> Result<bool> {
         bail!("cannot read the config repo: {}", last_error(&out.stderr));
     }
     Ok(serde_json::from_slice(&out.stdout)?)
+}
+
+#[cfg(test)]
+mod lock_tests {
+    /// Every evaluation of the configuration refuses to re-lock it (S4b; the audit of 2026-10-31
+    /// found one that did): a flake.lock that does not match flake.nix is an error, as the broker
+    /// builds it, never quietly re-locked. Any `nix eval`, `nix build` or `nix search` torqcli runs.
+    #[test]
+    fn no_evaluation_relocks() {
+        for file in ["main.rs", "shell.rs", "pkg.rs", "status.rs", "session.rs"] {
+            let text = std::fs::read_to_string(format!("{}/src/{file}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                let runs = ["[\"eval\"", "[\"build\"", "[\"search\""].iter().any(|c| line.contains(c));
+                if runs && !line.contains("--no-update-lock-file") {
+                    panic!("{file}:{}: a nix command without --no-update-lock-file: {}", i + 1, line.trim());
+                }
+            }
+        }
+    }
 }

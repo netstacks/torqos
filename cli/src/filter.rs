@@ -319,6 +319,21 @@ mod tests {
         assert!(left.is_empty(), "left running: {left:?}");
     }
 
+    /// From the audit of 2026-10-31: could a process a filter starts, still holding its output open
+    /// after the filter itself exits, keep torqcli waiting? No: the sandbox has its own process
+    /// namespace, so when the filter ends everything it started ends with it.
+    #[cfg(target_os = "linux")] // the sandbox
+    #[test]
+    fn what_a_filter_starts_ends_with_it() {
+        let sh = std::env::var("PATH").unwrap().split(':').map(|d| Path::new(d).join("sh")).find(|p| p.exists());
+        let sh = std::fs::canonicalize(sh.expect("a sh on PATH")).unwrap();
+        // `sort --compress-program` runs its spill through a shell: the input becomes its script.
+        let payload: String = (0..50_000).map(|_| "sleep 30 >&2 &\n").collect();
+        let start = Instant::now();
+        let _ = apply(&f(&format!("sort -S 64k --compress-program={}", sh.display())), payload);
+        assert!(start.elapsed() < Duration::from_secs(20), "waited {:?} for what the filter started", start.elapsed());
+    }
+
     #[cfg(target_os = "linux")] // the sandbox
     #[test]
     fn a_filter_is_stopped_at_its_limits() {

@@ -103,6 +103,9 @@ fn pending_confirm(entries: &[Entry]) -> Option<PendingConfirm> {
 /// The longest `commit confirmed` wait, in minutes (a day).
 pub const MAX_CONFIRM_MINUTES: u32 = 24 * 60;
 
+/// The largest diff a proposal may be (it is ledgered whole): 4 MiB, far beyond any configuration.
+pub const MAX_DIFF: u64 = 4 << 20;
+
 /// How often the rollback of an unconfirmed commit may fail to take before it is ledgered as not
 /// restored (below the timer's 60 tries, so the timer's own runs reach it).
 pub const MAX_ROLLBACK_ATTEMPTS: u32 = 40;
@@ -578,8 +581,13 @@ impl Broker {
     pub fn init(&self) -> Result<()> {
         let _l = Lock::acquire(&self.state_dir)?;
         self.refuse_if_interrupted()?;
+        // Once there is a ledger, init changes nothing: its baseline commit (`git add -A`) would take
+        // whatever is in the working tree into the history, unledgered (audit of 2026-10-31).
+        if !self.ledger.read_all()?.is_empty() {
+            return Ok(());
+        }
         self.repo.init()?;
-        if self.ledger.read_all()?.is_empty() {
+        {
             self.ledger.append(NewEntry {
                 actor: "user".into(),
                 approved_by: None,
@@ -635,6 +643,12 @@ impl Broker {
     pub fn propose_on(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         let _l = Lock::acquire(&self.state_dir)?;
         self.refuse_if_interrupted()?;
+        // An agent always says what it prepared its change against: without a base, a diff applies on
+        // top of whatever the configuration has become (second audit, M2; KNOWN-GAPS 6g).
+        if actor == Actor::Agent && base.is_none() {
+            bail!("refused: an agent's proposal needs --base (the commit it was prepared against)");
+        }
+        self.refuse_unledgered_head()?;
         if let Some(base) = base {
             // A full commit id, never a ref (`HEAD`, a branch) that would always "match".
             if base.len() != 40 || !base.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
@@ -642,8 +656,18 @@ impl Broker {
             }
             self.refuse_stale_base(base)?;
         }
-        let diff = fs::read_to_string(diff_path)
+        // A change is small: a diff far bigger is not one, and would be held in memory and ledgered
+        // whole by a root process (second audit, M4).
+        let size = fs::metadata(diff_path).with_context(|| format!("reading diff {}", diff_path.display()))?.len();
+        if size > MAX_DIFF {
+            bail!("refused: the diff is {size} bytes; a proposal is at most {MAX_DIFF}");
+        }
+        let mut diff = String::new();
+        std::io::Read::read_to_string(&mut std::io::Read::take(fs::File::open(diff_path)?, MAX_DIFF + 1), &mut diff)
             .with_context(|| format!("reading diff {}", diff_path.display()))?;
+        if diff.len() as u64 > MAX_DIFF {
+            bail!("refused: the diff grew past {MAX_DIFF} bytes while it was read");
+        }
         // Classify exactly the bytes that go into the ledger: the caller's file is read once and
         // could change between two reads.
         let copy = self.state_dir.join("proposing.diff");
@@ -673,6 +697,23 @@ impl Broker {
                 "base": base,
             }),
         })
+    }
+
+    /// The config repo must be at the last ledgered commit before anything builds on it: a commit made
+    /// outside the broker would otherwise become the base of an approved change, and so part of the
+    /// history, though nobody reviewed or ledgered it (audit of 2026-10-31).
+    fn refuse_unledgered_head(&self) -> Result<()> {
+        let entries = self.ledger.read_all()?;
+        let (Some(ledgered), Ok(head)) = (ledgered_commit(&entries), self.repo.head()) else { return Ok(()) };
+        if head != ledgered {
+            bail!(
+                "refused: the config repo is at {head}, not the last ledgered commit {ledgered}: it was changed \
+                 outside the broker. Nothing builds on an unledgered commit: return it to {ledgered} (as root: \
+                 git -C {} reset --hard {ledgered}), then propose that change through the broker",
+                self.repo.root().display()
+            );
+        }
+        Ok(())
     }
 
     fn refuse_stale_base(&self, base: &str) -> Result<()> {
@@ -768,10 +809,12 @@ impl Broker {
     }
 
     fn reconcile_locked(&self, lock: &Lock, by: &str) -> Result<Option<Entry>> {
+        // First, whether or not anything is pending: every operation that changes the machine (apply,
+        // revert, confirm, repair, expire-confirm) starts here, and on a broken chain it must change
+        // nothing — its final append would fail only after it had committed, rebuilt or activated
+        // (audit of 2026-10-31). An outcome entry found on a broken chain is not trustworthy either.
+        self.ledger.verify().context("refused: the ledger is broken (`torq-broker verify`); nothing was changed")?;
         let Some(mut p) = self.read_pending()? else { return Ok(None) };
-        // On a broken chain the final append fails, after a full reset and rebuild, on every retry
-        // — and an outcome entry found on it is not trustworthy.
-        self.ledger.verify().context("cannot reconcile on a broken ledger")?;
         if self.outcome_recorded(&p)? {
             self.clear_pending()?;
             return Ok(None);
@@ -849,6 +892,10 @@ impl Broker {
             })),
         })?;
         self.clear_pending()?;
+        // An interrupted commit confirmed is settled now: its build needs no root of its own (audit).
+        if p.anchor_system.is_some() {
+            self.drop_build_link();
+        }
         if !restored {
             bail!(
                 "reconciled the interrupted {} of #{}, but the restore rebuild failed; the running \
@@ -863,7 +910,15 @@ impl Broker {
     /// left the tree dirty (or the commit landed and only its sync failed): put the repo back and
     /// drop the record. If even that fails, the record stays and the next operation reconciles.
     fn undo_failed_commit(&self, p: &Pending, r: Result<String>) -> Result<String> {
-        r.or_else(|e| match self.repo.hard_reset(&p.before).and_then(|()| self.clear_pending()) {
+        // A commit git made before the failure (in its sync, say) is kept for the audit, as
+        // reconcile keeps one, before the reset discards it (audit of 2026-10-31).
+        let keep = || -> Result<()> {
+            match self.repo.head() {
+                Ok(h) if h != p.before => self.repo.keep(&h),
+                _ => Ok(()),
+            }
+        };
+        r.or_else(|e| match keep().and_then(|()| self.repo.hard_reset(&p.before)).and_then(|()| self.clear_pending()) {
             Ok(()) => Err(e),
             Err(u) => Err(e.context(format!("undoing it also failed ({u:#}); the next operation will reconcile"))),
         })
@@ -966,6 +1021,12 @@ impl Broker {
     fn apply_inner(&self, proposal_seq: u64, approved_by: &str, confirm_tainted: bool, confirm: Option<u32>) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
         self.reconcile_locked(&lock, approved_by)?;
+        self.refuse_unledgered_head()?;
+        // An outside `nixos-rebuild` switching now would interleave with this one, and the system
+        // recorded after it might be that one's (as repair and reconcile check; audit of 2026-10-31).
+        if switch_running() {
+            bail!("refused: a system switch ({SWITCH_UNIT}) is running outside the broker; wait for it to finish, then retry");
+        }
         self.refuse_if_confirm_pending()?;
         // The rollback of an unconfirmed commit — and a reboot — go back to the running system, which
         // must therefore be the boot default too (that also keeps it from garbage collection).
@@ -973,11 +1034,18 @@ impl Broker {
             None => None,
             Some(_) => {
                 let running = self.running_system().context("commit confirmed: cannot tell which system is running")?;
-                if let Some(next) = self.next_boot().filter(|n| *n != running) {
-                    bail!(
+                // Known, not assumed: an unreadable profile could not prove a reboot rolls back (audit).
+                match self.next_boot() {
+                    Some(next) if next == running => {}
+                    Some(next) => bail!(
                         "commit confirmed: the next boot would start {next}, not the running system {running}, \
                          so a reboot would not roll back to it; `torq-broker repair` first"
-                    );
+                    ),
+                    None => bail!(
+                        "commit confirmed: cannot tell what the next boot starts ({}), so not that a reboot \
+                         would roll back; a plain commit still works",
+                        self.system_profile.display()
+                    ),
                 }
                 // Without it, the boot-time check could not tell a restart from the switch that adds it.
                 if self.boot_id().is_none() {
@@ -1162,11 +1230,12 @@ impl Broker {
         if self.running_system().as_deref() != Some(system) {
             let _ = self.run_command_in(lock, "activation", &activate, &[("system", system)], path);
         }
-        if self.next_boot().is_some_and(|next| next != system) {
+        if self.next_boot().as_deref() != Some(system) {
             let profile = self.system_profile.to_string_lossy();
             let _ = self.run_command_in(lock, "boot default", &boot, &[("system", system), ("profile", &profile)], path);
         }
-        Ok(self.running_system().as_deref() == Some(system) && self.next_boot().is_none_or(|n| n == system))
+        // Restored only if both are known to be it: an unreadable profile is not "restored" (audit).
+        Ok(self.running_system().as_deref() == Some(system) && self.next_boot().as_deref() == Some(system))
     }
 
     /// The activate and boot commands, and the PATH, to restore `system` with.
@@ -1354,6 +1423,12 @@ impl Broker {
     pub fn revert(&self, applied_seq: u64, approved_by: &str) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
         self.reconcile_locked(&lock, approved_by)?;
+        self.refuse_unledgered_head()?;
+        // An outside `nixos-rebuild` switching now would interleave with this one, and the system
+        // recorded after it might be that one's (as repair and reconcile check; audit of 2026-10-31).
+        if switch_running() {
+            bail!("refused: a system switch ({SWITCH_UNIT}) is running outside the broker; wait for it to finish, then retry");
+        }
         self.refuse_if_confirm_pending()?;
         let a = self.ledger.get(applied_seq)?;
         if a.body.kind != "applied" {

@@ -16,11 +16,12 @@ pkgs.testers.runNixOSTest {
     torq.broker.rebuildCommand = "true";
     environment.etc."torq-test/default-rebuild".text = options.torq.broker.rebuildCommand.default;
     # commit confirmed: the "build" is a prebuilt specialisation (the VM cannot build systems), and
-    # the boot default is stubbed (the test VM has no boot loader). The activations — into that
-    # system and back — the rollback timer, the old broker it runs, and the boot-time check are real.
+    # the boot default is the system profile only (the test VM has no boot loader). The activations —
+    # into that system and back — the rollback timer, the old broker it runs, and the boot-time check
+    # are real.
     specialisation.confirmtarget.configuration.environment.etc."torq-test/new-system".text = "yes";
     torq.broker.buildCommand = "readlink -f /run/booted-system/specialisation/confirmtarget";
-    torq.broker.bootCommand = "true";
+    torq.broker.bootCommand = "nix-env -p {profile} --set {system}";
     specialisation.noguard.configuration.torq.broker.guardEtcNixos = false;
     # The test VM's disk is tiny: min-free would garbage-collect mid-test, deleting the unrooted
     # nixpkgs source the stray-rebuild check uses.
@@ -79,7 +80,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"rm {repo}/stray.nix")
 
     with subtest("agent proposes, user approves, change lands"):
-        out = machine.succeed("torq-broker propose --actor agent "
+        head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+        out = machine.succeed(f"torq-broker propose --actor agent --base {head} "
                               "--diff /etc/torq-test/night-light.diff --reason 'Night light'")
         assert "proposal #2" in out, out
         machine.succeed("torq-broker apply 2 --approved-by tester")
@@ -108,8 +110,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed("GIT_DIR=/nonexistent torq-broker status")
 
     with subtest("agent cannot touch policy"):
-        machine.fail("torq-broker propose --actor agent "
-                     "--diff /etc/torq-test/policy.diff --reason 'loosen permissions'")
+        # With its base, so it is refused for what it touches, not for leaving the base out.
+        head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+        out = machine.fail(f"torq-broker propose --actor agent --base {head} "
+                           "--diff /etc/torq-test/policy.diff --reason 'loosen permissions' 2>&1")
+        assert "forbidden" in out, out
 
     with subtest("ledger is tamper-evident"):
         machine.succeed("torq-broker verify")
@@ -336,6 +341,9 @@ pkgs.testers.runNixOSTest {
 
     booted = machine.succeed("readlink -f /run/booted-system").strip()
     new_system = machine.succeed("readlink -f /run/booted-system/specialisation/confirmtarget").strip()
+    # A real machine has a system profile (its boot default); the test VM boots without one. A commit
+    # confirmed needs to know what the next boot starts, so give it the one it would have.
+    machine.succeed(f"nix-env -p /nix/var/nix/profiles/system --set {booted}")
     def running():
         return machine.succeed("readlink -f /run/current-system").strip()
 

@@ -3,7 +3,7 @@ name = "torq-broker"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89" # std::fs::File::try_lock
-description = "TorqOS privileged change broker: tiers, signed commits, rebuild, rollback, hash-chained ledger"
+description = "TorqOS privileged change broker: tiers, commits, rebuild, rollback, hash-chained ledger"
 license = "MIT OR Apache-2.0"
 
 [dependencies]

@@ -1034,3 +1034,10 @@ mod tests {
         assert!(user_name_ok("dev") && user_name_ok("_svc") && !user_name_ok("Dev") && !user_name_ok("a.b"));
     }
 }
+
+/// Whether `path` is one of a person's own data files, the only user-tier files
+/// (`users/<name>/packages.json`, `users/<name>/cli.json`, as the broker's allow-list): the files
+/// that can never change how the system runs (SSH, say).
+pub fn is_user_data(path: &str) -> bool {
+    matches!(path.split('/').collect::<Vec<_>>().as_slice(), ["users", name, "packages.json" | "cli.json"] if !name.is_empty())
+}

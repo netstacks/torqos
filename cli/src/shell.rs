@@ -45,25 +45,60 @@ impl Real<'_> {
         Ok((scratch, copy))
     }
 
-    /// If reverting `target` turns SSH back on (it turned it off), the keys that would then get in —
-    /// as at a commit: none refuses. After the revert, services.json is as it was before the change
-    /// (later changes to it conflict, and are refused by the broker).
+    /// If reverting `target` turns SSH on, what the person approving must see — as at a commit: the
+    /// keys that get in (none refuses, for the catalog's), or that it is outside the catalog. Read from
+    /// the whole configuration as the revert leaves it, evaluated (every way SSH can be turned on, a
+    /// config file too; audit of 2026-10-31): the change's reverse patch applied to HEAD.
     fn revert_ssh_keys(&self, target: &history::Entry) -> Result<String> {
-        let changed = target.data["files"].as_array().is_some_and(|f| f.iter().any(|v| v.as_str() == Some("services.json")));
-        let Some(after) = target.data["commit"].as_str().filter(|_| changed) else { return Ok(String::new()) };
+        let Some(after) = target.data["commit"].as_str() else { return Ok(String::new()) };
         let repo = Repo::new(&self.cli.repo);
         let head = repo.head()?;
         let Some(before) = repo.parent_of(after)? else { return Ok(String::new()) };
-        let has_ssh = |rev: &str| -> Result<(bool, Option<String>)> {
-            let text = repo.file_at(rev, "services.json")?.map(|b| String::from_utf8_lossy(&b).into_owned());
-            let on = text.as_deref().and_then(|t| serde_json::from_str::<Vec<String>>(t).ok()).is_some_and(|l| l.iter().any(|s| s == "ssh"));
-            Ok((on, text))
-        };
-        let ((was_on, was), (now_on, _)) = (has_ssh(&before)?, has_ssh(&head)?);
-        if !was_on || now_on {
+        let touched: Vec<&str> = target.data["files"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).collect();
+        // A person's own data files cannot turn SSH on.
+        if touched.iter().all(|p| crate::tree::is_user_data(p)) {
             return Ok(String::new());
         }
-        let (owner, keys) = self.ssh_keys(&head, &[("services.json".to_string(), was)])?;
+        // The files as the revert leaves them: its reverse patch on HEAD (later edits elsewhere in a
+        // file kept, as git revert keeps them; review of the audit fixes). If it does not apply, the
+        // broker refuses the revert as a conflict, and there is nothing to show.
+        let Some(files) = repo.reverted_files(&head, &before, after, &touched)? else { return Ok(String::new()) };
+        // A folder as the source only in dev mode — a revert must not bring one back after dev mode
+        // was turned off (as `commit` checks it).
+        let after_revert = |p: &str| -> Result<Option<String>> {
+            match files.iter().find(|(f, _)| f == p) {
+                Some((_, c)) => Ok(c.clone()),
+                None => Ok(repo.file_at(&head, p)?.map(|b| String::from_utf8_lossy(&b).into_owned())),
+            }
+        };
+        let source = after_revert("flake.nix")?.and_then(|f| crate::software::source_of(&f));
+        let dev = after_revert("nixos/torq.json")?
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.pointer("/dev/enable").and_then(serde_json::Value::as_bool))
+            == Some(true);
+        if source.as_deref().is_some_and(|s| s.starts_with("path:")) && !dev {
+            bail!("not reverted: it would make TorqOS come from a folder (path:) without `torq dev enable true`; root builds from it");
+        }
+        // Not evaluable: then the broker's build of it fails just the same, and nothing is switched on —
+        // said, not a reason to refuse here.
+        let (now, then) = match self.ssh(&head, &files) {
+            Ok(s) => s,
+            Err(e) => return Ok(format!("(SSH not checked: the configuration it leaves does not evaluate: {})\n", history::one_line(&format!("{e:#}"), 120))),
+        };
+        if !then.on || now.on {
+            return Ok(String::new());
+        }
+        let (owner, keys) = self.ssh_keys(&head, &files)?;
+        if !then.catalog {
+            let mut out = "SSH is turned on outside TorqOS's catalog: its rules (keys only, only the owner) do not apply.\n".to_string();
+            if then.passwords {
+                out.push_str("! Password logins are allowed (services openssh settings PasswordAuthentication).\n");
+            }
+            if !keys.is_empty() {
+                out.push_str(&format!("Keys that will be able to log in as {owner}, among others:\n{}\n", keys.join("\n")));
+            }
+            return Ok(out);
+        }
         if keys.is_empty() {
             bail!(
                 "not reverted: this turns SSH back on, and SSH here lets in {owner}'s keys only — they have none, so nobody \
@@ -262,7 +297,7 @@ impl Machine for Real<'_> {
         let (_scratch, copy) = self.changed_copy(&head, &[])?;
         let host = config_name(&copy)?;
         let out = std::process::Command::new("nix")
-            .args(["eval", "--json"])
+            .args(["eval", "--no-update-lock-file", "--json"])
             .arg(format!("{}#nixosConfigurations.{host}.config", crate::flake_ref(&copy)))
             .args([
                 "--apply",
@@ -282,7 +317,7 @@ impl Machine for Real<'_> {
             let (_scratch, copy) = self.changed_copy(base, files)?;
             let host = config_name(&copy)?;
             let out = std::process::Command::new("nix")
-                .args(["eval", "--json"])
+                .args(["eval", "--no-update-lock-file", "--json"])
                 .arg(format!("{}#nixosConfigurations.{host}.config", crate::flake_ref(&copy)))
                 .args([
                     "--apply",
@@ -569,7 +604,9 @@ fn a_command_on_the_command_line() {
 }
 fn run_shell(args: &[String]) -> Result<i32> {
     let (run, style) = parse_args(args)?;
-    let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+    // The overrides exist only in a development build (`cargo build`): the released torqcli (the Nix
+    // package, a release build) always manages the machine's repo through its broker (second audit, L2).
+    let env = |k: &str, d: &str| if cfg!(debug_assertions) { std::env::var(k).unwrap_or_else(|_| d.to_string()) } else { d.to_string() };
     let cli = Cli {
         repo: PathBuf::from(env("TORQ_CONFIG_REPO", REPO)),
         broker: env("TORQ_BROKER", BROKER),

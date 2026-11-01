@@ -10,10 +10,14 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    process that inherits the broker lock and never exits blocks the broker until it is killed
    (the error names it). Not yet: reconcile at boot; recording who triggered a reconcile beyond
    `reconciled_by`; edits made in the repo *during* a rebuild are still reset by a failed
-   apply's restore (only reconcile snapshots them). The broker runs git hooks as root (the repo
-   is root-only, so planting one already needs root); consider `core.hooksPath=/dev/null`.
-2. **`verify` cannot detect truncation of the newest entries** and does not cross-check git
-   `Ledger-Entry` trailers against the ledger. Planned: anchor the head hash (M3).
+   apply's restore (only reconcile snapshots them). The broker's git runs no hook and no fsmonitor of
+   the repo (`core.hooksPath=/dev/null`, `core.fsmonitor=false`; second audit, M1: fixed).
+2. **`verify` cannot detect truncation of the newest entries, and the chain is unkeyed** (second
+   audit, H2): it is sha256 over each entry and the one before, so a writer of the file (root)
+   can rewrite the history and recompute the chain; it does not cross-check git `Ledger-Entry`
+   trailers against the ledger, and commits are not signed (L1). What it does catch: an edited,
+   added or removed field or entry (an added field passed before the audit of 2026-10-31).
+   Planned (M3): sign the entries and commits with a broker key, anchor the head hash.
 3. **Path-based tiers cannot see semantic escalation inside system-tier files** — e.g.
    `torq.broker.enable = false`, a new `torq.broker.stateDir` (fresh empty ledger),
    `torq.security.lockdown = "none"`, or swapping `torq.url` in `flake.nix`. Today only
@@ -31,11 +35,15 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    which stops background jobs but not anything started from the user's terminal. The per-user
    candidate is user-writable, so its integrity between `show | compare` and `commit` rests on the
    user's account; the agent must never write a user's candidate (it proposes as `actor=agent`).
-5. **`torq.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
+   The second audit (H1, H5) is this item: the approver and the actor are whoever the caller says,
+   so ledger attribution, and the agent's restrictions (which key on `--actor agent`), hold only
+   for callers that do not lie. Not fixed by patches: the M3 socket takes identity from the kernel.
+   The broker under sudo is not sandboxed either (L3; the socket service will be).5. **`torq.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
    is copied into the store on every evaluation. Prefer `git+file://`. Related: the rebuild
    builds the config repo's *working tree*; building the exact ledgered commit
    (`git+file://…?rev=<commit>`) would make "running system = ledgered commit" hold by
-   construction instead of by fsync discipline.
+   construction instead of by fsync discipline (second audit, H4). A `path:` source (the dev VM's)
+   is allowed only with `torq dev enable true` (second audit, M3).
 
 6a. **User tier is not bound to a user:** `users/alice/packages.json` is user tier whoever proposes
    it, so an agent session acting for viper could change alice's apps. Needs the caller identity
@@ -66,10 +74,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    is updated; only the dev VM ever had one. Such a repo also sets `networking.hostName` in
    `machine.nix`: adding `system/host.json` with a host name to it is a conflict until that line
    goes (the template now keeps the host name only in `system/host.json`).
-6g. **`propose --base` is optional.** Without it a diff applies wherever it applies, so a stale
-   change can still mix with a newer commit. `torqcli` will always pass it; once the agent exists,
-   the broker should require a base for `--actor agent` (and for anything approved from a shown
-   diff). The base must be a 40-hex SHA-1 id: a config repo created with git's SHA-256 object
+6g. **`propose --base` is optional for a person.** Without it a diff applies wherever it applies,
+   so a stale change can still mix with a newer commit. `torqcli` always passes it; the broker
+   requires it for `--actor agent` (second audit, M2), and nothing builds on a commit that is not
+   the last ledgered one (audit of 2026-10-31). The base must be a 40-hex SHA-1 id: a config repo created with git's SHA-256 object
    format could not use it.
 6j. **torqcli and a malformed tree file.** torqcli refuses to load a tree file it cannot show
    faithfully (wrong shape, unknown key, a value with spaces), so one bad file blocks `configure`
@@ -130,6 +138,19 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    that the lock needs changing Nix first fetches the new source, as root (its `inputs` are read,
    nothing is built). torqcli never commits a mismatch (a lock belongs to the flake.nix it is
    committed with); a hand-made proposal still could.
+
+6p. **"TorqOS's fixed flake.nix" is recognised by its one `torq.url` line** (audit of 2026-10-31).
+   torqcli does not check the rest of it (outputs, `configDir`, no extra modules or inputs): a
+   flake.nix changed by hand beyond that line is still shown as TorqOS's own. It is changed only
+   through the broker, as a system-tier change a person reads.
+6q. **`| display set` loads back, with three exceptions:** a value that is exactly `|`, or a list
+   value that is exactly `[` or `]`, is refused when read back (a quoted word is not told apart from
+   the syntax). `save` / `load override` keep them. `load set` saves the candidate as it goes:
+   all or nothing for errors, not for a crash or a full disk midway.
+6r. **The config repo is readable by every user** (0755/0644; second audit, L4), and so is the Nix
+   store it is built into: a secret must never be in it. M2's first-boot setup must keep passwords
+   (even hashes, which can be cracked offline) out of the repo, and its images need checksums
+   or signatures of their own (a signed binary cache covers store paths, not a qcow2 or ISO).
 
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is

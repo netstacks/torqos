@@ -41,7 +41,7 @@ const NIGHT_LIGHT: &str = "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{
 fn propose_apply_revert() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
-    let p = b.propose(&d, "Night light at sunset", Actor::Agent, false).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Night light at sunset", Actor::Agent, false).unwrap();
     assert_eq!(p.body.tier, "system");
 
     let a = b.apply(p.body.seq, "casey", false).unwrap();
@@ -70,7 +70,7 @@ fn agent_cannot_touch_policy() {
         "p.diff",
         "--- /dev/null\n+++ b/policy/override.toml\n@@ -0,0 +1 @@\n+agent_can_do_anything = true\n",
     );
-    let err = b.propose(&d, "loosen my own permissions", Actor::Agent, false).unwrap_err();
+    let err = b.propose_on(Some(&b.repo.head().unwrap()), &d, "loosen my own permissions", Actor::Agent, false).unwrap_err();
     assert!(err.to_string().contains("forbidden"), "{err}");
 }
 
@@ -78,7 +78,7 @@ fn agent_cannot_touch_policy() {
 fn tainted_needs_explicit_confirmation() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
-    let p = b.propose(&d, "a web page suggested this", Actor::Agent, true).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "a web page suggested this", Actor::Agent, true).unwrap();
     assert!(b.apply(p.body.seq, "casey", false).is_err());
     b.apply(p.body.seq, "casey", true).unwrap();
 }
@@ -148,7 +148,7 @@ fn user_tier_detected() {
         "t.diff",
         "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1,3 @@\n+[\n+  \"htop\"\n+]\n",
     );
-    let p = b.propose(&d, "install htop", Actor::Agent, false).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "install htop", Actor::Agent, false).unwrap();
     assert_eq!(p.body.tier, "user");
 }
 
@@ -165,7 +165,7 @@ fn user_tier_files_must_be_json_data() {
     let (dir, b) = setup("true");
     let refused = |name: &str, diff: String| {
         let d = write_diff(dir.path(), name, &diff);
-        let err = format!("{:#}", b.propose(&d, "sneaky", Actor::Agent, false).unwrap_err());
+        let err = format!("{:#}", b.propose_on(Some(&b.repo.head().unwrap()), &d, "sneaky", Actor::Agent, false).unwrap_err());
         assert!(err.contains("must be a regular file holding"), "{name}: {err}");
     };
     refused("not-json.diff", new_user_file("users/casey/packages.json", "{ pkgs, ... }: { }"));
@@ -196,10 +196,10 @@ fn user_tier_files_must_be_json_data() {
     );
     // A list of names is fine, up to 256 of them.
     let ok = write_diff(dir.path(), "ok.diff", &new_user_file("users/casey/packages.json", "[\"htop\", \"ripgrep\"]"));
-    assert_eq!(b.propose(&ok, "two packages", Actor::Agent, false).unwrap().body.tier, "user");
+    assert_eq!(b.propose_on(Some(&b.repo.head().unwrap()), &ok, "two packages", Actor::Agent, false).unwrap().body.tier, "user");
     let most: Vec<String> = (0..256).map(|i| format!("\"p{i}\"")).collect();
     let d = write_diff(dir.path(), "most.diff", &new_user_file("users/casey/packages.json", &format!("[{}]", most.join(","))));
-    assert_eq!(b.propose(&d, "256 packages", Actor::Agent, false).unwrap().body.tier, "user");
+    assert_eq!(b.propose_on(Some(&b.repo.head().unwrap()), &d, "256 packages", Actor::Agent, false).unwrap().body.tier, "user");
 }
 
 /// Removing a user-tier file is a plain user-tier change: there is no content to check.
@@ -214,7 +214,7 @@ fn user_tier_file_can_be_deleted() {
         "del.diff",
         "--- a/users/casey/packages.json\n+++ /dev/null\n@@ -1 +0,0 @@\n-[\"htop\"]\n",
     );
-    assert_eq!(b.propose(&del, "remove", Actor::Agent, false).unwrap().body.tier, "user");
+    assert_eq!(b.propose_on(Some(&b.repo.head().unwrap()), &del, "remove", Actor::Agent, false).unwrap().body.tier, "user");
 }
 
 /// `users/*.nix` is a full NixOS module (sudo rules, services, ...): changing it must never be
@@ -223,12 +223,12 @@ fn user_tier_file_can_be_deleted() {
 fn user_module_is_system_tier() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "t.diff", THEME);
-    let p = b.propose(&d, "light theme", Actor::Agent, false).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "light theme", Actor::Agent, false).unwrap();
     assert_eq!(p.body.tier, "system");
 }
 
 fn assert_agent_refused(b: &Broker, diff: &Path) {
-    let err = b.propose(diff, "sneaky", Actor::Agent, false).unwrap_err();
+    let err = b.propose_on(Some(&b.repo.head().unwrap()), diff, "sneaky", Actor::Agent, false).unwrap_err();
     assert!(err.to_string().contains("forbidden"), "{err:#}");
 }
 
@@ -477,7 +477,7 @@ fn propose_refuses_until_reconcile_runs() {
     assert_killed(&run_cli(dir.path(), CRASH, &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]));
 
     let t = write_diff(dir.path(), "theme.diff", THEME);
-    let err = format!("{:#}", b.propose(&t, "Light theme", Actor::Agent, false).unwrap_err());
+    let err = format!("{:#}", b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::Agent, false).unwrap_err());
     assert!(err.contains("torq-broker reconcile"), "{err}");
 
     let out = run_cli(dir.path(), "true", &["reconcile", "--approved-by", "casey"]);
@@ -486,7 +486,7 @@ fn propose_refuses_until_reconcile_runs() {
     let out = run_cli(dir.path(), "true", &["reconcile", "--approved-by", "casey"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to reconcile"), "{out:?}");
 
-    b.propose(&t, "Light theme", Actor::Agent, false).unwrap();
+    b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::Agent, false).unwrap();
     assert_eq!(kinds(&b), ["init", "proposal", "interrupted", "proposal"]);
     b.ledger.verify().unwrap();
 }
@@ -566,23 +566,30 @@ fn crash_before_commit_still_rebuilds() {
 
 /// `git apply --index` succeeds but `git commit` fails: the repo must be put back, not left dirty
 /// (which would fail every later operation's clean check).
+/// A PATH whose `git` fails for one subcommand (`commit`, `revert`) and is the real git otherwise.
+fn failing_git(dir: &Path, sub: &str) -> String {
+    let real = String::from_utf8(Command::new("sh").args(["-c", "command -v git"]).output().unwrap().stdout).unwrap();
+    let bin = dir.join(format!("failing-{sub}"));
+    fs::create_dir_all(&bin).unwrap();
+    let script = format!("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = {sub} ] && exit 1; done\nexec {} \"$@\"\n", real.trim());
+    fs::write(bin.join("git"), script).unwrap();
+    fs::set_permissions(bin.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+}
+
 #[test]
 fn failed_commit_leaves_repo_clean() {
     let (dir, b) = setup("true");
     let before = b.repo.head().unwrap();
-    let hook = b.repo.root().join(".git/hooks/pre-commit");
-    fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
-    fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
-    assert!(b.apply(p.body.seq, "casey", false).is_err());
+    // git commit fails (a repo hook cannot be the way: they never run).
+    let out = run_cli_env(dir.path(), &[("PATH", &failing_git(dir.path(), "commit"))], &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]);
+    assert!(!out.status.success(), "{out:?}");
     assert_eq!(b.repo.head().unwrap(), before);
     b.repo.ensure_clean().unwrap();
     assert!(!dir.path().join("state/pending.json").exists());
 
-    fs::remove_file(&hook).unwrap();
     b.apply(p.body.seq, "casey", false).unwrap();
     assert_eq!(kinds(&b), ["init", "proposal", "applied"]);
 }
@@ -651,12 +658,8 @@ fn failed_revert_commit_leaves_repo_clean() {
     let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
     let a = b.apply(p.body.seq, "casey", false).unwrap();
     let applied = b.repo.head().unwrap();
-    let hook = b.repo.root().join(".git/hooks/pre-commit");
-    fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
-    fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-
-    assert!(b.revert(a.body.seq, "casey").is_err());
+    let out = run_cli_env(dir.path(), &[("PATH", &failing_git(dir.path(), "revert"))], &["revert", &a.body.seq.to_string(), "--approved-by", "casey"]);
+    assert!(!out.status.success(), "{out:?}");
     assert_eq!(b.repo.head().unwrap(), applied);
     b.repo.ensure_clean().unwrap();
     assert!(!dir.path().join("state/pending.json").exists());
@@ -687,7 +690,7 @@ fn reconcile_refuses_on_a_broken_ledger_before_touching_anything() {
     let logging = Broker::new(dir.path().join("config"), dir.path().join("state"), format!("touch {}", calls.display()));
 
     let err = format!("{:#}", logging.reconcile("casey").unwrap_err());
-    assert!(err.contains("broken ledger"), "{err}");
+    assert!(err.contains("the ledger is broken"), "{err}");
     assert_eq!(b.repo.head().unwrap(), head);
     assert!(!calls.exists(), "must not rebuild");
 }
@@ -901,7 +904,7 @@ fn status_cli_exits_75_while_busy() {
 fn log_neutralises_control_characters_and_brief_drops_diffs() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
-    b.propose(&d, "x\r\u{1b}[2K#99 applied fake\nsecond line", Actor::Agent, false).unwrap();
+    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x\r\u{1b}[2K#99 applied fake\nsecond line", Actor::Agent, false).unwrap();
     let out = run_cli(dir.path(), "true", &["log"]);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(!text.contains('\r') && !text.contains('\u{1b}'), "{text:?}");
@@ -922,7 +925,8 @@ fn show_and_propose_neutralise_hidden_characters_in_diffs() {
         "t.diff",
         "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{ nightLight = false; }\n+{ nightLight = true; /* \u{202e} } \u{2066} */ \u{1b}[2K}\n",
     );
-    let out = run_cli(dir.path(), "true", &["propose", "--diff", d.to_str().unwrap(), "--reason", "r", "--actor", "agent"]);
+    let head = b.repo.head().unwrap();
+    let out = run_cli(dir.path(), "true", &["propose", "--diff", d.to_str().unwrap(), "--reason", "r", "--actor", "agent", "--base", &head]);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains(r"\u{202e}") && text.contains(r"\u{1b}"), "{text}");
     assert!(!text.contains('\u{202e}') && !text.contains('\u{1b}'), "{text:?}");
@@ -1627,6 +1631,7 @@ fn crash_during_commit_confirmed_goes_back_to_the_anchor() {
         let anchor = m.b.repo.head().unwrap();
         let seq = m.propose_theme();
         assert_killed(&m.cli(build, activate, &["apply", &seq.to_string(), "--approved-by", "casey", "--confirm", "10"]));
+        fs::write(m.dir.path().join("state/confirm-system"), "").unwrap(); // as nix build --out-link leaves it
         assert_eq!(m.b.status().unwrap().interrupted.map(|i| i.op), Some("apply".to_string()), "{step}");
         // What the timer runs (or any operation) reconciles first.
         assert!(m.b.expire_confirm(Some(seq + 1), false).unwrap().is_none(), "{step}: nothing was ever waiting");
@@ -1634,6 +1639,7 @@ fn crash_during_commit_confirmed_goes_back_to_the_anchor() {
         assert_eq!((last.body.kind.as_str(), last.body.data["restored"].as_bool()), ("interrupted", Some(true)), "{step}");
         assert!(!m.log().contains("rebuild"), "{step}: straight back, no rebuild: {}", m.log());
         m.assert_back(&anchor);
+        assert!(!m.dir.path().join("state/confirm-system").exists(), "{step}: settled, so not a GC root any more");
     }
 }
 
@@ -1674,11 +1680,13 @@ fn the_rollback_uses_the_anchor_systems_own_commands() {
         .to_string(),
     )
     .unwrap();
+    // As a real machine has it: the boot default is the running system (a commit confirmed needs to know).
+    std::os::unix::fs::symlink(&anchor_sys, dir.path().join("profile")).unwrap();
     std::os::unix::fs::symlink(&anchor_sys, &cur).unwrap();
     fs::write(dir.path().join("boot_id"), "boot-1\n").unwrap();
     let b = Broker::new(&repo, dir.path().join("state"), "true")
         .with_current_system(&cur)
-        .with_system_profile(dir.path().join("no-profile"))
+        .with_system_profile(dir.path().join("profile"))
         .with_boot_id_file(dir.path().join("boot_id"))
         .with_confirm_commands(
             &format!("echo {SYS2}"),
@@ -1760,7 +1768,7 @@ fn the_build_is_a_gc_root_until_settled() {
 fn user_cli_style_is_user_tier_data() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "cli.diff", &new_user_file("users/casey/cli.json", r#"{ "style": "cisco" }"#));
-    let p = b.propose(&d, "Cisco style", Actor::Agent, false).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Cisco style", Actor::Agent, false).unwrap();
     assert_eq!(p.body.tier, "user");
     b.apply(p.body.seq, "casey", false).unwrap();
     for (name, body) in [
@@ -1769,7 +1777,7 @@ fn user_cli_style_is_user_tier_data() {
         ("list.diff", r#"[ "juniper" ]"#),
     ] {
         let d = write_diff(dir.path(), name, &new_user_file("users/dana/cli.json", body));
-        let err = format!("{:#}", b.propose(&d, "x", Actor::Agent, false).unwrap_err());
+        let err = format!("{:#}", b.propose_on(Some(&b.repo.head().unwrap()), &d, "x", Actor::Agent, false).unwrap_err());
         assert!(err.contains(r#"exactly {"style": ...}, one of juniper, cisco"#), "{name}: {err}");
     }
 }
@@ -1801,4 +1809,171 @@ fn a_reason_may_start_with_a_dash() {
     // The form torqcli used to send is what the review caught: clap reads it as an option.
     let out = run_cli(dir.path(), "true", &["propose", "--diff", &d.to_string_lossy(), "--reason", reason]);
     assert!(!out.status.success());
+}
+
+/// From the audit of 2026-10-31: with nothing pending, apply went ahead on a broken ledger, and found
+/// out only at its final append — after committing and rebuilding. Now it changes nothing.
+#[test]
+fn a_broken_ledger_stops_apply_before_it_changes_anything() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    let ledger = dir.path().join("state/ledger.jsonl");
+    fs::write(&ledger, fs::read_to_string(&ledger).unwrap().replace("Config repository initialised", "edited")).unwrap();
+    let calls = dir.path().join("calls.log");
+    let logging = Broker::new(dir.path().join("config"), dir.path().join("state"), format!("touch {}", calls.display()));
+    let head = b.repo.head().unwrap();
+    let err = format!("{:#}", logging.apply(p.body.seq, "casey", false).unwrap_err());
+    assert!(err.contains("the ledger is broken") && err.contains("nothing was changed"), "{err}");
+    assert_eq!(b.repo.head().unwrap(), head, "not committed");
+    assert!(!calls.exists(), "not rebuilt");
+    let err = format!("{:#}", logging.revert(1, "casey").unwrap_err());
+    assert!(err.contains("the ledger is broken"), "{err}");
+}
+
+/// From the audit: a commit made outside the broker could become the base of an approved change, and
+/// so enter the history unreviewed. Nothing builds on an unledgered commit: not a proposal (with or
+/// without --base), not an apply of one proposed before, not a revert.
+#[test]
+fn nothing_builds_on_an_unledgered_commit() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let before = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    let applied = b.apply(before.body.seq, "casey", false).unwrap();
+    let pending = b.propose(&write_diff(dir.path(), "t.diff", THEME), "theme", Actor::User, false).unwrap();
+    fs::write(b.repo.root().join("outside.nix"), "{ }\n").unwrap();
+    git(&b, &["add", "-A"]);
+    git(&b, &["-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "outside"]);
+    let outside = b.repo.head().unwrap();
+    let t = write_diff(dir.path(), "t2.diff", THEME);
+    for err in [
+        b.propose_on(Some(&outside), &t, "on it", Actor::User, false).unwrap_err(),
+        b.propose(&t, "on it", Actor::User, false).unwrap_err(),
+        b.apply(pending.body.seq, "casey", false).unwrap_err(),
+        b.revert(applied.body.seq, "casey").unwrap_err(),
+    ] {
+        let err = format!("{err:#}");
+        assert!(err.contains("not the last ledgered commit") && err.contains("reset --hard"), "{err}");
+    }
+    assert_eq!(b.repo.head().unwrap(), outside, "nothing was added on top of it");
+    // Returned to the ledgered commit, it all works again.
+    git(&b, &["reset", "-q", "--hard", "HEAD~1"]);
+    b.apply(pending.body.seq, "casey", false).unwrap();
+}
+
+/// From the audit: `init` again, on a repo with a ledger, committed whatever was in the working tree
+/// (`git add -A`) as a new, unledgered "baseline". Now it changes nothing.
+#[test]
+fn init_again_changes_nothing() {
+    let (_dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    fs::write(b.repo.root().join("stray.nix"), "{ }\n").unwrap();
+    b.init().unwrap();
+    assert_eq!(b.repo.head().unwrap(), head, "no new commit");
+    assert!(git(&b, &["status", "--porcelain"]).contains("?? stray.nix"), "left as it was");
+    assert_eq!(b.ledger.read_all().unwrap().len(), 1);
+}
+
+/// From the audit: an unreadable boot profile counted as "the next boot is fine". A commit confirmed
+/// needs to know a reboot rolls back, so without a readable profile it is refused (a plain one works).
+#[test]
+fn commit_confirmed_needs_to_know_the_next_boot() {
+    let (dir, b, _) = setup_with_system();
+    let b = b.with_system_profile(dir.path().join("no-profile"));
+    let seq = b.propose(&write_diff(dir.path(), "t.diff", THEME), "x", Actor::User, false).unwrap().body.seq;
+    let err = format!("{:#}", b.apply_confirmed(seq, "casey", false, 10).unwrap_err());
+    assert!(err.contains("cannot tell what the next boot starts"), "{err}");
+    b.apply(seq, "casey", false).unwrap();
+}
+
+/// From the audit: a rollback whose boot default could not be read afterwards counted as
+/// `restored: true`. Restored means known to be: running and next boot both the anchor.
+#[test]
+fn a_rollback_is_restored_only_if_the_next_boot_is_known() {
+    let m = Confirmable::new();
+    let seq = m.propose_theme();
+    let a = m.b.apply_confirmed(seq, "casey", false, 1).unwrap();
+    // By the deadline the profile is unreadable: a folder (the boot command, `ln -sfn`, puts its link
+    // inside it, so it stays one), whose target is unknown.
+    fs::remove_file(&m.profile).unwrap();
+    fs::create_dir(&m.profile).unwrap();
+    // Not taken (and retried), never ledgered as restored.
+    let err = format!("{:#}", m.b.expire_confirm(Some(a.body.seq), false).unwrap_err());
+    assert!(err.contains("did not take") && err.contains("next boot ?"), "{err}");
+    assert!(!m.b.ledger.read_all().unwrap().iter().any(|e| e.body.kind == "rolled_back"), "not ledgered as done");
+}
+
+/// From the audit: apply and revert did not check for an outside switch running (repair and
+/// reconcile did); one interleaving could have its system recorded as the broker's commit's.
+#[test]
+fn apply_and_revert_wait_for_an_outside_switch() {
+    let (dir, b) = setup("true");
+    let fake = dir.path().join("fake-bin");
+    fs::create_dir(&fake).unwrap();
+    // A systemctl that says the switch unit is active.
+    fs::write(fake.join("systemctl"), "#!/bin/sh\n[ \"$1 $3\" = \"is-active nixos-rebuild-switch-to-configuration.service\" ]\n").unwrap();
+    fs::set_permissions(fake.join("systemctl"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap());
+    let d = write_diff(dir.path(), "theme.diff", THEME);
+    let p = b.propose(&d, "x", Actor::User, false).unwrap();
+    let head = b.repo.head().unwrap();
+    let out = run_cli_env(dir.path(), &[("PATH", &path)], &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{out:?}");
+    assert_eq!(b.repo.head().unwrap(), head, "nothing committed");
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+    let out = run_cli_env(dir.path(), &[("PATH", &path)], &["revert", &a.body.seq.to_string(), "--approved-by", "casey"]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{out:?}");
+}
+
+/// From the audit: a commit git had made when what followed it failed (its sync, here) was reset
+/// away without being kept for the audit. It is kept, as reconcile keeps one.
+#[test]
+fn a_commit_undone_after_a_failure_is_kept() {
+    let (dir, b) = setup("true");
+    let fake = dir.path().join("fake-bin");
+    fs::create_dir(&fake).unwrap();
+    fs::write(fake.join("sync"), "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(fake.join("sync"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap());
+    let p = b.propose(&write_diff(dir.path(), "theme.diff", THEME), "x", Actor::User, false).unwrap();
+    let before = b.repo.head().unwrap();
+    let out = run_cli_env(dir.path(), &[("PATH", &path)], &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]);
+    assert!(!out.status.success(), "{out:?}");
+    let kept = git(&b, &["for-each-ref", "--format=%(objectname)", "refs/torq/discarded/"]);
+    let kept: Vec<&str> = kept.lines().collect();
+    assert_eq!(kept.len(), 1, "the commit made is kept: {kept:?}");
+    assert_ne!(kept[0], before);
+    assert!(git(&b, &["show", &format!("{}:users/casey.nix", kept[0])]).contains("light"), "it is the change's");
+}
+
+/// From the second audit: the broker's git ran the repo's own hooks (`.git/hooks/*`), as root. No
+/// hook in the repo runs, whatever the operation.
+#[test]
+fn the_repos_own_hooks_never_run() {
+    let (dir, b) = setup("true");
+    let ran = dir.path().join("hook-ran");
+    for hook in ["pre-commit", "commit-msg", "post-commit", "pre-applypatch", "post-checkout", "reference-transaction"] {
+        let h = b.repo.root().join(".git/hooks").join(hook);
+        fs::write(&h, format!("#!/bin/sh\necho {hook} >> '{}'\n", ran.display())).unwrap();
+        fs::set_permissions(&h, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    let p = b.propose(&write_diff(dir.path(), "theme.diff", THEME), "x", Actor::User, false).unwrap();
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+    b.revert(a.body.seq, "casey").unwrap();
+    assert!(!ran.exists(), "a hook ran: {}", fs::read_to_string(&ran).unwrap_or_default());
+}
+
+/// From the second audit: an agent's proposal must say its base (M2), and no proposal may be huge (M4).
+#[test]
+fn an_agent_says_its_base_and_no_proposal_is_huge() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let err = format!("{:#}", b.propose(&d, "x", Actor::Agent, false).unwrap_err());
+    assert!(err.contains("needs --base"), "{err}");
+    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x", Actor::Agent, false).unwrap();
+    b.propose(&d, "a person's needs none", Actor::User, false).unwrap();
+    let big = dir.path().join("big.diff");
+    fs::File::create(&big).unwrap().set_len(torq_broker::MAX_DIFF + 1).unwrap();
+    let err = format!("{:#}", b.propose(&big, "x", Actor::User, false).unwrap_err());
+    assert!(err.contains("at most"), "{err}");
 }

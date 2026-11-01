@@ -71,6 +71,16 @@ pub struct Whole<'a> {
     pub tree: &'a Tree,
 }
 
+/// A folder (`path:`) as where TorqOS comes from is for developing TorqOS: root builds from it, so
+/// only with `torq dev enable true` (second audit, M3). Checked at `set` and at `commit`.
+pub fn software_allowed(d: &Data) -> Result<()> {
+    let dev = d.settings.get("torq").and_then(|t| t.pointer("/dev/enable")).and_then(serde_json::Value::as_bool) == Some(true);
+    if d.source.as_deref().is_some_and(|s| s.starts_with("path:")) && !dev {
+        bail!("TorqOS from a folder (path:) is for developing TorqOS, with `torq dev enable true`: root builds from it");
+    }
+    Ok(())
+}
+
 /// `system software torq source …`: the words after the path (None: not that setting). Only `torq`
 /// has a source of its own (nixpkgs follows TorqOS's).
 fn software_words(words: &[String]) -> Option<&[String]> {
@@ -168,7 +178,7 @@ impl Whole<'_> {
                     }
                     software::valid(url)?;
                     d.source = Some(url.clone());
-                    Ok(())
+                    software_allowed(d)
                 }
                 _ => bail!("set system software torq source <source>: one source (like github:netstacks/torqos); the version is `request system update`'s"),
             };

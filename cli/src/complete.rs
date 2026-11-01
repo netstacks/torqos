@@ -69,8 +69,11 @@ const CISCO_CONFIGURATION: &[(&str, &str)] = &[
     ("do", "Run an operational-mode command"),
     ("end", "Leave configuration mode (an uncommitted candidate is kept)"),
     ("exit", "Up one level (out of configuration mode at the top)"),
+    ("file", "The configuration's Nix files (list, show, edit, delete)"),
+    ("load", "Load a saved configuration into the candidate (override, merge, set)"),
     ("no", "Remove a setting"),
     ("rollback", "Load an earlier configuration into the candidate"),
+    ("save", "Save the whole candidate, and its config files, to a file"),
     ("show", "Show the candidate, or what it changes"),
     ("switch", "Switch to the Juniper style"),
     ("top", "Back to the top of the configuration"),
@@ -108,6 +111,8 @@ pub fn choices_at(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Cho
         },
         (Mode::Configuration, Style::Cisco, Some("switch")) if words.len() == 1 => table(&[("cli", "Switch to the Juniper style")]),
         (Mode::Configuration, Style::Cisco, Some("commit")) => commit_choices(&words[1..]),
+        // The same in both styles.
+        (Mode::Configuration, Style::Cisco, Some("file" | "load" | "save")) => choices_juniper(k, at, words, partial),
         (Mode::Configuration, Style::Cisco, Some(_)) if CISCO_CONFIGURATION.iter().any(|(w, _)| Some(*w) == first) => vec![],
         // A bare path.
         (Mode::Configuration, Style::Cisco, Some(_)) => tree_choices(k, &here(words), "set"),

@@ -80,8 +80,13 @@ impl Ledger {
             if line.trim().is_empty() {
                 continue;
             }
-            let e: Entry = serde_json::from_str(&line)
-                .with_context(|| format!("ledger line {} is not a valid entry", i + 1))?;
+            let e: Entry = serde_json::from_str(&line).with_context(|| format!("ledger line {} is not a valid entry", i + 1))?;
+            // Byte for byte what the broker writes for this entry (`append`): a field it does not know
+            // (which the hash would not cover, as it hashes the entry it reads), a key twice, a value
+            // written another way — any of them is an edit (audits of 2026-10-31).
+            if serde_json::to_string(&e)? != line {
+                bail!("ledger broken at line {}: entry contents were modified (it is not as the broker writes it)", i + 1);
+            }
             out.push(e);
         }
         Ok(out)
@@ -192,6 +197,33 @@ mod tests {
         let err = l.verify().unwrap_err().to_string();
         assert!(err.contains("seq 1"), "{err}");
         assert!(l.append(new("third")).is_err(), "must refuse to append to a broken chain");
+    }
+
+    /// From the audit of 2026-10-31: a field added to an entry (not one the hash covers, as it hashed
+    /// only what it read) was dropped on reading, so the entry verified. Any field, anywhere.
+    #[test]
+    fn detects_an_added_field() {
+        for (from, to) in [
+            ("{\"seq\"", "{\"approved_by_agent\":\"forged\",\"seq\""),
+            ("\"hash\"", "\"note\":1,\"hash\""),
+            ("\"tainted\":false", "\"tainted\":0"),
+            // A key twice: a reader keeping the first would show the forged one.
+            ("\"reason\":\"a\"", "\"reason\":\"forged\",\"reason\":\"a\""),
+            // The same entry, written another way.
+            ("\"seq\":1,", "\"seq\": 1,"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("ledger.jsonl");
+            let l = Ledger::open(&p);
+            l.append(new("a")).unwrap();
+            l.append(new("b")).unwrap();
+            let text = fs::read_to_string(&p).unwrap();
+            assert!(text.contains(from), "{from}");
+            fs::write(&p, text.replacen(from, to, 1)).unwrap();
+            let err = format!("{:#}", l.verify().unwrap_err());
+            assert!(err.contains("line 1") || err.contains("not a valid entry"), "{to}: {err}");
+            assert!(l.append(new("c")).is_err(), "{to}: must refuse to append to it");
+        }
     }
 
     #[test]

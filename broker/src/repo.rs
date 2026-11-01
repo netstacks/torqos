@@ -59,6 +59,9 @@ impl Repo {
             // Its advice is about resolving conflicts by hand, in a repo only the broker may write.
             .arg("-c")
             .arg("advice.mergeConflict=false")
+            // Nothing in the repo runs as root: not its hooks (`.git/hooks`), not an fsmonitor it names
+            // (as torqcli reads it; audit of 2026-10-31).
+            .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"])
             .args(args)
             .output()
             .context("running git")?;
@@ -209,6 +212,7 @@ impl Repo {
         let st = crate::config::command("git")
             .arg("-C")
             .arg(&self.root)
+            .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"])
             .args(["merge-base", "--is-ancestor", ancestor, of])
             .status()
             .context("running git")?;

@@ -61,7 +61,10 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
         if s("running_system") != Some(want) {
             found.push(("It is running a system TorqOS didn't build (switched outside TorqOS).".into(), Fix::Repair));
         }
-        if s("next_boot").is_some_and(|n| n != want) {
+        // During a commit confirmed the boot default is, rightly, still the system it rolls back to (as the
+        // broker says; audit of 2026-10-31): that is not drift.
+        let anchor = v["pending_confirm"]["anchor_system"].as_str();
+        if s("next_boot").is_some_and(|n| n != want && Some(n) != anchor) {
             found.push(("The next boot would start a system TorqOS didn't build.".into(), Fix::Repair));
         }
     }
@@ -122,6 +125,21 @@ mod tests {
         assert_eq!((r.exit, r.fix), (1, Fix::Repair));
         let expected = "  ⚠ This machine is not as its history says.\n    · It is running a system TorqOS didn't build (switched outside TorqOS).\n    · The next boot would start a system TorqOS didn't build.\n    To return it to its history:  request system repair   (asks first)\n";
         assert_eq!(r.text, expected);
+    }
+
+    /// From the audit of 2026-10-31: during a commit confirmed, the boot default is the system it rolls
+    /// back to — not drift (the broker says so too); any other boot default still is.
+    #[test]
+    fn a_commit_confirmed_waiting_is_not_boot_drift() {
+        let mut v = ok();
+        v["next_boot"] = json!("/nix/store/anchor");
+        v["pending_confirm"] = json!({ "applied": 7, "anchor_system": "/nix/store/anchor", "deadline": "soon" });
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
+        assert!(!r.text.contains("next boot"), "{}", r.text);
+        assert_ne!(r.fix, Fix::Repair, "repair is refused while it waits: never suggested");
+        v["next_boot"] = json!("/nix/store/elsewhere");
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
+        assert!(r.text.contains("next boot would start"), "{}", r.text);
     }
 
     #[test]

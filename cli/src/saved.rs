@@ -22,10 +22,17 @@ const FILE: &str = "## config file ";
 const LINE: &str = "##|";
 /// After a config file's last line, if the file does not end with a line break.
 const NO_EOL: &str = "##! no newline at end of file";
+/// A Nix file of the base that the saved candidate deletes.
+const DELETED: &str = "## config file deleted ";
+/// The largest saved configuration, as `save` writes and `load` reads it.
+pub const MAX: usize = 16 << 20;
 
 /// A saved configuration as text: the tree (`show`'s brace format) and the config files' content.
-pub fn render(tree: &str, files: &[(String, String)]) -> String {
+pub fn render(tree: &str, files: &[(String, String)], deleted: &[String]) -> String {
     let mut out = tree.to_string();
+    for path in deleted {
+        out.push_str(&format!("{DELETED}{path}\n"));
+    }
     for (path, content) in files {
         out.push_str(&format!("{FILE}{path}\n"));
         // Byte for byte: each line as it is (a `\r` kept), and a last line without a break said so.
@@ -44,6 +51,8 @@ pub fn render(tree: &str, files: &[(String, String)]) -> String {
 pub struct Saved {
     pub entries: Vec<(Vec<String>, Val)>,
     pub files: Vec<(String, String)>,
+    /// Nix files of the configuration the saved candidate deleted.
+    pub deleted: Vec<String>,
 }
 
 /// Read a saved configuration. An error names the line.
@@ -70,6 +79,12 @@ pub fn parse(text: &str) -> Result<Saved> {
                 }
                 _ => bail!("line {}: `{NO_EOL}` after no config file's line", i + 1),
             }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix(DELETED) {
+            saved.files.extend(file.take());
+            crate::attach::valid(path).map_err(|e| anyhow::anyhow!("line {}: {e:#}", i + 1))?;
+            saved.deleted.push(path.to_string());
             continue;
         }
         if let Some(path) = line.strip_prefix(FILE) {
@@ -255,13 +270,14 @@ mod tests {
         let mut sorted = entries.clone();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
         let tree = crate::tree::render_entries(&sorted);
-        let text = render(&format!("{tree}## software: torq 2026-10-31\n"), &[("hardware-configuration.nix".into(), "{ ... }:\n{\n  # a comment ##| not a marker\n}\n".into())]);
+        let text = render(&format!("{tree}## software: torq 2026-10-31\n"), &[("hardware-configuration.nix".into(), "{ ... }:\n{\n  # a comment ##| not a marker\n}\n".into())], &["old.nix".into()]);
         let saved = parse(&text).unwrap_or_else(|e| panic!("{e:#}\n{text}"));
         assert_eq!(saved.entries, sorted, "{text}");
         assert_eq!(saved.files, [("hardware-configuration.nix".to_string(), "{ ... }:\n{\n  # a comment ##| not a marker\n}\n".to_string())]);
+        assert_eq!(saved.deleted, ["old.nix"], "a deletion is saved too");
         // Byte for byte: CRLF kept, a missing last line break kept, an empty file.
         for content in ["a\r\nb\r\n", "no break at the end", "two\nlines", "", "\n"] {
-            let text = render("", &[("a.nix".into(), content.into())]);
+            let text = render("", &[("a.nix".into(), content.into())], &[]);
             assert_eq!(parse(&text).unwrap().files, [("a.nix".to_string(), content.to_string())], "{content:?}: {text:?}");
         }
     }

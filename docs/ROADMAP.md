@@ -11,7 +11,8 @@ In an ARM NixOS VM (UTM on the M4 Mac):
 - [x] `torq-broker propose` accepts a diff + reason, shows it.
 - [x] `torq-broker apply` commits (with `Ledger-Entry` trailer), rebuilds, appends ledger.
 - [x] `torq-broker rollback` reverts, rebuilds, appends ledger.
-- [x] `torq-broker verify` detects any edit to the ledger.
+- [x] `torq-broker verify` detects an edited, added or removed field or entry (not yet: the newest
+      entries cut off, until the ledger is anchored, M3; KNOWN-GAPS 2).
 - [x] NixOS VM test `tests/trust-loop.nix` proves propose → apply → rollback.
   (Runs inside the UTM VM without `/dev/kvm`: QEMU falls back to TCG; ~75 s of test time.)
 
@@ -91,6 +92,10 @@ binary cache. Ease of use first.
       (only the machine's own small config files are built locally).
 - [ ] **ISO installer** for real hardware: the same image and first-boot setup, plus disk choice.
 - [ ] **VM tests:** the image boots on a blank VM, first-boot setup, a commit, a rollback, an update.
+- [ ] **Designs to settle first** (audits of 2026-10-31; KNOWN-GAPS 6r): where first-boot passwords
+      live, since the config repo is readable by every user (a hash there can be cracked offline);
+      checksums or signatures for the qcow2 and ISO themselves; whether "SSH keys-only" is the
+      catalog's default or an invariant of every TorqOS machine.
 
 ## Later: the AI layers (not planned now; everything built keeps them possible)
 
