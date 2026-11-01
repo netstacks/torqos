@@ -45,6 +45,12 @@
           modules = [
             self.nixosModules.default
             { nixpkgs.hostPlatform = system; torq.packages.configDir = configDir; }
+            # The sources the machine is built from, kept with each system built from them: while a
+            # generation exists, its configuration can be evaluated again (the commit check reads
+            # the configuration before a change; a rollback rebuilds an older one). Without this a
+            # garbage collection deletes them — and a source that cannot be fetched again (the
+            # image's own, in the store; a folder that has changed since) is gone for good.
+            { system.extraDependencies = [ self.outPath nixpkgs.outPath ]; }
             # The tree's NixOS settings (nixos/*.json), built from the path itself (modules/nixos-settings.nix).
             (import ./modules/nixos-settings.nix configDir)
           ] ++ modules;

@@ -100,6 +100,9 @@ let
     # Several files at one place (a list): each takes effect.
     ++ lib.optional (tryValue (configOf "config-good-list").networking.domain != "from-the-top") "config-good-list: the first file did not take effect"
     ++ lib.optional (tryValue (configOf "config-good-list").networking.search != [ "from-a-second-file" ]) "config-good-list: the second file did not take effect"
+    # A machine keeps the sources it is built from (flake.nix, lib.mkSystem).
+    ++ lib.optional (!(builtins.all (s: builtins.elem (toString s) (map toString (configOf "template").system.extraDependencies)) [ self.outPath pkgs.path ]))
+      "template: the system does not keep its TorqOS and nixpkgs sources"
     # The template is a whole machine: data, its hardware attached, nothing else, no desktop.
     ++ lib.optional (tryValue (configOf "template").system.build.toplevel.drvPath == null) "template: does not evaluate as a machine"
     ++ lib.optional (tryValue (configOf "template").fileSystems."/".device != "/dev/vda1") "template: its hardware file is not attached"

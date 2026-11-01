@@ -45,6 +45,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    its working tree, so "running system = ledgered commit" holds by construction; second audit,
    H4.) A `path:` source (the dev VM's)
    is allowed only with `torq dev enable true` (second audit, M3).
+   Since each system keeps its sources (`lib.mkSystem`, so a configuration can always be evaluated
+   again), the dev VM's generations each keep a copy of the checkout with its `target/` folders
+   (~770 MB). The fix is the one above: the dev source as `git+file:///home/<you>/torq` (committed
+   files only, `.gitignore` respected).
 
 6a. **User tier is not bound to a user:** `users/alice/packages.json` is user tier whoever proposes
    it, so an agent session acting for viper could change alice's apps. Needs the caller identity
