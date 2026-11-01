@@ -21,8 +21,8 @@ pub trait Machine {
     fn pending_confirm(&self) -> Result<Option<Waiting>>;
     /// Keep the waiting commit confirmed.
     fn confirm(&self) -> Result<u64>;
-    /// Ask a person (a system-tier commit); false when there is no one to ask.
-    fn ask(&self, question: &str) -> bool;
+    /// Ask a person (a system-tier commit, a delete of everything, a repair, a revert).
+    fn ask(&self, question: &str) -> Answer;
     /// A person edits `text` (the config file `path`) in their editor; None: they left it unchanged.
     fn edit(&self, path: &str, text: &str) -> Result<Option<String>>;
     /// What a person pastes or types at the terminal, up to Ctrl-D (`load … terminal`), at most
@@ -85,6 +85,41 @@ pub struct Configuration {
     pub what: String,
     /// The ledger entry (None: read from git, without one).
     pub seq: Option<u64>,
+}
+
+/// A person's answer to a question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    Yes,
+    No,
+    /// No terminal to ask at (a script, a pipe).
+    NobodyToAsk,
+}
+
+impl Answer {
+    /// What an answer means for the command that asked, `not_done` its outcome declined
+    /// ("committed"): yes, go on (None); no, a choice, said, not a failure ("Not committed."); no one
+    /// to ask, refused.
+    pub fn go_on(self, not_done: &str) -> Result<Option<String>> {
+        match self {
+            Answer::Yes => Ok(None),
+            Answer::No => Ok(Some(format!("Not {not_done}.\n"))),
+            Answer::NobodyToAsk => bail!("not {not_done}: this needs a person to approve it at a terminal"),
+        }
+    }
+}
+
+/// Where the notice of changes not yet committed is said (Session::pending_note).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pending {
+    /// Into configuration mode, with changes from before.
+    Entering,
+    /// Out of configuration mode (the shell's candidate: kept).
+    Leaving,
+    /// Out of torqcli (kept).
+    Quitting,
+    /// At the end of `-c` (a candidate of its own: gone).
+    Discarded,
 }
 
 /// SSH in an evaluated configuration.
@@ -343,11 +378,7 @@ impl<'a> Session<'a> {
             Op::Exit if self.mode == Mode::Operational => {
                 self.done = true;
                 // The interactive candidate is kept for the next `configure`: say so on the way out.
-                Ok(if self.saved.is_some() && self.uncommitted().unwrap_or(false) {
-                    "The candidate has changes not yet committed: they are kept for your next `configure`.\n".into()
-                } else {
-                    String::new()
-                })
+                Ok(if self.saved.is_some() && self.uncommitted().unwrap_or(false) { self.pending_note(Pending::Quitting) } else { String::new() })
             }
             Op::Exit if !self.edit.is_empty() => {
                 self.up();
@@ -429,8 +460,8 @@ impl<'a> Session<'a> {
                 // first, as on a network device; a script cannot answer, so it is refused there.
                 if words.is_empty() {
                     let here = if full.is_empty() { "the whole configuration".to_string() } else { format!("everything under {}", full.join(" ")) };
-                    if !self.machine.ask(&format!("Delete {here}? ")) {
-                        bail!("not deleted: `delete` with nothing after it deletes {here}, and asks first, at a terminal");
+                    if let Some(stop) = self.machine.ask(&format!("Delete {here}? ")).go_on("deleted")? {
+                        return Ok(stop);
                     }
                 }
                 let mut d = self.candidate_data()?;
@@ -485,6 +516,17 @@ impl<'a> Session<'a> {
         self.edit.pop();
     }
 
+    /// The one notice of changes not yet committed, and what becomes of them where it is said.
+    pub fn pending_note(&self, at: Pending) -> String {
+        let then = match at {
+            Pending::Entering => "`show | compare` lists them, `rollback 0` discards them",
+            Pending::Leaving => "they are kept (`configure` returns to them, `rollback 0` discards them)",
+            Pending::Quitting => "they are kept for your next `configure`",
+            Pending::Discarded => "they are discarded: these commands work on a candidate of their own (end with `commit` to keep them)",
+        };
+        format!("{}\n", self.ui().line("", &format!("The candidate has changes not yet committed: {then}.")))
+    }
+
     /// Out of configuration mode, saying if the candidate holds changes.
     fn leave(&mut self) -> Result<String> {
         // Leave first: a candidate that cannot be read must not keep anyone in here.
@@ -493,8 +535,9 @@ impl<'a> Session<'a> {
         let changed = self.uncommitted().unwrap_or(true);
         Ok(match (changed, self.saved.is_some()) {
             (false, _) => String::new(),
-            (true, true) => "The configuration has been changed but not committed (it is kept: `configure` returns to it, `rollback 0` discards it).\n".into(),
-            (true, false) => "The configuration has been changed but not committed.\n".into(),
+            (true, true) => self.pending_note(Pending::Leaving),
+            // (A script's: said once, when it ends.)
+            (true, false) => String::new(),
         })
     }
 
@@ -565,7 +608,7 @@ impl<'a> Session<'a> {
         let mut out = String::from("Entering configuration mode\n");
         let base = c.base.clone();
         if base == head && self.pending()? > 0 {
-            out.push_str(&format!("{}\n", self.ui().line("", "The candidate has changes not yet committed: `show | compare` lists them, `rollback 0` discards them.")));
+            out.push_str(&self.pending_note(Pending::Entering));
         }
         let c = self.candidate()?;
         if c.base != head {
@@ -1104,8 +1147,8 @@ impl<'a> Session<'a> {
             _ => None,
         };
         if let Some(why) = why {
-            if !self.machine.ask(&format!("{shown}{} ", ui.line("", &format!("{why} Commit?")))) {
-                bail!("not committed: this change needs a person to approve it at a terminal");
+            if let Some(stop) = self.machine.ask(&format!("{shown}{} ", ui.line("", &format!("{why} Commit?")))).go_on("committed")? {
+                return Ok(stop);
             }
         }
         let (confirm, comment) = (o.confirm, o.comment);
@@ -1715,6 +1758,8 @@ mod tests {
         /// Where the ledger says the repo is, if a test says (else: its newest configuration).
         ledger_at: Option<String>,
         /// SSH before and after a commit, if a test says.
+        /// A person answers no (else, with `answer` false, nobody is there to ask).
+        no: bool,
         ssh_state: Option<(Ssh, Ssh)>,
         /// The keys turning SSH on would admit, and what was asked about.
         keys: Vec<String>,
@@ -1747,9 +1792,14 @@ mod tests {
             *self.confirmed.borrow_mut() += 1;
             Ok(43)
         }
-        fn ask(&self, q: &str) -> bool {
+        /// (A test's "no" is a script's: nobody to ask; `no` says a person declined.)
+        fn ask(&self, q: &str) -> Answer {
             self.asked.borrow_mut().push(q.into());
-            self.answer
+            match (self.answer, self.no) {
+                (true, _) => Answer::Yes,
+                (false, true) => Answer::No,
+                (false, false) => Answer::NobodyToAsk,
+            }
         }
         fn edit(&self, path: &str, text: &str) -> Result<Option<String>> {
             self.edited.borrow_mut().push((path.into(), text.into()));
@@ -1867,6 +1917,19 @@ mod tests {
         assert_eq!(s.exec("top show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
     }
 
+    /// A question answered no is a choice, said ("Not deleted."), not a failure; with nobody to ask (a
+    /// script), refused.
+    #[test]
+    fn no_is_an_answer() {
+        let (d, m) = (repo(), Fake { no: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(run(&mut s, &["configure", "edit time", "delete"]), "Entering configuration mode\nNot deleted.\n");
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", run_err(&mut s, &["configure"], "delete"));
+        assert_eq!(e, "not deleted: this needs a person to approve it at a terminal");
+    }
+
     /// Every command says what it did, and every way out says what is kept: rollback (what it loaded or
     /// discarded), an empty comparison, a place with nothing set, configure with changes left from
     /// before, exit with them kept, save and load in the home folder.
@@ -1880,7 +1943,7 @@ mod tests {
         assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
         assert_eq!(s.exec("show time").unwrap(), "Nothing is set at time.\n");
         s.exec("set time timeZone UTC").unwrap();
-        assert!(s.exec("exit").unwrap().contains("changed but not committed"));
+        assert!(s.exec("exit").unwrap().starts_with("The candidate has changes not yet committed: they are kept ("));
         assert_eq!(s.exec("exit").unwrap(), "The candidate has changes not yet committed: they are kept for your next `configure`.\n");
         let mut again = session(d.path(), Some(saved), &m);
         assert_eq!(again.exec("configure").unwrap(), "Entering configuration mode\nThe candidate has changes not yet committed: `show | compare` lists them, `rollback 0` discards them.\n");
@@ -2016,7 +2079,7 @@ mod tests {
         let mut again = session(d.path(), Some(saved.clone()), &m);
         again.exec("configure").unwrap();
         assert!(again.exec("show | compare").unwrap().contains(&format!("+   torq {old};")), "the candidate keeps its software");
-        assert_eq!(again.exec("exit").unwrap(), "The configuration has been changed but not committed (it is kept: `configure` returns to it, `rollback 0` discards it).\n");
+        assert_eq!(again.exec("exit").unwrap(), "The candidate has changes not yet committed: they are kept (`configure` returns to them, `rollback 0` discards them).\n");
         again.exec("configure").unwrap();
         assert_eq!(again.exec("rollback 0").unwrap(), "Discarded 1 change: the candidate is the configuration in effect.\n");
         assert_eq!(again.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
@@ -2879,7 +2942,7 @@ mod tests {
         let saved = state.path().join("candidate.json");
         let mut s = session(d.path(), Some(saved.clone()), &m);
         let out = run(&mut s, &["configure", "set users dev packages htop", "exit"]);
-        assert!(out.contains("changed but not committed"), "{out}");
+        assert!(out.contains("The candidate has changes not yet committed: they are kept"), "{out}");
         assert_eq!(s.mode, Mode::Operational);
         let mut s = session(d.path(), Some(saved.clone()), &m);
         assert!(run(&mut s, &["configure", "show | compare"]).contains("+   packages [ htop ];"));
@@ -2960,7 +3023,7 @@ mod tests {
         run(&mut s, &["configure", "set users dev packages jq"]);
         assert!(format!("{:#}", s.exec("commit").unwrap_err()).contains("busy"));
         assert!(s.exec("show | compare").unwrap().contains("+   packages [ jq ];"));
-        assert_eq!(s.exec("exit").unwrap(), "The configuration has been changed but not committed.\n");
+        assert_eq!(s.exec("exit").unwrap(), "", "a script's candidate: said once, when it ends");
     }
 
     fn fs_has(dir: &Path, needle: &str) -> bool {
@@ -3095,7 +3158,7 @@ mod tests {
         let mut s = session(d.path(), None, &no);
         run(&mut s, &["configure", "set virtualisation docker enable true", "edit virtualisation"]);
         let e = format!("{:#}", s.exec("delete").unwrap_err());
-        assert!(e.contains("not deleted") && e.contains("everything under virtualisation"), "{e}");
+        assert_eq!(e, "not deleted: this needs a person to approve it at a terminal", "a script cannot answer: refused");
         assert_eq!(no.asked.borrow().as_slice(), ["Delete everything under virtualisation? "]);
         assert!(s.exec("show | compare").unwrap().contains("enable true"), "nothing deleted");
         // With a yes, everything under it goes.

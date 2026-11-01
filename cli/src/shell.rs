@@ -310,8 +310,8 @@ impl Machine for Real<'_> {
             _ => bail!("not repaired: a repair would not fix this (see `show system alarms`); a person has to look"),
         }
         let shown: String = report.text.lines().map(|l| format!("{}\n", history::clean(l))).collect();
-        if !self.ask(&format!("{shown}This rebuilds and switches the system (all users). Repair? ")) {
-            bail!("not repaired: a repair needs a person to approve it at a terminal");
+        if let Some(stop) = self.ask(&format!("{shown}This rebuilds and switches the system (all users). Repair? ")).go_on("repaired")? {
+            return Ok(stop);
         }
         let log = run::start_log()?;
         let v = {
@@ -425,8 +425,8 @@ impl Machine for Real<'_> {
         let what = format!("{what}{}", self.revert_ssh_keys(target)?);
         if !mine {
             let why = if target.tier == "user" { "This changes someone else's settings." } else { "This changes the system (all users)." };
-            if !self.ask(&format!("{what}{why} Revert? ")) {
-                bail!("not reverted: this needs a person to approve it at a terminal");
+            if let Some(stop) = self.ask(&format!("{what}{why} Revert? ")).go_on("reverted")? {
+                return Ok(stop);
             }
         }
         let log = run::start_log()?;
@@ -481,7 +481,7 @@ impl Machine for Real<'_> {
     fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
         self.relock(base, Some(flake_nix), all)
     }
-    fn ask(&self, question: &str) -> bool {
+    fn ask(&self, question: &str) -> crate::session::Answer {
         ask_person(question)
     }
     fn read_terminal(&self, max: usize) -> Result<String> {
@@ -778,7 +778,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
             }
             // A script's candidate is its own: what it changed and did not commit is gone. Say so.
             if s.uncommitted().unwrap_or(false) {
-                eprint!("{}", crate::ui::Ui::for_terminal(true).warn("Not committed: the changes these commands made are discarded (-c works on a candidate of its own; end it with `commit` to keep them)."));
+                eprint!("{}", s.pending_note(crate::session::Pending::Discarded));
             }
             Ok(0)
         }
@@ -957,9 +957,9 @@ fn interactive(s: &mut Session, history: crate::complete::Later) -> Result<i32> 
 /// question counts: anything already waiting (typed or pasted ahead, e.g. a "y" after "commit") is
 /// not run — a question ends a batch; the line editor names what it had already read
 /// (editor::run), and what the terminal still holds is said here.
-fn ask_person(question: &str) -> bool {
+fn ask_person(question: &str) -> crate::session::Answer {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        return false;
+        return crate::session::Answer::NobodyToAsk;
     }
     ASKED.store(true, std::sync::atomic::Ordering::Relaxed);
     let stdin = std::io::stdin();
@@ -971,7 +971,11 @@ fn ask_person(question: &str) -> bool {
     let _ = std::io::stdout().flush();
     let _seen = Echo::set(true);
     let mut answer = String::new();
-    stdin.lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
+    if stdin.lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes") {
+        crate::session::Answer::Yes
+    } else {
+        crate::session::Answer::No
+    }
 }
 
 /// The terminal's echo set on or off, and back as it was when this is dropped: off while a command
@@ -1173,7 +1177,7 @@ mod editor {
                         let commits = s.commits(line);
                         if failed > 0 && commits {
                             let lines = if failed == 1 { "1 line".to_string() } else { format!("{failed} lines") };
-                            let anyway = ask_person(&format!("{lines} failed since you last looked at `show | compare`. Commit anyway? "));
+                            let anyway = ask_person(&format!("{lines} failed since you last looked at `show | compare`. Commit anyway? ")) == crate::session::Answer::Yes;
                             ASKED.store(false, Ordering::Relaxed);
                             after_question = true;
                             if !anyway {
