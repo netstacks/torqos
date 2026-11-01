@@ -45,7 +45,7 @@ $ torqcli -c "configure; set users viper packages htop; commit"
 | enter configuration | `configure` (or `config`) |
 | configuration prompt | `[edit system]` line, then `viper@torq-utm#` |
 | add / change | `set system packages jq` |
-| remove | `delete system packages jq` (a whole place or list: `delete <place> all`) |
+| remove | `delete system packages jq` (one value); `delete system packages`, `delete networking` (everything below); not set: a warning |
 | go down / up / to the top | `edit system` · `up` (or `exit`) · `top` |
 | compare with the active configuration | `show \| compare` |
 | show the configuration | `show` (candidate) / `show configuration` (operational) |
@@ -59,7 +59,7 @@ the changed configuration has them, and refuses if there are none (nobody could 
 And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`,
 `rollback <n>`, `show system commit`, `?` help, Tab completion, history (↑). `?` lists what may come
 next, `|` after any whole `show`, and `<[Enter]>` when the line would run as it is (decided as the
-session decides it: `set` by the tree's own check, `delete` of a place only with `all`).
+session decides it: the line is dry-run on a copy of the candidate).
 
 **Pipes**: `| compare`, and one `| display`: `set` (a configuration as `set` commands), `detail` (what
 is behind a view: the config repo files and commit of a configuration, the commit ids of `show system
@@ -73,8 +73,18 @@ output inside a sandbox that has nothing else (no files, no network), from the s
 coreutils and grep; words are split as a shell does (`'single'` quotes are literal).
 
 **One grammar.** Every line parses to one operation; a property test renders every operation as it
-is typed and parses it back. `all` is reserved: it can never name a list entry, since `delete
-<place> all` deletes a whole place.
+is typed and parses it back. `config` is reserved: it can never name a list entry, since `<place>
+config <file>` attaches a file.
+
+**Delete** works as on a network device (ADR-022): `delete <setting> <value>` takes that value of a
+list; `delete <setting>` or `delete <place>` takes everything below it — `show | compare` and
+`commit` show exactly what goes before anything does. What is not set is a warning (`! nothing
+deleted: … is not set`), not an error, so a paste goes on. `delete` with nothing after it takes
+everything at this level, and asks first.
+
+**Rules between settings** (a `path:` source needs `torq dev enable true`) are checked on the whole
+configuration, never line by line, where their order would decide: a change that breaks one is
+said at once (`! … — commit refuses until then`), and `commit` refuses until it holds.
 
 As built (4a, cli/src/syntax.rs; C style removed by ADR-021): the line editor's `?` and Tab follow
 where you are. In a `?` list each help is its setting's first sentence (NixOS's doc markup taken
@@ -106,8 +116,7 @@ setting them, and the tree shows the NixOS one:
 | `torq services enabled` | (`services`: now NixOS's own) | `services.json` |
 | `torq packages user <name>` | `users <name> packages` | `users/<name>/packages.json` (user tier) |
 
-Old names set and delete (and `delete users dev all`, `delete system all` take what they always
-did), but the old *places* are not places to go: `edit users dev` is gone, as the tree now groups
+Old names set and delete (and `delete users dev`, `delete system` take what they always did), but the old *places* are not places to go: `edit users dev` is gone, as the tree now groups
 by NixOS. A setting lives in exactly one place: the five above are refused inside `nixos/` files (by
 torqcli on reading, and by the evaluation). Text with a line break or another control character is
 refused in the tree: multi-line text goes in a config file. Whether a commit turns SSH on is read
@@ -182,7 +191,10 @@ you# show | compare
 ```
 
 `file list`, `file show <file>` (also in operational mode, of the active configuration), `file
-delete <file>`; `delete <place> config` unattaches.
+delete <file>`. A place may hold several files: `set <place> config <file>` adds one (`set config
+motd.nix` keeps `hardware-configuration.nix`), shown as `config [ a.nix b.nix ];`; `delete <place>
+config <file>` unattaches one, `delete <place> config` all of them. `config-files.json` holds a list
+per place (one name, the first form, still reads as a list of one).
 
 ## The commit model
 
@@ -270,7 +282,7 @@ input) still stop at their first error.
 | `request system software rollback <n>` | load commit <n>'s software into the candidate (a downgrade) |
 | `set system software torq source <source>` | (configuration mode) where TorqOS comes from: locks that source into the candidate |
 | `save <file>` | (configuration mode) the whole candidate and its config files' content to a file, private |
-| `load override\|merge\|set <file>` | (configuration mode) a saved configuration into the candidate, all or nothing |
+| `load override\|merge\|set <file>\|terminal` | (configuration mode) a saved configuration into the candidate, all or nothing; `terminal`: what you paste next, ended by Ctrl-D (brace format, or `set` lines; `#` and `/* … */` comments are left out) |
 | `request system repair` | return a machine changed outside TorqOS to its last commit |
 | `request system revert <change>` | undo one change (a new change forward; asks unless it is only your own folder) |
 | `configure` / `config` | enter configuration mode |

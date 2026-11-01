@@ -185,12 +185,12 @@ pub fn delete(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     if rest.is_empty() {
         return match s.remove(top) {
             Some(_) => Ok(()),
-            None => bail!("{}: not set", loc.join(" ")),
+            None => Err(crate::tree::NotSet(loc.join(" ")).into()),
         };
     }
-    let Some(root) = s.get_mut(top) else { bail!("{}: not set", loc.join(" ")) };
+    let Some(root) = s.get_mut(top) else { return Err(crate::tree::NotSet(loc.join(" ")).into()) };
     if !remove_at(root, rest, remove.as_ref())? {
-        bail!("{}: not set", loc.join(" "));
+        return Err(crate::tree::NotSet(loc.join(" ")).into());
     }
     if root.as_object().is_some_and(|o| o.is_empty()) {
         s.remove(top);

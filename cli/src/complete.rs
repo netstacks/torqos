@@ -113,7 +113,7 @@ fn complete(k: &Know, at: &At, op: &crate::syntax::Op) -> bool {
     let here = |w: &[String]| -> Vec<String> { at.edit.iter().chain(w).cloned().collect() };
     match op {
         Op::Set { words } => whole.set(&mut at.data.clone(), &here(words)).is_ok(),
-        Op::Delete { words, all } => whole.delete(&mut at.data.clone(), &here(words), *all, words).is_ok(),
+        Op::Delete { words } => !words.is_empty() && whole.delete(&mut at.data.clone(), &here(words)).is_ok(),
         Op::Edit { words } => !words.is_empty() && whole.is_place(&here(words)),
         Op::Up => !at.edit.is_empty(),
         Op::ShowCandidate { path, .. } => whole.show(&at.data, &here(path)).is_ok(),
@@ -221,7 +221,10 @@ fn choices_j(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> 
             ("override", "The file becomes the candidate"),
             ("set", "Run the file's `set` and `delete` lines (what `| display set` writes)"),
         ]),
-        (Mode::Configuration, Some("load")) if words.len() == 2 => vec![Choice::new("<file>", "A configuration saved with `save` (or `| display set` lines)")],
+        (Mode::Configuration, Some("load")) if words.len() == 2 => vec![
+            Choice::new("<file>", "A configuration saved with `save` (or `| display set` lines)"),
+            Choice::new("terminal", "What you paste or type next, ended by Ctrl-D at a new line"),
+        ],
         (Mode::Configuration, Some("save")) if words.len() == 1 => vec![Choice::new("<file>", "Where to save it (written private: 0600)")],
         (_, Some("file")) if words.len() == 1 => {
             let mut t = vec![("list", "Every Nix file of the configuration"), ("show", "Print one")];
@@ -630,12 +633,13 @@ mod tests {
         assert!(enter(k, "show | display set") && c(k, "show | display set").contains(&"|".to_string()));
         assert!(enter(k, "show | grep x") && c(k, "show | grep x").contains(&"|".to_string()), "{:?}", c(k, "show | grep x"));
         assert!(c(k, "show | grep").is_empty(), "grep's options are grep's");
-        // delete: what the session would delete, by either name; a place or a whole list with `all`.
-        for line in ["delete networking hostName", "delete system host-name", "delete networking all", "delete system packages htop", "delete system packages all", "delete torq packages system all", "delete services httpd config", "delete virtualisation docker enable"] {
+        // delete: what the session runs — a setting, a value, a whole list or place, by either name; what
+        // is not set runs too (a warning, nothing deleted).
+        for line in ["delete networking hostName", "delete system host-name", "delete networking", "delete system packages htop", "delete system packages", "delete torq packages system", "delete services httpd config", "delete virtualisation docker enable", "delete time timeZone", "delete virtualisation config"] {
             assert!(enter(k, line), "{line}: {:?}", c(k, line));
         }
-        for line in ["delete networking", "delete system packages", "delete time timeZone", "delete nonsense", "delete services nginx config"] {
-            assert!(!enter(k, line), "{line}: refused, so no <[Enter]>");
+        for line in ["delete nonsense", "delete networking all", "delete"] {
+            assert!(!enter(k, line), "{line}: refused (or asks first), so no <[Enter]>");
         }
         assert!(enter(k, "edit networking") && !enter(k, "edit") && !enter(k, "edit networking hostName"));
         assert!(!enter(k, "set") && !enter(k, "set virtualisation docker"), "a place is not a value");

@@ -62,6 +62,8 @@ pub fn parse(text: &str) -> Result<Saved> {
     // The tree's lines, each with its line number (comments and file blocks left out).
     let mut numbers: Vec<usize> = Vec::new();
     let mut file: Option<(String, String)> = None;
+    // Inside a `/* … */` annotation that spans lines.
+    let mut annotation = false;
     let pieces: Vec<&str> = text.strip_suffix('\n').unwrap_or(text).split('\n').collect();
     for (i, raw) in pieces.into_iter().enumerate() {
         // (A config file's lines keep a `\r`; the tree's and the markers' do not need one.)
@@ -94,7 +96,18 @@ pub fn parse(text: &str) -> Result<Saved> {
             continue;
         }
         saved.files.extend(file.take());
-        if line.trim_start().starts_with("##") {
+        // Comments, on lines of their own (where no statement is): `#` and `##` lines, and `/* … */`
+        // annotations as network devices write them, over one line or several.
+        let t = line.trim();
+        if annotation {
+            annotation = !t.ends_with("*/");
+            continue;
+        }
+        if t.starts_with("/*") {
+            annotation = !t.ends_with("*/") || t == "/*";
+            continue;
+        }
+        if t.starts_with('#') {
             continue;
         }
         tree.push_str(line);
@@ -102,6 +115,9 @@ pub fn parse(text: &str) -> Result<Saved> {
         numbers.push(i + 1);
     }
     saved.files.extend(file.take());
+    if annotation {
+        bail!("a `/*` annotation is not closed (`*/`)");
+    }
     let mut seen = std::collections::BTreeSet::new();
     for (p, _) in &saved.files {
         if !seen.insert(p) {
@@ -280,6 +296,17 @@ mod tests {
             let text = render("", &[("a.nix".into(), content.into())], &[]);
             assert_eq!(parse(&text).unwrap().files, [("a.nix".to_string(), content.to_string())], "{content:?}: {text:?}");
         }
+    }
+
+    /// What people paste: comments on lines of their own, `#` at any indent and `/* … */` annotations
+    /// (over one line or several), are left out; an annotation never closed is refused.
+    #[test]
+    fn comments_on_their_own_lines() {
+        let text = "## Last changed by alice\n# a note\nnetworking {\n    /* the name */\n    # indented\n    hostName torq;\n    /* a longer\n       note */\n}\n";
+        assert_eq!(parse(text).unwrap().entries, [(w("networking hostName"), Val::One("torq".into()))]);
+        let e = format!("{:#}", parse("networking {\n    /* never closed\n    hostName torq;\n}\n").unwrap_err());
+        assert!(e.contains("not closed"), "{e}");
+        assert_eq!(parse("time {\n    timeZone \"a # b\";\n}\n").unwrap().entries, [(w("time timeZone"), Val::One("a # b".into()))], "a # inside a value is the value's");
     }
 
     #[test]

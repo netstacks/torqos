@@ -79,6 +79,7 @@ let
     config-bad-space = c: c.networking.hostName;
     config-bad-flake = c: c.networking.hostName;
     config-bad-set = c: c.networking.hostName;
+    config-bad-empty = c: c.networking.hostName;
   };
   # torqcli's tests read the fence from cli/src/nixos-fixture.json: it must be the modules' own.
   fenceFixture = (builtins.fromJSON (builtins.readFile ../cli/src/nixos-fixture.json)).fence
@@ -93,6 +94,9 @@ let
     ++ lib.optional (!fenceFixture) "cli/src/nixos-fixture.json: its fence is not modules/settings-fence.nix's"
     ++ lib.optional (tryValue (configOf "config-good").services.httpd.virtualHosts."from-a-file".documentRoot != "/srv/file") "config-good: the attached file did not take effect"
     ++ lib.optional (tryValue (configOf "config-good").networking.domain != "from-the-top") "config-good: the file attached at the top did not take effect"
+    # Several files at one place (a list): each takes effect.
+    ++ lib.optional (tryValue (configOf "config-good-list").networking.domain != "from-the-top") "config-good-list: the first file did not take effect"
+    ++ lib.optional (tryValue (configOf "config-good-list").networking.search != [ "from-a-second-file" ]) "config-good-list: the second file did not take effect"
     # The template is a whole machine: data, its hardware attached, nothing else, no desktop.
     ++ lib.optional (tryValue (configOf "template").system.build.toplevel.drvPath == null) "template: does not evaluate as a machine"
     ++ lib.optional (tryValue (configOf "template").fileSystems."/".device != "/dev/vda1") "template: its hardware file is not attached"

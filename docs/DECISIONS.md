@@ -275,3 +275,18 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   is refused at evaluation, like any file a person's folder may not hold, and the broker treats it
   as system tier. The other syntax's words (`no`, `do`, `end`, `switch`, `show running-config`) are
   unknown commands, never another meaning.
+
+## ADR-022 — Pastes and deletes as on a network device
+- **Context:** Testers found that a paste stopped at its first error (the rest silently not run) and
+  that `delete <place>` needed `delete <place> all`; a network engineer pastes blocks of commands and
+  expects every line to run, each error reported, and `delete` to take what it names.
+- **Decision:** Every line of a paste runs; each error names its line. A batch is the lines already
+  waiting when the shell asks for the next (a paste, keys typed ahead): a `commit` after a failed
+  line of the same batch is refused, so a commit never takes part of a paste; a question
+  (`Commit? [y/N]`) takes only an answer typed after it and ends the batch. `delete` takes what it
+  names — one value, a setting, or everything below a place — without `all`; deleting what is not
+  set is a warning. `delete` alone (everything at this level) asks first. Scripts (`-c`, piped
+  input) still stop at their first error. Rules between settings are checked on the whole
+  configuration (warned at once, refused at `commit`), never line by line.
+- **Consequences:** `all` is no longer a reserved word (`config` still is). `show | compare` and
+  `commit` remain where a person sees exactly what a delete takes before it happens.

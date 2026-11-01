@@ -10,6 +10,19 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// What `delete` names is not set: nothing to delete. Its own error type, so the caller tells it
+/// from a real mistake (a delete of what is not there warns and goes on, as on a network device).
+#[derive(Debug)]
+pub struct NotSet(pub String);
+
+impl std::fmt::Display for NotSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is not set", self.0)
+    }
+}
+
+impl std::error::Error for NotSet {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
@@ -275,7 +288,7 @@ impl Schema {
         let t = self.resolve_in(words, Some(cfg))?;
         self.not_the_top("delete", &t)?;
         let n = self.node(&t.node);
-        let gone = |what: &str| anyhow::anyhow!("delete {}: {what} is not set", t.words.join(" "));
+        let gone = |what: &str| anyhow::Error::new(NotSet(what.to_string())).context(format!("delete {}", t.words.join(" ")));
         match n.kind {
             Kind::Leaf => {
                 if !t.values.is_empty() {
@@ -320,7 +333,7 @@ impl Schema {
                     .map(|(key, name, _)| (key, name))
                     .collect();
                 if below.is_empty() {
-                    return Err(gone("nothing below it"));
+                    return Err(gone("anything below it"));
                 }
                 for (key, name) in below {
                     let file = self.file_of(&key, name.as_deref()).expect("instances have files");
@@ -908,9 +921,9 @@ mod tests {
     #[test]
     fn no_setting_is_named_like_a_command() {
         let mut v: serde_json::Value = serde_json::from_str(include_str!("schema-fixture.json")).unwrap();
-        v["nodes"]["system all"] = serde_json::json!({"kind":"container","help":"x"});
+        v["nodes"]["system config"] = serde_json::json!({"kind":"container","help":"x"});
         let e = format!("{:#}", Schema::parse(&v.to_string()).unwrap_err());
-        assert!(e.contains("'system all' uses a word torqcli keeps for commands"), "{e}");
+        assert!(e.contains("'system config' uses a word torqcli keeps for commands"), "{e}");
     }
 
     /// The schema itself: two nodes may only share a file as leaves of one object (review of ef8d7f8).

@@ -55,9 +55,9 @@ let
     if lib.isOption opts then byType opts.type v
     else if builtins.isAttrs v then lib.mapAttrs (k: x: if builtins.isAttrs opts && opts ? ${k} then under opts.${k} x else x) v
     else v;
-  # The tree's config files (docs/CONFIG-IS-THE-DEVICE.md): `config-files.json` maps where each is
-  # attached in the tree (its path, words separated by spaces) to an ordinary NixOS module file in the
-  # config repo. Inside the repo only — relative, no `..`, a `.nix` file — so the machine never depends
+  # The tree's config files (docs/CONFIG-IS-THE-DEVICE.md): `config-files.json` maps where they are
+  # attached in the tree (its path, words separated by spaces; "" is the top) to a list of ordinary
+  # NixOS module files in the config repo (one name, the first form, is a list of one). Inside the repo only — relative, no `..`, a `.nix` file — so the machine never depends
   # on a file nothing tracks. A config file is plain NixOS and may set anything: it is system tier, and
   # shown as its raw diff before anyone commits it.
   attached =
@@ -73,12 +73,15 @@ let
         && rel != "flake.nix";
       path = configDir + "/${rel}";
       shown = if builtins.isString rel then rel else "(not a file name)";
+      place = if at == "" then "the top" else "`${at}`";
     in
-    if !ok then throw "torq: config file for `${at}`: '${shown}' must be a .nix file inside the config repo (like services/httpd.nix: relative, no ..)"
-    else if !builtins.pathExists path then throw "torq: config file for `${at}`: ${rel} is not in the config repo"
+    if !ok then throw "torq: config file for ${place}: '${shown}' must be a .nix file inside the config repo (like services/httpd.nix: relative, no ..)"
+    else if !builtins.pathExists path then throw "torq: config file for ${place}: ${rel} is not in the config repo"
     else path;
 in
 {
-  imports = lib.mapAttrsToList configFile attached;
+  imports = lib.concatLists (lib.mapAttrsToList (at: rels:
+    if rels == [ ] then throw "torq: config-files.json: ${if at == "" then "the top" else "`${at}`"}: an empty list (no files: no entry)"
+    else map (configFile at) (lib.toList rels)) attached);
   config = lib.genAttrs names (name: under (options.${name} or { }) (checked name (read name)));
 }

@@ -3,7 +3,7 @@
 //! through `Machine`, so the whole command layer is testable without either.
 
 use crate::candidate::{self, Candidate, Repo};
-use crate::syntax::{self, CommitOptions, Display, FileAction, LoadHow, Op};
+use crate::syntax::{self, CommitOptions, Display, FileAction, LoadFrom, LoadHow, Op};
 use crate::whole::Data;
 use crate::tree::Schema;
 use anyhow::{bail, Context, Result};
@@ -25,6 +25,9 @@ pub trait Machine {
     fn ask(&self, question: &str) -> bool;
     /// A person edits `text` (the config file `path`) in their editor; None: they left it unchanged.
     fn edit(&self, path: &str, text: &str) -> Result<Option<String>>;
+    /// What a person pastes or types at the terminal, up to Ctrl-D (`load … terminal`), at most
+    /// `max` bytes.
+    fn read_terminal(&self, max: usize) -> Result<String>;
     /// `show system alarms`: what is not as the ledger says (and a commit confirmed waiting); with
     /// `detail`, the broker's facts behind it (commits, store paths).
     fn alarms(&self, detail: bool, fit: Option<usize>) -> Result<String>;
@@ -306,7 +309,7 @@ impl<'a> Session<'a> {
             Op::Request { words } => self.request(&words),
             Op::File { action, path } => self.file(action, path),
             Op::Save { file } => self.save_to(&file),
-            Op::Load { how, file } => self.load_from(how, &file),
+            Op::Load { how, from } => self.load_from(how, &from),
             Op::Exit if self.mode == Mode::Operational => {
                 self.done = true;
                 Ok(String::new())
@@ -341,26 +344,37 @@ impl<'a> Session<'a> {
                 let mut d = self.candidate_data()?;
                 let was = d.source.clone();
                 self.whole().set(&mut d, &full)?;
+                let note = rules_note(&d);
                 if d.source != was {
                     // A new source is locked now, in the candidate: what `commit` installs is shown first.
                     let shown = self.lock_source(d.source.as_deref().unwrap_or_default())?;
                     self.put_data(d)?;
                     self.save()?;
-                    return Ok(shown);
+                    return Ok(format!("{shown}{note}"));
                 }
                 self.put_data(d)?;
                 self.save()?;
-                Ok(String::new())
+                Ok(note)
             }
-            Op::Delete { words, all } => {
-                // Everything below a place, or a whole list of values, goes only with `all`: an Enter
-                // pressed before the value must not take them all.
+            Op::Delete { words } => {
                 let full = self.here(&words);
+                // Nothing after `delete`: everything here (the whole configuration, at the top) — asked
+                // first, as on a network device; a script cannot answer, so it is refused there.
+                if words.is_empty() {
+                    let here = if full.is_empty() { "the whole configuration".to_string() } else { format!("everything under {}", full.join(" ")) };
+                    if !self.machine.ask(&format!("Delete {here}? ")) {
+                        bail!("not deleted: `delete` with nothing after it deletes {here}, and asks first, at a terminal");
+                    }
+                }
                 let mut d = self.candidate_data()?;
-                self.whole().delete(&mut d, &full, all, &words)?;
+                let done = self.whole().delete(&mut d, &full)?;
+                if done == crate::whole::Deleted::NotFound {
+                    return Ok(format!("! nothing deleted: {} is not set\n", if full.is_empty() { "anything".to_string() } else { full.join(" ") }));
+                }
+                let note = rules_note(&d);
                 self.put_data(d)?;
                 self.save()?;
-                Ok(String::new())
+                Ok(note)
             }
             Op::ShowCandidate { path, display } => {
                 let d = self.candidate_data()?;
@@ -445,7 +459,7 @@ impl<'a> Session<'a> {
             .into_iter()
             // (flake.nix is TorqOS's own: its software is the line above.)
             .filter(|p| p != "flake.lock" && p != "flake.nix" && p != crate::attach::FILE && !self.schema.describes(p) && crate::settings::top_of(p).is_none())
-            .filter(|p| !attached.values().any(|f| f == p)).map(|p| crate::history::one_line(&p, 60)).collect();
+            .filter(|p| !crate::attach::files(&attached).any(|f| f == p)).map(|p| crate::history::one_line(&p, 60)).collect();
         if !outside.is_empty() {
             out.push_str(&format!("## also set outside this configuration, in Nix: {}\n", outside.join(", ")));
         }
@@ -907,7 +921,7 @@ impl<'a> Session<'a> {
                     Some(Some(_)) => " (edited in the candidate)",
                     None => "",
                 };
-                let at: Vec<&str> = attached.iter().filter(|(_, f)| **f == p).map(|(a, _)| a.as_str()).collect();
+                let at: Vec<&str> = attached.iter().filter(|(_, f)| f.contains(&p)).map(|(a, _)| a.as_str()).collect();
                 let at: Vec<&str> = at.into_iter().map(|a| if a.is_empty() { "the top" } else { a }).collect();
                 let at = if at.is_empty() { String::new() } else { format!("  [attached at: {}]", at.join("; ")) };
                 let at = if p == "flake.nix" { "  (TorqOS's own: it builds the machine from the tree)".to_string() } else { at };
@@ -933,7 +947,7 @@ impl<'a> Session<'a> {
                 }
                 self.candidate()?.nix.insert(path.clone(), Some(now));
                 self.save()?;
-                let hint = if attached.values().any(|f| *f == path) || self.repo.file_at(&rev, &path)?.is_some() {
+                let hint = if crate::attach::files(&attached).any(|f| *f == path) || self.repo.file_at(&rev, &path)?.is_some() {
                     String::new()
                 } else {
                     format!(" (not attached anywhere yet: `set <place> config {path}`)")
@@ -944,8 +958,9 @@ impl<'a> Session<'a> {
                 if text_of(self, &path)?.is_none() {
                     bail!("{path}: no such file in the configuration");
                 }
-                if let Some((at, _)) = attached.iter().find(|(_, f)| **f == path) {
-                    bail!("{path} is attached at `{at}`: `delete {at} config` first");
+                if let Some((at, _)) = attached.iter().find(|(_, f)| f.contains(&path)) {
+                    let place = if at.is_empty() { String::new() } else { format!("{at} ") };
+                    bail!("{path} is attached at {}: `delete {place}config {path}` first", if at.is_empty() { "the top" } else { at.as_str() });
                 }
                 let exists = self.repo.file_at(&rev, &path)?.is_some();
                 let c = self.candidate()?;
@@ -986,7 +1001,7 @@ impl<'a> Session<'a> {
                 None => {}
             }
         }
-        for rel in d.attached.values() {
+        for rel in crate::attach::files(&d.attached) {
             if !files.iter().any(|(p, _)| p == rel) {
                 bail!("{rel} is attached but not in the configuration: `file edit {rel}`, or `delete <place> config`");
             }
@@ -1002,12 +1017,18 @@ impl<'a> Session<'a> {
 
     /// `load override|merge|set <file>`: a saved configuration into the candidate, from the top — all
     /// of it or, if any part is refused, none of it (the candidate is left as it was).
-    fn load_from(&mut self, how: LoadHow, file: &str) -> Result<String> {
+    fn load_from(&mut self, how: LoadHow, from: &LoadFrom) -> Result<String> {
         // A configuration is small: a file far bigger is not one, and is never read whole into memory
         // (read at most one byte past the limit, whatever the file does meanwhile).
-        let mut text = String::new();
-        std::io::Read::read_to_string(&mut std::io::Read::take(std::fs::File::open(file).with_context(|| format!("load {file}"))?, crate::saved::MAX as u64 + 1), &mut text)
-            .with_context(|| format!("load {file}"))?;
+        let (file, text) = match from {
+            LoadFrom::File(file) => {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::Read::take(std::fs::File::open(file).with_context(|| format!("load {file}"))?, crate::saved::MAX as u64 + 1), &mut text)
+                    .with_context(|| format!("load {file}"))?;
+                (file.as_str(), text)
+            }
+            LoadFrom::Terminal => ("terminal", self.machine.read_terminal(crate::saved::MAX + 1).context("load terminal")?),
+        };
         if text.len() > crate::saved::MAX {
             bail!("load {file}: not a saved configuration (bigger than the most, {} bytes)", crate::saved::MAX);
         }
@@ -1042,7 +1063,7 @@ impl<'a> Session<'a> {
             self.exec_words(&w).with_context(|| format!("line {}: {}", i + 1, crate::history::one_line(line, 80)))?;
             n += 1;
         }
-        Ok(format!("load complete ({n} line{})\n", if n == 1 { "" } else { "s" }))
+        Ok(format!("load complete ({n} line{})\n{}", if n == 1 { "" } else { "s" }, rules_note(&self.candidate_data()?)))
     }
 
     /// `load override` (the file is the candidate) or `load merge` (the file's settings set onto it).
@@ -1074,7 +1095,7 @@ impl<'a> Session<'a> {
         // Every attached file has its content. Override: in the file itself, never this machine's own
         // (a cut-short file must not load other Nix than it was saved with; audit of 2026-10-31).
         // Merge: in the file, or the configuration it is merged into.
-        for rel in d.attached.values() {
+        for rel in crate::attach::files(&d.attached) {
             let in_file = saved.files.iter().any(|(p, _)| p == rel);
             if whole && !in_file {
                 bail!("{rel} is attached but its content is not in the file (a saved configuration carries its config files)");
@@ -1088,10 +1109,12 @@ impl<'a> Session<'a> {
         if d.source != cur.source {
             out = self.lock_source(d.source.as_deref().unwrap_or_default())?;
         }
+        let note = rules_note(&d);
         self.put_data(d)?;
         self.candidate()?.nix = nix;
         self.save()?;
         out.push_str("load complete\n");
+        out.push_str(&note);
         Ok(out)
     }
 
@@ -1262,6 +1285,16 @@ fn software_compare(old: Option<&[u8]>, new: &Option<String>) -> String {
     out
 }
 
+/// The rules between settings (whole::software_allowed) are checked on the whole configuration, as
+/// `commit` checks them — never line by line, where their order would decide. After a change that
+/// breaks one, the person hears it at once; `commit` refuses until it holds.
+fn rules_note(d: &Data) -> String {
+    match crate::whole::software_allowed(d) {
+        Ok(()) => String::new(),
+        Err(e) => format!("! {e:#} — `commit` refuses until then\n"),
+    }
+}
+
 /// A ledger reason from the comparison: its `+`/`-` lines, short.
 fn summary(compare: &str) -> String {
     // Each `+`/`-` line with its section (`[edit torq packages user]` + `+   dev [ jq ];` →
@@ -1333,6 +1366,8 @@ mod tests {
         ssh_asked: RefCell<Vec<Files>>,
         /// What `file edit` leaves a file as (None: unchanged), and what it was given.
         edit_to: Option<String>,
+        /// What `load … terminal` reads (None: no terminal).
+        typed: Option<String>,
         edited: RefCell<Vec<(String, String)>>,
         ssh_calls: RefCell<usize>,
         /// The flake.nix each source was locked with.
@@ -1364,6 +1399,9 @@ mod tests {
         fn edit(&self, path: &str, text: &str) -> Result<Option<String>> {
             self.edited.borrow_mut().push((path.into(), text.into()));
             Ok(self.edit_to.clone())
+        }
+        fn read_terminal(&self, _: usize) -> Result<String> {
+            self.typed.clone().context("no terminal")
         }
         fn alarms(&self, detail: bool, _: Option<usize>) -> Result<String> {
             Ok(if detail { "all well\n  running system /nix/store/x\n".into() } else { "all well\n".into() })
@@ -1838,11 +1876,11 @@ mod tests {
         assert!(compare.starts_with("[edit services httpd]\n+   config services/httpd.nix;\n[edit config files]\n"), "{compare}");
         assert!(compare.contains("+++ b/services/httpd.nix") && compare.contains("+  services.httpd.enable = true;"), "{compare}");
         // Deleting an attached file is refused until it is not attached.
-        assert!(s.exec("file delete services/httpd.nix").unwrap_err().to_string().contains("`delete services httpd config` first"));
+        assert!(s.exec("file delete services/httpd.nix").unwrap_err().to_string().contains("`delete services httpd config services/httpd.nix` first"));
         assert!(s.exec("file edit ../x.nix").is_err() && s.exec("set services httpd config /etc/x.nix").is_err());
         assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
         let (diff, _, tier, _, _) = m.commits.borrow()[0].clone();
-        assert!(diff.contains("+++ b/config-files.json") && diff.contains("\"services httpd\": \"services/httpd.nix\""), "{diff}");
+        assert!(diff.contains("+++ b/config-files.json") && diff.contains("+  \"services httpd\": [\n+    \"services/httpd.nix\"\n+  ]"), "{diff}");
         assert!(diff.contains("+++ b/services/httpd.nix"), "{diff}");
         assert_eq!(tier, "system");
         assert!(m.asked.borrow()[0].contains("services.httpd.enable = true"), "the person approves the Nix as written");
@@ -1865,15 +1903,15 @@ mod tests {
         let saved = d.path().join("c3.json");
         run(&mut session(d.path(), Some(saved.clone()), &m), &["configure", "file delete system.nix"]);
         assert_eq!(run(&mut session(d.path(), Some(saved), &m), &["configure", "file list"]).lines().last(), Some("system.nix (deleted in the candidate)"));
-        // Unattaching: `delete <place> config`; `delete <place> all` takes it too.
+        // Unattaching: `delete <place> config`; deleting the place takes it too.
         let mut d2 = crate::whole::Data::default();
-        d2.attached.insert("services httpd".into(), "a.nix".into());
+        d2.attached.insert("services httpd".into(), ["a.nix".to_string()].into());
         let x = s.whole();
-        x.delete(&mut d2.clone(), &w("services httpd config"), false, &[]).unwrap();
+        assert_eq!(x.delete(&mut d2.clone(), &w("services httpd config")).unwrap(), crate::whole::Deleted::Done);
         let mut d3 = d2.clone();
-        x.delete(&mut d3, &w("services httpd"), true, &[]).unwrap();
+        assert_eq!(x.delete(&mut d3, &w("services httpd")).unwrap(), crate::whole::Deleted::Done);
         assert!(d3.attached.is_empty());
-        assert!(x.delete(&mut crate::whole::Data::default(), &w("services httpd config"), false, &[]).is_err());
+        assert_eq!(x.delete(&mut crate::whole::Data::default(), &w("services httpd config")).unwrap(), crate::whole::Deleted::NotFound);
         // Below named entries, `config` is no name (a reserved word), and no place to attach.
         let mut d4 = crate::whole::Data::default();
         assert!(x.set(&mut d4, &w("services httpd virtualHosts config documentRoot /srv")).unwrap_err().to_string().contains("keeps the word"));
@@ -2134,14 +2172,26 @@ mod tests {
         sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"github:netstacks/torqos\";\\n  };\\n}\\n' > flake.nix && git add -A && git commit -qm flake");
         let mut s = session(d.path(), None, &m);
         s.exec("configure").unwrap();
-        let e = s.exec("set system software torq source path:/home/dev/torq").unwrap_err().to_string();
-        assert!(e.contains("torq dev enable true"), "{e}");
+        // A rule between settings: said at once, refused at `commit` — never by the order of lines.
+        let out = s.exec("set system software torq source path:/home/dev/torq").unwrap();
+        assert!(out.contains("! TorqOS from a folder (path:)") && out.contains("torq dev enable true") && out.contains("`commit` refuses until then"), "{out}");
+        assert!(s.exec("commit").unwrap_err().to_string().contains("torq dev enable true"));
+        assert!(m.commits.borrow().is_empty());
         run(&mut s, &["set system software torq source github:netstacks/torqos/v1"]);
         // In dev mode it may; turning dev mode off with the folder still the source does not commit.
         run(&mut s, &["rollback 0", "set torq dev enable true", "set system software torq source path:/home/dev/torq", "set torq dev enable false"]);
         let e = s.exec("commit").unwrap_err().to_string();
         assert!(e.contains("torq dev enable true"), "{e}");
         assert!(m.commits.borrow().is_empty());
+        // A saved configuration holds `system software …` before `torq dev …` (sorted): it loads back
+        // whole, its lines in any order — the rule is checked on the result, not line by line.
+        let file = d.path().join("dev.conf");
+        run(&mut s, &["set torq dev enable true", &format!("save {}", file.display()), "rollback 0"]);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.find("source path:/home/dev/torq").unwrap() < text.find("dev {").unwrap(), "{text}");
+        let out = s.exec(&format!("load override {}", file.display())).unwrap();
+        assert!(out.ends_with("load complete\n") && !out.contains("refuses"), "{out}");
+        assert!(s.exec("show system software").unwrap().contains("path:/home/dev/torq"));
     }
 
     /// From the audit of 2026-10-31: a deleted Nix file is saved as deleted (not resurrected by a
@@ -2499,27 +2549,79 @@ mod tests {
 
     /// Deleting a whole container or list entry takes `all`, so a slip cannot take everything below.
     #[test]
-    fn delete_of_a_container_needs_all() {
+    fn delete_takes_everything_below_as_on_a_network_device() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set torq packages user dev [ jq ]", "set torq packages system [ htop vim ]"]);
         run(&mut s, &["set virtualisation docker enable true", "set virtualisation docker rootless enable true"]);
-        for (bad, why) in [
-            ("delete virtualisation docker", "say `delete virtualisation docker all`"),
-            ("delete virtualisation", "say `delete virtualisation all`"),
-            ("delete virtualisation docker enable all", "`all` is for a whole place or list"),
-            ("delete networking hostName all", "`all` is for a whole place or list"),
-            // A whole list of values too: Enter pressed before the value (review of f705cc8).
-            ("delete torq packages system", "say `delete torq packages system all`"),
-        ] {
-            assert!(format!("{:#}", s.exec(bad).unwrap_err()).contains(why), "{bad}");
-        }
-        // The hint is relative to where you are.
+        // `all` is no word of `delete` any more: here it would be a setting's name.
+        assert!(s.exec("delete virtualisation docker enable all").is_err());
+        // From where you are: a place goes whole; a value alone; a whole list.
         run(&mut s, &["edit virtualisation docker"]);
-        assert!(format!("{:#}", s.exec("delete rootless").unwrap_err()).contains("say `delete rootless all`"));
-        run(&mut s, &["delete rootless all", "top", "delete torq packages system htop", "delete torq packages system all", "delete torq packages user dev all"]);
+        assert_eq!(s.exec("delete rootless").unwrap(), "");
+        run(&mut s, &["top", "delete torq packages system htop"]);
+        assert!(s.exec("show | compare").unwrap().contains("vim") && !s.exec("show | compare").unwrap().contains("htop"));
+        run(&mut s, &["delete torq packages system", "delete torq packages user dev"]);
         let c = s.exec("show | compare").unwrap();
         assert_eq!(c, "[edit virtualisation docker]\n+   enable true;\n");
+        // What is not set: a warning, nothing deleted, no error (a paste goes on).
+        assert_eq!(s.exec("delete time timeZone").unwrap(), "! nothing deleted: time timeZone is not set\n");
+        assert_eq!(s.exec("delete virtualisation docker rootless").unwrap(), "! nothing deleted: virtualisation docker rootless is not set\n");
+        assert_eq!(s.exec("show | compare").unwrap(), c, "nothing changed");
+        assert!(s.exec("delete nonsense").unwrap_err().to_string().contains("no such setting"), "an unknown path is still an error");
+    }
+
+    /// `delete` with nothing after it is everything here: asked first; refused without a yes.
+    #[test]
+    fn a_bare_delete_asks_first() {
+        let (d, no) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &no);
+        run(&mut s, &["configure", "set virtualisation docker enable true", "edit virtualisation"]);
+        let e = format!("{:#}", s.exec("delete").unwrap_err());
+        assert!(e.contains("not deleted") && e.contains("everything under virtualisation"), "{e}");
+        assert_eq!(no.asked.borrow().as_slice(), ["Delete everything under virtualisation? "]);
+        assert!(s.exec("show | compare").unwrap().contains("enable true"), "nothing deleted");
+        // With a yes, everything under it goes.
+        let (d, yes) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &yes);
+        run(&mut s, &["configure", "set virtualisation docker enable true", "edit virtualisation", "delete", "top"]);
+        assert_eq!(yes.asked.borrow().as_slice(), ["Delete everything under virtualisation? "]);
+        assert!(!s.exec("show").unwrap().contains("docker"), "{}", s.exec("show").unwrap());
+        // At the top it is the whole configuration, asked as such.
+        let (d, no) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &no);
+        assert!(run_err(&mut s, &["configure"], "delete").to_string().contains("deletes the whole configuration"));
+        assert_eq!(no.asked.borrow().as_slice(), ["Delete the whole configuration? "]);
+        // With a yes there, everything goes: TorqOS's own files and nixos/ alike.
+        let (d, yes) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &yes);
+        run(&mut s, &["configure", "set virtualisation docker enable true", "set system time-zone UTC", "delete"]);
+        assert_eq!(s.exec("show").unwrap(), "", "nothing left");
+    }
+
+    /// `load … terminal`: what is pasted, up to Ctrl-D — brace format for override and merge, `set`
+    /// lines for `load set`; all or nothing as from a file.
+    #[test]
+    fn load_from_the_terminal() {
+        let d = repo();
+        let m = Fake { typed: Some("/* pasted */\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n".into()), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(run(&mut s, &["configure", "load merge terminal"]).lines().last(), Some("load complete"));
+        let c = s.exec("show | compare").unwrap();
+        assert!(c.contains("[edit virtualisation docker]\n+   enable true;"), "{c}");
+        let m = Fake { typed: Some("set environment variables A one\n# a note\nset environment variables B two\n".into()), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        assert!(run(&mut s, &["configure", "load set terminal"]).contains("load complete (2 lines)"));
+        assert!(s.exec("show | compare").unwrap().contains("+   B two;"));
+        let m = Fake { typed: Some("set environment variables A one\nset nonsense x\n".into()), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", run_err(&mut s, &["configure"], "load set terminal"));
+        assert!(e.contains("load terminal: nothing loaded") && e.contains("line 2"), "{e}");
+        assert_eq!(s.exec("show | compare").unwrap(), "", "all or nothing");
+        // No terminal (a script): said.
+        let m = Fake::default();
+        let mut s = session(d.path(), None, &m);
+        assert!(format!("{:#}", run_err(&mut s, &["configure"], "load merge terminal")).contains("no terminal"));
     }
 
     /// Out of a list entry is out of the list; a bare list is nowhere to stand; a command word cannot
@@ -2532,10 +2634,11 @@ mod tests {
         assert_eq!(s.edit_path(), w("services httpd"));
         run(&mut s, &["up", "up"]);
         assert!(s.edit_path().is_empty());
-        // A command word as an entry's name would be ambiguous (`delete … all`).
-        assert!(format!("{:#}", s.exec("set services httpd virtualHosts all forceSSL true").unwrap_err()).contains("keeps the word for a command"));
-        s.schema.nodes.get_mut("users").unwrap().values.as_mut().unwrap().insert("all".into(), String::new());
-        assert!(format!("{:#}", s.exec("set users all packages vim").unwrap_err()).contains("keeps the word for a command"), "the old names too");
+        // `config` as an entry's name would be ambiguous (`<place> config <file>`); `all` is a name now.
+        assert!(format!("{:#}", s.exec("set services httpd virtualHosts config forceSSL true").unwrap_err()).contains("keeps the word for a command"));
+        s.schema.nodes.get_mut("users").unwrap().values.as_mut().unwrap().insert("config".into(), String::new());
+        assert!(format!("{:#}", s.exec("set users config packages vim").unwrap_err()).contains("keeps the word for a command"), "the old names too");
+        run(&mut s, &["set services httpd virtualHosts all forceSSL true"]);
     }
 
     #[test]

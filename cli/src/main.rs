@@ -29,6 +29,7 @@ mod pkg;
 mod run;
 mod status;
 mod ui;
+mod nixerr;
 
 use anyhow::{bail, Context, Result};
 
@@ -321,12 +322,14 @@ fn evaluate(copy: &Path, host: &str, log: &Path) -> Result<()> {
 /// clean line: it can quote text from the config repo, so it never reaches the terminal raw.
 fn last_error(stderr: &[u8]) -> String {
     let s = String::from_utf8_lossy(stderr);
-    let lines: Vec<&str> = s.lines().map(str::trim).collect();
-    let line = lines
-        .iter()
+    // A package check of TorqOS's own names the package, wherever Nix put it; otherwise the error
+    // that stopped Nix, with its message wherever it is (nixerr.rs).
+    let line = s
+        .lines()
+        .map(str::trim)
         .find(|l| l.contains("torq.packages:"))
-        .or_else(|| lines.iter().rev().find(|l| l.starts_with("error:")))
         .map(|l| l.trim_start_matches("error:").trim().to_string())
+        .or_else(|| crate::nixerr::message(&s))
         .unwrap_or_else(|| s.trim().to_string());
     history::one_line(&line, 300)
 }

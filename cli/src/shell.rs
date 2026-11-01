@@ -434,19 +434,19 @@ impl Machine for Real<'_> {
         }
         print!("{}[y/N] ", crate::paint::paint(question, &crate::ui::Ui::for_terminal(false)));
         let _ = std::io::stdout().flush();
-        // The answer is seen as it is typed (the shell turns echo off while a command runs).
-        let was = rustix::termios::tcgetattr(&stdin).ok();
-        if let Some(t) = &was {
-            let mut echo = t.clone();
-            echo.local_modes.insert(rustix::termios::LocalModes::ECHO);
-            let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &echo);
-        }
+        let _seen = Echo::set(true);
         let mut answer = String::new();
-        let yes = stdin.lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes");
-        if let Some(t) = &was {
-            let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, t);
+        stdin.lock().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "yes")
+    }
+    fn read_terminal(&self, max: usize) -> Result<String> {
+        if !std::io::stdin().is_terminal() {
+            bail!("load … terminal reads what is pasted at a terminal; from a script, load a file");
         }
-        yes
+        println!("[Type ^D at a new line to end input]");
+        let _seen = Echo::set(true);
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::Read::take(std::io::stdin().lock(), max as u64), &mut text)?;
+        Ok(text)
     }
     fn edit(&self, path: &str, text: &str) -> Result<Option<String>> {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -787,6 +787,36 @@ fn interactive(s: &mut Session) -> Result<i32> {
     }
 }
 
+/// The terminal's echo set on or off, and back as it was when this is dropped: off while a command
+/// runs (keys typed meanwhile wait, unseen, for the next line instead of drawing over its output); on
+/// while a person answers a question or pastes for `load … terminal` inside one.
+struct Echo(Option<rustix::termios::Termios>);
+
+impl Echo {
+    fn set(on: bool) -> Self {
+        let stdin = std::io::stdin();
+        let was = rustix::termios::tcgetattr(&stdin).ok();
+        if let Some(t) = &was {
+            let mut now = t.clone();
+            if on {
+                now.local_modes.insert(rustix::termios::LocalModes::ECHO);
+            } else {
+                now.local_modes.remove(rustix::termios::LocalModes::ECHO);
+            }
+            let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &now);
+        }
+        Echo(was)
+    }
+}
+
+impl Drop for Echo {
+    fn drop(&mut self) {
+        if let Some(t) = &self.0 {
+            let _ = rustix::termios::tcsetattr(std::io::stdin(), rustix::termios::OptionalActions::Now, t);
+        }
+    }
+}
+
 /// Set when a question was asked (`Real::ask`): it ends the batch the line was part of.
 static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -808,7 +838,7 @@ fn run_line(s: &mut Session, line: &str, named: bool) -> bool {
 
 /// The line editor: rustyline, with Tab and `?` answered by complete.rs.
 mod editor {
-    use super::{prompt, run_line, say_error, ASKED};
+    use super::{prompt, run_line, say_error, Echo, ASKED};
     use std::sync::atomic::Ordering;
     use crate::complete;
     use crate::session::{words, Session};
@@ -871,29 +901,6 @@ mod editor {
     /// A line that was read sooner than this after the prompt was waiting already: no person types a
     /// whole command in a quarter of a second.
     const WAITING: std::time::Duration = std::time::Duration::from_millis(250);
-
-    /// The terminal's echo off while a command runs, back on after: keys typed meanwhile are kept
-    /// (the line editor shows them on the next line) but not drawn over the command's output.
-    struct NoEcho(Option<rustix::termios::Termios>);
-    impl NoEcho {
-        fn new() -> Self {
-            let stdin = std::io::stdin();
-            let was = rustix::termios::tcgetattr(&stdin).ok();
-            if let Some(t) = &was {
-                let mut quiet = t.clone();
-                quiet.local_modes.remove(rustix::termios::LocalModes::ECHO);
-                let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &quiet);
-            }
-            NoEcho(was)
-        }
-    }
-    impl Drop for NoEcho {
-        fn drop(&mut self) {
-            if let Some(t) = &self.0 {
-                let _ = rustix::termios::tcsetattr(std::io::stdin(), rustix::termios::OptionalActions::Now, t);
-            }
-        }
-    }
 
     /// `?`: list what may come next, and redraw the line as it was.
     struct Question(Help);
@@ -974,7 +981,7 @@ mod editor {
                         }
                         // (Typing goes on while a command runs: keys wait, unseen, for the next line.)
                         let ok = {
-                            let _quiet = NoEcho::new();
+                            let _quiet = Echo::set(false);
                             run_line(s, line, named)
                         };
                         if !ok {

@@ -20,7 +20,7 @@ pub fn explain_check_error(msg: &str) -> String {
     } else if msg.contains("is not a package name") {
         format!("\"{name}\" isn't a package name. Find one: show packages available <words>")
     } else {
-        format!("This change wouldn't work, so nothing was changed: {msg}")
+        format!("This change wouldn't work: {msg}")
     }
 }
 

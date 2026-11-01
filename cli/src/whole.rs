@@ -12,7 +12,7 @@ use crate::settings::{self, Settings};
 use crate::tree::{Config, Kind, Schema, Val};
 use crate::attach::{self, Attached};
 use crate::software;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::collections::BTreeMap;
 
 /// (NixOS path, the hand-made schema's path to the file that holds it, whether the old name still
@@ -86,6 +86,14 @@ fn software_words(words: &[String]) -> Option<&[String]> {
     (words.len() >= n && words[..n].iter().zip(software::PATH).all(|(a, b)| a == b)).then(|| &words[n..])
 }
 
+/// What a `delete` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deleted {
+    Done,
+    /// Nothing named is set: nothing deleted (a warning, not an error).
+    NotFound,
+}
+
 /// The tree's data: the files TorqOS keeps (the hand-made schema's), nixos/*.json, the config files
 /// attached (config-files.json), and the software's source (flake.nix).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -116,15 +124,22 @@ impl Whole<'_> {
     /// `<place> config [<file>]`: the place a config file is (to be) attached at, and the file. None if
     /// the words are not that — and where NixOS has a setting named `config` (`containers <name>
     /// config`), they are NixOS's.
-    fn attachment<'w>(&self, words: &'w [String]) -> Option<(&'w [String], Option<&'w String>)> {
+    fn attachment<'w>(&self, words: &'w [String]) -> Option<(&'w [String], Vec<String>)> {
         let i = words.iter().rposition(|w| w == "config")?;
         let (place, rest) = (&words[..i], &words[i + 1..]);
+        // Files: none (all of a place's), one, or `[ a b ]` (as a saved configuration writes several).
+        let files = match rest {
+            [] => vec![],
+            [one] if one != "[" && one != "]" => vec![one.clone()],
+            [open, inner @ .., close] if open == "[" && close == "]" => inner.to_vec(),
+            _ => return None,
+        };
         // Below a set of named entries (`virtualHosts`), `config` is an entry's name.
-        if rest.len() > 1 || self.tree.next(place).iter().any(|(w, _)| w == "config" || w.starts_with('<')) {
+        if self.tree.next(place).iter().any(|(w, _)| w == "config" || w.starts_with('<')) {
             return None;
         }
         let somewhere = place.is_empty() || self.is_place(place) || self.tree.locate(place).is_ok();
-        somewhere.then(|| (place, rest.first()))
+        somewhere.then_some((place, files))
     }
 
     /// Every value, by NixOS path, sorted: the files TorqOS kept, nixos/*.json, the config files.
@@ -176,15 +191,23 @@ impl Whole<'_> {
                     }
                     software::valid(url)?;
                     d.source = Some(url.clone());
-                    software_allowed(d)
+                    // (Whether this machine may build from it — software_allowed — is a rule between
+                    // settings: checked on the whole configuration, as `commit` does, not line by line.)
+                    Ok(())
                 }
                 _ => bail!("set system software torq source <source>: one source (like github:netstacks/torqos); the version is `request system update`'s"),
             };
         }
-        if let Some((place, file)) = self.attachment(words) {
-            let file = file.context("config <file>: which file (a .nix file of the config repo, like services/httpd.nix)")?;
-            attach::valid(file)?;
-            d.attached.insert(place.join(" "), file.clone());
+        // A config file joins the place's files, as a value joins a list (`set config motd.nix` does not
+        // take hardware-configuration.nix's place).
+        if let Some((place, files)) = self.attachment(words) {
+            if files.is_empty() {
+                bail!("config <file>: which file (a .nix file of the config repo, like services/httpd.nix)");
+            }
+            for f in &files {
+                attach::valid(f)?;
+            }
+            d.attached.entry(place.join(" ")).or_default().extend(files);
             return Ok(());
         }
         if let Some(h) = self.hand(words, &d.config)? {
@@ -193,46 +216,52 @@ impl Whole<'_> {
         settings::set(self.tree, &mut d.settings, words).map_err(|e| self.hint(words, e))
     }
 
-    /// `delete <words> [all]`: a setting, one value of a list, an attached config file (`<place>
-    /// config`), or (with `all`) everything shown below a place — from every kind of file — or an old
-    /// name's place (`delete users dev all`).
-    pub fn delete(&self, d: &mut Data, words: &[String], all: bool, typed: &[String]) -> Result<()> {
+    /// `delete <words>`, as on a network device: one value of a list goes alone (`delete system
+    /// packages htop`); anything else — a setting, a whole list, a place — takes everything below it,
+    /// from every kind of file, and the config files attached there (`delete <place> config [<file>]`:
+    /// one, or all of a place's). What is not set is not an error: `Deleted::NotFound`, which the
+    /// session says, and a paste goes on.
+    pub fn delete(&self, d: &mut Data, words: &[String]) -> Result<Deleted> {
         if software_words(words).is_some() || words == ["system", "software"] || words == ["system", "software", "torq"] {
             bail!("the software's source can be changed (`set system software torq source …`), not deleted: a machine always has one");
         }
-        if let Some((place, _)) = self.attachment(words).filter(|_| !all) {
-            return match d.attached.remove(&place.join(" ")) {
-                Some(_) => Ok(()),
-                None => bail!("{}: no config file attached there", if place.is_empty() { "the top".into() } else { place.join(" ") }),
-            };
+        if let Some((place, files)) = self.attachment(words) {
+            let key = place.join(" ");
+            let Some(have) = d.attached.get_mut(&key) else { return Ok(Deleted::NotFound) };
+            if files.is_empty() {
+                d.attached.remove(&key);
+                return Ok(Deleted::Done);
+            }
+            // All or nothing, as for a list's values.
+            if !files.iter().all(|f| have.contains(f)) {
+                return Ok(Deleted::NotFound);
+            }
+            have.retain(|f| !files.contains(f));
+            if have.is_empty() {
+                d.attached.remove(&key);
+            }
+            return Ok(Deleted::Done);
         }
-        // (`typed`: the words as typed, from where configuration mode is, for the hint.)
-        let typed = typed.iter().map(|w| crate::syntax::quote(w)).collect::<Vec<_>>().join(" ");
         let hand = self.hand(words, &d.config).ok().flatten();
         // An old name's place (`users dev`, `system`): the hand-made schema's container or entry.
         let old_place = self.schema.resolve_in(words, Some(&d.config)).ok().filter(|t| {
             t.values.is_empty() && !t.node.is_empty() && matches!(self.schema.nodes[&t.node].kind, Kind::Container | Kind::List)
         });
-        let whole = if let Some(h) = &hand {
-            let t = self.schema.resolve_in(h, Some(&d.config))?;
-            let kind = (!t.node.is_empty()).then(|| self.schema.nodes[&t.node].kind);
-            match kind {
-                None | Some(Kind::Container | Kind::List) => true,
-                Some(Kind::LeafList) => t.values.is_empty(),
-                Some(Kind::Leaf) => false,
-            }
-        } else if old_place.is_some() {
-            true
-        } else {
-            let (_, ty, values) = self.tree.locate(words).map_err(|e| self.hint(words, e))?;
-            // A place, or a whole list or set of values, goes only with `all`.
-            ty.is_none() || (values.is_empty() && ty.is_some_and(|t| t.name.starts_with("listOf") || t.name.starts_with("attrsOf")))
+        // Values after the setting's path: those values only.
+        let values = match (&hand, &old_place) {
+            (Some(h), _) => !self.schema.resolve_in(h, Some(&d.config))?.values.is_empty(),
+            (None, Some(_)) => false,
+            (None, None) => !self.tree.locate(words).map_err(|e| self.hint(words, e))?.2.is_empty(),
         };
-        self.check_all(whole, all, &typed)?;
-        if !all {
-            return match hand {
-                Some(h) => self.schema.delete(&mut d.config, &h),
+        if values {
+            let r = match &hand {
+                Some(h) => self.schema.delete(&mut d.config, h),
                 None => settings::delete(self.tree, &mut d.settings, words),
+            };
+            return match r {
+                Ok(()) => Ok(Deleted::Done),
+                Err(e) if e.downcast_ref::<crate::tree::NotSet>().is_some() => Ok(Deleted::NotFound),
+                Err(e) => Err(e),
             };
         }
         // Everything below: what TorqOS keeps in its own files, by each entry's NixOS path, the rest,
@@ -242,34 +271,25 @@ impl Whole<'_> {
         for h in below {
             let nixos = translate(&h, 1, false).unwrap_or_else(|| h.clone());
             // By its NixOS path, by an old place (`users dev`), or by an old name for this one setting
-            // (`system packages all`: the whole list).
+            // (`system packages`: the whole list).
             if nixos.starts_with(words) || old_place.is_some() && h.starts_with(words) || hand.as_ref().is_some_and(|hp| h.starts_with(hp)) {
                 self.schema.delete(&mut d.config, &h)?;
                 gone += 1;
             }
         }
         if settings::entries(&d.settings).iter().any(|(w, _)| w.starts_with(words)) {
-            settings::delete(self.tree, &mut d.settings, words)?;
+            // (The whole configuration — `delete` at the top — is every nixos/ file.)
+            if words.is_empty() {
+                d.settings.clear();
+            } else {
+                settings::delete(self.tree, &mut d.settings, words)?;
+            }
             gone += 1;
         }
         let before = d.attached.len();
-        d.attached.retain(|at, _| !at.split(' ').map(String::from).collect::<Vec<_>>().starts_with(words));
+        d.attached.retain(|at, _| !at.split(' ').filter(|w| !w.is_empty()).map(String::from).collect::<Vec<_>>().starts_with(words));
         gone += before - d.attached.len();
-        if gone == 0 {
-            bail!("{}: nothing set below it", words.join(" "));
-        }
-        Ok(())
-    }
-
-    fn check_all(&self, whole: bool, all: bool, typed: &str) -> Result<()> {
-        let typed = if typed.is_empty() { String::new() } else { format!("{typed} ") };
-        if whole && !all {
-            bail!("delete {typed}deletes everything below it — say `delete {typed}all`");
-        }
-        if all && !whole {
-            bail!("delete {typed}all: `all` is for a whole place or list");
-        }
-        Ok(())
+        Ok(if gone == 0 { Deleted::NotFound } else { Deleted::Done })
     }
 
     /// Whether `words` name a place (somewhere `edit` can go), not a setting.
@@ -377,21 +397,76 @@ mod tests {
         assert_eq!(d2, d);
     }
 
+    /// What is not set is `NotFound` (nothing changed, no error), wherever it would be; an unknown
+    /// path is still an error.
     #[test]
-    fn deleting_needs_all_for_a_whole_place_and_the_catalog_says_its_new_name() {
+    fn deleting_what_is_not_set_finds_nothing() {
+        let t = t();
+        let x = Whole { schema: &t.schema, tree: &t.tree };
+        let mut d = Data::default();
+        for line in ["networking firewall allowedTCPPorts [ 22 ]", "system packages [ htop ]", "config hardware-configuration.nix"] {
+            x.set(&mut d, &w(line)).unwrap();
+        }
+        let before = d.clone();
+        for line in [
+            "networking hostName",
+            "system host-name",
+            "virtualisation docker",
+            "virtualisation",
+            "networking firewall allowedTCPPorts 80",
+            "system packages vim",
+            "virtualisation config",
+            "config other.nix",
+        ] {
+            assert_eq!(x.delete(&mut d, &w(line)).unwrap_or_else(|e| panic!("{line}: {e:#}")), Deleted::NotFound, "{line}");
+            assert_eq!(d, before, "{line}: nothing changed");
+        }
+        assert!(format!("{:#}", x.delete(&mut d, &w("nonsense")).unwrap_err()).contains("no such setting"));
+    }
+
+    /// A place holds several config files: `set` adds (never replaces), `[ a b ]` adds several,
+    /// `delete <place> config <file>` takes one, `delete <place> config` all of them.
+    #[test]
+    fn config_files_add_and_go_one_or_all() {
+        let t = t();
+        let x = Whole { schema: &t.schema, tree: &t.tree };
+        let mut d = Data::default();
+        x.set(&mut d, &w("config hardware-configuration.nix")).unwrap();
+        x.set(&mut d, &w("config custom/motd.nix")).unwrap();
+        assert_eq!(attach::files(&d.attached).collect::<Vec<_>>(), ["custom/motd.nix", "hardware-configuration.nix"], "added, not replaced");
+        assert_eq!(x.show(&d, &[]).unwrap(), "config [ custom/motd.nix hardware-configuration.nix ];\n");
+        x.set(&mut d, &w("services httpd config [ a.nix b.nix ]")).unwrap();
+        assert_eq!(d.attached["services httpd"].len(), 2);
+        x.set(&mut d, &w("services httpd config a.nix")).unwrap();
+        assert_eq!(d.attached["services httpd"].len(), 2, "once each");
+        assert_eq!(x.delete(&mut d, &w("config custom/motd.nix")).unwrap(), Deleted::Done);
+        assert_eq!(x.show(&d, &[]).unwrap().lines().next(), Some("config hardware-configuration.nix;"), "one shows as one");
+        assert_eq!(x.delete(&mut d, &w("services httpd config [ a.nix nope.nix ]")).unwrap(), Deleted::NotFound, "all or nothing");
+        assert_eq!(d.attached["services httpd"].len(), 2);
+        assert_eq!(x.delete(&mut d, &w("services httpd config")).unwrap(), Deleted::Done);
+        assert!(!d.attached.contains_key("services httpd"));
+        assert!(x.set(&mut d, &w("config")).is_err(), "which file");
+        assert!(x.set(&mut d, &w("config ../x.nix")).is_err());
+    }
+
+    #[test]
+    fn deleting_a_whole_place_and_the_catalog_says_its_new_name() {
         let t = t();
         let x = Whole { schema: &t.schema, tree: &t.tree };
         let mut d = Data::default();
         for line in ["virtualisation docker enable true", "virtualisation docker rootless enable true", "networking firewall allowedTCPPorts [ 22 80 ]", "torq packages user dev [ htop jq ]"] {
             x.set(&mut d, &w(line)).unwrap();
         }
-        let e = format!("{:#}", x.delete(&mut d, &w("virtualisation docker"), false, &w("virtualisation docker")).unwrap_err());
-        assert!(e.contains("say `delete virtualisation docker all`"), "{e}");
-        let e = format!("{:#}", x.delete(&mut d, &w("networking firewall allowedTCPPorts"), false, &w("networking firewall allowedTCPPorts")).unwrap_err());
-        assert!(e.contains("all`"), "a whole list too: {e}");
-        x.delete(&mut d, &w("networking firewall allowedTCPPorts 80"), false, &w("networking firewall allowedTCPPorts 80")).unwrap();
-        x.delete(&mut d, &w("virtualisation docker rootless"), true, &w("virtualisation docker rootless")).unwrap();
-        x.delete(&mut d, &w("torq packages user dev jq"), false, &w("torq packages user dev jq")).unwrap();
+        // A place, or a whole list, goes whole (as on a network device); one value alone.
+        let mut whole_place = d.clone();
+        assert_eq!(x.delete(&mut whole_place, &w("virtualisation docker")).unwrap(), Deleted::Done);
+        assert!(!x.show(&whole_place, &[]).unwrap().contains("docker"));
+        let mut whole_list = d.clone();
+        assert_eq!(x.delete(&mut whole_list, &w("networking firewall allowedTCPPorts")).unwrap(), Deleted::Done);
+        assert!(!x.show(&whole_list, &[]).unwrap().contains("allowedTCPPorts"));
+        x.delete(&mut d, &w("networking firewall allowedTCPPorts 80")).unwrap();
+        x.delete(&mut d, &w("virtualisation docker rootless")).unwrap();
+        x.delete(&mut d, &w("torq packages user dev jq")).unwrap();
         assert_eq!(x.display_set(&d, &[]).unwrap(), "set networking firewall allowedTCPPorts 22\nset torq packages user dev htop\nset virtualisation docker enable true\n");
         let e = format!("{:#}", x.set(&mut d, &w("services ssh")).unwrap_err());
         assert!(e.contains("`torq services enabled ssh`"), "{e}");
@@ -443,23 +518,22 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     for line in ["networking hostName laptop", "networking firewall allowedTCPPorts [ 22 ]", "torq packages user dev [ htop ]", "system packages vim", "system time-zone UTC"] {
         x.set(&mut d, &w(line)).unwrap();
     }
-    // A whole list by its old name, as by its NixOS one (`delete system packages all`).
+    // A whole list by its old name, as by its NixOS one (`delete system packages`).
     for name in ["system packages", "torq packages system"] {
         let mut e = d.clone();
         x.set(&mut e, &w("system packages [ htop vim ]")).unwrap();
-        x.delete(&mut e, &w(name), true, &w(name)).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+        assert_eq!(x.delete(&mut e, &w(name)).unwrap_or_else(|err| panic!("{name}: {err:#}")), Deleted::Done);
         assert!(!x.show(&e, &[]).unwrap().contains("vim"), "{name}");
     }
-    // `delete networking all`: everything shown below it, from both kinds of files.
-    x.delete(&mut d, &w("networking"), true, &w("networking")).unwrap();
+    // `delete networking`: everything shown below it, from both kinds of files.
+    x.delete(&mut d, &w("networking")).unwrap();
     assert!(!x.show(&d, &[]).unwrap().contains("networking"), "{}", x.show(&d, &[]).unwrap());
     // An old name's place deletes what it always did.
-    x.delete(&mut d, &w("users dev"), true, &w("users dev")).unwrap();
+    x.delete(&mut d, &w("users dev")).unwrap();
     assert!(!x.show(&d, &[]).unwrap().contains("dev"));
-    x.delete(&mut d, &w("system"), true, &w("system")).unwrap();
+    x.delete(&mut d, &w("system")).unwrap();
     assert_eq!(x.show(&d, &[]).unwrap(), "");
-    let e = format!("{:#}", x.delete(&mut d, &w("virtualisation"), true, &w("virtualisation")).unwrap_err());
-    assert!(e.contains("nothing set below it"), "{e}");
+    assert_eq!(x.delete(&mut d, &w("virtualisation")).unwrap(), Deleted::NotFound, "nothing set below it: nothing deleted, no error");
     // Text that would draw lines of its own: refused when set, and when read.
     let e = format!("{:#}", x.set(&mut d, &[w("services httpd virtualHosts a documentRoot"), vec!["/x\nKeys that will".into()]].concat()).unwrap_err());
     assert!(e.contains("multi-line text goes in a config file"), "{e}");

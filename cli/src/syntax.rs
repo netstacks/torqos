@@ -6,9 +6,9 @@ use crate::session::Mode;
 use crate::filter::Filter;
 use anyhow::{bail, Context, Result};
 
-/// Words with a meaning of their own after a path (`delete <path> all`, `set <place> config <file>`):
-/// no list entry may be named one (settings.rs, tree.rs), so a line never means two things.
-pub const RESERVED: &[&str] = &["all", "config"];
+/// A word with a meaning of its own after a path (`set <place> config <file>`): no list entry may be
+/// named it (settings.rs, tree.rs), so a line never means two things.
+pub const RESERVED: &[&str] = &["config"];
 
 /// `| display …` after a `show`: what each view offers (CLI-DESIGN principle 5: internals only when
 /// asked).
@@ -77,13 +77,14 @@ pub enum Op {
     File { action: FileAction, path: Option<String> },
     /// `save <file>`: the whole candidate, and its config files' content, to a file (saved.rs).
     Save { file: String },
-    /// `load override|merge|set <file>`: a saved configuration into the candidate, all or nothing.
-    Load { how: LoadHow, file: String },
+    /// `load override|merge|set <file>|terminal`: a saved configuration into the candidate, all or
+    /// nothing.
+    Load { how: LoadHow, from: LoadFrom },
     // Configuration mode.
     /// A leaf's value or leaf-list elements: the words after `set`.
     Set { words: Vec<String> },
-    /// `delete <path>`; `all` deletes a whole container or list entry.
-    Delete { words: Vec<String>, all: bool },
+    /// `delete <path>`: a setting, a value of a list, or everything below a place.
+    Delete { words: Vec<String> },
     /// `edit <path>`: go down to a container or list entry.
     Edit { words: Vec<String> },
     Up,
@@ -111,15 +112,24 @@ pub enum LoadHow {
     Set,
 }
 
+/// Where `load` reads from: a file, or what is pasted at the terminal (`terminal`, ended by Ctrl-D;
+/// a file of that name is `./terminal`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadFrom {
+    File(String),
+    Terminal,
+}
+
 fn parse_load(w: &[String]) -> Result<Op> {
     let s: Vec<&str> = w.iter().map(String::as_str).collect();
     let how = match s.as_slice() {
         ["override", _] => LoadHow::Override,
         ["merge", _] => LoadHow::Merge,
         ["set", _] => LoadHow::Set,
-        _ => bail!("load: one of: load override <file> (the file is the candidate), load merge <file> (onto it), load set <file> (set and delete lines)"),
+        _ => bail!("load: one of: load override <file>|terminal (it becomes the candidate), load merge <file>|terminal (onto it), load set <file>|terminal (set and delete lines)"),
     };
-    Ok(Op::Load { how, file: w[1].clone() })
+    let from = if w[1] == "terminal" { LoadFrom::Terminal } else { LoadFrom::File(w[1].clone()) };
+    Ok(Op::Load { how, from })
 }
 
 /// What `file` does.
@@ -327,8 +337,7 @@ pub fn parse(mode: Mode, w: &[String]) -> Result<Op> {
     let s: Vec<&str> = w.iter().map(String::as_str).collect();
     Ok(match s.as_slice() {
         ["set", ..] => Op::Set { words: w[1..].to_vec() },
-        ["delete", .., "all"] => Op::Delete { words: w[1..w.len() - 1].to_vec(), all: true },
-        ["delete", ..] => Op::Delete { words: w[1..].to_vec(), all: false },
+        ["delete", ..] => Op::Delete { words: w[1..].to_vec() },
         ["edit", ..] => Op::Edit { words: w[1..].to_vec() },
         ["up"] => Op::Up,
         ["top"] => Op::Top,
@@ -411,13 +420,16 @@ pub fn render(op: &Op) -> String {
         Op::ShowPackages { terms } => sep("show packages available", terms),
         Op::Request { words } => sep("request", words),
         Op::Save { file } => format!("save {}", quote(file)),
-        Op::Load { how, file } => {
+        Op::Load { how, from } => {
             let h = match how {
                 LoadHow::Override => "override",
                 LoadHow::Merge => "merge",
                 LoadHow::Set => "set",
             };
-            format!("load {h} {}", quote(file))
+            match from {
+                LoadFrom::File(f) => format!("load {h} {}", quote(f)),
+                LoadFrom::Terminal => format!("load {h} terminal"),
+            }
         }
         Op::File { action, path } => {
             let a = match action {
@@ -429,7 +441,7 @@ pub fn render(op: &Op) -> String {
             sep(&format!("file {a}"), &path.iter().cloned().collect::<Vec<_>>())
         }
         Op::Set { words } => sep("set", words),
-        Op::Delete { words, all } => format!("{}{}", sep("delete", words), if *all { " all" } else { "" }),
+        Op::Delete { words } => sep("delete", words),
         Op::Edit { words } => sep("edit", words),
         Op::Up => "up".into(),
         Op::Top => "top".into(),
@@ -480,8 +492,9 @@ mod tests {
             (Mode::Configuration, Op::Set { words: v("system host-name torq") }),
             (Mode::Configuration, Op::Set { words: v("system packages [ htop vim ]") }),
             (Mode::Configuration, Op::Set { words: v("users dev packages jq") }),
-            (Mode::Configuration, Op::Delete { words: v("system packages htop"), all: false }),
-            (Mode::Configuration, Op::Delete { words: v("system"), all: true }),
+            (Mode::Configuration, Op::Delete { words: v("system packages htop") }),
+            (Mode::Configuration, Op::Delete { words: v("system") }),
+            (Mode::Configuration, Op::Delete { words: vec![] }),
             (Mode::Configuration, Op::Edit { words: v("system") }),
             (Mode::Configuration, Op::Edit { words: v("users dev") }),
             (Mode::Configuration, Op::Up),
@@ -493,9 +506,10 @@ mod tests {
             (Mode::Configuration, Op::Compare { display: diff }),
             (Mode::Configuration, Op::Rollback { n: 2 }),
             (Mode::Configuration, Op::Save { file: "/home/dev/my device.conf".into() }),
-            (Mode::Configuration, Op::Load { how: LoadHow::Override, file: "a.conf".into() }),
-            (Mode::Configuration, Op::Load { how: LoadHow::Merge, file: "a.conf".into() }),
-            (Mode::Configuration, Op::Load { how: LoadHow::Set, file: "a.set".into() }),
+            (Mode::Configuration, Op::Load { how: LoadHow::Override, from: LoadFrom::File("a.conf".into()) }),
+            (Mode::Configuration, Op::Load { how: LoadHow::Merge, from: LoadFrom::File("a.conf".into()) }),
+            (Mode::Configuration, Op::Load { how: LoadHow::Set, from: LoadFrom::File("a.set".into()) }),
+            (Mode::Configuration, Op::Load { how: LoadHow::Merge, from: LoadFrom::Terminal }),
             (Mode::Configuration, Op::File { action: FileAction::Edit, path: Some("custom/a.nix".into()) }),
             (Mode::Configuration, Op::File { action: FileAction::List, path: None }),
             (Mode::Operational, Op::File { action: FileAction::Show, path: Some("a.nix".into()) }),

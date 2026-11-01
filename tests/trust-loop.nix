@@ -264,6 +264,15 @@ pkgs.testers.runNixOSTest {
         # Without bracketed paste (a serial console, screen): the same, and no line is lost.
         as_dev("printf 'set users dev packages htop\\nset users dev packages jq\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -t t")
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qE \"^\\+   dev \\[.* vim htop .*\\];\"')}", timeout=30)
+        # `load merge terminal`: a configuration pasted in brace format (a comment in it is left out),
+        # ended by Ctrl-D, as on a network device.
+        as_dev("tmux send-keys -t t 'load merge terminal' Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"[Type ^D at a new line to end input]\"')}", timeout=30)
+        as_dev("printf 'time {\\n    /* where it stands */\\n    timeZone Europe/Berlin;\\n}\\n' | tmux load-buffer - && tmux paste-buffer -t t")
+        as_dev("tmux send-keys -t t C-d")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"load complete\"')}", timeout=30)
+        as_dev("tmux send-keys -t t 'show | compare' Enter")
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"+   timeZone Europe/Berlin;\"')}", timeout=30)
         # Leave.
         last_line = screen + " | grep -v '^$' | tail -n 1"
         as_dev("tmux send-keys -t t exit Enter")

@@ -1,6 +1,7 @@
 //! Config files attached in the tree (docs/CONFIG-IS-THE-DEVICE.md): `set services httpd config
 //! services/httpd.nix` attaches an ordinary NixOS module file of the config repo at that point, for
-//! what is not a value. Kept in `config-files.json` (where in the tree → which file), which
+//! what is not a value; a place may hold several, as a list holds values. Kept in
+//! `config-files.json` (where in the tree → its files), which
 //! modules/nixos-settings.nix turns into NixOS `imports`; the files themselves are plain Nix, system
 //! tier, shown as their raw diffs before anyone commits them.
 //!
@@ -8,13 +9,27 @@
 
 use crate::tree::Val;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The config repo file that says which config files are attached where.
 pub const FILE: &str = "config-files.json";
 
-/// Where in the tree (its words, joined by spaces) → the config repo file attached there.
-pub type Attached = BTreeMap<String, String>;
+/// Where in the tree (its words, joined by spaces; "" is the top) → the config repo files attached
+/// there.
+pub type Attached = BTreeMap<String, BTreeSet<String>>;
+
+/// Every attached file, wherever it is attached.
+pub fn files(a: &Attached) -> impl Iterator<Item = &String> {
+    a.values().flatten()
+}
+
+/// A place's files as `config-files.json` holds them: a list, or (the first form, still read) one name.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum Files {
+    One(String),
+    Many(BTreeSet<String>),
+}
 
 /// Whether `rel` may be a config file: a `.nix` file inside the config repo — relative, no `..`, no
 /// empty or odd parts, nothing but plain path characters — as modules/nixos-settings.nix requires.
@@ -34,13 +49,24 @@ pub fn valid(rel: &str) -> Result<()> {
 /// Read `config-files.json` (if there is one), each entry checked.
 pub fn load(bytes: Option<&[u8]>) -> Result<Attached> {
     let Some(b) = bytes else { return Ok(Attached::new()) };
-    let a: Attached = serde_json::from_slice(b).with_context(|| format!("{FILE}: not a JSON object of strings; fix the file (as raw JSON) first"))?;
-    for (at, rel) in &a {
+    let read: BTreeMap<String, Files> = serde_json::from_slice(b).with_context(|| format!("{FILE}: not a JSON object of file lists; fix the file (as raw JSON) first"))?;
+    let mut a = Attached::new();
+    for (at, files) in read {
         // (An empty place is the top of the tree: `set config hardware-configuration.nix`.)
         if at.chars().any(char::is_control) || at.starts_with(' ') || at.ends_with(' ') || at.contains("  ") {
             bail!("{FILE}: an attachment's place is not words of the tree");
         }
-        valid(rel).with_context(|| format!("{FILE}: {at}"))?;
+        let files = match files {
+            Files::One(f) => BTreeSet::from([f]),
+            Files::Many(f) => f,
+        };
+        if files.is_empty() {
+            bail!("{FILE}: {}: an empty list (no files: no entry)", if at.is_empty() { "the top" } else { &at });
+        }
+        for rel in &files {
+            valid(rel).with_context(|| format!("{FILE}: {}", if at.is_empty() { "the top" } else { &at }))?;
+        }
+        a.insert(at, files);
     }
     Ok(a)
 }
@@ -50,13 +76,17 @@ pub fn render(a: &Attached) -> Option<String> {
     (!a.is_empty()).then(|| format!("{}\n", serde_json::to_string_pretty(a).unwrap_or_default()))
 }
 
-/// Each attachment as an entry: `<place> config <file>`.
+/// Each place's attachments as an entry: `<place> config <file>`, or `[ <file> … ]` for several.
 pub fn entries(a: &Attached) -> Vec<(Vec<String>, Val)> {
     a.iter()
-        .map(|(at, rel)| {
+        .map(|(at, files)| {
             let mut w: Vec<String> = at.split(' ').filter(|w| !w.is_empty()).map(String::from).collect();
             w.push("config".into());
-            (w, Val::One(rel.clone()))
+            let v = match files.iter().collect::<Vec<_>>().as_slice() {
+                [one] => Val::One((*one).clone()),
+                many => Val::Many(many.iter().map(|f| (*f).clone()).collect()),
+            };
+            (w, v)
         })
         .collect()
 }
@@ -83,5 +113,13 @@ mod tests {
         let top = load(Some(br#"{"": "hardware-configuration.nix"}"#)).unwrap();
         assert_eq!(entries(&top), [(vec!["config".into()], Val::One("hardware-configuration.nix".into()))]);
         assert!(load(Some(br#"{" services": "a.nix"}"#)).is_err());
+        // Several at one place: a list, written as one; the first form (one name) reads as a list of one.
+        let two = load(Some(br#"{"": ["hardware-configuration.nix", "custom/motd.nix"]}"#)).unwrap();
+        assert_eq!(entries(&two), [(vec!["config".into()], Val::Many(vec!["custom/motd.nix".into(), "hardware-configuration.nix".into()]))]);
+        assert_eq!(files(&two).count(), 2);
+        assert_eq!(load(render(&two).as_deref().map(str::as_bytes)).unwrap(), two, "reads back");
+        assert!(render(&top).is_some_and(|r| r.contains("[")), "written as a list");
+        assert!(load(Some(br#"{"": []}"#)).is_err(), "no files: no entry");
+        assert!(load(Some(br#"{"": ["a.nix", "../b.nix"]}"#)).is_err(), "every one checked");
     }
 }
