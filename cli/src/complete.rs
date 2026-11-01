@@ -25,26 +25,27 @@ impl Choice {
 
 const OPERATIONAL: &[(&str, &str)] = &[
     ("configure", "Edit the configuration (a candidate, until you commit it)"),
-    ("file", "The configuration's Nix files (list, show)"),
+    ("exit", "Leave torqcli"),
+    ("file", "The configuration's Nix files (list, show; edit and delete in configuration mode)"),
     ("request", "Ask the machine to do something"),
     ("show", "Show information about the machine"),
-    ("exit", "Leave torqcli"),
 ];
+// (Alphabetical, as `?` lists them.)
 const CONFIGURATION: &[(&str, &str)] = &[
     ("commit", "Make the candidate the machine's configuration"),
-    ("delete", "Remove a setting"),
+    ("delete", "Remove a value, a setting, or everything below a place"),
     ("edit", "Go down to a part of the configuration"),
-    ("file", "The configuration's Nix files (list, show, edit, delete)"),
-    ("load", "Load a saved configuration into the candidate (override, merge, set)"),
     ("exit", "Up one level (out of configuration mode at the top; the candidate is kept)"),
-    ("quit", "Up one level (out of configuration mode at the top; the candidate is kept)"),
+    ("file", "The configuration's Nix files (list, show, edit, delete)"),
+    ("load", "Load a saved or pasted configuration into the candidate (override, merge, set)"),
+    ("quit", "The same as exit"),
     ("rollback", "Load an earlier configuration into the candidate"),
     ("run", "Run an operational-mode command"),
     ("save", "Save the whole candidate, and its config files, to a file"),
     ("set", "Set a value"),
-    ("show", "Show the candidate configuration"),
-    ("top", "Back to the top of the configuration"),
-    ("up", "Up one level"),
+    ("show", "Show the candidate configuration, or what it changes (show | compare)"),
+    ("top", "Back to the top, or run a command from there"),
+    ("up", "Up one level, or <n> levels"),
 ];
 
 /// What may follow `words` (the complete words before the cursor), each starting with `partial`
@@ -610,7 +611,7 @@ mod tests {
     #[test]
     fn commands_of_each_mode() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "file", "request", "show", "exit"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "exit", "file", "request", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);

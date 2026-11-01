@@ -163,7 +163,7 @@ pkgs.testers.runNixOSTest {
         assert "is not a valid system host-name" in out and "[edit" not in out.split("my_laptop")[-1], out
         # One syntax (ADR-021): the other one's words are unknown commands, not another meaning.
         out = machine.fail("su - dev -c 'torqcli -c \"configure; no system time-zone\"' 2>&1")
-        assert "unknown command: no" in out, out
+        assert "'no' is not a word here" in out, out
 
     with subtest("torqcli filters: the real tools, in a sandbox that reaches nothing"):
         import shlex
