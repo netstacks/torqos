@@ -111,11 +111,13 @@ pub fn is_user_data(p: &str) -> bool {
     let Some((name, leaf)) = p.strip_prefix("users/").and_then(|rest| rest.split_once('/')) else {
         return false;
     };
-    // A conservative user name: what `useradd` accepts by default, minus uppercase.
+    user_name_ok(name) && USER_LEAVES.contains(&leaf)
+}
+
+/// A conservative user name: what `useradd` accepts by default, minus uppercase.
+pub fn user_name_ok(name: &str) -> bool {
     let mut chars = name.chars();
-    let valid_name = matches!(chars.next(), Some('a'..='z' | '_'))
-        && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'));
-    valid_name && USER_LEAVES.contains(&leaf)
+    matches!(chars.next(), Some('a'..='z' | '_')) && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
 }
 
 pub fn tier_for_path(path: &str) -> Tier {

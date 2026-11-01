@@ -2025,7 +2025,10 @@ fn setup_builds_switches_then_ledgers_once() {
     std::os::unix::fs::symlink("/nix/store/aaa-the-image", &link).unwrap();
     // The "switch": the running system becomes the configuration's.
     let switch = format!("ln -sfn /nix/store/bbb-the-machine {}", link.display());
-    let b = Broker::new(&repo, dir.path().join("state"), &switch).with_current_system(&link).with_system_profile(dir.path().join("no-profile"));
+    let b = Broker::new(&repo, dir.path().join("state"), &switch)
+        .with_current_system(&link)
+        .with_system_profile(dir.path().join("no-profile"))
+        .with_confirm_commands("echo /nix/store/bbb-the-machine", "true", "true", "true");
     let e = b.set_up().unwrap();
     assert_eq!((e.body.seq, e.body.kind.as_str(), e.body.reason.as_str()), (1, "init", "TorqOS set up"));
     assert_eq!(e.body.data["system"], "/nix/store/bbb-the-machine", "the system it switched to, not the image's");
@@ -2034,11 +2037,46 @@ fn setup_builds_switches_then_ledgers_once() {
     let again = format!("{:#}", b.set_up().unwrap_err());
     assert!(again.contains("already set up"), "{again}");
 
-    // A configuration that does not build: nothing ledgered, not taken over, the files kept.
+    // A configuration that does not build: nothing switched, nothing ledgered, not taken over, the
+    // files kept.
     let (dir, repo) = config_dir();
-    let failing = Broker::new(&repo, dir.path().join("state"), "false");
+    let marker = dir.path().join("switched");
+    let failing = Broker::new(&repo, dir.path().join("state"), &format!("touch {}", marker.display())).with_confirm_commands("false", "true", "true", "true");
     let e = format!("{:#}", failing.set_up().unwrap_err());
-    assert!(e.contains("nothing was set up"), "{e}");
-    assert!(failing.ledger.read_all().unwrap().is_empty());
+    assert!(e.contains("did not build: nothing was set up"), "{e}");
+    assert!(failing.ledger.read_all().unwrap().is_empty() && !marker.exists(), "never switched");
     assert!(!repo.join(".git").exists() && repo.join("desktop.nix").exists(), "files left, history gone");
+    // Built, but the switch reported a problem: the machine boots it from now on, so it is ledgered,
+    // saying so.
+    let (dir, repo) = config_dir();
+    let partly = Broker::new(&repo, dir.path().join("state"), "false").with_confirm_commands("echo /nix/store/ccc", "true", "true", "true");
+    let e = partly.set_up().unwrap();
+    assert_eq!((e.body.seq, e.body.reason.as_str()), (1, "TorqOS set up (the switch reported a problem: show system alarms)"));
+}
+
+/// `request system password`: the hash set at once (here a command that only reads it), kept in
+/// the account's file outside the repo, private; the ledger says whose and by whom — never the hash.
+#[test]
+fn a_password_is_kept_outside_the_repo_and_ledgered_without_it() {
+    let (dir, b) = setup("true");
+    let pw = dir.path().join("passwords");
+    let b = b.with_passwords(&pw, "cat");
+    let hash = "$6$saltsalt$abcdefghijklmnopqrstuvwxyz0123456789";
+    let e = b.set_password("casey", hash, "casey").unwrap();
+    assert_eq!((e.body.kind.as_str(), e.body.reason.as_str(), e.body.data["user"].as_str()), ("password", "Password changed for casey", Some("casey")));
+    assert_eq!(fs::read_to_string(pw.join("casey")).unwrap(), format!("{hash}\n"));
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(fs::metadata(pw.join("casey")).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(fs::metadata(&pw).unwrap().permissions().mode() & 0o777, 0o700);
+    let ledger = fs::read_to_string(dir.path().join("state/ledger.jsonl")).unwrap();
+    assert!(!ledger.contains("$6$"), "never the hash");
+    assert!(!b.repo.root().join("casey").exists() && b.repo.ensure_clean().is_ok(), "nothing in the repo");
+    for (user, bad) in [("casey", "plaintext"), ("casey", "$6$a:b"), ("casey", "$6$a\nroot:$6$x"), ("../x", hash), ("Casey", hash)] {
+        assert!(b.set_password(user, bad, "casey").is_err(), "{user} {bad:?}");
+    }
+    // Not set in the running system (no such account): nothing kept, nothing ledgered.
+    let failing = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_passwords(&pw, "false");
+    let before = b.ledger.read_all().unwrap().len();
+    assert!(failing.set_password("dana", hash, "casey").is_err());
+    assert!(!pw.join("dana").exists() && b.ledger.read_all().unwrap().len() == before);
 }

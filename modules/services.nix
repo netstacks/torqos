@@ -8,24 +8,33 @@
 let
   cfg = config.torq.services;
   dir = config.torq.packages.configDir;
-  owner = config.torq.user;
+  owner = if config.torq.user == null then "the owner" else config.torq.user;
   ssh = config.services.openssh;
+  # SSH by password too (first-boot setup's choice, or `set torq ssh passwords true`): protected.
+  passwords = config.torq.ssh.passwords;
 
   catalog = {
     ssh = {
-      description = "SSH server: keys only, no root login, only ${owner} may log in; opens TCP 22 on every network";
-      config.services.openssh = {
-        enable = true;
-        settings = {
-          PasswordAuthentication = false;
-          KbdInteractiveAuthentication = false;
-          PermitRootLogin = "no";
-          AllowUsers = [ owner ];
+      description = if passwords
+        then "SSH server: passwords and keys (repeated wrong guesses blocked, 3 tries a connection), no root login, only ${owner} may log in; opens TCP 22 on every network"
+        else "SSH server: keys only, no root login, only ${owner} may log in; opens TCP 22 on every network";
+      config = {
+        services.openssh = {
+          enable = true;
+          settings = {
+            PasswordAuthentication = passwords;
+            KbdInteractiveAuthentication = false;
+            PermitRootLogin = "no";
+            AllowUsers = [ owner ];
+            MaxAuthTries = 3;
+          };
         };
+        # Password guessing: an address that keeps failing is blocked for a while.
+        services.sshguard.enable = passwords;
       };
       # The catalog's promise must hold: a stronger definition elsewhere (lib.mkForce) would
       # otherwise silently undo it while `show services` still says "keys only".
-      holds = ssh.settings.PasswordAuthentication == false
+      holds = ssh.settings.PasswordAuthentication == passwords
         && ssh.settings.KbdInteractiveAuthentication == false
         && ssh.settings.PermitRootLogin == "no"
         && ssh.settings.AllowUsers == [ owner ];
@@ -62,6 +71,12 @@ let
   fromFile = if dir != null && builtins.pathExists file then lib.importJSON file else [ ];
 in
 {
+  options.torq.ssh.passwords = lib.mkOption {
+    type = lib.types.bool;
+    default = false;
+    description = "The catalog's SSH accepts passwords as well as keys (repeated wrong guesses are blocked). Off: keys only.";
+  };
+
   options.torq.services = {
     enabled = lib.mkOption {
       type = lib.types.listOf (lib.types.enum (lib.attrNames catalog));

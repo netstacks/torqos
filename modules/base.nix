@@ -5,19 +5,21 @@ let
 in
 {
   options.torq.user = lib.mkOption {
-    type = lib.types.str;
-    description = "Primary (owner) user account of this machine.";
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "Primary (owner) user account of this machine. None only in the image, before first-boot setup creates it (modules/setup.nix).";
   };
 
   config = {
     assertions = [
       {
-        assertion = cfg.user != "CHANGE-ME";
+        # Every configured machine has an owner; only the image, before setup, has none.
+        assertion = cfg.user != null && cfg.user != "CHANGE-ME" || cfg.user == null && cfg.setup.enable;
         message = "Set the owner's login name: `torq user <name>` (nixos/torq.json in the config repo).";
       }
       {
         # The same shape the broker accepts for users/<name>/ (user tier).
-        assertion = builtins.match "[a-z_][a-z0-9_-]*" cfg.user != null;
+        assertion = cfg.user == null || builtins.match "[a-z_][a-z0-9_-]*" cfg.user != null;
         message = "torq.user '${cfg.user}' must be a lowercase login name ([a-z_][a-z0-9_-]*).";
       }
     ];
@@ -44,9 +46,11 @@ in
     };
     boot.loader.systemd-boot.configurationLimit = lib.mkDefault 20;
 
-    users.users.${cfg.user} = {
-      isNormalUser = true;
-      extraGroups = [ "wheel" "networkmanager" "video" "audio" ];
+    users.users = lib.mkIf (cfg.user != null) {
+      ${cfg.user} = {
+        isNormalUser = true;
+        extraGroups = [ "wheel" "networkmanager" "video" "audio" ];
+      };
     };
 
     networking.networkmanager.enable = lib.mkDefault true;

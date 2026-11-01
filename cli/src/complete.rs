@@ -207,7 +207,7 @@ fn complete(k: &Know, at: &At, op: &crate::syntax::Op) -> bool {
             let w: Vec<&str> = words.iter().map(String::as_str).collect();
             let number = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
             match w.as_slice() {
-                ["system", "update"] | ["system", "update", "all"] | ["system", "repair"] => true,
+                ["system", "update"] | ["system", "update", "all"] | ["system", "repair"] | ["system", "password"] | ["system", "password", _] => true,
                 ["system", "revert", n] | ["system", "software", "rollback", n] => number(n),
                 _ => false,
             }
@@ -279,12 +279,14 @@ fn choices_j(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> 
         (Mode::Operational, Some("request")) => match words[1..].iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             [] => table(&[("system", "This machine")]),
             ["system"] => table(&[
+                ("password", "Change a person's password (yours, or <user>'s)"),
                 ("repair", "Return a machine changed outside TorqOS to its last configuration"),
                 ("revert", "Undo one change (a new change forward)"),
                 ("software", "This machine's software"),
                 ("update", "Load the newest TorqOS into the candidate"),
             ]),
             ["system", "update"] => table(&[("all", "Every input, nixpkgs too")]),
+            ["system", "password"] => vec![Choice::new("<user>", "Whose (yours, if none)")],
             ["system", "revert"] => vec![Choice::new("<change>", "The change number (show system ledger)")],
             ["system", "software"] => table(&[("rollback", "Load an earlier configuration's software into the candidate (a downgrade)")]),
             ["system", "software", "rollback"] => vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")],
@@ -617,7 +619,7 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "revert", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["password", "repair", "revert", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["file", "request", "show"], "not configure or exit: already here");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
@@ -685,7 +687,7 @@ mod tests {
     #[test]
     fn requests_for_the_software() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "revert", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["password", "repair", "revert", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["<[Enter]>", "all"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system revert"), "")), ["<change>"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system ledger"), "")), ["<[Enter]>", "<count>", "|"]);

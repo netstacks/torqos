@@ -40,6 +40,14 @@ pub fn with_source(flake: &str, url: &str) -> Result<String> {
 
 /// Whether `url` may be a source: a flake reference of a kind TorqOS can be fetched from, written
 /// with plain URL characters only (it is put inside a Nix string: no quote, backslash or `${`).
+/// Whether `url` is a folder someone can write to (`path:`, outside the read-only store): whoever
+/// can write there decides what the next build installs, so it is for developing TorqOS only (dev
+/// mode). A path in the store cannot change — an image's own TorqOS (docs/INSTALL.md) — and is
+/// any machine's.
+pub fn writable_folder(url: &str) -> bool {
+    url.starts_with("path:") && !(url.starts_with("path:/nix/store/") && !url.contains(".."))
+}
+
 pub fn valid(url: &str) -> Result<()> {
     let plain = !url.is_empty() && url.chars().all(|c| c.is_ascii_alphanumeric() || ":/._~?&=%+@-".contains(c));
     let kinds = ["github:", "gitlab:", "sourcehut:", "git+https://", "https://", "path:/"];
@@ -57,6 +65,12 @@ mod tests {
     use super::*;
 
     const FLAKE: &str = "{\n  inputs = {\n    # The TorqOS distribution.\n    torq.url = \"github:netstacks/torqos\";\n    nixpkgs.follows = \"torq/nixpkgs\";\n  };\n}\n";
+
+    #[test]
+    fn only_a_folder_that_can_change_is_dev_only() {
+        assert!(writable_folder("path:/home/viper/torq") && writable_folder("path:/nix/store/../home/x"));
+        assert!(!writable_folder("path:/nix/store/abc-source") && !writable_folder("github:netstacks/torqos"));
+    }
 
     #[test]
     fn the_source_is_the_one_line() {

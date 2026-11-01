@@ -35,6 +35,9 @@ pub trait Machine {
     fn search(&self, terms: &[String], fit: Option<usize>) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
     fn repair(&self) -> Result<String>;
+    /// `request system password [<user>]`: a person types the new password; it is set and kept
+    /// outside the config repo, ledgered without the hash.
+    fn set_password(&self, user: &str) -> Result<String>;
     /// SSH as the configuration at `base` has it, and as it will with `files` changed — evaluated, so
     /// every way of turning it on counts (the catalog, `services openssh`, its `sshd` alias, …).
     fn ssh(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(Ssh, Ssh)>;
@@ -708,6 +711,8 @@ impl<'a> Session<'a> {
     fn request(&mut self, w: &[String]) -> Result<String> {
         match w.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["system", "repair"] => self.machine.repair(),
+            ["system", "password"] => self.machine.set_password(&self.me),
+            ["system", "password", user] => self.machine.set_password(user),
             ["system", "revert", n] => {
                 let seq: u64 = n.parse().with_context(|| format!("request system revert <change>: '{n}' is not a change number"))?;
                 self.machine.revert(seq, &self.me)
@@ -715,7 +720,7 @@ impl<'a> Session<'a> {
             ["system", "update"] => self.update(false),
             ["system", "update", "all"] => self.update(true),
             ["system", "software", "rollback", n] => self.software_rollback(syntax::number(n)?),
-            _ => bail!("request: one of: system repair, system revert <change>, system update [all], system software rollback <n>"),
+            _ => bail!("request: one of: system password [<user>], system repair, system revert <change>, system update [all], system software rollback <n>"),
         }
     }
 
@@ -936,7 +941,7 @@ impl<'a> Session<'a> {
         let boots = compare.lines().filter_map(section).any(|top| matches!(top.as_str(), "fileSystems" | "boot" | "swapDevices"))
             || files.iter().any(|(p, _)| p == "hardware-configuration.nix");
         // A folder as the source: the approval is of its content as it is now (the lock's hash).
-        if a.data.source.as_deref().is_some_and(|s| s.starts_with("path:")) && files.iter().any(|(p, _)| p == "flake.nix" || p == "flake.lock") {
+        if a.data.source.as_deref().is_some_and(crate::software::writable_folder) && files.iter().any(|(p, _)| p == "flake.nix" || p == "flake.lock") {
             shown.push_str(&format!("{}\n", ui.line("! ", "TorqOS comes from a folder (path:): whoever can write to it decides what the next `request system update` installs.")));
         }
         if boots {
@@ -1522,6 +1527,9 @@ mod tests {
         }
         fn repair(&self) -> Result<String> {
             Ok("repaired\n".into())
+        }
+        fn set_password(&self, user: &str) -> Result<String> {
+            Ok(format!("password of {user}\n"))
         }
         fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String> {
             Ok(format!("ledger {count} fitting {fit:?}\n"))
@@ -2731,6 +2739,15 @@ mod tests {
         // At a level where nothing changes but elsewhere something does: said.
         run(&mut s, &["top set time timeZone UTC"]);
         assert!(s.exec("show | compare").unwrap().contains("nothing changes here; elsewhere it does"));
+    }
+
+    /// `request system password [<user>]`: your own, or another person's (the broker sets it).
+    #[test]
+    fn a_password_is_requested_for_you_or_someone() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("request system password").unwrap(), "password of dev\n");
+        assert_eq!(s.exec("req sys pass alice").unwrap(), "password of alice\n");
     }
 
     #[test]

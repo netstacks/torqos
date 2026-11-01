@@ -19,11 +19,15 @@
     in
     {
       # ── Packages ─────────────────────────────────────────────────────────────
-      packages = forSystems allSystems (pkgs: {
+      packages = lib.recursiveUpdate (forSystems allSystems (pkgs: {
         torq-broker = pkgs.callPackage ./broker/package.nix { };
         torq = pkgs.callPackage ./cli/package.nix { };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
-      });
+      })) (forSystems linuxSystems (pkgs: {
+        # The TorqOS image (docs/INSTALL.md): a qcow2 to download and boot; first-boot setup on its
+        # console. `nix build .#image`.
+        image = self.nixosConfigurations."image-${pkgs.stdenv.hostPlatform.system}".config.system.build.images.qemu-efi;
+      }));
 
       # ── The distribution, as one NixOS module ────────────────────────────────
       nixosModules.default = { pkgs, lib, ... }: {
@@ -51,6 +55,12 @@
         self.lib.mkSystem {
           system = if name == "dev-vm-aarch64" then "aarch64-linux" else "x86_64-linux";
           modules = [ ./hosts/dev-vm ];
+        })
+      # The image's own system, carrying this TorqOS as the source a new machine is built from.
+      // lib.genAttrs (map (s: "image-${s}") linuxSystems) (name:
+        self.lib.mkSystem {
+          system = lib.removePrefix "image-" name;
+          modules = [ ./hosts/image { torq.setup.source = self.sourceInfo; } ];
         });
 
       # ── Template for the per-machine config repo the broker manages ─────────

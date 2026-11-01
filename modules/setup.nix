@@ -45,6 +45,10 @@ in
       { assertion = src != null; message = "torq.setup needs torq.setup.source (the flake sets it)."; }
     ];
 
+    # Nobody can log in to the image, deliberately: setup creates the first account (NixOS would
+    # otherwise refuse a system without one).
+    users.allowNoPasswordLogin = true;
+
     # What setup writes the config repo from: TorqOS's template, the lock above, the image's disk.
     environment.etc = {
       "torq/image/source".source = src.outPath;
@@ -59,7 +63,14 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "systemd-user-sessions.service" ];
       conflicts = [ "getty@tty1.service" ];
-      unitConfig.ConditionPathExists = "!${repo}/flake.nix";
+      # Setup runs the broker, which switches to the new system — where this unit does not exist. A
+      # switch stops units it removes, which would kill setup and the broker mid-switch: this one
+      # finishes instead, and exits by itself.
+      unitConfig = {
+        ConditionPathExists = "!${repo}/flake.nix";
+        X-StopOnRemoval = false;
+      };
+      restartIfChanged = false;
       serviceConfig = {
         Type = "idle";
         ExecStart = "${lib.getExe config.torq.cli.package} setup";

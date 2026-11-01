@@ -75,7 +75,7 @@ impl Real<'_> {
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .and_then(|v| v.pointer("/dev/enable").and_then(serde_json::Value::as_bool))
             == Some(true);
-        if source.as_deref().is_some_and(|s| s.starts_with("path:")) && !dev {
+        if source.as_deref().is_some_and(crate::software::writable_folder) && !dev {
             bail!("not reverted: it would make TorqOS come from a folder (path:) without `torq dev enable true`; root builds from it");
         }
         // Not evaluable: then the broker's build of it fails just the same, and nothing is switched on —
@@ -266,6 +266,44 @@ impl Machine for Real<'_> {
 
     /// Only when the report says a repair can fix what is wrong, and only
     /// with a person's yes — it rebuilds and switches the whole system.
+    fn set_password(&self, user: &str) -> Result<String> {
+        if !std::io::stdin().is_terminal() {
+            bail!("a password is typed at a terminal: `request system password` there");
+        }
+        if !crate::pkg::valid_user(user) {
+            bail!("'{user}' is not a user name");
+        }
+        let typed = |q: &str| -> Result<String> {
+            print!("{q}: ");
+            std::io::stdout().flush()?;
+            let _hidden = Echo::set(false);
+            let mut s = String::new();
+            std::io::stdin().lock().read_line(&mut s)?;
+            println!();
+            Ok(s.trim_end_matches(['\n', '\r']).to_string())
+        };
+        let new = typed(&format!("New password for {user}"))?;
+        if new.chars().count() < 8 {
+            bail!("not changed: at least 8 characters");
+        }
+        if typed("Again")? != new {
+            bail!("not changed: the two differ");
+        }
+        let hash = sha_crypt::sha512_simple(&new, &sha_crypt::Sha512Params::default()).map_err(|e| anyhow::anyhow!("hashing the password: {e:?}"))?;
+        // To the broker as a diff goes: a private file, gone as soon as it is read.
+        let scratch = crate::scratch_dir()?;
+        let file = scratch.path().join("hash");
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?;
+            writeln!(f, "{hash}")?;
+        }
+        let log = run::start_log()?;
+        let file = file.to_string_lossy().into_owned();
+        let v = done(run::broker_json(broker(self.cli, &["password", "--user", user, "--hash-file", &file, "--approved-by", &me()?]), &log)?, "password")?;
+        Ok(format!("password changed for {user} (ledger #{})\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
     fn repair(&self) -> Result<String> {
         // Shown with a question, at the terminal: fitting it.
         let (_, report) = self.status_report(crate::ui::fit(crate::ui::columns(false)))?;
@@ -675,6 +713,10 @@ fn a_command_on_the_command_line() {
     assert!(e.contains("torqcli -c"), "{e}");
 }
 fn run_shell(args: &[String]) -> Result<i32> {
+    // First-boot setup (the image's console, as root): its own program, not a shell.
+    if args == ["setup"] {
+        return crate::setup::run().map(|()| 0);
+    }
     let run = parse_args(args)?;
     // The overrides exist only in a development build (`cargo build`): the released torqcli (the Nix
     // package, a release build) always manages the machine's repo through its broker (second audit, L2).
@@ -827,10 +869,10 @@ fn ask_person(question: &str) -> bool {
 /// The terminal's echo set on or off, and back as it was when this is dropped: off while a command
 /// runs (keys typed meanwhile wait, unseen, for the next line instead of drawing over its output); on
 /// while a person answers a question or pastes for `load … terminal` inside one.
-struct Echo(Option<rustix::termios::Termios>);
+pub(crate) struct Echo(Option<rustix::termios::Termios>);
 
 impl Echo {
-    fn set(on: bool) -> Self {
+    pub(crate) fn set(on: bool) -> Self {
         let stdin = std::io::stdin();
         let was = rustix::termios::tcgetattr(&stdin).ok();
         if let Some(t) = &was {

@@ -36,6 +36,7 @@ struct Cli {
 enum Cmd {
     Init,
     Setup,
+    Password { user: String, hash_file: PathBuf, approved_by: String },
     Propose { diff: PathBuf, reason: String, actor: Actor, tainted: bool, base: Option<String> },
     Show { seq: u64 },
     Apply { seq: u64, approved_by: String, confirm_tainted: bool, confirm: Option<u32> },
@@ -97,6 +98,13 @@ fn command_line() -> clap::Command {
             "Machine-readable output: one JSON value per command (a ledger entry, or the status), and `{\"error\": \"...\"}` on failure. For the `torq` CLI (ADR-014); people get plain text.",
         ).global(true))
         .subcommand(Command::new("init").about("Initialise the config repo and ledger (idempotent)."))
+        .subcommand(
+            Command::new("password")
+                .about("Set a person's password: its hash (SHA-512 or yescrypt crypt) read from a file, set at once and kept outside the config repo; ledgered without the hash.")
+                .arg(Arg::new("user").long("user").required(true))
+                .arg(Arg::new("hash-file").long("hash-file").required(true).value_parser(value_parser!(PathBuf)))
+                .arg(by()),
+        )
         .subcommand(Command::new("setup").about("First-boot setup: take over the config repo just written, build and switch to it, ledger it (once)."))
         .subcommand(
             Command::new("propose")
@@ -154,6 +162,7 @@ fn parse_cli() -> Cli {
     let cmd = match name {
         "init" => Cmd::Init,
         "setup" => Cmd::Setup,
+        "password" => Cmd::Password { user: s(sub, "user").unwrap_or_default(), hash_file: p(sub, "hash-file").unwrap_or_default(), approved_by: by(sub) },
         "propose" => Cmd::Propose {
             diff: p(sub, "diff").unwrap_or_default(),
             reason: s(sub, "reason").unwrap_or_default(),
@@ -271,6 +280,16 @@ fn run(mut cli: Cli) -> Result<()> {
             } else {
                 println!("initialised {} (ledger: {})", s.repo.display(), b.ledger.path().display());
             }
+        }
+        Cmd::Password { user, hash_file, approved_by } => {
+            // (A file, as a diff is passed: the caller's standard input is sudo's, for its own password.)
+            let mut hash = String::new();
+            std::io::Read::read_to_string(&mut std::io::Read::take(std::fs::File::open(&hash_file).context("reading the hash")?, 1024), &mut hash)?;
+            let e = b.set_password(&user, hash.trim_end(), &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
         }
         Cmd::Setup => {
             let e = b.set_up()?;

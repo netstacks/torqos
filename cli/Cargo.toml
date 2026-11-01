@@ -13,4 +13,6 @@ rustix = { version = "1.1.6", features = ["process", "termios"] }
 rustyline = { version = "17", default-features = false, features = ["custom-bindings", "buffer-redux"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# First-boot setup: the owner's password as NixOS reads it (SHA-512 crypt), made here, no outside tool.
+sha-crypt = "0.5"
 tempfile = "3"

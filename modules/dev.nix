@@ -21,7 +21,7 @@ in
     ];
 
     security.sudo.wheelNeedsPassword = false;
-    nix.settings.trusted-users = [ config.torq.user ];
+    nix.settings.trusted-users = lib.optional (config.torq.user != null) config.torq.user;
 
     # (Unfree: allowed by name, through the one rule for it, modules/unfree.nix.)
     torq.unfree.packages = [ "claude-code" ];

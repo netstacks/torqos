@@ -8,6 +8,8 @@
     ./dev.nix
     ./packages.nix
     ./unfree.nix
+    ./setup.nix
+    ./accounts.nix
     ./host.nix
     ./shell.nix
     ./schema.nix

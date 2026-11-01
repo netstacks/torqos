@@ -30,6 +30,7 @@ mod run;
 mod status;
 mod ui;
 mod nixerr;
+mod setup;
 
 use anyhow::{bail, Context, Result};
 
@@ -166,7 +167,7 @@ fn flake_ref(dir: &Path) -> String {
 
 /// A private (0700), unpredictable scratch directory: the broker, as root, reads the diff from it.
 /// In XDG_RUNTIME_DIR (the user's own) if there is one, else /tmp; TMPDIR is not consulted.
-fn scratch_dir() -> Result<tempfile::TempDir> {
+pub(crate) fn scratch_dir() -> Result<tempfile::TempDir> {
     let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
     tempfile::Builder::new().prefix("torq-").tempdir_in(base).context("creating a scratch directory")
 }

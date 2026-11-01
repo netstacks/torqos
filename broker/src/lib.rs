@@ -54,6 +54,10 @@ pub struct Broker {
     /// Restore an anchor system with that system's own commands and PATH
     /// (`<system>/etc/torq/broker.json`), not those the change being undone installed.
     anchor_settings: bool,
+    /// Where each person's password hash lives, outside the config repo (modules/accounts.nix).
+    passwords_dir: PathBuf,
+    /// What sets a password in the running system at once: `user:hash` lines on its input.
+    password_cmd: String,
 }
 
 /// A `commit confirmed` waiting for `confirm`: an `applied` entry with a `confirm` record and no
@@ -398,7 +402,17 @@ impl Broker {
             exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("torq-broker")),
             boot_id_file: PathBuf::from("/proc/sys/kernel/random/boot_id"),
             anchor_settings: false,
+            passwords_dir: PathBuf::from("/var/lib/torq/secrets/passwords"),
+            password_cmd: "chpasswd -e".into(),
         }
+    }
+
+    /// Where password hashes go, and the command that sets one at once (tests: a scratch folder and
+    /// a command that changes nothing).
+    pub fn with_passwords(mut self, dir: impl Into<PathBuf>, cmd: impl Into<String>) -> Self {
+        self.passwords_dir = dir.into();
+        self.password_cmd = cmd.into();
+        self
     }
 
     pub fn with_anchor_settings(mut self, on: bool) -> Self {
@@ -579,11 +593,15 @@ impl Broker {
     }
 
     /// First-boot setup (docs/INSTALL.md): take over the config repo setup has just written, build it,
-    /// switch to it — and only then ledger it, as change #1, with the system it really switched to
-    /// (`init` records the running system as the configuration's, true only where the machine already
-    /// runs it). Once there is a ledger, refused: setup is once. If the build or the switch fails,
-    /// nothing is ledgered and the repo is not taken over (its history is removed, its files left),
-    /// so setup can correct its answers and try again.
+    /// switch to it, and ledger it as change #1 with the system it really switched to (`init` records
+    /// the running system as the configuration's, true only where the machine already runs it). Once
+    /// there is a ledger, refused: setup is once.
+    /// - Built first: a configuration that does not build changes nothing — not taken over (its
+    ///   history removed, its files left), so setup can correct its answers and try again.
+    /// - Then switched to, and ledgered whatever the switch says: a switch makes the new system the
+    ///   boot default before activating it, so from then on the machine starts it, and its history
+    ///   must name it. A switch that reported a problem says so in the entry; `status` shows any
+    ///   difference, and `repair` returns the machine to it.
     pub fn set_up(&self) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
         if !self.ledger.read_all()?.is_empty() {
@@ -594,18 +612,66 @@ impl Broker {
         }
         self.repo.init()?;
         let head = self.repo.head()?;
-        if let Err(e) = self.rebuild(&lock, &head) {
+        if let Err(e) = self.build_system(&lock, &head) {
             let _ = std::fs::remove_dir_all(self.repo.root().join(".git"));
-            return Err(e.context("the new configuration did not build or switch: nothing was set up"));
+            return Err(e.context("the new configuration did not build: nothing was set up"));
         }
+        let switched = self.rebuild(&lock, &head);
+        let reason = if switched.is_ok() { "TorqOS set up" } else { "TorqOS set up (the switch reported a problem: show system alarms)" };
         self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: None,
             kind: "init".into(),
             tier: Tier::System.to_string(),
             tainted: false,
-            reason: "TorqOS set up".into(),
+            reason: reason.into(),
             data: self.with_system(json!({ "commit": head })),
+        })
+    }
+
+    /// `request system password` (SECURITY-MODEL.md, "Accounts and passwords"): a person's new
+    /// password, as a hash, set in the running system at once, then kept in the file their account
+    /// points at — outside the config repo, readable by the system only — so every later build keeps
+    /// it. Ledgered: whose password, changed by whom; never the hash.
+    pub fn set_password(&self, user: &str, hash: &str, by: &str) -> Result<Entry> {
+        let _lock = Lock::acquire(&self.state_dir)?;
+        self.ledger.verify().context("cannot change a password on a broken ledger")?;
+        if !policy::user_name_ok(user) {
+            bail!("'{user}' is not a user name");
+        }
+        let shaped = ["$6$", "$y$", "$2b$"].iter().any(|p| hash.starts_with(p)) && hash.len() < 512 && !hash.contains([':', '\n', '\r']);
+        if !shaped {
+            bail!("not a password hash this machine reads (SHA-512 or yescrypt crypt)");
+        }
+        // At once: the running system's own tool. It fails for an account this machine does not have.
+        let mut words = self.password_cmd.split_whitespace();
+        let mut cmd = config::command(words.next().unwrap_or("chpasswd"));
+        cmd.args(words).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().context("setting the password")?;
+        child.stdin.take().context("setting the password")?.write_all(format!("{user}:{hash}\n").as_bytes())?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            bail!("the password was not set: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        // Kept: written whole (a new file, then renamed over the old), private to the system.
+        {
+            use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.passwords_dir)?;
+            let part = self.passwords_dir.join(format!(".{user}.new"));
+            let _ = std::fs::remove_file(&part);
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?;
+            f.write_all(format!("{hash}\n").as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&part, self.passwords_dir.join(user))?;
+        }
+        self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(by.into()),
+            kind: "password".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: format!("Password changed for {user}"),
+            data: json!({ "user": user }),
         })
     }
 

@@ -73,7 +73,7 @@ pub struct Whole<'a> {
 /// only with `torq dev enable true` (second audit, M3). Checked at `set` and at `commit`.
 pub fn software_allowed(d: &Data) -> Result<()> {
     let dev = d.settings.get("torq").and_then(|t| t.pointer("/dev/enable")).and_then(serde_json::Value::as_bool) == Some(true);
-    if d.source.as_deref().is_some_and(|s| s.starts_with("path:")) && !dev {
+    if d.source.as_deref().is_some_and(software::writable_folder) && !dev {
         bail!("TorqOS from a folder (path:) is for developing TorqOS, with `torq dev enable true`: root builds from it");
     }
     Ok(())

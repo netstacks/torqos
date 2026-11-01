@@ -6,7 +6,8 @@
 {
   networking.hostName = "torq-dev";
   torq.user = "dev";
-  users.users.dev.initialPassword = "torq";
+  # A throwaway VM's fixed password, instead of a password file (modules/accounts.nix).
+  users.users.dev = { initialPassword = "torq"; hashedPasswordFile = lib.mkForce null; };
 
   services.openssh.enable = true;
 
