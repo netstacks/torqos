@@ -192,7 +192,10 @@ pkgs.testers.runNixOSTest {
         assert "## commit " not in machine.succeed(dev_sh("torqcli show configuration")), "no internals unless asked"
         # Every NixOS setting of the system, TorqOS's too, generated with it for torqcli.
         schema = json.loads(machine.succeed("cat /etc/torq/nixos-schema.json"))
-        locs = {".".join(s["loc"]): s["type"] for s in schema["settings"]}
+        # (Settings have a type; a section that takes any key of its own says what each key takes.)
+        locs = {".".join(s["loc"]): s["type"] for s in schema["settings"] if "type" in s}
+        free = {".".join(s["loc"]) for s in schema["settings"] if "free" in s}
+        assert "services.openssh.settings" in free, sorted(free)[:5]
         assert locs["virtualisation.docker.enable"] == {"name": "bool"}, locs.get("virtualisation.docker.enable")
         assert "torq.dev.enable" in locs and "services.httpd.virtualHosts.<name>.forceSSL" in locs
         assert len(locs) > 10000, len(locs)
