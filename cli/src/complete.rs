@@ -76,9 +76,8 @@ pub fn choices_at(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Cho
     let is_filter = |w: &String| crate::filter::FILTERS.iter().any(|(f, _)| f == w);
     if partial.is_empty() && !words.last().is_some_and(is_filter) {
         if let Ok((op, _)) = crate::syntax::parse_line(at.mode, words) {
-            let piped = words.iter().any(|w| w == "|");
-            if (piped || crate::grammar::filtered(at.mode, words)) && !all.iter().any(|c| c.word == "|") {
-                all.push(Choice::new("|", "Pipe the output (display, grep, wc, …)"));
+            if let Some(help) = crate::grammar::pipe_help(at.mode, words).filter(|_| !all.iter().any(|c| c.word == "|")) {
+                all.push(Choice::new("|", &help));
             }
             if complete(k, at, &op) {
                 all.insert(0, Choice::new(ENTER.0, ENTER.1));
@@ -115,7 +114,23 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
                 if verb == "edit" {
                     c.retain(|x| x.word != "|");
                 }
-                let packages = takes_packages(k, &path);
+                // `delete` at a setting: a list's values the configuration has; one value, nothing.
+                if verb == "delete" {
+                    if let Some(r) = k.tree.resolve(&path).ok().filter(|r| r.values.is_empty()) {
+                        let whole = crate::whole::Whole { schema: k.schema, tree: k.tree };
+                        c = whole
+                            .entries(&at.data)
+                            .into_iter()
+                            .filter(|(w, _)| *w == r.loc && r.ty.name == "listOf")
+                            .flat_map(|(_, v)| match v {
+                                crate::tree::Val::Many(items) => items,
+                                crate::tree::Val::One(x) => vec![x],
+                            })
+                            .map(|x| Choice::new(&x, "In the configuration"))
+                            .collect();
+                    }
+                }
+                let packages = verb != "delete" && takes_packages(k, &path);
                 // Where an entry is named: the ones the configuration has, first.
                 // (A list's entries by number: those it has, and the next, which adds one.)
                 let numbered = c.iter().any(|x| x.word == "<n>");
@@ -230,9 +245,7 @@ fn tree_choices(k: &Know, rest: &[String], cmd: &str) -> Vec<Choice> {
         })
         .map(|(w, h)| Choice::new(&w, &h))
         .collect();
-    if cmd == "show" {
-        c.push(Choice::new("|", "Pipe the output (compare, display set, grep, wc, …)"));
-    }
+    // (A `|` is the grammar's to offer, with the pipes this command has: choices_at.)
     if at_place && cmd != "show" && !c.iter().any(|x| x.word == "config" || x.is_placeholder()) {
         c.push(Choice::new("config", "Attach a NixOS file here, for what is not a value"));
         c.sort_by(|a, b| a.word.cmp(&b.word));
@@ -249,11 +262,7 @@ fn hand_tree_choices(schema: &Schema, rest: &[String], cmd: &str) -> Vec<Choice>
     let node = (!t.node.is_empty()).then(|| &schema.nodes[&t.node]);
     match node.map(|n| n.kind) {
         None | Some(Kind::Container) => {
-            let mut c: Vec<Choice> = schema.children(&t.node).into_iter().map(|(w, k)| Choice::new(&w, &schema.nodes[&k].help)).collect();
-            if cmd == "show" {
-                c.push(Choice::new("|", "Pipe the output (compare, display set, grep, wc, …)"));
-            }
-            c
+            schema.children(&t.node).into_iter().map(|(w, k)| Choice::new(&w, &schema.nodes[&k].help)).collect()
         }
         Some(Kind::List) => {
             let n = node.unwrap();
@@ -681,6 +690,36 @@ mod tests {
         let e = format!("{:#}", whole.set(&mut crate::whole::Data::default(), &w("system packages btopp")).unwrap_err());
         assert_eq!(e, "'btopp' is not a package in this machine's nixpkgs; did you mean btop? (`show packages <word>` searches them)");
         assert!(whole.set(&mut crate::whole::Data::default(), &w("system packages python3Packages.rich")).is_ok(), "in a set nixpkgs has");
+    }
+
+    /// `?` offers only what the line takes: a `|` says the pipes this command has; `up` is not offered
+    /// after `top`; after `run`, a configuration-mode word is not "for configuration mode".
+    #[test]
+    fn question_mark_offers_only_what_the_line_takes() {
+        let s = schema();
+        let help = |mode, line: &str| choices(&s, mode, &w(line), "").into_iter().find(|c| c.word == "|").map(|c| c.help);
+        assert_eq!(help(Mode::Operational, "show version").as_deref(), Some("Pipe the output (cut, grep, head, …)"), "no display for it");
+        assert_eq!(help(Mode::Operational, "show configuration").as_deref(), Some("Pipe the output (display, cut, grep, …)"));
+        assert_eq!(help(Mode::Configuration, "show").as_deref(), Some("Pipe the output (compare, display, cut, …)"));
+        assert!(!words_of(&choices(&s, Mode::Configuration, &w("top"), "")).contains(&"up"));
+        let e = format!("{:#}", crate::syntax::parse_line(Mode::Configuration, &w("run run show version")).unwrap_err());
+        assert!(e.starts_with("'run' is not a word here (after `run`)") && e.contains("one of: file, help"), "{e}");
+    }
+
+    /// `delete` at a setting: a list's values the configuration has; a setting of one value, nothing
+    /// to add (`delete` takes it whole).
+    #[test]
+    fn delete_offers_what_there_is_to_delete() {
+        let s = schema();
+        let mut data = crate::whole::Data::default();
+        let whole = crate::whole::Whole { schema: s.schema, tree: s.tree };
+        whole.set(&mut data, &w("environment systemPackages [ htop jq ]")).unwrap();
+        whole.set(&mut data, &w("networking hostName box")).unwrap();
+        let at = At { mode: Mode::Configuration, edit: vec![], data, configurations: Later::new(Vec::new), files: vec![] };
+        assert_eq!(words_of(&choices_at(&s, &at, &w("delete environment systemPackages"), "")), ["<[Enter]>", "htop", "jq"]);
+        assert_eq!(words_of(&choices_at(&s, &at, &w("delete networking hostName"), "")), ["<[Enter]>"]);
+        let e = format!("{:#}", whole.delete(&mut at.data.clone(), &w("networking hostName extra")).unwrap_err());
+        assert!(e.starts_with("networking hostName"), "named as typed: {e}");
     }
 
     /// A configuration number: `?` lists the configurations themselves, newest first; a Nix file of the

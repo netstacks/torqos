@@ -290,7 +290,7 @@ impl Schema {
         match n.kind {
             Kind::Leaf => {
                 if !t.values.is_empty() {
-                    bail!("delete {}: takes no value", t.words.join(" "));
+                    bail!("{}: takes no value here (delete removes it whole)", t.words.join(" "));
                 }
                 let file = self.file_of(&t.node, t.name.as_deref()).context("schema: a leaf without a file")?;
                 let key = n.key.as_deref().context("schema: a leaf without a key")?;

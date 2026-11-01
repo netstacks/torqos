@@ -341,7 +341,7 @@ impl Whole<'_> {
         };
         if values {
             let r = match &hand {
-                Some(h) => self.schema.delete(&mut d.config, h),
+                Some(h) => self.schema.delete(&mut d.config, h).map_err(|e| as_typed(e, words, h)),
                 None => settings::delete(self.tree, &mut d.settings, words),
             };
             return match r {
@@ -359,7 +359,7 @@ impl Whole<'_> {
             // By its NixOS path, by an old place (`users dev`), or by an old name for this one setting
             // (`system packages`: the whole list).
             if nixos.starts_with(words) || old_place.is_some() && h.starts_with(words) || hand.as_ref().is_some_and(|hp| h.starts_with(hp)) {
-                self.schema.delete(&mut d.config, &h)?;
+                self.schema.delete(&mut d.config, &h).map_err(|e| as_typed(e, words, &h))?;
                 gone += 1;
             }
         }

@@ -402,7 +402,7 @@ mod tests {
     fn filters_follow_every_show() {
         let filters = vec![f("grep", "-Ei \"host|name\""), f("sort", "-r"), f("wc", "-l")];
         let mut n = 0;
-        for (mode, op) in ops().into_iter().filter(|(mode, op)| crate::grammar::filtered(*mode, &w(&render(op)))) {
+        for (mode, op) in ops().into_iter().filter(|(mode, op)| crate::grammar::pipe_help(*mode, &w(&render(op))).is_some()) {
             let line = format!("{} | grep -Ei \"host|name\" | sort -r | wc -l", render(&op));
             assert_eq!(pl(mode, &line).unwrap_or_else(|e| panic!("{line}: {e:#}")), (op.clone(), filters.clone()), "{line}");
             n += 1;

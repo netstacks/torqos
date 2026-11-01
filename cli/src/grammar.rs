@@ -226,7 +226,7 @@ static ROOTS: &[Node] = &[
     fixed("show", "Show information about the machine", In::Op).then(SHOW),
     fixed("show", "Show the candidate configuration, or what it changes (show | compare)", In::Cf).whole(show_candidate).pipes(Pipes::Candidate).then(&[node(Word::Path, "A part of it", In::Cf).whole(show_candidate).pipes(Pipes::Candidate)]),
     fixed("top", "Back to the top, or run a command from there", In::Cf).whole(|_| Ok(Op::Top { then: None })).then(&[node(Word::Command(Mode::Configuration), "A command, as from the top", In::Cf).whole(|r| Ok(Op::Top { then: Some(Box::new(sub(r)?)) }))]),
-    fixed("up", "Up one level, or <n> levels", In::Cf).whole(up).then(&[value(Value::Levels, "How many levels up").whole(up)]),
+    fixed("up", "Up one level, or <n> levels", In::Cf).top_only().whole(up).then(&[value(Value::Levels, "How many levels up").whole(up)]),
 ];
 
 static SHOW: &[Node] = &[
@@ -554,7 +554,8 @@ fn step(walked: &mut Walked, w: &String) -> Result<(), Stop> {
         Here::Start { top, .. } => Here::Start { mode: other, top },
         Here::After(n, _) => Here::After(n, other),
     };
-    let elsewhere = there.next(&walked.read).iter().any(|n| name(n) == w);
+    // (Only where a line starts: after `run`, the command is the operational one `run` takes.)
+    let elsewhere = walked.outer.is_empty() && there.next(&walked.read).iter().any(|n| name(n) == w);
     let said = if begins.len() > 1 {
         let many: Vec<&str> = begins.iter().map(|n| name(n)).collect();
         format!("'{w}' is ambiguous{}: {}", after_text(&after), many.join(", "))
@@ -742,9 +743,14 @@ pub fn offers(walked: &Walked) -> Vec<Offer> {
     out
 }
 
-/// Whether a line's output may be piped (it is a whole command that prints something).
-pub fn filtered(mode: Mode, words: &[String]) -> bool {
-    walk(mode, words).ok().and_then(|w| w.node()).is_some_and(|n| n.whole.is_some() && n.pipes != Pipes::None)
+/// What `|` after a line offers, as its help says it — the line's own pipes and the filters it may
+/// still take (`show version`: cut, grep, …; `show configuration`: display, cut, …); None where the
+/// line's output may not be piped.
+pub fn pipe_help(mode: Mode, words: &[String]) -> Option<String> {
+    let line: Vec<String> = words.iter().cloned().chain(std::iter::once("|".to_string())).collect();
+    let next = pipe_next(mode, &line);
+    let first: Vec<&str> = next.iter().take(3).map(|(w, _)| w.as_str()).collect();
+    (!first.is_empty()).then(|| format!("Pipe the output ({}, …)", first.join(", ")))
 }
 
 /// What may come after the last `|` of a line, and its help: the command's own pipes, then the
