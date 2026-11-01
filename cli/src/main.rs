@@ -10,6 +10,7 @@
 #![cfg_attr(not(test), forbid(dead_code))]
 #![cfg_attr(test, deny(dead_code))]
 
+mod facts;
 mod grammar;
 mod history;
 mod tree;

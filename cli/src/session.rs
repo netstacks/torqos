@@ -48,6 +48,8 @@ pub trait Machine {
     fn ssh_keys(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)>;
     /// `show system ledger <count>`: the ledger's last entries, as a person reads them.
     fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String>;
+    /// The running machine: its versions, uptime, interfaces and disks (facts.rs).
+    fn facts(&self) -> Result<crate::facts::Facts>;
     /// `request system revert <change>`: undo that one change (a new change forward), asked as a
     /// commit is (`me`: who is asking; their own folder needs no question).
     fn revert(&self, seq: u64, me: &str) -> Result<String>;
@@ -329,7 +331,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces | Op::ShowStorage => {
                 self.show_operational(op)
             }
             Op::Request(r) => self.request(r),
@@ -501,27 +503,19 @@ impl<'a> Session<'a> {
     /// runs (`lock`: the candidate's, if it changes it) and the files outside the tree that also set
     /// things (Nix). So `show configuration` names everything that makes the device, and stays a
     /// file `load` reads (`#` lines are comments).
+    /// The software the configuration at `rev` runs, as its lock names it.
+    fn software(&self, rev: &str) -> Result<Option<String>> {
+        Ok(self.repo.file_at(rev, "flake.lock")?.and_then(|b| software_of(&String::from_utf8_lossy(&b))))
+    }
+
     fn footer(&self, rev: &str, lock: Option<&str>) -> Result<String> {
         let mut out = String::new();
         let lock = match lock {
             Some(l) => Some(l.to_string()),
             None => self.repo.file_at(rev, "flake.lock")?.map(|b| String::from_utf8_lossy(&b).into_owned()),
         };
-        if let Some(lock) = lock {
-            let v: serde_json::Value = serde_json::from_str(&lock).unwrap_or_default();
-            // The machine's own inputs (what it follows from them is theirs).
-            let direct: Vec<String> = v["nodes"]["root"]["inputs"]
-                .as_object()
-                .map(|o| o.iter().filter_map(|(_, n)| n.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let shown: Vec<String> = crate::pkg::lock_moves("", &lock)
-                .iter()
-                .filter(|m| direct.contains(&m.name))
-                .map(|m| format!("{} {}", crate::history::one_line(&m.name, 30), crate::pkg::move_dates(m).1))
-                .collect();
-            if !shown.is_empty() {
-                out.push_str(&format!("## software: {}\n", shown.join(", ")));
-            }
+        if let Some(shown) = lock.as_deref().and_then(software_of) {
+            out.push_str(&format!("## software: {shown}\n"));
         }
         // A config file attached in the tree is part of the configuration (shown as `<place> config <file>`).
         let attached = self.configuration_of(rev)?.attached;
@@ -672,6 +666,21 @@ impl<'a> Session<'a> {
                 Ok(out)
             }
             Op::ShowPackages { terms } => self.machine.search(&terms, self.fit),
+            Op::ShowVersion => {
+                let head = self.repo.head()?;
+                let software = self.software(&head)?.unwrap_or_else(|| "(its flake.lock names no inputs)".into());
+                Ok(crate::facts::version(&self.machine.facts()?, &software))
+            }
+            Op::ShowUptime => {
+                let all = self.machine.configurations(&self.repo, 1)?.configurations;
+                let last = all.first().map(|c| {
+                    let n = c.seq.map(|s| format!("#{s}, ")).unwrap_or_default();
+                    format!("{n}{}, by {}: {}", c.date, c.who, crate::history::one_line(&c.what, usize::MAX))
+                });
+                Ok(crate::facts::uptime(&self.machine.facts()?, last.as_deref(), &self.ui()))
+            }
+            Op::ShowInterfaces => Ok(crate::facts::interfaces(&self.machine.facts()?)),
+            Op::ShowStorage => Ok(crate::facts::storage(&self.machine.facts()?, &self.ui())),
             Op::ShowLedger { count } => self.machine.ledger(count.unwrap_or(20), self.fit),
             other => bail!("not an operational show: {other:?}"),
         }
@@ -1573,6 +1582,20 @@ pub fn ssh_turned_on(owner: &str, keys: &[String], passwords: bool, verb: &str, 
     Ok(out)
 }
 
+/// The software a configuration's lock names: its own inputs, each with when it is from
+/// (`torq 2026-11-01, nixpkgs 2026-10-29`); None if it names none.
+fn software_of(lock: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(lock).unwrap_or_default();
+    // The machine's own inputs (what it follows from them is theirs).
+    let direct: Vec<String> = v["nodes"]["root"]["inputs"].as_object().map(|o| o.iter().filter_map(|(_, n)| n.as_str().map(String::from)).collect()).unwrap_or_default();
+    let shown: Vec<String> = crate::pkg::lock_moves("", lock)
+        .iter()
+        .filter(|m| direct.contains(&m.name))
+        .map(|m| format!("{} {}", crate::history::one_line(&m.name, 30), crate::pkg::move_dates(m).1))
+        .collect();
+    (!shown.is_empty()).then(|| shown.join(", "))
+}
+
 /// "1 change", "3 changes".
 fn changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
@@ -1693,6 +1716,9 @@ mod tests {
         }
         fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String> {
             Ok(format!("ledger {count} fitting {fit:?}\n"))
+        }
+        fn facts(&self) -> Result<crate::facts::Facts> {
+            Ok(crate::facts::Facts { nixos: "26.05".into(), kernel: "6.18".into(), uptime: 60, generations: 2, ..Default::default() })
         }
         /// As the evaluator would: `services openssh|sshd enable true` in the changed files, or the old
         /// list's `ssh`; passwords only where PasswordAuthentication is true (modules/services.nix: keys

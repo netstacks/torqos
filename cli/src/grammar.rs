@@ -227,9 +227,11 @@ static ROOTS: &[Node] = &[
 
 static SHOW: &[Node] = &[
     fixed("configuration", "The configuration in effect", In::Op).whole(show_active).pipes(Pipes::Views(CONFIGURATION_VIEWS)).then(&[node(Word::Path, "A part of it", In::Op).whole(show_active).pipes(Pipes::Views(CONFIGURATION_VIEWS))]),
+    fixed("interfaces", "The network interfaces, their state and addresses", In::Op).whole(|_| Ok(Op::ShowInterfaces)).pipes(Pipes::Filters),
     fixed("packages", "Search the software you can install", In::Op).then(&[node(Word::Terms, "Words to search for, in names and descriptions", In::Op).whole(|r| Ok(Op::ShowPackages { terms: r.terms.clone() })).pipes(Pipes::Filters)]),
     fixed("services", "The services the configuration turns on", In::Op).whole(|_| Ok(Op::ShowServices)).pipes(Pipes::Filters),
     fixed("system", "This machine", In::Op).then(SHOW_SYSTEM),
+    fixed("version", "What this machine runs: TorqOS, NixOS, Linux", In::Op).whole(|_| Ok(Op::ShowVersion)).pipes(Pipes::Filters),
 ];
 
 static SHOW_SYSTEM: &[Node] = &[
@@ -237,6 +239,8 @@ static SHOW_SYSTEM: &[Node] = &[
     fixed("commit", "The configurations so far, newest first", In::Op).whole(|r| Ok(Op::ShowCommits { display: r.display })).pipes(Pipes::Views(DETAIL)),
     fixed("ledger", "Every change, as the ledger has it (refused and failed ones too)", In::Op).whole(ledger).pipes(Pipes::Filters).then(&[value(Value::Count, "How many entries (20)").whole(ledger).pipes(Pipes::Filters)]),
     fixed("rollback", "An earlier configuration, or how two differ", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(show_rollback).pipes(Pipes::Views(CONFIGURATION_VIEWS)).then(&[fixed("compare", "How it differs from another one", In::Op).then(&[value(Value::Rollback, "The configuration to compare with").whole(show_rollback).pipes(Pipes::Views(COMPARISON))])])]),
+    fixed("storage", "The disks: size and use, and the system versions kept", In::Op).whole(|_| Ok(Op::ShowStorage)).pipes(Pipes::Filters),
+    fixed("uptime", "How long the machine has run, its load, and its last change", In::Op).whole(|_| Ok(Op::ShowUptime)).pipes(Pipes::Filters),
 ];
 
 static REQUEST_SYSTEM: &[Node] = &[

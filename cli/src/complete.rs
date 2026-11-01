@@ -379,8 +379,8 @@ mod tests {
     fn commands_of_each_mode() {
         let s = schema();
         assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "exit", "file", "help", "quit", "request", "show"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "packages", "services", "system"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "interfaces", "packages", "services", "system", "version"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback", "storage", "uptime"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["password", "repair", "revert", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show"]);
@@ -553,7 +553,7 @@ mod tests {
         assert!(e.contains("'foo' is not a word here (after `show system`)") && e.contains("alarms, commit, ledger, rollback"), "{e}");
         assert!(x(o, "show configuraton").unwrap_err().contains("did you mean configuration?"));
         // A line that is not whole says what may follow, what value it needs, or that nothing may.
-        assert_eq!(x(o, "show system").unwrap_err(), "not a whole command: one of these may follow: alarms, commit, ledger, rollback");
+        assert_eq!(x(o, "show system").unwrap_err(), "not a whole command: one of these may follow: alarms, commit, ledger, rollback, storage, uptime");
         assert_eq!(x(o, "request system revert").unwrap_err(), "needs <change> (the change's number, from show system ledger)");
         assert_eq!(x(o, "show system alarms extra").unwrap_err(), "'extra' is not a word here: nothing may follow `show system alarms`");
         assert_eq!(x(o, "show system rollback x").unwrap_err(), "'x' is not a number (configuration numbers: 0, 1, …)");

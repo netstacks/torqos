@@ -57,6 +57,11 @@ pub enum Op {
     /// `show system ledger [<count>]`: the ledger itself — every change, refused and failed ones too.
     ShowLedger { count: Option<usize> },
     ShowPackages { terms: Vec<String> },
+    /// `show version`, `show system uptime`, `show interfaces`, `show system storage`: the machine.
+    ShowVersion,
+    ShowUptime,
+    ShowInterfaces,
+    ShowStorage,
     Request(Request),
     /// `file show|edit|delete <path>`, `file list`: the config repo's config files (in configuration
     /// mode, the candidate's; in operational mode, the active ones; `edit` and `delete` only there).
@@ -200,6 +205,10 @@ pub fn render(op: &Op) -> String {
         Op::ShowLedger { count: None } => "show system ledger".into(),
         Op::ShowLedger { count: Some(n) } => format!("show system ledger {n}"),
         Op::ShowPackages { terms } => sep("show packages", terms),
+        Op::ShowVersion => "show version".into(),
+        Op::ShowUptime => "show system uptime".into(),
+        Op::ShowInterfaces => "show interfaces".into(),
+        Op::ShowStorage => "show system storage".into(),
         Op::Request(r) => match r {
             Request::Repair => "request system repair".into(),
             Request::Password { user: None } => "request system password".into(),
@@ -277,6 +286,10 @@ mod tests {
             (Mode::Operational, Op::ShowAlarms { display: None }),
             (Mode::Operational, Op::ShowAlarms { display: detail }),
             (Mode::Operational, Op::ShowServices),
+            (Mode::Operational, Op::ShowVersion),
+            (Mode::Operational, Op::ShowUptime),
+            (Mode::Operational, Op::ShowInterfaces),
+            (Mode::Operational, Op::ShowStorage),
             (Mode::Operational, Op::ShowLedger { count: None }),
             (Mode::Operational, Op::ShowLedger { count: Some(5) }),
             (Mode::Operational, Op::ShowPackages { terms: v("rip grep") }),
@@ -356,7 +369,7 @@ mod tests {
             (Mode::Configuration, "top exit", "'exit' is not a word here (after `top`)"),
             (Mode::Operational, "exit now", "'now' is not a word here: nothing may follow `exit`"),
             (Mode::Operational, "show packages", "needs <word> (words to search for, in names and descriptions)"),
-            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, commit, ledger, rollback"),
+            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, commit, ledger, rollback, storage, uptime"),
             (Mode::Operational, "request system revert x", "'x' is not a number (change numbers: 1, 2, …)"),
             (Mode::Configuration, "up 0", "'0' is out of range: levels go from 1 to 10000"),
             (Mode::Configuration, "commit check comment x", "'comment' is not a word here: nothing may follow `commit check`"),

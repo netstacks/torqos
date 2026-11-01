@@ -357,6 +357,43 @@ impl Machine for Real<'_> {
         Ok(history::render(&entries, count, &crate::ui::Ui::plain_at(fit), &history::Clock::system()))
     }
 
+    /// The running machine, from the kernel (/proc, /sys), `ip -j addr`, `df`, and its system profiles.
+    fn facts(&self) -> Result<crate::facts::Facts> {
+        let read = |p: &str| fs::read_to_string(p).map(|s| s.trim().to_string()).with_context(|| format!("reading {p}"));
+        let uptime = read("/proc/uptime")?.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) as u64;
+        let loads: Vec<f64> = read("/proc/loadavg")?.split_whitespace().take(3).filter_map(|s| s.parse().ok()).collect();
+        let load = [loads.first().copied().unwrap_or(0.0), loads.get(1).copied().unwrap_or(0.0), loads.get(2).copied().unwrap_or(0.0)];
+        // Interfaces, as iproute2 reports them (its JSON, not its text).
+        let ip = std::process::Command::new("/run/current-system/sw/bin/ip").args(["-j", "addr"]).output().context("running ip")?;
+        let list: serde_json::Value = serde_json::from_slice(&ip.stdout).context("reading ip's answer")?;
+        let interfaces = list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|i| crate::facts::Interface {
+                name: i["ifname"].as_str().unwrap_or_default().to_string(),
+                state: i["operstate"].as_str().unwrap_or("unknown").to_lowercase(),
+                mac: i["address"].as_str().unwrap_or_default().to_string(),
+                addresses: i["addr_info"].as_array().into_iter().flatten().filter_map(|a| Some(format!("{}/{}", a["local"].as_str()?, a["prefixlen"].as_u64()?))).collect(),
+            })
+            .collect();
+        // Disks, not the kernel's own filesystems in memory.
+        let df = std::process::Command::new("/run/current-system/sw/bin/df")
+            .args(["-P", "-B1", "-x", "tmpfs", "-x", "devtmpfs", "-x", "efivarfs", "-x", "overlay", "-x", "ramfs"])
+            .output()
+            .context("running df")?;
+        let filesystems = String::from_utf8_lossy(&df.stdout)
+            .lines()
+            .skip(1)
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                Some(crate::facts::Filesystem { device: f.first()?.to_string(), size: f.get(1)?.parse().ok()?, used: f.get(2)?.parse().ok()?, free: f.get(3)?.parse().ok()?, mount: f.get(5)?.to_string() })
+            })
+            .collect();
+        let generations = fs::read_dir("/nix/var/nix/profiles").map(|d| d.filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with("system-") && e.file_name().to_string_lossy().ends_with("-link")).count()).unwrap_or(0);
+        Ok(crate::facts::Facts { nixos: read("/run/current-system/nixos-version")?, kernel: read("/proc/sys/kernel/osrelease")?, uptime, load, interfaces, filesystems, generations })
+    }
+
     /// As `torq undo` did, with a commit's rule for asking: a change only to your own folder goes
     /// ahead; anything else (the system, someone else's folder) needs a person at a terminal.
     fn revert(&self, seq: u64, me: &str) -> Result<String> {
