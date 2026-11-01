@@ -70,9 +70,30 @@ const ENTER: (&str, &str) = ("<[Enter]>", "Execute this command");
 /// What may follow `words` at `at`: the next words, `|` after a whole `show`, and `<[Enter]>` when
 /// the line could run as it is.
 pub fn choices_at(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
+    let mut all = next(k, at, words, partial);
+    // (After a filter's own name, its options are its own: `| grep ?` lists nothing.)
+    let is_filter = |w: &String| crate::filter::FILTERS.iter().any(|(f, _)| f == w);
+    if partial.is_empty() && !words.last().is_some_and(is_filter) {
+        if let Ok((op, _)) = crate::syntax::parse_line(at.mode, words) {
+            if crate::syntax::shows(&op) && !all.iter().any(|c| c.word == "|") {
+                all.push(Choice::new("|", "Pipe the output (display, grep, wc, …)"));
+            }
+            if complete(k, at, &op) {
+                all.insert(0, Choice::new(ENTER.0, ENTER.1));
+            }
+        }
+    }
+    all.into_iter().filter(|c| c.is_placeholder() || c.word.starts_with(partial)).collect()
+}
+
+/// The words of the command language that may follow `words` at `at` — the grammar `?` lists, and
+/// that `expand` reads lines against: fixed words, and `<placeholders>` where a value stands.
+fn next(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
     let here = |rest: &[String]| -> Vec<String> { at.edit.iter().chain(rest).cloned().collect() };
     let first = words.first().map(String::as_str);
     let all = match (at.mode, first) {
+        // `top <command>`: the command, as from the top.
+        (Mode::Configuration, Some("top")) => return next(k, &At { edit: vec![], ..at.clone() }, &words[1..], partial),
         (Mode::Configuration, Some(cmd @ ("set" | "delete" | "show" | "edit"))) => {
             let rest = &words[1..];
             if let Some(p) = pipe_choices(cmd, rest) {
@@ -87,21 +108,81 @@ pub fn choices_at(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Cho
         }
         _ => choices_j(k, at, words, partial),
     };
-    let mut all = with_filters(words, all);
-    // (`run …`: the operational choices it lists already have them. After a filter's own name, its
-    // options are its own: `| grep ?` lists nothing.)
-    let is_filter = |w: &String| crate::filter::FILTERS.iter().any(|(f, _)| f == w);
-    if partial.is_empty() && !words.last().is_some_and(is_filter) {
-        if let Some((op, _)) = crate::syntax::parse_line(at.mode, words).ok().filter(|(op, _)| !matches!(op, crate::syntax::Op::Run(_))) {
-            if crate::syntax::shows(&op) && !all.iter().any(|c| c.word == "|") {
-                all.push(Choice::new("|", "Pipe the output through another (display, grep, wc, …)"));
-            }
-            if complete(k, at, &op) {
-                all.insert(0, Choice::new(ENTER.0, ENTER.1));
-            }
+    with_filters(words, all)
+}
+
+/// Words the grammar offers, for an error: the first dozen, then `…`.
+fn listed(fixed: &[&str]) -> String {
+    let shown: Vec<&str> = fixed.iter().copied().take(12).collect();
+    format!("{}{}", shown.join(", "), if fixed.len() > shown.len() { ", …" } else { "" })
+}
+
+/// When a line is not a whole command but the grammar knows what may follow it, what to say: what
+/// may come next. Only for a line of command words alone (`show system`): where a word stands for a
+/// value (`show system rollback x`), what is wrong is the value, and the command's own error says so.
+pub fn incomplete(k: &Know, at: &At, words: &[String]) -> Option<String> {
+    for i in 0..words.len() {
+        let c = next(k, at, &words[..i], "");
+        if c.iter().any(Choice::is_placeholder) || !c.iter().any(|x| x.word == words[i]) {
+            return None;
         }
     }
-    all.into_iter().filter(|c| c.is_placeholder() || c.word.starts_with(partial)).collect()
+    let c = next(k, at, words, "");
+    let fixed: Vec<&str> = c.iter().filter(|x| !x.is_placeholder() && x.word != "|").map(|x| x.word.as_str()).collect();
+    (!words.is_empty() && !fixed.is_empty() && !c.iter().any(Choice::is_placeholder)).then(|| format!("`{}` is not a whole command: one of these may follow: {}", words.join(" "), listed(&fixed)))
+}
+
+/// Whether the next word is part of a configuration path (`set networking …`, `show configuration
+/// networking …`, before any `|`): paths have old names and entries people name, so they are read
+/// by the configuration's own check (with its hints), never against the grammar.
+fn in_path(mode: Mode, words: &[String]) -> bool {
+    if words.iter().any(|w| w == "|") {
+        return false;
+    }
+    match (mode, words.first().map(String::as_str)) {
+        (Mode::Configuration, Some("top")) => in_path(mode, &words[1..]),
+        (Mode::Configuration, Some("run")) => in_path(Mode::Operational, &words[1..]),
+        (Mode::Configuration, Some("set" | "delete" | "edit" | "show")) => true,
+        (Mode::Operational, Some("show")) => words.get(1).is_some_and(|w| w == "configuration"),
+        _ => false,
+    }
+}
+
+/// A line's words read against the grammar (`next`), as on a network device: a word of the command
+/// language that begins exactly one of the words that may stand there is that word (`sh conf | gr
+/// host` is `show configuration | grep host`); one that begins several, or none, is refused, naming
+/// it and what may stand there. Where a value may stand (a `<placeholder>`), the grammar says
+/// nothing (after a value, a filter's own options), or a configuration path goes on (`in_path`),
+/// words are taken as they are.
+pub fn expand(k: &Know, at: &At, words: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for w in words {
+        // (`|` may follow any whole `show`: the parser judges it; what follows it is read again.)
+        if w == "|" || in_path(at.mode, &out) {
+            out.push(w.clone());
+            continue;
+        }
+        let c = next(k, at, &out, "");
+        let open = c.is_empty() || c.iter().any(Choice::is_placeholder);
+        let fixed: Vec<&str> = c.iter().filter(|x| !x.is_placeholder()).map(|x| x.word.as_str()).collect();
+        if open || fixed.contains(&w.as_str()) {
+            out.push(w.clone());
+            continue;
+        }
+        let after = if out.is_empty() { String::new() } else { format!(" (after `{}`)", out.join(" ")) };
+        let begins: Vec<&str> = fixed.iter().copied().filter(|f| f.starts_with(w.as_str())).collect();
+        match begins.as_slice() {
+            [one] => out.push(one.to_string()),
+            [] => {
+                // (Near enough to mean something: at most 2 edits, and fewer than the word has letters.)
+                let near = fixed.iter().copied().filter(|f| { let d = crate::nixos::distance(f, w); d <= 2 && d < w.chars().count() }).min_by_key(|f| crate::nixos::distance(f, w));
+                let hint = near.map(|n| format!(": did you mean {n}?")).unwrap_or_default();
+                anyhow::bail!("'{w}' is not a word here{after}{hint} (one of: {})", listed(&fixed));
+            }
+            many => anyhow::bail!("'{w}' is ambiguous{after}: {}", many.join(", ")),
+        }
+    }
+    Ok(out)
 }
 
 /// Whether `op` would run as it is, decided as the session decides it: `set`, `delete` and `show`
@@ -115,7 +196,8 @@ fn complete(k: &Know, at: &At, op: &crate::syntax::Op) -> bool {
         Op::Set { words } => whole.set(&mut at.data.clone(), &here(words)).is_ok(),
         Op::Delete { words } => !words.is_empty() && whole.delete(&mut at.data.clone(), &here(words)).is_ok(),
         Op::Edit { words } => !words.is_empty() && whole.is_place(&here(words)),
-        Op::Up => !at.edit.is_empty(),
+        Op::Up { .. } => !at.edit.is_empty(),
+        Op::Top { then: Some(op) } => complete(k, &At { edit: vec![], ..at.clone() }, op),
         Op::ShowCandidate { path, .. } => whole.show(&at.data, &here(path)).is_ok(),
         Op::ShowActive { path, .. } => whole.show(&at.data, path).is_ok(),
         Op::Request { words } => {
@@ -138,10 +220,6 @@ fn with_filters(words: &[String], mut all: Vec<Choice>) -> Vec<Choice> {
     // (`run show …` gets its own from the operational choices.)
     if words.first().map(String::as_str) != Some("show") {
         return all;
-    }
-    if words.get(1).map(String::as_str) == Some("packages") {
-        // A search prints as it goes: nothing follows its `|`.
-        return if words.iter().any(|x| x == "|") { vec![] } else { all };
     }
     let Some(bar) = words.iter().rposition(|x| x == "|") else { return all };
     let is_filter = |x: &String| crate::filter::FILTERS.iter().any(|(f, _)| f == x);
@@ -181,6 +259,7 @@ fn commit_choices(rest: &[String]) -> Vec<Choice> {
             ("check", "Check the candidate evaluates, without committing"),
             ("comment", "Commit, with a comment for the log"),
             ("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)"),
+            ("and-quit", "Commit, then leave configuration mode"),
         ]),
         [w] if w == "comment" => vec![Choice::new("<\"text\">", "What the change is for")],
         [w] if w == "confirmed" => vec![Choice::new("<minutes>", "1 to 1440: confirm by committing again")],
@@ -208,7 +287,14 @@ fn choices_j(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> 
             ["system", "software", "rollback"] => vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")],
             _ => vec![],
         },
-        (Mode::Configuration, Some("run")) => choices_at(k, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial),
+        (Mode::Configuration, Some("run")) => {
+            let mut c = next(k, &At { mode: Mode::Operational, ..at.clone() }, &words[1..], partial);
+            // (Already in configuration mode; `exit` is configuration mode's own.)
+            if words.len() == 1 {
+                c.retain(|x| x.word != "configure" && x.word != "exit");
+            }
+            c
+        }
         (Mode::Configuration, Some("commit")) => commit_choices(&words[1..]),
         (Mode::Configuration, Some("rollback")) if words.len() == 1 => {
             vec![Choice::new("<number>", "0 is the current configuration, 1 the one before, …")]
@@ -230,6 +316,8 @@ fn choices_j(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> 
             let mut t = vec![("list", "Every Nix file of the configuration"), ("show", "Print one")];
             if mode == Mode::Configuration {
                 t.extend([("delete", "Delete one, in the candidate"), ("edit", "Edit one (or a new one) in your editor, in the candidate")]);
+            } else {
+                t.extend([("delete", "Delete one (in configuration mode)"), ("edit", "Edit one (in configuration mode)")]);
             }
             t.sort();
             table(&t)
@@ -271,7 +359,7 @@ fn operational_show(k: &Know, rest: &[String]) -> Vec<Choice> {
         ["system", "rollback", _] => table(&[("compare", "How it differs from another one")]),
         ["system", "rollback", _, "compare"] => vec![Choice::new("<number>", "The configuration to compare with")],
         ["packages"] => table(&[("available", "Search nixpkgs")]),
-        ["packages", "available", ..] => vec![Choice::new("<term>", "Words to search for")],
+        ["packages", "available", terms @ ..] if !terms.contains(&"|") => vec![Choice::new("<term>", "Words to search for")],
         ["configuration", .., "|"] | ["system", "commit" | "alarms", "|"] => table(DISPLAY),
         ["system", "rollback", _, "|"] | ["system", "rollback", _, "compare", _, "|"] => table(DISPLAY),
         ["configuration", .., "|", "display"] | ["system", "rollback", _, "|", "display"] => table(OF_CONFIGURATION),
@@ -299,9 +387,9 @@ fn pipe_choices(cmd: &str, rest: &[String]) -> Option<Vec<Choice>> {
 
 /// What `?` and Tab know: the hand-made schema (the values of the settings TorqOS keeps in its own
 /// files: time zones, user names) and every NixOS setting of the system (the tree's paths).
-pub struct Know {
-    pub schema: Schema,
-    pub tree: crate::nixos::Tree,
+pub struct Know<'a> {
+    pub schema: &'a Schema,
+    pub tree: &'a crate::nixos::Tree,
 }
 
 /// The next word of a tree path (`set virtualisation docker …`): from the NixOS tree, and for a
@@ -335,7 +423,20 @@ fn tree_choices(k: &Know, rest: &[String], cmd: &str) -> Vec<Choice> {
             return vec![Choice::new("<file>", "A .nix file of the config repo (like services/httpd.nix); `file edit <file>` writes it")];
         }
     }
-    let mut c: Vec<Choice> = k.tree.next(rest).into_iter().map(|(w, h)| Choice::new(&w, &h)).collect();
+    // Only what may be set: not NixOS's module internals (`_module`), nor what the fence keeps out of
+    // the tree (TorqOS's own, the broker's) — `set` refuses those anyway.
+    let mut c: Vec<Choice> = k
+        .tree
+        .next(rest)
+        .into_iter()
+        .filter(|(w, _)| {
+            let at: Vec<String> = [rest, &[w.clone()]].concat();
+            // (A place whose every setting is fenced is not offered either: `torq cli`.)
+            let below = k.tree.next(&at);
+            w.starts_with('<') || !w.starts_with('_') && !k.tree.fenced(&at) && (below.is_empty() || !below.iter().all(|(b, _)| k.tree.fenced(&[at.clone(), vec![b.clone()]].concat())))
+        })
+        .map(|(w, h)| Choice::new(&w, &h))
+        .collect();
     if cmd == "show" {
         c.push(Choice::new("|", "Pipe the output (compare, display set, grep, wc, …)"));
     }
@@ -494,8 +595,10 @@ pub fn tab(choices: &[Choice]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
 
-    fn schema() -> Know {
-        Know { schema: Schema::parse(include_str!("schema-fixture.json")).unwrap(), tree: crate::nixos::Tree::parse(include_str!("nixos-fixture.json")).unwrap() }
+    fn schema() -> Know<'static> {
+        static FIXTURE: std::sync::OnceLock<(Schema, crate::nixos::Tree)> = std::sync::OnceLock::new();
+        let (schema, tree) = FIXTURE.get_or_init(|| (Schema::parse(include_str!("schema-fixture.json")).unwrap(), crate::nixos::Tree::parse(include_str!("nixos-fixture.json")).unwrap()));
+        Know { schema, tree }
     }
     fn w(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
@@ -513,7 +616,7 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["repair", "revert", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["configure", "file", "request", "show", "exit"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["file", "request", "show"], "not configure or exit: already here");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
     }
 
@@ -539,7 +642,7 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("file"), "")), ["delete", "edit", "list", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("load"), "")), ["merge", "override", "set"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "l")), ["load"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("file"), "")), ["list", "show"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("file"), "")), ["delete", "edit", "list", "show"], "edit and delete are there, said to be configuration mode's");
     }
 
     #[test]
@@ -572,7 +675,7 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "g")), ["grep"]);
         assert!(choices(&s, Mode::Operational, &w("show configuration | grep"), "").is_empty(), "grep's options are grep's");
         assert!(choices(&s, Mode::Configuration, &w("show | grep x | display"), "").is_empty(), "after a filter, no display");
-        assert!(choices(&s, Mode::Operational, &w("show packages available x |"), "").is_empty(), "a search cannot be filtered");
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show packages available x |"), "")), filters, "a search is a show like any other");
         assert!(choices(&s, Mode::Configuration, &w("set system |"), "").is_empty(), "only a show");
     }
 
@@ -625,7 +728,7 @@ mod tests {
         assert_eq!(c(o, "show system commit"), ["<[Enter]>", "|"]);
         assert_eq!(c(o, "show services"), ["<[Enter]>", "|"]);
         assert!(!enter(o, "show"), "show alone is not a command");
-        assert_eq!(c(k, "commit"), ["<[Enter]>", "check", "comment", "confirmed"]);
+        assert_eq!(c(k, "commit"), ["<[Enter]>", "check", "comment", "confirmed", "and-quit"]);
         assert_eq!(c(k, "rollback"), ["<[Enter]>", "<number>"]);
         assert!(enter(k, "show") && c(k, "show").last().is_some_and(|x| x == "|"));
         // Pipes after pipes: each whole show takes another; a filter's own options are its own.
@@ -653,6 +756,33 @@ mod tests {
         assert_eq!(words_of(&choices_at(&s, &docker, &w("set enable true"), "")), ["<[Enter]>"]);
         // Tab never inserts `<[Enter]>`.
         assert!(tab(&choices(&s, k, &w("commit"), "")).iter().all(|(t, _)| t != "<[Enter]>"));
+    }
+
+    /// Lines read against the grammar, as on a network device: the command language abbreviates and
+    /// names a wrong word; configuration paths and values are taken as they are.
+    #[test]
+    fn the_command_language_abbreviates() {
+        let s = schema();
+        let at = |mode| At { mode, edit: vec![], data: crate::whole::Data::default() };
+        let (o, k) = (Mode::Operational, Mode::Configuration);
+        let x = |mode, line: &str| expand(&s, &at(mode), &w(line)).map_err(|e| format!("{e:#}"));
+        assert_eq!(x(o, "sho sys ala").unwrap(), w("show system alarms"));
+        assert_eq!(x(o, "sh conf | disp set | gr host").unwrap(), w("show configuration | display set | grep host"), "pipes too, a filter's own words not");
+        assert_eq!(x(o, "sh conf netw").unwrap(), w("show configuration netw"), "a path is the configuration's to read");
+        assert_eq!(x(k, "se netw hostName x").unwrap(), w("set netw hostName x"));
+        let why = vec!["comm".to_string(), "comm".into(), "why not".into()];
+        assert_eq!(expand(&s, &at(k), &why).unwrap(), vec!["commit".to_string(), "comment".into(), "why not".into()], "a value stays");
+        assert_eq!(x(k, "ru sh sys ala").unwrap(), w("run show system alarms"));
+        assert_eq!(x(k, "to se time timeZone UTC").unwrap(), w("top set time timeZone UTC"));
+        assert!(x(k, "s").unwrap_err().contains("'s' is ambiguous: save, set, show"));
+        let e = x(o, "show system foo").unwrap_err();
+        assert!(e.contains("'foo' is not a word here (after `show system`)") && e.contains("alarms, commit, ledger, rollback"), "{e}");
+        assert!(x(o, "show configuraton").unwrap_err().contains("did you mean configuration?"));
+        assert!(!x(k, "set torq ?").unwrap_or_default().is_empty(), "a path word is never refused here");
+        // A line of command words that is not whole says what may follow; a wrong value does not.
+        assert!(incomplete(&s, &at(o), &w("show system")).is_some_and(|m| m.contains("alarms, commit, ledger, rollback")));
+        assert_eq!(incomplete(&s, &at(o), &w("show system rollback x")), None);
+        assert_eq!(incomplete(&s, &at(o), &w("show system alarms")), None, "whole: nothing follows");
     }
 
     #[test]

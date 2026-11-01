@@ -136,6 +136,18 @@ pub fn parse_offset(z: &str) -> Option<i64> {
     Some(sign * (rest[..2].parse::<i64>().ok()? * 3600 + rest[2..].parse::<i64>().ok()? * 60))
 }
 
+/// A broker time (UTC) in local time, as the ledger shows times: `2026-11-01 09:04:37`. Not a time
+/// the broker wrote: as it is.
+pub fn local_stamp(ts: &str, clock: &Clock) -> String {
+    match parse_ts(ts) {
+        Some(t) => {
+            let l = t + clock.offset;
+            format!("{} {:02}:{:02}:{:02}", crate::pkg::ymd(l.max(0) as u64), l.rem_euclid(86_400) / 3600, l.rem_euclid(3600) / 60, l.rem_euclid(60))
+        }
+        None => one_line(ts, 25),
+    }
+}
+
 /// "2026-10-30T19:02:51Z" (how the broker writes times, in UTC) → Unix seconds.
 pub fn parse_ts(ts: &str) -> Option<i64> {
     let n = |r: std::ops::Range<usize>| ts.get(r)?.parse::<i64>().ok();

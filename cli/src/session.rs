@@ -32,7 +32,7 @@ pub trait Machine {
     /// `detail`, the broker's facts behind it (commits, store paths).
     fn alarms(&self, detail: bool, fit: Option<usize>) -> Result<String>;
     /// `show packages available <term>…`.
-    fn search(&self, terms: &[String]) -> Result<String>;
+    fn search(&self, terms: &[String], fit: Option<usize>) -> Result<String>;
     /// `request system repair`: return the machine to its last ledgered configuration.
     fn repair(&self) -> Result<String>;
     /// SSH as the configuration at `base` has it, and as it will with `files` changed — evaluated, so
@@ -258,10 +258,11 @@ impl<'a> Session<'a> {
         matches!(syntax::parse_line(self.mode, &w), Ok((Op::Commit(o), _)) if !o.check)
     }
 
-    /// Whether `line` shows what the candidate changes (`show | compare`): the person has looked.
+    /// Whether `line` shows all the candidate changes (`show | compare`, from the top): the person
+    /// has looked.
     pub fn reviews(&self, line: &str) -> bool {
         let Ok(w) = words(line) else { return false };
-        matches!(syntax::parse_line(self.mode, &w), Ok((Op::Compare { .. }, _)))
+        self.edit.is_empty() && matches!(syntax::parse_line(self.mode, &w), Ok((Op::Compare { .. }, _)))
     }
 
     /// Run one command, already split into words (`torqcli <command>`: as the calling shell split
@@ -274,7 +275,15 @@ impl<'a> Session<'a> {
         if w.is_empty() {
             return Ok(String::new());
         }
-        let (op, filters) = syntax::parse_line(self.mode, w)?;
+        // Read against the grammar first: abbreviations become their words, and a word that may not
+        // stand where it is is named (complete::expand).
+        let know = crate::complete::Know { schema: &self.schema, tree: &self.tree };
+        let at = crate::complete::At { mode: self.mode, edit: self.edit.clone(), data: Data::default() };
+        let w = &crate::complete::expand(&know, &at, w)?;
+        let (op, filters) = match syntax::parse_line(self.mode, w) {
+            Ok(parsed) => parsed,
+            Err(e) => return Err(crate::complete::incomplete(&know, &at, w).map_or(e, |what| anyhow::anyhow!(what))),
+        };
         self.fit = if filters.is_empty() { crate::ui::fit((self.screen)()) } else { None };
         crate::filter::apply(&filters, self.run(op)?)
     }
@@ -325,27 +334,55 @@ impl<'a> Session<'a> {
                 Ok(String::new())
             }
             Op::Exit | Op::End => self.leave(),
-            Op::Up => {
+            Op::Up { n } => {
                 if self.edit.is_empty() {
                     bail!("already at the top of the configuration");
                 }
-                self.up();
+                for _ in 0..n {
+                    if self.edit.is_empty() {
+                        break;
+                    }
+                    self.up();
+                }
                 Ok(String::new())
             }
-            Op::Top => {
+            Op::Top { then: None } => {
                 self.edit.clear();
                 Ok(String::new())
             }
+            // A command from the top, as on a network device: back where you were after it — unless
+            // it is itself a move (`top edit system`).
+            Op::Top { then: Some(op) } => {
+                let moves = matches!(*op, Op::Edit { .. } | Op::Up { .. } | Op::Top { .. } | Op::Exit | Op::End);
+                let was = std::mem::take(&mut self.edit);
+                let r = self.run(*op);
+                if !moves || r.is_err() {
+                    self.edit = was;
+                }
+                r
+            }
             Op::Edit { words } => {
+                if words.is_empty() {
+                    bail!("edit needs a place to go: `edit ?` lists them");
+                }
                 let full = self.here(&words);
                 self.candidate()?;
                 if !self.whole().is_place(&full) {
-                    bail!("{}: not somewhere to go (a setting takes a value)", full.join(" "));
+                    // Not a place: no such setting at all (said with a hint), or a setting.
+                    if let Err(e) = self.tree.locate(&full) {
+                        if crate::whole::to_hand(&full).is_none() {
+                            return Err(e.context(format!("edit {}", full.join(" "))));
+                        }
+                    }
+                    bail!("{}: a setting, not a place to go: `set {} <value>`", full.join(" "), words.iter().map(|w| syntax::quote(w)).collect::<Vec<_>>().join(" "));
                 }
                 self.edit = full;
                 Ok(String::new())
             }
             Op::Set { words } => {
+                if words.is_empty() {
+                    bail!("set needs a setting and its value: `set ?` lists them");
+                }
                 let full = self.here(&words);
                 let mut d = self.candidate_data()?;
                 let was = d.source.clone();
@@ -395,7 +432,16 @@ impl<'a> Session<'a> {
             }
             Op::Compare { display } => self.compare(display),
             Op::Rollback { n } => self.rollback(n),
-            Op::Commit(o) => self.commit(o),
+            Op::Commit(o) => {
+                let quit = o.and_quit;
+                let out = self.commit(o)?;
+                if !quit {
+                    return Ok(out);
+                }
+                self.mode = Mode::Operational;
+                self.edit.clear();
+                Ok(format!("{out}Exiting configuration mode\n"))
+            }
             Op::Run(op) => {
                 let was = self.mode;
                 self.mode = Mode::Operational;
@@ -426,7 +472,7 @@ impl<'a> Session<'a> {
         let changed = self.uncommitted().unwrap_or(true);
         Ok(match (changed, self.saved.is_some()) {
             (false, _) => String::new(),
-            (true, true) => "The configuration has been changed but not committed (it is kept: `configure` returns to it).\n".into(),
+            (true, true) => "The configuration has been changed but not committed (it is kept: `configure` returns to it, `rollback 0` discards it).\n".into(),
             (true, false) => "The configuration has been changed but not committed.\n".into(),
         })
     }
@@ -543,17 +589,18 @@ impl<'a> Session<'a> {
                 let n_data = self.configuration_of(&n_id)?;
                 match compare {
                     None => Ok(self.view(&n_data, &[], display, &format!("commit {n_id} (rollback {n})"))? + &self.footer(&n_id, None)?),
-                    // What going from configuration m to configuration n changes.
+                    // As on a network device, n is the base: what going from configuration n to
+                    // configuration m changes (`+`: what m has).
                     Some(m) => {
                         let m_id = self.commit_at(m)?;
                         match display {
                             Some(Display::Diff) => {
-                                let (old, new) = (self.repo.all_files(&m_id)?, self.repo.all_files(&n_id)?);
+                                let (old, new) = (self.repo.all_files(&n_id)?, self.repo.all_files(&m_id)?);
                                 commits_diff(&old, &new)
                             }
                             _ => {
                                 let m_data = self.configuration_of(&m_id)?;
-                                Ok(self.whole().compare(&m_data, &n_data))
+                                Ok(self.whole().compare(&n_data, &m_data))
                             }
                         }
                     }
@@ -573,13 +620,14 @@ impl<'a> Session<'a> {
                     .map(|(name, what)| format!("{} {name:<width$}  {what}\n", if on.contains(name) { "on " } else { "off" }))
                     .collect();
                 if !on.iter().any(|s| s == "ssh") && self.machine.ssh_outside()? {
-                    let what = "SSH is on anyway, outside the catalog, with password logins allowed (a .nix file sets \
-                                services.openssh.enable): `set services ssh` makes it keys only, once that line is gone";
+                    let what = "SSH is on, outside TorqOS's catalog (`services openssh` set in the tree or a config \
+                                file), with password logins allowed: `set torq services enabled ssh` makes it the catalog's \
+                                SSH — keys only, only the owner";
                     out.push_str(&format!("{}\n", self.ui().line("! ", what)));
                 }
                 Ok(out)
             }
-            Op::ShowPackages { terms } => self.machine.search(&terms),
+            Op::ShowPackages { terms } => self.machine.search(&terms, self.fit),
             Op::ShowLedger { count } => self.machine.ledger(count.unwrap_or(20), self.fit),
             other => bail!("not an operational show: {other:?}"),
         }
@@ -736,7 +784,8 @@ impl<'a> Session<'a> {
             let scratch = tempfile::tempdir()?;
             return candidate::unified_diff(scratch.path(), &a.changes(&self.schema)?);
         }
-        a.compare(&self.whole())
+        // As on a network device: from `[edit networking]`, what changes there and below it.
+        Ok(sections_under(&a.compare(&self.whole())?, &self.edit))
     }
 
     fn rollback(&mut self, n: usize) -> Result<String> {
@@ -1297,6 +1346,26 @@ fn software_compare(old: Option<&[u8]>, new: &Option<String>) -> String {
     out
 }
 
+/// The sections of a comparison (`[edit <path>]` and its lines) at or below `path`; all of them at
+/// the top.
+fn sections_under(compare: &str, path: &[String]) -> String {
+    if path.is_empty() {
+        return compare.to_string();
+    }
+    let mut out = String::new();
+    let mut keep = false;
+    for line in compare.split_inclusive('\n') {
+        if let Some(at) = line.trim_end().strip_prefix("[edit").and_then(|s| s.strip_suffix(']')) {
+            // (Split as a line is: a name with spaces is quoted there.)
+            keep = words(at.trim()).is_ok_and(|w| w.starts_with(path));
+        }
+        if keep {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 /// The rules between settings (whole::software_allowed) are checked on the whole configuration, as
 /// `commit` checks them — never line by line, where their order would decide. After a change that
 /// breaks one, the person hears it at once; `commit` refuses until it holds.
@@ -1418,7 +1487,7 @@ mod tests {
         fn alarms(&self, detail: bool, _: Option<usize>) -> Result<String> {
             Ok(if detail { "all well\n  running system /nix/store/x\n".into() } else { "all well\n".into() })
         }
-        fn search(&self, terms: &[String]) -> Result<String> {
+        fn search(&self, terms: &[String], _: Option<usize>) -> Result<String> {
             Ok(format!("searched {}\n", terms.join(" ")))
         }
         fn repair(&self) -> Result<String> {
@@ -1604,7 +1673,7 @@ mod tests {
         let mut again = session(d.path(), Some(saved.clone()), &m);
         again.exec("configure").unwrap();
         assert!(again.exec("show | compare").unwrap().contains(&format!("+   torq {old};")), "the candidate keeps its software");
-        assert_eq!(again.exec("exit").unwrap(), "The configuration has been changed but not committed (it is kept: `configure` returns to it).\n");
+        assert_eq!(again.exec("exit").unwrap(), "The configuration has been changed but not committed (it is kept: `configure` returns to it, `rollback 0` discards it).\n");
         again.exec("configure").unwrap();
         assert_eq!(again.exec("rollback 0").unwrap(), "load complete\n");
         assert_eq!(again.exec("show | compare").unwrap(), "", "rollback 0 discards the software too");
@@ -1806,7 +1875,7 @@ mod tests {
         let (d, m) = (repo(), Fake { ssh_outside: true, ..Default::default() });
         let mut s = session(d.path(), None, &m);
         let out = s.exec("show services").unwrap();
-        assert!(out.lines().any(|l| l.starts_with("off ssh")) && out.contains("! SSH is on anyway, outside the catalog"), "{out}");
+        assert!(out.lines().any(|l| l.starts_with("off ssh")) && out.contains("! SSH is on, outside TorqOS's catalog") && out.contains("`set torq services enabled ssh`"), "{out}");
         let (d, m) = (repo(), Fake::default());
         assert!(!session(d.path(), None, &m).exec("show services").unwrap().contains('!'));
     }
@@ -2294,7 +2363,8 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         sh(d.path(), "printf '{\"nodes\":{}}' > flake.lock && printf '{ }\\n' > flake.nix && git add -A && git commit -qm software");
         let mut s = session(d.path(), None, &m);
-        let raw = s.exec("show system rollback 0 compare 1 | display diff").unwrap();
+        // (1 is the base, as on a network device: what 0 adds is `+`.)
+        let raw = s.exec("show system rollback 1 compare 0 | display diff").unwrap();
         assert!(raw.contains("+++ b/flake.lock\n") && raw.contains("+{\"nodes\":{}}") && raw.contains("+++ b/flake.nix\n"), "{raw}");
         assert!(!raw.contains("host.json"), "only what changed: {raw}");
         assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "", "the tree did not change");
@@ -2328,7 +2398,7 @@ mod tests {
         let commits = s.exec("show system commit | display detail").unwrap();
         assert!(commits.contains(&format!("\n    commit {head}\n")) && commits.ends_with(&format!("    commit {first}\n")), "{commits}");
         assert!(s.exec("show system rollback 1 | display detail").unwrap().contains(&format!("hostName one;\n}}\n## commit {first} (rollback 1)\n")));
-        let raw = s.exec("show system rollback 0 compare 1 | display diff").unwrap();
+        let raw = s.exec("show system rollback 1 compare 0 | display diff").unwrap();
         assert_eq!(raw, "--- a/system/host.json\n+++ b/system/host.json\n@@ -1 +1 @@\n-{ \"host-name\": \"one\" }\n+{ \"host-name\": \"two\" }\n", "the files as committed");
         assert_eq!(s.exec("show system alarms | display detail").unwrap(), "all well\n  running system /nix/store/x\n");
         assert_eq!(s.exec("show system alarms").unwrap(), "all well\n");
@@ -2552,9 +2622,10 @@ mod tests {
         assert_eq!(s.exec("show").unwrap(), "forceSSL true;\n");
         run(&mut s, &["up"]);
         assert_eq!(s.edit_path(), w("services httpd"), "out of an entry and its set: one step");
-        assert!(format!("{:#}", s.exec("edit enable").unwrap_err()).contains("not somewhere to go"));
+        assert!(format!("{:#}", s.exec("edit enable").unwrap_err()).contains("a setting, not a place to go: `set enable <value>`"));
         run(&mut s, &["top", "edit system", "set time-zone UTC"]);
-        assert!(s.exec("show | compare").unwrap().contains("[edit time]\n+   timeZone UTC;"), "an old name, from where you are");
+        // (Its NixOS place is `time`, not `system`: seen from the top.)
+        assert!(s.exec("top show | compare").unwrap().contains("[edit time]\n+   timeZone UTC;"), "an old name, from where you are");
         run(&mut s, &["top"]);
         assert!(format!("{:#}", s.exec("up").unwrap_err()).contains("already at the top"));
         // `exit` goes up a level, and out of configuration mode at the top.
@@ -2589,6 +2660,43 @@ mod tests {
     }
 
     /// `delete` with nothing after it is everything here: asked first; refused without a yes.
+    /// `up <n>`, `top <command>` (back where you were after it, unless it moves), `commit and-quit`, and
+    /// no `run configure` inside configuration mode.
+    /// `show | compare` from where configuration mode is: what changes there and below it.
+    #[test]
+    fn compare_at_the_edit_level() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set time timeZone UTC", "set services httpd virtualHosts \"a b\" documentRoot /srv", "edit networking", "set hostName three"]);
+        assert_eq!(s.exec("show | compare").unwrap(), "[edit networking]\n-   hostName two;\n+   hostName three;\n");
+        run(&mut s, &["top", "edit services httpd virtualHosts \"a b\""]);
+        assert!(s.exec("show | compare").unwrap().contains("documentRoot /srv"), "a quoted name in a section");
+        run(&mut s, &["top"]);
+        let all = s.exec("show | compare").unwrap();
+        assert!(all.contains("hostName three") && all.contains("timeZone UTC") && all.contains("documentRoot"), "{all}");
+        assert!(s.reviews("show | compare") && !{ s.exec("edit networking").unwrap(); s.reviews("show | compare") }, "only the whole is a review");
+    }
+
+    #[test]
+    fn moving_as_on_a_network_device() {
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "edit services httpd virtualHosts example.com", "up 9"]);
+        assert!(s.edit_path().is_empty(), "up as far as there is: {:?}", s.edit_path());
+        run(&mut s, &["edit networking", "top set time timeZone UTC"]);
+        assert_eq!(s.edit_path(), w("networking"), "back where it was");
+        assert!(s.exec("top show time").unwrap().contains("timeZone UTC"));
+        run(&mut s, &["top edit virtualisation"]);
+        assert_eq!(s.edit_path(), w("virtualisation"), "a move moves");
+        assert!(format!("{:#}", s.exec("run configure").unwrap_err()).contains("'configure' is not a word here (after `run`)"));
+        assert!(format!("{:#}", s.exec("edit").unwrap_err()).contains("edit needs a place"));
+        assert!(format!("{:#}", s.exec("set").unwrap_err()).contains("set needs a setting"));
+        assert!(format!("{:#}", s.exec("edit nosuch").unwrap_err()).contains("nosuch"));
+        let out = s.exec("commit and-quit").unwrap();
+        assert!(out.ends_with("Exiting configuration mode\n") && s.mode == Mode::Operational, "{out}");
+        assert_eq!(m.commits.borrow().len(), 1);
+    }
+
     #[test]
     fn a_bare_delete_asks_first() {
         let (d, no) = (repo(), Fake::default());
@@ -2663,7 +2771,9 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         assert_eq!(s.exec("show system rollback 1").unwrap(), "networking {\n    hostName one;\n}\n");
-        assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "[edit networking]\n-   hostName one;\n+   hostName two;\n");
+        // As on a network device: 0 is the base, `+` is what 1 has.
+        assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "[edit networking]\n-   hostName two;\n+   hostName one;\n");
+        assert_eq!(s.exec("show system rollback 1 compare 0").unwrap(), "[edit networking]\n-   hostName one;\n+   hostName two;\n");
         assert!(format!("{:#}", s.exec("show system rollback 5").unwrap_err()).contains("only 2 configurations"));
         assert!(format!("{:#}", s.exec("show system rollback x").unwrap_err()).contains("not a number"));
     }
@@ -2692,7 +2802,7 @@ mod tests {
         assert_eq!(s.exec("show configuration").unwrap(), "networking {\n    hostName two;\n}\n");
         assert_eq!(s.exec("show configuration | display set").unwrap(), "set networking hostName two\n");
         assert!(s.exec("show system commit").unwrap().starts_with("0   "));
-        assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("unknown command: set"));
+        assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("'set' is not a word here"));
         run(&mut s, &["configure", "set system host-name three"]);
         assert_eq!(s.exec("run show configuration").unwrap(), "networking {\n    hostName two;\n}\n", "run: the active one");
         assert_eq!(s.mode, Mode::Configuration);

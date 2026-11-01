@@ -577,7 +577,8 @@ pub fn compare_entries(old: Vec<(Vec<String>, Val)>, new: Vec<(Vec<String>, Val)
         }
         let parent = p[..p.len() - 1].to_vec();
         if section.as_ref() != Some(&parent) {
-            out.push_str(&if parent.is_empty() { "[edit]\n".to_string() } else { format!("[edit {}]\n", parent.join(" ")) });
+            // (Each word as it is typed: a name with spaces quoted, so the section reads back as a path.)
+            out.push_str(&if parent.is_empty() { "[edit]\n".to_string() } else { format!("[edit {}]\n", parent.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")) });
             section = Some(parent);
         }
         let leaf = p.last().unwrap();

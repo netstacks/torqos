@@ -54,6 +54,8 @@ pub struct CommitOptions {
     pub check: bool,
     pub confirm: Option<u32>,
     pub comment: Option<String>,
+    /// `and-quit`: leave configuration mode once committed.
+    pub and_quit: bool,
 }
 
 /// One command. Paths are relative to where configuration mode is (`edit`), except in operational
@@ -87,8 +89,10 @@ pub enum Op {
     Delete { words: Vec<String> },
     /// `edit <path>`: go down to a container or list entry.
     Edit { words: Vec<String> },
-    Up,
-    Top,
+    /// `up [<n>]`: up n levels (1).
+    Up { n: usize },
+    /// `top [<command>]`: to the top, or run a command from the top and come back.
+    Top { then: Option<Box<Op>> },
     /// `show [path]`: the candidate.
     ShowCandidate { path: Vec<String>, display: Option<Display> },
     /// `show | compare`: what the candidate changes.
@@ -158,7 +162,7 @@ fn parse_file(w: &[String], mode: Mode) -> Result<Op> {
 pub const MAX_ROLLBACK: usize = 10_000;
 
 pub fn number(n: &str) -> Result<usize> {
-    let n: usize = n.parse().with_context(|| format!("'{n}' is not a number"))?;
+    let n: usize = n.parse().map_err(|_| anyhow::anyhow!("'{n}' is not a number (0, 1, 2, …)"))?;
     if n > MAX_ROLLBACK {
         bail!("rollback numbers go up to {MAX_ROLLBACK}");
     }
@@ -239,7 +243,7 @@ fn split_filters(w: &[String]) -> Result<(Vec<String>, Vec<Filter>)> {
 pub fn shows(op: &Op) -> bool {
     match op {
         Op::ShowActive { .. } | Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowLedger { .. } => true,
-        Op::ShowCandidate { .. } | Op::Compare { .. } => true,
+        Op::ShowCandidate { .. } | Op::Compare { .. } | Op::ShowPackages { .. } => true,
         Op::Run(op) => shows(op),
         _ => false,
     }
@@ -251,23 +255,20 @@ pub fn parse_line(mode: Mode, w: &[String]) -> Result<(Op, Vec<Filter>)> {
     let op = parse(mode, &head)?;
     if !filters.is_empty() && !shows(&op) {
         let tool = &w[head.len() + 1];
-        let packages = |o: &Op| matches!(o, Op::ShowPackages { .. });
-        if packages(&op) || matches!(&op, Op::Run(o) if packages(o)) {
-            bail!("| {tool}: show packages available prints as it searches and cannot be filtered; add search terms instead");
-        }
         bail!("| {tool}: only the output of a show command can be filtered");
     }
     Ok((op, filters))
 }
 
 pub fn parse_commit(w: &[String]) -> Result<CommitOptions> {
-    let usage = || anyhow::anyhow!("commit: one of: commit, commit check, commit [confirmed [<minutes>]] [comment \"…\"]");
+    let usage = || anyhow::anyhow!("commit: one of: commit, commit check, commit [confirmed [<minutes>]] [comment \"…\"] [and-quit]");
     if w.len() == 1 && w[0] == "check" {
         return Ok(CommitOptions { check: true, ..Default::default() });
     }
-    let (mut confirm, mut comment, mut i) = (None, None, 0);
+    let (mut confirm, mut comment, mut and_quit, mut i) = (None, None, false, 0);
     while i < w.len() {
         match w[i].as_str() {
+            "and-quit" if !and_quit => and_quit = true,
             "confirmed" if confirm.is_none() => {
                 let mut m = 10;
                 if let Some(n) = w.get(i + 1).filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
@@ -287,7 +288,7 @@ pub fn parse_commit(w: &[String]) -> Result<CommitOptions> {
         }
         i += 1;
     }
-    Ok(CommitOptions { check: false, confirm, comment })
+    Ok(CommitOptions { check: false, confirm, comment, and_quit })
 }
 
 /// The operational commands (`configure` and `config` both enter configuration mode).
@@ -339,8 +340,10 @@ pub fn parse(mode: Mode, w: &[String]) -> Result<Op> {
         ["set", ..] => Op::Set { words: w[1..].to_vec() },
         ["delete", ..] => Op::Delete { words: w[1..].to_vec() },
         ["edit", ..] => Op::Edit { words: w[1..].to_vec() },
-        ["up"] => Op::Up,
-        ["top"] => Op::Top,
+        ["up"] => Op::Up { n: 1 },
+        ["up", n] => Op::Up { n: number(n)?.max(1) },
+        ["top"] => Op::Top { then: None },
+        ["top", ..] => Op::Top { then: Some(Box::new(parse(Mode::Configuration, &w[1..])?)) },
         ["show", ..] => {
             let (path, compare, display) = split_pipes(&w[1..])?;
             match (compare, path.is_empty()) {
@@ -356,7 +359,11 @@ pub fn parse(mode: Mode, w: &[String]) -> Result<Op> {
         ["rollback"] => Op::Rollback { n: 0 },
         ["rollback", n] => Op::Rollback { n: number(n)? },
         ["commit", ..] => Op::Commit(parse_commit(&w[1..])?),
-        ["run", ..] => Op::Run(Box::new(parse_operational(&w[1..])?)),
+        ["run", ..] => match parse_operational(&w[1..])? {
+            Op::Configure => bail!("run configure: already in configuration mode"),
+            Op::Exit => bail!("run exit: `exit` leaves configuration mode (`exit configuration-mode` from anywhere)"),
+            op => Op::Run(Box::new(op)),
+        },
         ["exit", "configuration-mode"] => Op::End,
         ["exit" | "quit"] => Op::Exit,
         [other, ..] => bail!("unknown command: {other}; one of: set, delete, edit, up, top, show, commit, rollback, run, save, load, file, exit"),
@@ -405,6 +412,9 @@ pub fn render(op: &Op) -> String {
         if let Some(c) = &o.comment {
             s.push_str(&format!(" comment {}", quote(c)));
         }
+        if o.and_quit {
+            s.push_str(" and-quit");
+        }
         s
     };
     match op {
@@ -443,8 +453,10 @@ pub fn render(op: &Op) -> String {
         Op::Set { words } => sep("set", words),
         Op::Delete { words } => sep("delete", words),
         Op::Edit { words } => sep("edit", words),
-        Op::Up => "up".into(),
-        Op::Top => "top".into(),
+        Op::Up { n: 1 } => "up".into(),
+        Op::Up { n } => format!("up {n}"),
+        Op::Top { then: None } => "top".into(),
+        Op::Top { then: Some(op) } => format!("top {}", render(op)),
         Op::ShowCandidate { path, display } => format!("{}{}", sep("show", path), display_text(display)),
         Op::Compare { display } => format!("show | compare{}", display_text(display)),
         Op::Rollback { n } => format!("rollback {n}"),
@@ -497,8 +509,11 @@ mod tests {
             (Mode::Configuration, Op::Delete { words: vec![] }),
             (Mode::Configuration, Op::Edit { words: v("system") }),
             (Mode::Configuration, Op::Edit { words: v("users dev") }),
-            (Mode::Configuration, Op::Up),
-            (Mode::Configuration, Op::Top),
+            (Mode::Configuration, Op::Up { n: 1 }),
+            (Mode::Configuration, Op::Up { n: 3 }),
+            (Mode::Configuration, Op::Top { then: None }),
+            (Mode::Configuration, Op::Top { then: Some(Box::new(Op::Set { words: v("time timeZone UTC") })) }),
+            (Mode::Configuration, Op::Top { then: Some(Box::new(Op::ShowCandidate { path: v("networking"), display: None })) }),
             (Mode::Configuration, Op::ShowCandidate { path: vec![], display: None }),
             (Mode::Configuration, Op::ShowCandidate { path: v("system"), display: set }),
             (Mode::Configuration, Op::ShowCandidate { path: vec![], display: detail }),
@@ -515,7 +530,9 @@ mod tests {
             (Mode::Operational, Op::File { action: FileAction::Show, path: Some("a.nix".into()) }),
             (Mode::Configuration, Op::Commit(CommitOptions::default())),
             (Mode::Configuration, Op::Commit(CommitOptions { check: true, ..Default::default() })),
-            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()) })),
+            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()), and_quit: false })),
+            (Mode::Configuration, Op::Commit(CommitOptions { and_quit: true, ..Default::default() })),
+            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: None, comment: Some("why".into()), and_quit: true })),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowAlarms { display: None }))),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowActive { path: v("system"), display: None }))),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowRollback { n: 1, compare: Some(0), display: diff }))),
@@ -608,12 +625,12 @@ mod tests {
             ("show configuration |", "a | needs something after it"),
             ("show configuration | sed s/a/b/", "unknown pipe: | sed s/a/b/; one of: compare, display set|detail|diff, or a filter: cut, grep"),
             ("show configuration | sh -c x", "unknown pipe: | sh -c x"),
-            ("show packages available rg | grep x", "cannot be filtered"),
         ] {
             let e = err(o, line);
             assert!(e.contains(want), "{line}: {e}");
         }
-        for line in ["set system host-name a | wc -l", "commit | grep x", "rollback 1 | head", "run show packages available x | wc -l"] {
+        assert_eq!(pl(o, "show packages available rg | grep x").unwrap(), (Op::ShowPackages { terms: w("rg") }, vec![f("grep", "x")]), "a search is a show like any other");
+        for line in ["set system host-name a | wc -l", "commit | grep x", "rollback 1 | head"] {
             let e = err(c, line);
             assert!(e.contains("filtered"), "{line}: {e}");
         }

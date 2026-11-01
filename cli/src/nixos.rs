@@ -252,7 +252,7 @@ fn did_you_mean(n: &Node, w: &str) -> String {
     }
 }
 
-fn distance(a: &str, b: &str) -> usize {
+pub fn distance(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     for (i, ca) in a.iter().enumerate() {
@@ -317,7 +317,7 @@ pub fn value(ty: &Type, words: &[String]) -> Result<Value> {
         }
         k if is_int(k) => {
             let w = one("a number")?;
-            let n: i64 = w.parse().with_context(|| format!("'{w}' is not a number"))?;
+            let n: i64 = w.parse().map_err(|_| anyhow::anyhow!("'{w}' is not a number"))?;
             match k {
                 "unsignedInt16" if !(0..=65535).contains(&n) => bail!("{n}: 0 to 65535"),
                 "unsignedInt" | "unsignedInt8" | "unsignedInt32" if n < 0 => bail!("{n}: not below 0"),

@@ -106,18 +106,56 @@ fn me() -> Result<String> {
     Ok(user)
 }
 
-fn search(repo: &Path, terms: &[String]) -> Result<()> {
-    let st = Command::new("nix")
-        .args(["search", "--no-update-lock-file", "--inputs-from"])
+/// Search this machine's nixpkgs (`show packages available`): what matches, as (name, version,
+/// description), sorted by name. Nix's own progress goes to the log (`log`), never the screen.
+fn search(repo: &Path, terms: &[String], log: &Path) -> Result<Vec<(String, String, String)>> {
+    let out = Command::new("nix")
+        .args(["search", "--json", "--no-update-lock-file", "--inputs-from"])
         .arg(flake_ref(repo))
         .arg("nixpkgs")
         .args(terms)
-        .status()
+        .output()
         .context("running nix search")?;
-    if !st.success() {
-        bail!("nix search failed");
+    let _ = fs::OpenOptions::new().append(true).open(log).and_then(|mut f| f.write_all(&out.stderr));
+    // (No match is an error to nix search, with nothing on stdout.)
+    if !out.status.success() && out.stdout.iter().all(u8::is_ascii_whitespace) {
+        let why = last_error(&out.stderr);
+        if why.contains("no results") {
+            return Ok(vec![]);
+        }
+        bail!("searching nixpkgs: {why}");
     }
-    Ok(())
+    search_results(&out.stdout)
+}
+
+/// `nix search --json`'s answer as (name, version, description), sorted: each name as it is typed
+/// (`set system packages <name>`), without nix's `legacyPackages.<system>.` in front.
+fn search_results(json: &[u8]) -> Result<Vec<(String, String, String)>> {
+    let found: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(json).context("reading nix search's answer")?;
+    let mut out: Vec<(String, String, String)> = found
+        .into_iter()
+        .map(|(attr, p)| {
+            let name = attr.splitn(3, '.').nth(2).unwrap_or(&attr).to_string();
+            let s = |k: &str| history::one_line(p[k].as_str().unwrap_or_default(), 300);
+            (history::one_line(&name, 80), s("version"), s("description"))
+        })
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+#[cfg(test)]
+#[test]
+fn search_results_are_names_as_typed() {
+    let json = br#"{"legacyPackages.aarch64-linux.htop":{"pname":"htop","version":"3.4.1","description":"An interactive process viewer"},"legacyPackages.aarch64-linux.python3Packages.rich":{"pname":"rich","version":"13.9","description":"Rich text\nin the terminal"}}"#;
+    assert_eq!(
+        search_results(json).unwrap(),
+        [
+            ("htop".to_string(), "3.4.1".to_string(), "An interactive process viewer".to_string()),
+            ("python3Packages.rich".to_string(), "13.9".to_string(), "Rich text in the terminal".to_string()),
+        ]
+    );
+    assert!(search_results(b"{}").unwrap().is_empty());
 }
 
 /// The config repo as a flake. `path:`, not a plain path: the repo belongs to root, and git refuses

@@ -245,12 +245,23 @@ impl Machine for Real<'_> {
         Ok(out)
     }
 
-    fn search(&self, terms: &[String]) -> Result<String> {
+    fn search(&self, terms: &[String], fit: Option<usize>) -> Result<String> {
         if let Some(t) = terms.iter().find(|t| t.starts_with('-')) {
             bail!("show packages available: '{t}' is not a search term");
         }
-        crate::search(&self.cli.repo, terms)?; // prints as it goes (nix search)
-        Ok(String::new())
+        let log = run::start_log()?;
+        let found = {
+            let _p = run::Progress::start("Searching nixpkgs");
+            crate::search(&self.cli.repo, terms, &log)?
+        };
+        if found.is_empty() {
+            return Ok(format!("No package matches {}.\n", terms.join(" ")));
+        }
+        // A table: name and version, then the description as a sentence beside them (ui.rs).
+        let ui = crate::ui::Ui::plain_at(fit);
+        let name = found.iter().map(|(n, _, _)| n.chars().count()).max().unwrap_or(0).min(30);
+        let version = found.iter().map(|(_, v, _)| v.chars().count()).max().unwrap_or(0).min(16);
+        Ok(found.iter().map(|(n, v, d)| format!("{}\n", ui.line(&format!("{n:<name$}  {v:<version$}  "), d))).collect())
     }
 
     /// Only when the report says a repair can fix what is wrong, and only
@@ -407,7 +418,7 @@ impl Machine for Real<'_> {
     /// them), newest first. The ledger is the broker's: read through it, as a commit is.
     fn configurations(&self, _repo: &Repo, count: usize) -> Result<History> {
         let entries = crate::read_ledger(self.cli)?;
-        Ok(History { configurations: configurations_of(&entries, count), at: ledgered_commit(&entries) })
+        Ok(History { configurations: configurations_of(&entries, count, &history::Clock::system()), at: ledgered_commit(&entries) })
     }
 
     /// As `torq update` does it, but on the committed configuration the candidate is based on (as
@@ -595,11 +606,11 @@ fn verbose_flag(args: &[String]) -> bool {
 /// the log the last broker or Nix command wrote (cleaned of anything that could fool a terminal).
 fn describe(e: &anyhow::Error) -> String {
     if !VERBOSE.get().copied().unwrap_or(false) {
-        return history::one_line(&format!("{e:#}"), 300);
+        return history::one_line(&e.chain().map(said).collect::<Vec<_>>().join(": "), 300);
     }
     let mut out = String::new();
     for (i, cause) in e.chain().enumerate() {
-        let text = history::clean(&cause.to_string());
+        let text = history::clean(&said(cause));
         if i == 0 { out.push_str(&text) } else { out.push_str(&format!("\n  because: {text}")) }
     }
     if let Ok(log) = run::log_path() {
@@ -718,6 +729,16 @@ fn print_clean(out: &str) {
     say(&crate::paint::paint(&cleaned, &crate::ui::Ui::for_terminal(false)));
 }
 
+/// One cause of an error as a person reads it: the system's own words for a failed file operation
+/// ("No such file or directory"), without the number after them ("(os error 2)").
+fn said(cause: &(dyn std::error::Error + 'static)) -> String {
+    let text = cause.to_string();
+    match cause.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error) {
+        Some(code) => text.strip_suffix(&format!(" (os error {code})")).map(str::to_string).unwrap_or(text),
+        None => text,
+    }
+}
+
 /// `error: …` to standard error, the word in red on a terminal.
 fn say_error(msg: &str) {
     let ui = crate::ui::Ui::for_terminal(true);
@@ -745,7 +766,7 @@ fn prompt(s: &Session, user: &str, host: &str) -> (Option<String>, String) {
     match s.mode {
         Mode::Operational => (None, format!("{user}@{host}> ")),
         Mode::Configuration => {
-            let at = if path.is_empty() { "[edit]".to_string() } else { format!("[edit {}]", path.join(" ")) };
+            let at = if path.is_empty() { "[edit]".to_string() } else { format!("[edit {}]", path.iter().map(|w| crate::syntax::quote(w)).collect::<Vec<_>>().join(" ")) };
             (Some(format!("\n{at}")), format!("{user}@{host}# "))
         }
     }
@@ -869,7 +890,8 @@ mod editor {
     /// What Tab and `?` need: the schema, and the mode the session is in now.
     #[derive(Clone)]
     struct Help {
-        know: Arc<complete::Know>,
+        /// What `?` and Tab know: the schema and the NixOS tree (complete::Know borrows them).
+        know: Arc<(crate::tree::Schema, crate::nixos::Tree)>,
         /// Where the session is: mode, edit path (updated before each line is read).
         at: Arc<Mutex<complete::At>>,
     }
@@ -889,7 +911,8 @@ mod editor {
         fn choices(&self, before: &str) -> Option<(Vec<complete::Choice>, String)> {
             let (w, partial) = at_cursor(before)?;
             let at = self.at.lock().unwrap().clone();
-            Some((complete::choices_at(&self.know, &at, &w, &partial), partial))
+            let know = complete::Know { schema: &self.know.0, tree: &self.know.1 };
+            Some((complete::choices_at(&know, &at, &w, &partial), partial))
         }
     }
 
@@ -947,8 +970,7 @@ mod editor {
         // stops the command's child — nix, the broker — and torqcli says so and stays, its terminal
         // put back by the Echo guard as the command returns.)
         let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data() };
-        let know = complete::Know { schema: s.schema.clone(), tree: s.tree.clone() };
-        let help = Help { know: Arc::new(know), at: Arc::new(Mutex::new(at(s))) };
+        let help = Help { know: Arc::new((s.schema.clone(), s.tree.clone())), at: Arc::new(Mutex::new(at(s))) };
         // Bracketed paste off: a paste arrives as typed, each line running at its newline as on a network
         // device (not held as one block until another Enter); the lines after the first were waiting
         // already, so they are one batch (below), and none is lost (rustyline's buffer-redux).
@@ -1061,7 +1083,7 @@ fn ledgered_commit(entries: &[history::Entry]) -> Option<String> {
 
 /// The configurations in a ledger, newest first: its `init`, `applied`, `reverted` and `rolled_back`
 /// entries (each made a commit), at most `count`. Text from the ledger is one line each, cleaned.
-fn configurations_of(entries: &[history::Entry], count: usize) -> Vec<Configuration> {
+fn configurations_of(entries: &[history::Entry], count: usize, clock: &history::Clock) -> Vec<Configuration> {
     entries
         .iter()
         .rev()
@@ -1071,7 +1093,8 @@ fn configurations_of(entries: &[history::Entry], count: usize) -> Vec<Configurat
             let who = e.approved_by.clone().filter(|w| !w.is_empty()).unwrap_or_else(|| e.actor.clone());
             Some(Configuration {
                 id: id.to_string(),
-                date: history::one_line(&e.ts, 25),
+                // Local time, as the ledger shows it (`show system ledger`).
+                date: history::local_stamp(&e.ts, clock),
                 who: history::one_line(&who, 20),
                 what: history::one_line(&e.reason, 80),
                 seq: Some(e.seq),
@@ -1096,13 +1119,16 @@ fn configurations_are_the_ledger_entries_that_made_one() {
     ]
     .join("\n");
     let entries = history::parse(&ledger).unwrap();
-    let c = configurations_of(&entries, 10);
+    // (An hour east of UTC: each date is the ledger's time, shown local.)
+    let clock = history::Clock { now: 0, offset: 3600 };
+    let c = configurations_of(&entries, 10, &clock);
     let ids: Vec<&str> = c.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, ["aaaa", "bbbb", "aaaa"], "newest first; a rollback is a configuration of its own");
     assert_eq!((c[0].who.as_str(), c[0].seq), ("broker", Some(5)));
     assert_eq!(c[1].who, "viper", "the person who approved it");
     assert_eq!(c[0].what, "Change #3 rolled back fake: line", "one line");
-    assert_eq!(configurations_of(&entries, 1).len(), 1);
+    assert_eq!(c[2].date, "2026-10-31 02:00:00", "the ledger's 01:00 UTC, local");
+    assert_eq!(configurations_of(&entries, 1, &clock).len(), 1);
     assert_eq!(ledgered_commit(&entries).as_deref(), Some("aaaa"), "the repair is the newest entry that moved it");
     let more = format!("{ledger}\n{}", r#"{"seq":8,"ts":"t","actor":"broker","approved_by":null,"kind":"interrupted","tier":"user","reason":"i","data":{"commit":"cccc"}}"#);
     assert_eq!(ledgered_commit(&history::parse(&more).unwrap()).as_deref(), Some("cccc"), "as the broker counts: interrupted too");

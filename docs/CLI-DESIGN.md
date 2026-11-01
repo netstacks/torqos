@@ -56,10 +56,19 @@ Turning SSH on (`set services ssh`) shows at `commit` exactly which keys will be
 the changed configuration has them, and refuses if there are none (nobody could log in) — 4g, as
 `torq service enable ssh` did.
 
-And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`,
-`rollback <n>`, `show system commit`, `?` help, Tab completion, history (↑). `?` lists what may come
-next, `|` after any whole `show`, and `<[Enter]>` when the line would run as it is (decided as the
-session decides it: the line is dry-run on a copy of the candidate).
+And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`, `commit
+and-quit`, `rollback <n>`, `up [<n>]`, `top [<command>]` (a command from the top, then back where
+you were — unless it moves), `show system commit`, `?` help, Tab completion, history (↑). `?` lists
+what may come next, `|` after any whole `show`, and `<[Enter]>` when the line would run as it is
+(decided as the session decides it: the line is dry-run on a copy of the candidate).
+
+**One grammar for `?`, abbreviations and errors** (complete.rs): a word of the command language
+that begins exactly one word that may stand there is that word (`sh conf | gr host` is `show
+configuration | grep host`); one that begins several is ambiguous; one that begins none is named,
+with what may stand there (and a near one: "did you mean configuration?"). A line of command words
+that is not whole says what may follow (`show system`). Configuration paths (old names, entries
+people name) and values are never read against it: the configuration's own check reads them, with
+its hints. `?` offers only what can be set: not NixOS's `_module`, nor what the fence keeps out.
 
 **Pipes**: `| compare`, and one `| display`: `set` (a configuration as `set` commands), `detail` (what
 is behind a view: the config repo files and commit of a configuration, the commit ids of `show system
@@ -273,11 +282,11 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | Command | Does |
 |---|---|
 | `show configuration` | the active configuration |
-| `show system commit` | the commit history, numbered for `rollback` |
-| `show system rollback <n> [compare <m>]` | commit <n>'s configuration, or its difference to <m> |
+| `show system commit` | the commit history, numbered for `rollback`, in local time (as the ledger) |
+| `show system rollback <n> [compare <m>]` | commit <n>'s configuration, or what going from <n> to <m> changes (<n> is the base, as on a network device) |
 | `show system alarms` | is this machine exactly as its history says? (and any pending confirmed commit) |
 | `show system ledger [<count>]` | every change as the ledger has it, refused and failed ones too |
-| `show packages available <term>` | search this machine's nixpkgs |
+| `show packages available <term>` | search this machine's nixpkgs: each package as it is typed (`htop`, `python3Packages.rich`), its version and description; filterable like any `show` |
 | `show services` | the catalog, and what is on |
 | `request system update [all]` | load the newest TorqOS (and its nixpkgs) into the candidate |
 | `request system software rollback <n>` | load commit <n>'s software into the candidate (a downgrade) |
