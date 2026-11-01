@@ -55,7 +55,7 @@ the tree spaces do, so `example.com` is one word, and under a level of named ent
 
 **No variables, at first.** Every value is literal, so `show | compare` and an approval prompt say
 exactly what changes — nobody approves a puzzle, least of all an AI's proposal. When repetition
-hurts, Junos-style `groups` (a block applied in many places, `apply-groups`, with
+hurts, J style `groups` (a block applied in many places, `apply-groups`, with
 `| display inheritance` to show the result expanded) cover most of what variables are used for.
 Computed values and references between settings belong in a `config` file: plain Nix.
 
@@ -204,7 +204,7 @@ torq.desktop.enable = true;       →  torq desktop enable true
    hardware-configuration.nix is attached at the top, and it builds the very system that was
    running (ledger #46; `show configuration` no longer names anything set outside it). tests/tree.nix evaluates the template as a whole machine. A change to how the machine
    starts is warned about at commit (KNOWN-GAPS 6n). Also fixed: `| display set` prints whole lines
-   from the top (pasteable, as Junos); `torqcli … | head` stops quietly (141), and a failure to
+   from the top (pasteable); `torqcli … | head` stops quietly (141), and a failure to
    write the output (a full disk) is an error; a top-level attachment (`set config x.nix`) reads
    back.
    **Built (S4b):** `system software torq source <source>`: where TorqOS comes from, the one
@@ -214,8 +214,8 @@ torq.desktop.enable = true;       →  torq desktop enable true
    update` then updates that source; `request system software rollback` is refused while the
    candidate changes the source; it is never deleted. Only plain flake references (`github:`,
    `gitlab:`, `sourcehut:`, `git+https://`, `https://`, `path:/`), written with plain URL
-   characters. The version stays the lock's (`## software: …`, `request system update`), as Junos
-   keeps configuration and software installs apart. A flake.nix that is not TorqOS's fixed one has
+   characters. The version stays the lock's (`## software: …`, `request system update`), as network devices
+   keep configuration and software installs apart. A flake.nix that is not TorqOS's fixed one has
    no source in the tree. This completes step 5: nothing of the machine is outside the tree.
    From the independent review: `rollback <n>` dropped the source but kept its lock, so a commit
    could pair the old flake.nix with another source's lock, and Nix would quietly re-lock it, as
@@ -238,7 +238,7 @@ torq.desktop.enable = true;       →  torq desktop enable true
    candidate is as it was, the error naming the line (all or nothing for errors: `load set` keeps
    the candidate as it goes, so a crash midway leaves it partly loaded, as a paste would). Nothing reaches the machine until `commit`
    shows it and a person approves it. The software's version is not saved, only its source (as
-   Junos keeps configuration and software apart): a loaded configuration builds on the newest
+   network devices keep configuration and software apart): a loaded configuration builds on the newest
    (or, for the same source, the candidate's already loaded)
    software of that source. On other hardware, the saved `fileSystems`, `boot` and hardware file
    are this machine's: the commit question warns about them (KNOWN-GAPS 6n). Live as change #52:

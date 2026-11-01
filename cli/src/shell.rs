@@ -555,7 +555,7 @@ enum Invocation {
     Command(Vec<String>),
 }
 
-const USAGE: &str = "usage: torqcli [--style juniper|cisco] [-c \"<command>; <command>…\" | <command>]";
+const USAGE: &str = "usage: torqcli [--style j|c] [-c \"<command>; <command>…\" | <command>]";
 
 fn parse_args(args: &[String]) -> Result<(Invocation, Option<Style>)> {
     let usage = || anyhow::anyhow!(USAGE);
@@ -593,8 +593,8 @@ fn a_command_on_the_command_line() {
     assert_eq!(a(&["show", "system", "alarms"]).unwrap().0, Invocation::Command(w(&["show", "system", "alarms"])));
     assert_eq!(a(&["show configuration | grep 'a b'"]).unwrap().0, Invocation::Command(w(&["show", "configuration", "|", "grep", "a b"])), "one argument: a line");
     assert_eq!(a(&["show", "configuration", "|", "grep", "a b"]).unwrap().0, Invocation::Command(w(&["show", "configuration", "|", "grep", "a b"])), "words as given");
-    assert_eq!(a(&["--style", "cisco", "show", "running-config"]).unwrap(), (Invocation::Command(w(&["show", "running-config"])), Some(Style::Cisco)));
-    assert_eq!(a(&["show", "--style", "cisco"]).unwrap().0, Invocation::Command(w(&["show", "--style", "cisco"])), "options come first");
+    assert_eq!(a(&["--style", "c", "show", "running-config"]).unwrap(), (Invocation::Command(w(&["show", "running-config"])), Some(Style::C)));
+    assert_eq!(a(&["show", "--style", "c"]).unwrap().0, Invocation::Command(w(&["show", "--style", "c"])), "options come first");
     assert_eq!(a(&["-c", "show; show"]).unwrap().0, Invocation::Script("show; show".into()));
     for bad in [&["-c", "x", "show"][..], &["-c", "x", "-c", "y"], &["-x"], &["-c"], &["--style", "vi", "show"], &[""]] {
         assert!(a(bad).is_err(), "{bad:?}");
@@ -616,14 +616,14 @@ fn run_shell(args: &[String]) -> Result<i32> {
     let tree = crate::nixos::Tree::parse(&fs::read_to_string(NIXOS_SCHEMA).with_context(|| format!("reading {NIXOS_SCHEMA} (is this TorqOS, from S1 on?)"))?)?;
     let machine = Real { cli: &cli };
     let who = me()?;
-    // Scripts and commands speak Juniper unless told otherwise (they must not change meaning with a
+    // Scripts and commands speak J style unless told otherwise (they must not change meaning with a
     // setting); the interactive shell speaks your style (users <you> cli style, else system cli
     // style). Piped input is a script too: the same rule (and it stops at its first error, below).
     let piped = !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
     let style = match (style, &run) {
         (Some(s), _) => s,
-        (None, Invocation::Script(_) | Invocation::Command(_)) => Style::Juniper,
-        (None, Invocation::Interactive) if piped => Style::Juniper,
+        (None, Invocation::Script(_) | Invocation::Command(_)) => Style::J,
+        (None, Invocation::Interactive) if piped => Style::J,
         (None, Invocation::Interactive) => configured_style(&who),
     };
     // Only the interactive shell keeps a candidate between runs; a script's is its own.
@@ -684,22 +684,22 @@ fn say(text: &str) {
 /// The style this machine's configuration gives `user` (/etc/torq/cli.json, modules/cli.nix).
 fn configured_style(user: &str) -> Style {
     let v: serde_json::Value = fs::read(CLI_STYLES).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    v["users"][user].as_str().or(v["style"].as_str()).and_then(Style::parse).unwrap_or(Style::Juniper)
+    v["users"][user].as_str().or(v["style"].as_str()).and_then(Style::parse).unwrap_or(Style::J)
 }
 
 const CLI_STYLES: &str = "/etc/torq/cli.json";
 
-/// The prompt, and a line above it: Juniper `[edit system]` then `user@host# `; Cisco
+/// The prompt, and a line above it: J style `[edit system]` then `user@host# `; C style
 /// `user@host(config-system)# `. Operational mode: `user@host> ` in both.
 fn prompt(s: &Session, user: &str, host: &str) -> (Option<String>, String) {
     let path: Vec<String> = s.edit_path().iter().map(|w| history::clean(w)).collect();
     match (s.mode, s.style) {
         (Mode::Operational, _) => (None, format!("{user}@{host}> ")),
-        (Mode::Configuration, Style::Juniper) => {
+        (Mode::Configuration, Style::J) => {
             let at = if path.is_empty() { "[edit]".to_string() } else { format!("[edit {}]", path.join(" ")) };
             (Some(format!("\n{at}")), format!("{user}@{host}# "))
         }
-        (Mode::Configuration, Style::Cisco) => {
+        (Mode::Configuration, Style::C) => {
             let at = if path.is_empty() { "config".to_string() } else { format!("config-{}", path.join("-")) };
             (None, format!("{user}@{host}({at})# "))
         }
@@ -807,7 +807,7 @@ mod editor {
     impl Validator for Help {}
     impl rustyline::Helper for Help {}
 
-    /// `?`: list what may come next, Junos style, and redraw the line as it was.
+    /// `?`: list what may come next, J style, and redraw the line as it was.
     struct Question(Help);
     impl ConditionalEventHandler for Question {
         fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
@@ -935,7 +935,7 @@ fn configurations_are_the_ledger_entries_that_made_one() {
     let ledger = [
         r#"{"seq":1,"ts":"2026-10-31T01:00:00Z","actor":"user","approved_by":null,"kind":"init","tier":"system","reason":"Config repository initialised","data":{"commit":"aaaa"}}"#,
         r#"{"seq":2,"ts":"2026-10-31T02:00:00Z","actor":"user","approved_by":null,"kind":"proposal","tier":"user","reason":"x","data":{}}"#,
-        r#"{"seq":3,"ts":"2026-10-31T02:01:00Z","actor":"user","approved_by":"viper","kind":"applied","tier":"user","reason":"+   style cisco;","data":{"commit":"bbbb","proposal":2}}"#,
+        r#"{"seq":3,"ts":"2026-10-31T02:01:00Z","actor":"user","approved_by":"viper","kind":"applied","tier":"user","reason":"+   style c;","data":{"commit":"bbbb","proposal":2}}"#,
         r#"{"seq":4,"ts":"2026-10-31T02:02:00Z","actor":"user","approved_by":"viper","kind":"confirmed","tier":"user","reason":"Confirmed","data":{"applied":3}}"#,
         r#"{"seq":5,"ts":"2026-10-31T03:00:00Z","actor":"broker","approved_by":null,"kind":"rolled_back","tier":"user","reason":"Change #3 rolled back\nfake: line","data":{"commit":"aaaa","applied":3}}"#,
         r#"{"seq":6,"ts":"2026-10-31T04:00:00Z","actor":"user","approved_by":"viper","kind":"apply_failed","tier":"user","reason":"broke","data":{}}"#,

@@ -1,5 +1,5 @@
 //! torqcli's commands as one model (`Op`) with two syntaxes (ADR-016, "One grammar, two
-//! renderings"): a line in Juniper or Cisco style parses to an `Op`, and every `Op` renders in either
+//! renderings"): a line in J or C style parses to an `Op`, and every `Op` renders in either
 //! style. The session executes `Op`s; nothing else knows a syntax. A property test checks that
 //! rendering in one style and parsing in the other gives the same `Op`.
 
@@ -9,27 +9,27 @@ use anyhow::{bail, Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
-    Juniper,
-    Cisco,
+    J,
+    C,
 }
 
 impl Style {
     pub fn name(self) -> &'static str {
         match self {
-            Style::Juniper => "juniper",
-            Style::Cisco => "cisco",
+            Style::J => "j",
+            Style::C => "c",
         }
     }
     pub fn parse(s: &str) -> Option<Style> {
         match s {
-            "juniper" => Some(Style::Juniper),
-            "cisco" => Some(Style::Cisco),
+            "j" => Some(Style::J),
+            "c" => Some(Style::C),
             _ => None,
         }
     }
 }
 
-/// Words a Cisco-style bare path could be mistaken for: no setting may be named one of these
+/// Words a C style bare path could be mistaken for: no setting may be named one of these
 /// (Schema::parse refuses it), so a command word is never also a path.
 pub const RESERVED: &[&str] = &[
     "no", "do", "exit", "end", "top", "up", "show", "commit", "rollback", "set", "delete", "edit", "configure", "config",
@@ -88,7 +88,7 @@ pub struct CommitOptions {
 pub enum Op {
     // Operational mode.
     Configure,
-    /// `show configuration [path] [| display set|detail]` (Cisco: `show running-config`).
+    /// `show configuration [path] [| display set|detail]` (C style: `show running-config`).
     ShowActive { path: Vec<String>, display: Option<Display> },
     ShowCommits { display: Option<Display> },
     ShowRollback { n: usize, compare: Option<usize>, display: Option<Display> },
@@ -106,26 +106,26 @@ pub enum Op {
     /// `load override|merge|set <file>`: a saved configuration into the candidate, all or nothing.
     Load { how: LoadHow, file: String },
     // Configuration mode.
-    /// A leaf's value or leaf-list elements: the words after `set` (Cisco: the bare path).
+    /// A leaf's value or leaf-list elements: the words after `set` (C style: the bare path).
     Set { words: Vec<String> },
-    /// `delete <path>` (Cisco: `no <path>`); `all` deletes a whole container or list entry.
+    /// `delete <path>` (C style: `no <path>`); `all` deletes a whole container or list entry.
     Delete { words: Vec<String>, all: bool },
-    /// Go down to a container or list entry (Cisco: its bare path, a submode).
+    /// Go down to a container or list entry (C style: its bare path, a submode).
     Edit { words: Vec<String> },
     Up,
     Top,
-    /// The candidate (Cisco: `show configuration`).
+    /// The candidate (C style: `show configuration`).
     ShowCandidate { path: Vec<String>, display: Option<Display> },
-    /// What the candidate changes (Juniper `show | compare`, Cisco `show configuration diff`).
+    /// What the candidate changes (J style `show | compare`, C style `show configuration diff`).
     Compare { display: Option<Display> },
     Rollback { n: usize },
     Commit(CommitOptions),
-    /// An operational command from configuration mode (Juniper `run`, Cisco `do`).
+    /// An operational command from configuration mode (J style `run`, C style `do`).
     Run(Box<Op>),
     /// Up one level, or out of configuration mode at the top (both styles' `exit`); in operational
     /// mode, leave torqcli.
     Exit,
-    /// Out of configuration mode from anywhere (Cisco `end`, Juniper `exit configuration-mode`).
+    /// Out of configuration mode from anywhere (C style `end`, J style `exit configuration-mode`).
     End,
     SwitchCli,
 }
@@ -307,7 +307,7 @@ pub fn parse_commit(w: &[String]) -> Result<CommitOptions> {
     Ok(CommitOptions { check: false, confirm, comment })
 }
 
-/// The operational commands, the same words in both styles except `show running-config` (Cisco)
+/// The operational commands, the same words in both styles except `show running-config` (C style)
 /// and `configure` / `config` (both accepted in both).
 fn parse_operational(style: Style, w: &[String]) -> Result<Op> {
     let s: Vec<&str> = w.iter().map(String::as_str).collect();
@@ -315,14 +315,14 @@ fn parse_operational(style: Style, w: &[String]) -> Result<Op> {
         ["configure" | "config"] | ["configure", "terminal"] => Op::Configure,
         ["exit" | "quit"] => Op::Exit,
         ["switch", "cli"] => Op::SwitchCli,
-        ["show", "configuration", ..] if style == Style::Juniper => {
+        ["show", "configuration", ..] if style == Style::J => {
             let (path, compare, display) = split_pipes(&w[2..])?;
             if compare {
                 bail!("| compare is for the candidate, in configuration mode");
             }
             Op::ShowActive { path, display: offered("a configuration", OF_CONFIGURATION, display)? }
         }
-        ["show", "running-config", ..] if style == Style::Cisco => {
+        ["show", "running-config", ..] if style == Style::C => {
             let (path, compare, display) = split_pipes(&w[2..])?;
             if compare {
                 bail!("| compare is for the candidate: `show configuration diff` in configuration mode");
@@ -349,14 +349,14 @@ fn parse_operational(style: Style, w: &[String]) -> Result<Op> {
         ["file", ..] => parse_file(&w[1..], Mode::Operational)?,
         [] => bail!("empty command"),
         [other, ..] => {
-            let show = if style == Style::Cisco { "show running-config" } else { "show configuration" };
+            let show = if style == Style::C { "show running-config" } else { "show configuration" };
             bail!("unknown command: {other}; one of: configure, {show}, show system …, show services, request, switch cli, exit")
         }
     })
 }
 
 /// Parse one line's words in `style` and `mode`. `is_place(words)`: whether the words name a
-/// container or list entry (somewhere to go), not a setting — what a Cisco-style bare path means
+/// container or list entry (somewhere to go), not a setting — what a C style bare path means
 /// depends on it.
 pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]) -> bool) -> Result<Op> {
     if w.is_empty() {
@@ -367,7 +367,7 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
     }
     let s: Vec<&str> = w.iter().map(String::as_str).collect();
     match style {
-        Style::Juniper => Ok(match s.as_slice() {
+        Style::J => Ok(match s.as_slice() {
             ["set", ..] => Op::Set { words: w[1..].to_vec() },
             ["delete", .., "all"] => Op::Delete { words: w[1..w.len() - 1].to_vec(), all: true },
             ["delete", ..] => Op::Delete { words: w[1..].to_vec(), all: false },
@@ -396,7 +396,7 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
             [other, ..] => bail!("unknown command: {other}; one of: set, delete, edit, up, top, show, commit, rollback, run, exit"),
             [] => unreachable!(),
         }),
-        Style::Cisco => Ok(match s.as_slice() {
+        Style::C => Ok(match s.as_slice() {
             ["no", .., "all"] => Op::Delete { words: w[1..w.len() - 1].to_vec(), all: true },
             ["no", ..] => Op::Delete { words: w[1..].to_vec(), all: false },
             ["exit"] => Op::Exit,
@@ -420,7 +420,7 @@ pub fn parse(style: Style, mode: Mode, w: &[String], is_place: &dyn Fn(&[String]
             ["do", ..] => Op::Run(Box::new(parse_operational(style, &w[1..])?)),
             ["switch", "cli"] => Op::SwitchCli,
             [first, ..] if RESERVED.contains(first) => {
-                bail!("unknown command: {first}; in Cisco style: <path> [value], no <path>, exit, end, top, show configuration [diff], commit, rollback configuration <n>, do <command>")
+                bail!("unknown command: {first}; in C style: <path> [value], no <path>, exit, end, top, show configuration [diff], commit, rollback configuration <n>, do <command>")
             }
             // A bare path: a container or list entry is somewhere to go (a submode); anything else
             // sets a value.
@@ -475,8 +475,8 @@ pub fn render(style: Style, op: &Op) -> String {
     };
     match (style, op) {
         (_, Op::Configure) => "configure".into(),
-        (Style::Juniper, Op::ShowActive { path, display }) => format!("{}{}", sep("show configuration", path), display_text(display)),
-        (Style::Cisco, Op::ShowActive { path, display }) => format!("{}{}", sep("show running-config", path), display_text(display)),
+        (Style::J, Op::ShowActive { path, display }) => format!("{}{}", sep("show configuration", path), display_text(display)),
+        (Style::C, Op::ShowActive { path, display }) => format!("{}{}", sep("show running-config", path), display_text(display)),
         (_, Op::ShowCommits { display }) => format!("show system commit{}", display_text(display)),
         (_, Op::ShowRollback { n, compare: None, display }) => format!("show system rollback {n}{}", display_text(display)),
         (_, Op::ShowRollback { n, compare: Some(m), display }) => format!("show system rollback {n} compare {m}{}", display_text(display)),
@@ -504,27 +504,27 @@ pub fn render(style: Style, op: &Op) -> String {
             };
             sep(&format!("file {a}"), &path.iter().cloned().collect::<Vec<_>>())
         }
-        (Style::Juniper, Op::Set { words }) => sep("set", words),
-        (Style::Cisco, Op::Set { words }) => join(words),
-        (Style::Juniper, Op::Delete { words, all }) => format!("{}{}", sep("delete", words), if *all { " all" } else { "" }),
-        (Style::Cisco, Op::Delete { words, all }) => format!("{}{}", sep("no", words), if *all { " all" } else { "" }),
-        (Style::Juniper, Op::Edit { words }) => sep("edit", words),
-        (Style::Cisco, Op::Edit { words }) => join(words),
-        (Style::Juniper, Op::Up) => "up".into(),
-        (Style::Cisco, Op::Up) => "exit".into(),
+        (Style::J, Op::Set { words }) => sep("set", words),
+        (Style::C, Op::Set { words }) => join(words),
+        (Style::J, Op::Delete { words, all }) => format!("{}{}", sep("delete", words), if *all { " all" } else { "" }),
+        (Style::C, Op::Delete { words, all }) => format!("{}{}", sep("no", words), if *all { " all" } else { "" }),
+        (Style::J, Op::Edit { words }) => sep("edit", words),
+        (Style::C, Op::Edit { words }) => join(words),
+        (Style::J, Op::Up) => "up".into(),
+        (Style::C, Op::Up) => "exit".into(),
         (_, Op::Top) => "top".into(),
-        (Style::Juniper, Op::ShowCandidate { path, display }) => format!("{}{}", sep("show", path), display_text(display)),
-        (Style::Cisco, Op::ShowCandidate { path, display }) => format!("{}{}", sep("show configuration", path), display_text(display)),
-        (Style::Juniper, Op::Compare { display }) => format!("show | compare{}", display_text(display)),
-        (Style::Cisco, Op::Compare { display }) => format!("show configuration diff{}", display_text(display)),
-        (Style::Juniper, Op::Rollback { n }) => format!("rollback {n}"),
-        (Style::Cisco, Op::Rollback { n }) => format!("rollback configuration {n}"),
+        (Style::J, Op::ShowCandidate { path, display }) => format!("{}{}", sep("show", path), display_text(display)),
+        (Style::C, Op::ShowCandidate { path, display }) => format!("{}{}", sep("show configuration", path), display_text(display)),
+        (Style::J, Op::Compare { display }) => format!("show | compare{}", display_text(display)),
+        (Style::C, Op::Compare { display }) => format!("show configuration diff{}", display_text(display)),
+        (Style::J, Op::Rollback { n }) => format!("rollback {n}"),
+        (Style::C, Op::Rollback { n }) => format!("rollback configuration {n}"),
         (_, Op::Commit(o)) => commit(o),
-        (Style::Juniper, Op::Run(op)) => format!("run {}", render(style, op)),
-        (Style::Cisco, Op::Run(op)) => format!("do {}", render(style, op)),
+        (Style::J, Op::Run(op)) => format!("run {}", render(style, op)),
+        (Style::C, Op::Run(op)) => format!("do {}", render(style, op)),
         (_, Op::Exit) => "exit".into(),
-        (Style::Juniper, Op::End) => "exit configuration-mode".into(),
-        (Style::Cisco, Op::End) => "end".into(),
+        (Style::J, Op::End) => "exit configuration-mode".into(),
+        (Style::C, Op::End) => "end".into(),
         (_, Op::SwitchCli) => "switch cli".into(),
     }
 }
@@ -571,7 +571,7 @@ mod tests {
             (Mode::Operational, Op::SwitchCli),
             (Mode::Configuration, Op::Set { words: v("system host-name torq") }),
             (Mode::Configuration, Op::Set { words: v("system packages [ htop vim ]") }),
-            (Mode::Configuration, Op::Set { words: v("users dev cli style cisco") }),
+            (Mode::Configuration, Op::Set { words: v("users dev cli style c") }),
             (Mode::Configuration, Op::Delete { words: v("system packages htop"), all: false }),
             (Mode::Configuration, Op::Delete { words: v("system"), all: true }),
             (Mode::Configuration, Op::Edit { words: v("system") }),
@@ -607,13 +607,13 @@ mod tests {
     #[test]
     fn every_op_round_trips_in_both_styles() {
         for (mode, op) in ops() {
-            for style in [Style::Juniper, Style::Cisco] {
+            for style in [Style::J, Style::C] {
                 let line = render(style, &op);
                 assert_eq!(p(style, mode, &line), op, "{} {line:?}", style.name());
             }
         }
-        // Juniper's `up` has no Cisco word of its own (Cisco's `exit` goes up, or out at the top).
-        assert_eq!(p(Style::Juniper, Mode::Configuration, "up"), Op::Up);
+        // J style's `up` has no C style word of its own (C style's `exit` goes up, or out at the top).
+        assert_eq!(p(Style::J, Mode::Configuration, "up"), Op::Up);
     }
 
     #[test]
@@ -628,20 +628,20 @@ mod tests {
             ("run show system alarms", "do show system alarms"),
             ("exit configuration-mode", "end"),
         ] {
-            assert_eq!(p(Style::Juniper, Mode::Configuration, j), p(Style::Cisco, Mode::Configuration, c), "{j} / {c}");
+            assert_eq!(p(Style::J, Mode::Configuration, j), p(Style::C, Mode::Configuration, c), "{j} / {c}");
         }
-        assert_eq!(p(Style::Juniper, Mode::Operational, "show configuration system"), p(Style::Cisco, Mode::Operational, "show running-config system"));
+        assert_eq!(p(Style::J, Mode::Operational, "show configuration system"), p(Style::C, Mode::Operational, "show running-config system"));
     }
 
-    /// In Cisco style a line's first word is a command or a path, never both: the reserved words
+    /// In C style a line's first word is a command or a path, never both: the reserved words
     /// are refused as paths (and Schema::parse refuses a setting named one of them).
     #[test]
     fn command_words_are_never_paths() {
         for line in ["set system host-name x", "edit system", "delete system packages", "up", "show system", "run show system alarms"] {
-            let e = format!("{:#}", parse(Style::Cisco, Mode::Configuration, &w(line), &is_place).unwrap_err());
-            assert!(e.contains("in Cisco style"), "{line}: {e}");
+            let e = format!("{:#}", parse(Style::C, Mode::Configuration, &w(line), &is_place).unwrap_err());
+            assert!(e.contains("in C style"), "{line}: {e}");
         }
-        let e = format!("{:#}", parse(Style::Juniper, Mode::Configuration, &w("system host-name x"), &is_place).unwrap_err());
+        let e = format!("{:#}", parse(Style::J, Mode::Configuration, &w("system host-name x"), &is_place).unwrap_err());
         assert!(e.contains("unknown command: system"), "{e}");
     }
 
@@ -661,7 +661,7 @@ mod tests {
         let filters = vec![f("grep", "-Ei \"host|name\""), f("sort", "-r"), f("wc", "-l")];
         let mut n = 0;
         for (mode, op) in ops().into_iter().filter(|(_, op)| shows(op)) {
-            for style in [Style::Juniper, Style::Cisco] {
+            for style in [Style::J, Style::C] {
                 let line = format!("{} | grep -Ei \"host|name\" | sort -r | wc -l", render(style, &op));
                 assert_eq!(pl(style, mode, &line).unwrap_or_else(|e| panic!("{line}: {e:#}")), (op.clone(), filters.clone()), "{line}");
                 n += 1;
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn each_view_has_its_own_displays() {
-        let (j, o, c) = (Style::Juniper, Mode::Operational, Mode::Configuration);
+        let (j, o, c) = (Style::J, Mode::Operational, Mode::Configuration);
         for (mode, line, want) in [
             (o, "show system commit | display set", "| display set: not for show system commit (it has | display detail)"),
             (o, "show system alarms | display diff", "not for show system alarms"),
@@ -687,20 +687,20 @@ mod tests {
             let e = err(j, mode, line);
             assert!(e.contains(want), "{line}: {e}");
         }
-        let e = err(Style::Cisco, c, "show configuration diff | display detail");
+        let e = err(Style::C, c, "show configuration diff | display detail");
         assert!(e.contains("not for a comparison"), "{e}");
     }
 
     #[test]
     fn filters_come_after_the_commands_own_pipes() {
-        let (j, o, c) = (Style::Juniper, Mode::Operational, Mode::Configuration);
+        let (j, o, c) = (Style::J, Mode::Operational, Mode::Configuration);
         assert_eq!(pl(j, o, "show configuration | grep 'a b'").unwrap().1, [f("grep", "\"a b\"")]);
         assert_eq!(pl(j, o, "show configuration | grep \"a|b\"").unwrap().1, [f("grep", "\"a|b\"")], "a quoted | is the pattern's");
         assert_eq!(pl(j, c, "show | compare | grep x").unwrap(), (Op::Compare { display: None }, vec![f("grep", "x")]));
         let (op, fs) = pl(j, c, "show system | display set | wc -l").unwrap();
         assert_eq!((op, fs), (Op::ShowCandidate { path: w("system"), display: Some(Display::Set) }, vec![f("wc", "-l")]));
-        assert_eq!(pl(Style::Cisco, c, "show configuration diff | grep x").unwrap().0, Op::Compare { display: None });
-        assert_eq!(pl(Style::Cisco, c, "do show system alarms | wc -l").unwrap().0, Op::Run(Box::new(Op::ShowAlarms { display: None })));
+        assert_eq!(pl(Style::C, c, "show configuration diff | grep x").unwrap().0, Op::Compare { display: None });
+        assert_eq!(pl(Style::C, c, "do show system alarms | wc -l").unwrap().0, Op::Run(Box::new(Op::ShowAlarms { display: None })));
         assert_eq!(pl(j, c, "show").unwrap().1, [], "no pipe, no filter");
         for (line, want) in [
             ("show configuration | grep a | display set", "| display set must come before | grep"),
@@ -717,7 +717,7 @@ mod tests {
             let e = err(j, c, line);
             assert!(e.contains("filtered"), "{line}: {e}");
         }
-        let e = err(Style::Cisco, c, "system host-name a | grep a");
+        let e = err(Style::C, c, "system host-name a | grep a");
         assert!(e.contains("only the output of a show command"), "{e}");
         let many = format!("show configuration{}", " | wc -l".repeat(MAX_FILTERS));
         assert!(pl(j, o, &many).is_ok());

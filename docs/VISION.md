@@ -13,7 +13,7 @@ machine, and every change is reviewed, ledgered and undoable.
 | Goal | What we do |
 |---|---|
 | The configuration is the device | Like a router's config: one tree (`torqcli`, every NixOS setting) defines the system. `show configuration` is the machine (docs/CONFIG-IS-THE-DEVICE.md). |
-| Small and controlled | torq is the configuration part of the OS: a Rust broker that is the only writer of the config repo, and `torqcli`, a Junos/Cisco-style shell over it. Everything else is plain NixOS. |
+| Small and controlled | torq is the configuration part of the OS: a Rust broker that is the only writer of the config repo, and `torqcli`, a J- or C-style shell over it. Everything else is plain NixOS. |
 | Everything reversible | Every change is a git commit, a NixOS generation and a ledger entry. `rollback`, `commit confirmed`, `request system revert`. |
 | Ready for AI, later | No AI now. Built so AI layers can be added later without bypass: the broker is the only writer, every change names its actor, tiers decide what needs a person. Then an AI could only *propose*; people stay free. |
 | Thin | CLI only. No desktop, no UI layer: what is not needed is not installed. |

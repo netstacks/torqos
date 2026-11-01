@@ -1763,22 +1763,22 @@ fn the_build_is_a_gc_root_until_settled() {
     assert!(!link.exists(), "removed once confirmed");
 }
 
-/// A user's CLI style is user tier, and only exactly { "style": "juniper" | "cisco" } is accepted.
+/// A user's CLI style is user tier, and only exactly { "style": "j" | "c" } is accepted.
 #[test]
 fn user_cli_style_is_user_tier_data() {
     let (dir, b) = setup("true");
-    let d = write_diff(dir.path(), "cli.diff", &new_user_file("users/casey/cli.json", r#"{ "style": "cisco" }"#));
-    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Cisco style", Actor::Agent, false).unwrap();
+    let d = write_diff(dir.path(), "cli.diff", &new_user_file("users/casey/cli.json", r#"{ "style": "c" }"#));
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "C style", Actor::Agent, false).unwrap();
     assert_eq!(p.body.tier, "user");
     b.apply(p.body.seq, "casey", false).unwrap();
     for (name, body) in [
         ("unknown-style.diff", r#"{ "style": "vim" }"#),
-        ("extra-key.diff", r#"{ "style": "juniper", "prompt": "$(id)" }"#),
-        ("list.diff", r#"[ "juniper" ]"#),
+        ("extra-key.diff", r#"{ "style": "j", "prompt": "$(id)" }"#),
+        ("list.diff", r#"[ "j" ]"#),
     ] {
         let d = write_diff(dir.path(), name, &new_user_file("users/dana/cli.json", body));
         let err = format!("{:#}", b.propose_on(Some(&b.repo.head().unwrap()), &d, "x", Actor::Agent, false).unwrap_err());
-        assert!(err.contains(r#"exactly {"style": ...}, one of juniper, cisco"#), "{name}: {err}");
+        assert!(err.contains(r#"exactly {"style": ...}, one of j, c"#), "{name}: {err}");
     }
 }
 

@@ -167,7 +167,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   "change a live system safely".
 - **Decision:**
   - `torqcli` is the shell (interactive, or one command per invocation for scripts). Two syntaxes
-    over one model — Juniper-style and Cisco-style — switched with `switch cli` (as in Cisco NSO);
+    over one model — J style and C style — switched with `switch cli`;
     the default is a setting. The earlier `torq pkg/service/update/log/undo/status` are removed.
   - The configuration is a tree whose containers are the config repo's folders and whose leaves are
     small data files; each setting is declared in a schema next to its NixOS module and installed
@@ -197,8 +197,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 
 ## ADR-017 — Output filters are the real Linux tools, not our own
 - **Status:** accepted (2026-10-31)
-- **Context:** Junos filters `show` output with `| match`/`| except`/`| count`, Cisco with `| include`/
-  `| exclude`. TorqOS users are Linux users; the owner's call: "it should just work like any Linux
+- **Context:** Network devices filter `show` output with words of their own (`| match`/`| except`/`| count`, or `| include`/
+  `| exclude`). TorqOS users are Linux users; the owner's call: "it should just work like any Linux
   CLI filtering", not a reimplementation of grep.
 - **Decision:** After a `show` (and its own `| compare` / `| display set`), `| <tool> <args>` runs a
   real tool from a short allow-list of text filters (`cut grep head sort tail tr uniq wc`) with the

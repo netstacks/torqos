@@ -29,8 +29,8 @@
       "kind": "leaf",
       "tier": "system",
       "values": {
-        "cisco": "IOS-style syntax: no …, show running-config",
-        "juniper": "Junos syntax: set/delete, show | compare, commit"
+        "c": "C syntax: no …, show running-config",
+        "j": "J syntax: set/delete, show | compare, commit"
       }
     },
     "system host-name": {
@@ -680,8 +680,8 @@
       "kind": "leaf",
       "tier": "user",
       "values": {
-        "cisco": "IOS-style syntax: no …, show running-config",
-        "juniper": "Junos syntax: set/delete, show | compare, commit"
+        "c": "C syntax: no …, show running-config",
+        "j": "J syntax: set/delete, show | compare, commit"
       }
     },
     "users <name> packages": {

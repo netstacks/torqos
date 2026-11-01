@@ -135,7 +135,7 @@ pub fn entries(s: &Settings) -> Vec<(Vec<String>, Val)> {
 /// elements; a set of plain values gains its entry; anything else is replaced).
 pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     let r = tree.resolve(words)?;
-    // A command word as an entry's name would be ambiguous (`delete … virtualHosts all`, Cisco `top`).
+    // A command word as an entry's name would be ambiguous (`delete … virtualHosts all`, C style `top`).
     if let Some(i) = tree.entry_positions(&r.loc).into_iter().find(|i| crate::syntax::RESERVED.contains(&r.loc[*i].as_str())) {
         bail!("'{}' cannot be named in {}: torqcli keeps the word for a command", r.loc[i], r.loc[..i].join(" "));
     }

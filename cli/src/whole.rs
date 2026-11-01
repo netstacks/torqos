@@ -272,7 +272,7 @@ impl Whole<'_> {
         Ok(())
     }
 
-    /// Whether `words` name a place (somewhere `edit` can go, a Cisco submode), not a setting.
+    /// Whether `words` name a place (somewhere `edit` can go, a C style submode), not a setting.
     pub fn is_place(&self, words: &[String]) -> bool {
         !words.is_empty() && matches!(self.tree.locate(words), Ok((_, None, _)))
     }
@@ -283,7 +283,7 @@ impl Whole<'_> {
         Ok(crate::tree::render_entries(&below))
     }
 
-    /// `| display set` below `path`: each line whole, from the top (as Junos), so it can be pasted back.
+    /// `| display set` below `path`: each line whole, from the top, so it can be pasted back.
     pub fn display_set(&self, d: &Data, path: &[String]) -> Result<String> {
         self.below(d, path)?;
         let path = self.shown_path(d, path);
@@ -350,7 +350,7 @@ mod tests {
             "networking hostName laptop",
             "system time-zone UTC",
             "torq packages user dev [ htop ]",
-            "users dev cli style cisco",
+            "users dev cli style c",
             "virtualisation docker enable true",
             "networking firewall allowedTCPPorts [ 22 ]",
             "torq services enabled ssh",
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(settings::files(&d.settings).keys().collect::<Vec<_>>(), ["nixos/networking.json", "nixos/virtualisation.json"]);
         assert_eq!(
             x.show(&d, &[]).unwrap(),
-            "networking {\n    firewall {\n        allowedTCPPorts [ 22 ];\n    }\n    hostName laptop;\n}\ntime {\n    timeZone UTC;\n}\ntorq {\n    cli {\n        userStyles {\n            dev cisco;\n        }\n    }\n    packages {\n        user {\n            dev [ htop ];\n        }\n    }\n    services {\n        enabled [ ssh ];\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
+            "networking {\n    firewall {\n        allowedTCPPorts [ 22 ];\n    }\n    hostName laptop;\n}\ntime {\n    timeZone UTC;\n}\ntorq {\n    cli {\n        userStyles {\n            dev c;\n        }\n    }\n    packages {\n        user {\n            dev [ htop ];\n        }\n    }\n    services {\n        enabled [ ssh ];\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
         );
         assert_eq!(x.show(&d, &w("networking hostName")).unwrap(), "hostName laptop;\n", "one setting");
         assert_eq!(x.show(&d, &w("system host-name")).unwrap(), "hostName laptop;\n", "by its old name too");
@@ -440,7 +440,7 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     let x = Whole { schema: &schema, tree: &tree };
     let w = |s: &str| crate::session::words(s).unwrap();
     let mut d = Data::default();
-    for line in ["networking hostName laptop", "networking firewall allowedTCPPorts [ 22 ]", "torq packages user dev [ htop ]", "users dev cli style cisco", "system time-zone UTC"] {
+    for line in ["networking hostName laptop", "networking firewall allowedTCPPorts [ 22 ]", "torq packages user dev [ htop ]", "users dev cli style c", "system time-zone UTC"] {
         x.set(&mut d, &w(line)).unwrap();
     }
     // `delete networking all`: everything shown below it, from both kinds of files.
@@ -461,6 +461,6 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     // One setting, one place: a kept one in a nixos/ file is refused, naming where it lives.
     let e = format!("{:#}", settings::load([("nixos/networking.json", br#"{"hostName":"x"}"# as &[u8])]).unwrap_err());
     assert!(e.contains("networking hostName is kept in its own file (`system host-name`)"), "{e}");
-    let e = format!("{:#}", settings::load([("nixos/torq.json", br#"{"cli":{"userStyles":{"dev":"cisco"}}}"# as &[u8])]).unwrap_err());
+    let e = format!("{:#}", settings::load([("nixos/torq.json", br#"{"cli":{"userStyles":{"dev":"c"}}}"# as &[u8])]).unwrap_err());
     assert!(e.contains("torq cli userStyles is kept in its own file"), "{e}");
 }

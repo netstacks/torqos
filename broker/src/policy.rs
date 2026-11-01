@@ -76,7 +76,7 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
 pub const USER_LEAVES: &[&str] = &["packages.json", "cli.json"];
 
 /// The CLI styles `torqcli` speaks (`cli.json`'s "style"; modules/cli.nix).
-pub const CLI_STYLES: &[&str] = &["juniper", "cisco"];
+pub const CLI_STYLES: &[&str] = &["j", "c"];
 
 /// The most packages one user's list may hold: a lightly-approved change must not be able to start
 /// hours of downloads and builds while holding the broker lock.
@@ -91,7 +91,7 @@ pub fn user_leaf_ok(leaf: &str, value: &serde_json::Value) -> bool {
         "packages.json" => value.as_array().is_some_and(|names| {
             names.len() <= MAX_USER_PACKAGES && names.iter().all(|n| n.as_str().is_some_and(package_name_ok))
         }),
-        // Exactly { "style": "juniper" | "cisco" }.
+        // Exactly { "style": "j" | "c" }.
         "cli.json" => value.as_object().is_some_and(|o| {
             o.len() == 1 && o.get("style").and_then(|s| s.as_str()).is_some_and(|s| CLI_STYLES.contains(&s))
         }),
@@ -226,12 +226,12 @@ mod tests {
         assert!(ok("packages.json", &at_most(256)));
         assert!(!ok("packages.json", &at_most(257)));
         assert!(!ok("unknown.json", "[]"), "a leaf without a shape is never ok");
-        for style in ["juniper", "cisco"] {
+        for style in ["j", "c"] {
             assert!(ok("cli.json", &format!(r#"{{"style": "{style}"}}"#)));
         }
         for bad in [
-            "{}", "[]", r#""juniper""#, r#"{"style": "Juniper"}"#, r#"{"style": "vim"}"#, r#"{"style": null}"#,
-            r#"{"style": ["juniper"]}"#, r#"{"style": "juniper", "prompt": "$(id)"}"#, r#"{"Style": "cisco"}"#,
+            "{}", "[]", r#""j""#, r#"{"style": "J style"}"#, r#"{"style": "vim"}"#, r#"{"style": null}"#,
+            r#"{"style": ["j"]}"#, r#"{"style": "j", "prompt": "$(id)"}"#, r#"{"Style": "c"}"#,
         ] {
             assert!(!ok("cli.json", bad), "{bad}");
         }

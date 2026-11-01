@@ -145,7 +145,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'test \"$(stat -c %a /home/dev/saved.conf)\" = 600'")
         # -c uses a private candidate; the interactive shell keeps one, private, between sessions.
         machine.succeed("su - dev -c 'test ! -e ~/.local/state/torq/candidate.json'")
-        machine.succeed("su - dev -c 'printf \"configure\\nset users dev cli style cisco\\nexit\\nexit\\n\" | torqcli'")
+        machine.succeed("su - dev -c 'printf \"configure\\nset users dev cli style c\\nexit\\nexit\\n\" | torqcli'")
         machine.succeed("su - dev -c 'test \"$(stat -c %a ~/.local/state/torq/candidate.json)\" = 600'")
         # The ledger is root's (its state directory is 0700): the numbers come through the broker, as a
         # commit does. Without it there are no numbers, rather than git's (which a rollback can differ from).
@@ -158,8 +158,8 @@ pkgs.testers.runNixOSTest {
         # Piped input is a script: it stops at its first error (exit 1) and runs nothing after it.
         out = machine.fail("su - dev -c 'printf \"configure\\nset system host-name my_laptop\\nshow | compare\\n\" | torqcli' 2>&1")
         assert "is not a valid system host-name" in out and "[edit" not in out.split("my_laptop")[-1], out
-        # The Cisco style says the same: a bare path sets, `show configuration diff` compares.
-        out = machine.succeed("su - dev -c 'torqcli --style cisco -c \"config; system; time-zone UTC; end; config; show configuration diff\"'")
+        # The C style says the same: a bare path sets, `show configuration diff` compares.
+        out = machine.succeed("su - dev -c 'torqcli --style c -c \"config; system; time-zone UTC; end; config; show configuration diff\"'")
         assert "[edit time]\n+   timeZone UTC;" in out, out
 
     with subtest("torqcli filters: the real tools, in a sandbox that reaches nothing"):
@@ -222,7 +222,7 @@ pkgs.testers.runNixOSTest {
         as_dev("tmux send-keys -t t 'set torq cli style ' '?'")
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q Possible.completions')}", timeout=30)
         out = as_dev(screen)
-        assert "cisco" in out and "IOS-style" in out and "juniper" in out, out
+        assert "C syntax" in out and "J syntax" in out, out
         # The line is still there after the list, ready to finish.
         assert out.rstrip().splitlines()[-1].endswith("set torq cli style"), out
         as_dev("tmux send-keys -t t C-u 'set time ti' Tab")
@@ -236,7 +236,7 @@ pkgs.testers.runNixOSTest {
         as_dev("tmux send-keys -t t top Enter")
         machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -v \"^$\" | tail -n 1 | grep -qF \"dev@machine(config)#\"')}", timeout=30)
         as_dev("tmux send-keys -t t 'switch cli' Enter")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -c \"Switched to the juniper style\" | grep -q 1')}", timeout=30)
+        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -c \"Switched to the J style\" | grep -q 1')}", timeout=30)
         # A pasted block stops at its first error: nothing after a refused line runs.
         as_dev("tmux send-keys -t t C-u")
         as_dev("printf 'set system host-name my_laptop\\nset users dev packages vim\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")

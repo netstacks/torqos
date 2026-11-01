@@ -531,7 +531,7 @@ mod tests {
         let (_d, r) = repo();
         let s = schema();
         let mut c = Candidate::from_repo(&r, &s, "HEAD").unwrap();
-        s.set(&mut c.config, &w("users dev cli style cisco")).unwrap();
+        s.set(&mut c.config, &w("users dev cli style c")).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("torq/candidate.json");
         c.save(&path).unwrap();
@@ -578,7 +578,7 @@ mod tests {
         assert!(changes(&s, &base, &c.config).unwrap().is_empty());
         s.set(&mut c.config, &w("system time-zone UTC")).unwrap(); // changes an existing file
         s.delete(&mut c.config, &w("system packages")).unwrap(); // deletes one
-        s.set(&mut c.config, &w("users dev cli style cisco")).unwrap(); // adds one
+        s.set(&mut c.config, &w("users dev cli style c")).unwrap(); // adds one
         let ch = changes(&s, &base, &c.config).unwrap();
         assert_eq!(ch.iter().map(|(p, o, n)| (p.as_str(), o.is_some(), n.is_some())).collect::<Vec<_>>(),
             [("system/host.json", true, true), ("system/packages.json", true, false), ("users/dev/cli.json", false, true)]);
@@ -589,7 +589,7 @@ mod tests {
         let applied = fs::read_to_string(d.path().join("system/host.json")).unwrap();
         assert_eq!(applied, "{\n  \"host-name\": \"three\",\n  \"time-zone\": \"UTC\"\n}\n");
         assert!(!d.path().join("system/packages.json").exists());
-        assert_eq!(fs::read_to_string(d.path().join("users/dev/cli.json")).unwrap(), "{\n  \"style\": \"cisco\"\n}\n");
+        assert_eq!(fs::read_to_string(d.path().join("users/dev/cli.json")).unwrap(), "{\n  \"style\": \"c\"\n}\n");
     }
 }
 

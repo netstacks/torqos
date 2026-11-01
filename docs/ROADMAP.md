@@ -32,9 +32,9 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`.
       an evaluation test (`tests/tree.nix`).
 - [ ] Environment variables: their own design first (allow-list, per-user delivery, escaping,
       never reaching root or the broker, secrets check) — review N2/N3.
-- [x] `torqcli` shell: operational + configuration modes, Juniper style, pipes, `?`, Tab, history
+- [x] `torqcli` shell: operational + configuration modes, J style, pipes, `?`, Tab, history
       (3a–3d; a pasted block runs line by line).
-- [x] Cisco style and `switch cli` (4a: one command model, both syntaxes, round-trip tested; edit
+- [x] C style and `switch cli` (4a: one command model, both syntaxes, round-trip tested; edit
       / up / top; `delete … all`; reserved words).
 - [x] Filters after any `show`: the real Linux tools (`grep`, `wc`, `head`, `tail`, `sort`, `uniq`,
       `cut`, `tr`; ADR-017, 4b); shell-style quoting; `torqcli <command>` without `-c` (4c);

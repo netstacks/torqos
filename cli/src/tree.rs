@@ -1,6 +1,6 @@
 //! The configuration tree (ADR-016, docs/CLI-DESIGN.md): the schema TorqOS installs as
 //! /etc/torq/schema.json (modules/schema.nix), the tree's data as the config repo files it lives in,
-//! `set` / `delete` in Junos syntax, and the views of it: `show configuration`, `| display set`,
+//! `set` / `delete` in J syntax, and the views of it: `show configuration`, `| display set`,
 //! `| compare`.
 //!
 //! Pure: no I/O but parsing what it is given. The modules' checks stay the authority on what is
@@ -97,7 +97,7 @@ impl Schema {
         if s.version != 1 {
             bail!("this torqcli reads schema version 1, not {}", s.version);
         }
-        // No setting may be named like a command (a Cisco-style bare path would be ambiguous).
+        // No setting may be named like a command (a C style bare path would be ambiguous).
         if let Some(key) = s.nodes.keys().find(|k| k.split(' ').any(|w| crate::syntax::RESERVED.contains(&w))) {
             bail!("schema: '{key}' uses a word torqcli keeps for commands");
         }
@@ -461,7 +461,7 @@ impl Schema {
         out
     }
 
-    /// `show configuration [<words>]`, Junos style: containers in braces, `leaf value;`,
+    /// `show configuration [<words>]`, J style: containers in braces, `leaf value;`,
     /// `leaf-list [ a b ];`.
     /// The path is resolved first: an unknown setting or name is an error, not empty output; a path
     /// to a leaf or leaf-list shows that one statement.
@@ -524,7 +524,7 @@ impl Schema {
         display_set_entries(&self.entries(cfg))
     }
 
-    /// `show | compare`: what `new` changes from `old`, Junos style — under `[edit <container>]`,
+    /// `show | compare`: what `new` changes from `old`, J style — under `[edit <container>]`,
     /// `-` lines for what goes and `+` lines for what comes.
     #[cfg(test)] // torqcli shows the whole tree (whole.rs); these show the hand-made part alone
     pub fn compare(&self, old: &Config, new: &Config) -> String {
@@ -600,7 +600,7 @@ fn check_name(key: &str, list: &Node, name: &str, existing: bool) -> Result<()> 
     if !shaped {
         bail!("'{name}' is not a valid name in {key}");
     }
-    // A command word as an entry name would be ambiguous (`users all`, Cisco `top` inside `users`).
+    // A command word as an entry name would be ambiguous (`users all`, C style `top` inside `users`).
     if crate::syntax::RESERVED.contains(&name) {
         bail!("'{name}' cannot be named in {key}: torqcli keeps the word for a command");
     }
@@ -674,7 +674,7 @@ fn render(entries: &[(Vec<String>, Val)], depth: usize, out: &mut String) {
     }
 }
 
-/// A word as Junos shows it: quoted if it has spaces or characters the syntax uses.
+/// A word as J style shows it: quoted if it has spaces or characters the syntax uses.
 fn quote(w: &str) -> String {
     // (`|` too: a line torqcli reads splits there.)
     if w.is_empty() || w.chars().any(|c| c.is_whitespace() || c.is_control() || ";{}[]\"#'\\|".contains(c)) {
@@ -738,7 +738,7 @@ mod tests {
             "system packages [ ripgrep htop ]",
             "services ssh",
             "users dev packages jq",
-            "users dev cli style cisco",
+            "users dev cli style c",
         ] {
             s.set(&mut c, &w(cmd)).unwrap();
         }
@@ -748,8 +748,8 @@ mod tests {
     #[test]
     fn resolves_paths_through_the_schema() {
         let s = schema();
-        let t = s.resolve(&w("users dev cli style cisco")).unwrap();
-        assert_eq!((t.node.as_str(), t.name.as_deref(), t.values.clone()), ("users <name> cli style", Some("dev"), w("cisco")));
+        let t = s.resolve(&w("users dev cli style c")).unwrap();
+        assert_eq!((t.node.as_str(), t.name.as_deref(), t.values.clone()), ("users <name> cli style", Some("dev"), w("c")));
         assert_eq!(t.words, w("users dev cli style"));
         let t = s.resolve(&w("system")).unwrap();
         assert_eq!((t.node.as_str(), t.values.len()), ("system", 0));
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(c.files["system/packages.json"], Data::List(w("htop ripgrep")));
         assert_eq!(c.files["services.json"], Data::List(w("ssh")));
         assert_eq!(c.files["users/dev/packages.json"], Data::List(w("jq")));
-        assert_eq!(c.files["users/dev/cli.json"], Data::Object([("style".into(), "cisco".into())].into()));
+        assert_eq!(c.files["users/dev/cli.json"], Data::Object([("style".into(), "c".into())].into()));
         assert_eq!(c.files.len(), 5);
     }
 
@@ -807,7 +807,7 @@ mod tests {
         s.delete(&mut c, &w("users dev")).unwrap();
         assert!(c.files.keys().all(|f| !f.starts_with("users/")), "{:?}", c.files.keys());
         assert_eq!(c.files.keys().collect::<Vec<_>>(), ["services.json"]);
-        // Not set: an error, as in Junos ("statement not found").
+        // Not set: an error ("statement not found", as network devices say).
         for gone in ["system host-name", "system packages", "system packages vim", "users dev", "system"] {
             assert!(err(s.delete(&mut c, &w(gone))).contains("is not set"), "{gone}");
         }
@@ -825,20 +825,20 @@ mod tests {
     }
 
     #[test]
-    fn show_configuration_is_junos_style() {
+    fn show_configuration_is_j_style() {
         let (s, c) = (schema(), configured());
         assert_eq!(
             s.show(&c, &[]).unwrap(),
             "services [ ssh ];\n\
              system {\n    host-name torq;\n    packages [ htop ripgrep ];\n    time-zone Europe/Berlin;\n}\n\
-             users {\n    dev {\n        cli {\n            style cisco;\n        }\n        packages [ jq ];\n    }\n}\n"
+             users {\n    dev {\n        cli {\n            style c;\n        }\n        packages [ jq ];\n    }\n}\n"
         );
-        assert_eq!(s.show(&c, &w("users dev")).unwrap(), "cli {\n    style cisco;\n}\npackages [ jq ];\n");
+        assert_eq!(s.show(&c, &w("users dev")).unwrap(), "cli {\n    style c;\n}\npackages [ jq ];\n");
         assert_eq!(s.show(&Config::default(), &[]).unwrap(), "");
         // A path to a leaf or leaf-list shows that statement (review: this used to panic).
         assert_eq!(s.show(&c, &w("system host-name")).unwrap(), "host-name torq;\n");
         assert_eq!(s.show(&c, &w("system packages")).unwrap(), "packages [ htop ripgrep ];\n");
-        assert_eq!(s.show(&c, &w("users dev cli style")).unwrap(), "style cisco;\n");
+        assert_eq!(s.show(&c, &w("users dev cli style")).unwrap(), "style c;\n");
         assert_eq!(s.show(&Config::default(), &w("system host-name")).unwrap(), "");
         // An unknown setting or name is an error, not empty output.
         assert!(format!("{:#}", s.show(&c, &w("users nobody")).unwrap_err()).contains("not one of the users"));
@@ -892,7 +892,7 @@ mod tests {
     fn load_checks_names_and_values() {
         let s = schema();
         for (path, body, why) in [
-            ("users/a b/cli.json", r#"{"style":"cisco"}"#, "not a valid name"),
+            ("users/a b/cli.json", r#"{"style":"c"}"#, "not a valid name"),
             ("users/dev/cli.json", "{\"style\":\"x\\ny\"}", "is not a valid users … cli style"),
             ("system/packages.json", r#"["a.b.c"]"#, "is not a valid system packages"),
             ("system/host.json", r#"{"host-name":"my_laptop"}"#, "is not a valid system host-name"),
@@ -939,7 +939,7 @@ mod tests {
             .load([
                 ("system/host.json", br#"{"host-name":"a","time-zone":"UTC"}"#.as_slice()),
                 ("services.json", br#"["ssh"]"#.as_slice()),
-                ("users/dev/cli.json", br#"{"style":"cisco"}"#.as_slice()),
+                ("users/dev/cli.json", br#"{"style":"c"}"#.as_slice()),
                 ("flake.nix", b"{ outputs = _: { }; }".as_slice()),
                 ("users/dev.nix", b"{ }".as_slice()),
             ])
@@ -972,7 +972,7 @@ mod tests {
         assert_eq!(
             s.display_set(&c),
             "set services ssh\nset system host-name torq\nset system packages htop\nset system packages ripgrep\n\
-             set system time-zone Europe/Berlin\nset users dev cli style cisco\nset users dev packages jq\n"
+             set system time-zone Europe/Berlin\nset users dev cli style c\nset users dev packages jq\n"
         );
         // ...and reading it back gives the same configuration.
         let mut again = Config::default();
@@ -993,7 +993,7 @@ mod tests {
         assert_eq!(
             s.compare(&old, &new),
             "[edit system]\n-   host-name torq;\n+   host-name laptop;\n-   packages [ htop ripgrep ];\n+   packages [ htop ripgrep vim ];\n\
-             [edit users dev cli]\n-   style cisco;\n"
+             [edit users dev cli]\n-   style c;\n"
         );
         assert_eq!(s.compare(&old, &old), "");
     }
@@ -1013,7 +1013,7 @@ mod tests {
         s.nodes.get_mut("users").unwrap().values.as_mut().unwrap().insert("ana".into(), String::new());
         let mut c = configured();
         s.set(&mut c, &w("users ana packages vim")).unwrap();
-        s.set(&mut c, &w("users ana cli style juniper")).unwrap();
+        s.set(&mut c, &w("users ana cli style j")).unwrap();
         s.delete(&mut c, &w("users dev")).unwrap();
         let users: Vec<&String> = c.files.keys().filter(|f| f.starts_with("users/")).collect();
         assert_eq!(users, ["users/ana/cli.json", "users/ana/packages.json"]);

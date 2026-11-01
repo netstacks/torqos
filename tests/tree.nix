@@ -36,9 +36,9 @@ let
       etc = builtins.fromJSON c.environment.etc."torq/cli.json".text;
     });
   cliExpect = {
-    host-empty = { style = "juniper"; userStyles = { }; etc = { style = "juniper"; users = { }; }; };
-    cli-good = { style = "cisco"; userStyles = { dev = "juniper"; }; etc = { style = "cisco"; users = { dev = "juniper"; }; }; };
-    cli-user-only = { style = "juniper"; userStyles = { dev = "cisco"; }; etc = { style = "juniper"; users = { dev = "cisco"; }; }; };
+    host-empty = { style = "j"; userStyles = { }; etc = { style = "j"; users = { }; }; };
+    cli-good = { style = "c"; userStyles = { dev = "j"; }; etc = { style = "c"; users = { dev = "j"; }; }; };
+    cli-user-only = { style = "j"; userStyles = { dev = "c"; }; etc = { style = "j"; users = { dev = "c"; }; }; };
   };
   cliInvalid = [ "cli-bad-style" "cli-bad-extra" "cli-bad-list" "cli-bad-leaf" "cli-bad-user" "cli-bad-symlink" ];
 

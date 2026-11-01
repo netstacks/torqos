@@ -1,8 +1,8 @@
-# Which syntax `torqcli` speaks (ADR-016): `system cli style juniper|cisco` for the machine, and
-# `users <name> cli style juniper|cisco` for one user, stored in the config repo as
+# Which syntax `torqcli` speaks (ADR-016): `system cli style j|c` for the machine, and
+# `users <name> cli style j|c` for one user, stored in the config repo as
 #
-#   system/cli.json          { "style": "cisco" }      (system tier)
-#   users/<name>/cli.json    { "style": "juniper" }    (user tier: the broker's USER_LEAVES)
+#   system/cli.json          { "style": "c" }      (system tier)
+#   users/<name>/cli.json    { "style": "j" }    (user tier: the broker's USER_LEAVES)
 #
 # Exactly that object, nothing else: the broker checks the user file's shape before accepting it
 # (broker/src/policy.rs, user_leaf_ok) and this module is the authority at evaluation. The result is
@@ -13,7 +13,7 @@
 let
   cfg = config.torq.cli;
   dir = config.torq.packages.configDir;
-  styles = [ "juniper" "cisco" ];
+  styles = [ "j" "c" ];
 
   # The option's enum type refuses an unknown style too; this gives the message, and is what refuses
   # an extra key (tests/tree.nix, cli-bad-extra).
@@ -22,7 +22,7 @@ let
     if builtins.isAttrs v && lib.attrNames v == [ "style" ] && builtins.elem v.style styles then
       v.style
     else
-      throw "torq: ${where} must be exactly { \"style\": \"juniper\" } or { \"style\": \"cisco\" }";
+      throw "torq: ${where} must be exactly { \"style\": \"j\" } or { \"style\": \"c\" }";
 
   systemFile = dir + "/system/cli.json";
   usersDir = dir + "/users";
@@ -39,7 +39,7 @@ in
   options.torq.cli = {
     style = lib.mkOption {
       type = lib.types.enum styles;
-      default = "juniper";
+      default = "j";
       description = "The syntax torqcli speaks on this machine (system/cli.json).";
     };
     userStyles = lib.mkOption {
@@ -56,7 +56,7 @@ in
 
     torq.schema =
       let
-        values = { juniper = "Junos syntax: set/delete, show | compare, commit"; cisco = "IOS-style syntax: no …, show running-config"; };
+        values = { j = "J syntax: set/delete, show | compare, commit"; c = "C syntax: no …, show running-config"; };
       in
       {
         "system cli" = { kind = "container"; help = "The torqcli shell"; };

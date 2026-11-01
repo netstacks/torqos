@@ -441,8 +441,8 @@
       "type": {
         "name": "enum",
         "values": [
-          "juniper",
-          "cisco"
+          "j",
+          "c"
         ]
       }
     },
@@ -457,8 +457,8 @@
         "elem": {
           "name": "enum",
           "values": [
-            "juniper",
-            "cisco"
+            "j",
+            "c"
           ]
         },
         "name": "attrsOf"

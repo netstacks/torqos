@@ -1,5 +1,5 @@
 //! A torqcli session (ADR-016, docs/CLI-DESIGN.md): operational and configuration mode, and the
-//! commands of each in Juniper syntax. Everything that reaches the broker or evaluates Nix goes
+//! commands of each in J syntax. Everything that reaches the broker or evaluates Nix goes
 //! through `Machine`, so the whole command layer is testable without either.
 
 use crate::candidate::{self, Candidate, Repo};
@@ -115,7 +115,7 @@ pub struct Session<'a> {
     pub mode: Mode,
     /// The syntax spoken (`switch cli` changes it for the session).
     pub style: Style,
-    /// Where configuration mode is (`edit system`; Cisco: the submode).
+    /// Where configuration mode is (`edit system`; C style: the submode).
     edit: Vec<String>,
     candidate: Option<Candidate>,
     machine: &'a dyn Machine,
@@ -254,7 +254,7 @@ impl<'a> Session<'a> {
         if w.is_empty() {
             return Ok(String::new());
         }
-        // A Cisco bare path is read against the candidate it will change: load it first.
+        // A C style bare path is read against the candidate it will change: load it first.
         if self.mode == Mode::Configuration {
             self.candidate()?;
         }
@@ -299,10 +299,10 @@ impl<'a> Session<'a> {
             Op::Load { how, file } => self.load_from(how, &file),
             Op::SwitchCli => {
                 self.style = match self.style {
-                    Style::Juniper => Style::Cisco,
-                    Style::Cisco => Style::Juniper,
+                    Style::J => Style::C,
+                    Style::C => Style::J,
                 };
-                Ok(format!("Switched to the {} style (for this session)\n", self.style.name()))
+                Ok(format!("Switched to the {} style (for this session)\n", self.style.name().to_uppercase()))
             }
             Op::Exit if self.mode == Mode::Operational => {
                 self.done = true;
@@ -354,8 +354,8 @@ impl<'a> Session<'a> {
                 // pressed before the value must not take them all.
                 let full = self.here(&words);
                 let del = match self.style {
-                    Style::Juniper => "delete",
-                    Style::Cisco => "no",
+                    Style::J => "delete",
+                    Style::C => "no",
                 };
                 let mut d = self.candidate_data()?;
                 self.whole().delete(&mut d, &full, all, del, &words)?;
@@ -391,7 +391,7 @@ impl<'a> Session<'a> {
     /// Up one level: out of a list entry (its name and the list), else one word.
     fn up(&mut self) {
         // Out of a named entry means out of its set too (`services httpd virtualHosts example.com` →
-        // `services httpd`), as in Junos and NSO: the entry and its set are one step.
+        // `services httpd`), as on network devices: the entry and its set are one step.
         let entry = self.edit.len() >= 2 && self.tree.is_entry(&self.edit);
         self.edit.pop();
         if entry {
@@ -767,7 +767,7 @@ impl<'a> Session<'a> {
             if o.confirm.is_some() {
                 bail!("change #{} is already waiting for confirmation until {}: `commit` confirms it", w.seq, w.deadline);
             }
-            // Junos: committing again within the window confirms it — but only its author may.
+            // As on network devices: committing again within the window confirms it — but only its author may.
             if w.by.as_deref().is_some_and(|by| by != self.me) {
                 bail!("change #{} is waiting for {} to confirm it; it rolls back at {} unless they do", w.seq, w.by.as_deref().unwrap_or("?"), w.deadline);
             }
@@ -1026,7 +1026,7 @@ impl<'a> Session<'a> {
                 Some("set" | "delete") => {}
                 Some(_) => bail!("line {}: only `set` and `delete` lines load (`| display set` writes them)", i + 1),
             }
-            let style = std::mem::replace(&mut self.style, Style::Juniper);
+            let style = std::mem::replace(&mut self.style, Style::J);
             let r = self.exec_words(&w);
             self.style = style;
             r.with_context(|| format!("line {}: {}", i + 1, crate::history::one_line(line, 80)))?;
@@ -1254,8 +1254,8 @@ fn software_compare(old: Option<&[u8]>, new: &Option<String>) -> String {
 
 /// A ledger reason from the comparison: its `+`/`-` lines, short.
 fn summary(compare: &str) -> String {
-    // Each `+`/`-` line with its section (`[edit torq cli userStyles]` + `+   dev cisco;` →
-    // `+ torq cli userStyles dev cisco;`): a ledger reason is read on its own.
+    // Each `+`/`-` line with its section (`[edit torq cli userStyles]` + `+   dev c;` →
+    // `+ torq cli userStyles dev c;`): a ledger reason is read on its own.
     let mut section = String::new();
     let mut lines: Vec<String> = Vec::new();
     let mut was = String::new();
@@ -1432,7 +1432,7 @@ mod tests {
         crate::nixos::Tree::parse(include_str!("nixos-fixture.json")).unwrap()
     }
     fn session<'a>(d: &Path, saved: Option<PathBuf>, m: &'a Fake) -> Session<'a> {
-        Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d), saved, m, "dev", Style::Juniper)
+        Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d), saved, m, "dev", Style::J)
     }
     fn waiting(by: &str) -> Option<Waiting> {
         Some(Waiting { seq: 42, deadline: "soon".into(), by: Some(by.into()) })
@@ -2170,7 +2170,7 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         // By its NixOS path, and by its old name: the same file.
-        run(&mut s, &["configure", "set torq packages user dev htop", "set users dev cli style cisco"]);
+        run(&mut s, &["configure", "set torq packages user dev htop", "set users dev cli style c"]);
         let out = s.exec("show torq | display detail").unwrap();
         assert!(out.contains("## users/dev/cli.json: torq cli userStyles dev\n") && out.contains("## users/dev/packages.json: torq packages user dev\n"), "{out}");
         assert!(!out.contains("system/"), "only what is shown: {out}");
@@ -2235,14 +2235,14 @@ mod tests {
     fn a_user_change_commits_without_asking() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        let out = run(&mut s, &["configure", "set users dev cli style cisco", "show | compare"]);
-        assert!(out.contains("[edit torq cli userStyles]\n+   dev cisco;\n"), "{out}");
+        let out = run(&mut s, &["configure", "set users dev cli style c", "show | compare"]);
+        assert!(out.contains("[edit torq cli userStyles]\n+   dev c;\n"), "{out}");
         let out = s.exec("commit").unwrap();
         assert_eq!(out, "commit complete (change #42)\n");
         let c = m.commits.borrow();
         let (diff, base, tier, reason, confirm) = &c[0];
-        assert!(diff.contains("+++ b/users/dev/cli.json") && diff.contains("+  \"style\": \"cisco\""), "{diff}");
-        assert_eq!((base.as_str(), tier.as_str(), reason.as_str(), *confirm), (s.repo.head().unwrap().as_str(), "user", "+ torq cli userStyles dev cisco;", None));
+        assert!(diff.contains("+++ b/users/dev/cli.json") && diff.contains("+  \"style\": \"c\""), "{diff}");
+        assert_eq!((base.as_str(), tier.as_str(), reason.as_str(), *confirm), (s.repo.head().unwrap().as_str(), "user", "+ torq cli userStyles dev c;", None));
         assert!(m.asked.borrow().is_empty(), "user tier: no question");
         assert_eq!(m.checks.borrow().len(), 1, "checked before committing");
         assert_eq!(s.exec("show | compare").unwrap(), "", "the candidate starts over after a commit");
@@ -2303,7 +2303,7 @@ mod tests {
         let out = s.exec("commit confirmed 5").unwrap();
         assert!(out.contains("rolled back in 5 minutes"), "{out}");
         assert_eq!(m.commits.borrow()[0].4, Some(5));
-        // Committing again, with nothing changed, confirms it (as in Junos).
+        // Committing again, with nothing changed, confirms it.
         let m = Fake { pending: waiting("dev"), ..Fake::default() };
         let mut s = session(d.path(), None, &m);
         assert_eq!(run(&mut s, &["configure", "commit"]), "Entering configuration mode\ncommit complete: change #42 confirmed (#43)\n");
@@ -2326,7 +2326,7 @@ mod tests {
         assert!(run(&mut s, &["configure", "show | compare"]).contains("+   dev [ htop ];"));
         // `torqcli -c`: a private candidate; nothing is saved.
         let mut p = session(d.path(), None, &m);
-        run(&mut p, &["configure", "set users dev cli style cisco"]);
+        run(&mut p, &["configure", "set users dev cli style c"]);
         assert!(!fs_has(state.path(), "cli.json"));
     }
 
@@ -2360,7 +2360,7 @@ mod tests {
     fn commit_options_parse_and_are_bounded() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set users dev cli style cisco"]);
+        run(&mut s, &["configure", "set users dev cli style c"]);
         for (bad, why) in [("commit confirmed 0", "1 to 1440"), ("commit confirmed 1441", "1 to 1440"), ("commit confirmed 99999999999", "too many"), ("commit now", "one of")] {
             assert!(format!("{:#}", s.exec(bad).unwrap_err()).contains(why), "{bad}");
         }
@@ -2386,7 +2386,7 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         s.schema.nodes.get_mut("users").unwrap().values.as_mut().unwrap().insert("ana".into(), String::new());
-        run(&mut s, &["configure", "set users ana cli style cisco"]);
+        run(&mut s, &["configure", "set users ana cli style c"]);
         let e = format!("{:#}", s.exec("commit").unwrap_err());
         assert!(e.contains("needs a person"), "{e}");
         assert!(m.asked.borrow()[0].contains("This changes the settings of: ana."), "{:?}", m.asked.borrow());
@@ -2398,9 +2398,9 @@ mod tests {
     fn a_failed_commit_keeps_the_candidate() {
         let (d, m) = (repo(), Fake { refuse: true, ..Fake::default() });
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set users dev cli style cisco"]);
+        run(&mut s, &["configure", "set users dev cli style c"]);
         assert!(format!("{:#}", s.exec("commit").unwrap_err()).contains("busy"));
-        assert!(s.exec("show | compare").unwrap().contains("dev cisco"));
+        assert!(s.exec("show | compare").unwrap().contains("dev c"));
         assert_eq!(s.exec("exit").unwrap(), "The configuration has been changed but not committed.\n");
     }
 
@@ -2435,7 +2435,7 @@ mod tests {
     fn delete_of_a_container_needs_all() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set torq cli userStyles dev cisco", "set torq packages system [ htop vim ]"]);
+        run(&mut s, &["configure", "set torq cli userStyles dev c", "set torq packages system [ htop vim ]"]);
         run(&mut s, &["set virtualisation docker enable true", "set virtualisation docker rootless enable true"]);
         for (bad, why) in [
             ("delete virtualisation docker", "say `delete virtualisation docker all`"),
@@ -2471,12 +2471,12 @@ mod tests {
         assert!(format!("{:#}", s.exec("set users all packages vim").unwrap_err()).contains("keeps the word for a command"), "the old names too");
     }
 
-    /// The same session in Cisco style: bare paths set, a container path is a submode, `no`
+    /// The same session in C style: bare paths set, a container path is a submode, `no`
     /// deletes, `show configuration diff` compares, `end` leaves.
     #[test]
-    fn a_session_in_cisco_style() {
+    fn a_session_in_c_style() {
         let (d, m) = (repo(), Fake { answer: true, ..Fake::default() });
-        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, "dev", Style::Cisco);
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, "dev", Style::C);
         run(&mut s, &["config", "networking hostName three", "services httpd virtualHosts example.com", "forceSSL true"]);
         assert_eq!(s.edit_path(), w("services httpd virtualHosts example.com"), "a bare path to a place is a submode");
         run(&mut s, &["exit"]);
@@ -2488,7 +2488,7 @@ mod tests {
             "[edit networking]\n-   hostName two;\n+   hostName three;\n[edit services httpd virtualHosts example.com]\n+   forceSSL true;\n"
         );
         run(&mut s, &["no services httpd virtualHosts example.com forceSSL", "do show system alarms"]);
-        assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("in Cisco style"));
+        assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("in C style"));
         assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
         assert_eq!(s.exec("end").unwrap(), "");
         assert_eq!(s.mode, Mode::Operational);
@@ -2501,7 +2501,7 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "edit system"]);
-        assert_eq!(s.exec("switch cli").unwrap(), "Switched to the cisco style (for this session)\n");
+        assert_eq!(s.exec("switch cli").unwrap(), "Switched to the C style (for this session)\n");
         run(&mut s, &["time-zone UTC", "no time-zone"]);
         run(&mut s, &["switch cli", "set time-zone UTC"]);
         assert!(s.exec("show | compare").unwrap().contains("+   timeZone UTC;"));

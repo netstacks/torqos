@@ -3,7 +3,7 @@
 Status: **plan** (milestone M1.5 in `ROADMAP.md`; ADR-016). TorqOS is driven like a network
 device: a shell with an operational mode and a configuration mode, a private *candidate*
 configuration, `show | compare`, `commit check`, `commit confirmed`, `rollback <n>`. Two syntaxes over
-one model — Juniper-style and Cisco-style — switchable at any time with `switch cli`, as in Cisco NSO.
+one model — J style and C style — switchable at any time with `switch cli`. (Network operating systems do this too.)
 Anyone who has run a router already knows how to drive TorqOS.
 
 ## Principles
@@ -40,7 +40,7 @@ $ torqcli show system alarms                # one command, for scripts
 $ torqcli -c "configure; set users viper packages htop; commit"
 ```
 
-| | Juniper style | Cisco style |
+| | J style | C style |
 |---|---|---|
 | operational prompt | `viper@torq-utm>` | `viper@torq-utm>` |
 | enter configuration | `configure` | `config` |
@@ -71,26 +71,26 @@ output inside a sandbox that has nothing else (no files, no network), from the s
 coreutils and grep; words are split as a shell does (`'single'` quotes are literal).
 
 **One grammar, two renderings.** Both styles parse to one set of operations; a property test renders
-every operation in one style and parses it in the other. Words a Cisco-style bare path could collide
+every operation in one style and parses it in the other. Words a C style bare path could collide
 with are reserved and can never name a container (`no`, `do`, `exit`, `end`, `top`, `up`, `show`,
 `commit`, `rollback`, `set`, `delete`, `edit`, `configure`, `config`, `run`, `switch`). Deleting a
-whole container needs `delete <container> all` / `no <container> all`. In Cisco configuration mode
+whole container needs `delete <container> all` / `no <container> all`. In C style configuration mode
 `do <command>` runs an operational command; rollback is `rollback configuration <n>` there.
 
 As built (4a, cli/src/syntax.rs): both styles parse to one `Op`; a test renders every `Op` in each
-style and parses it back. A Cisco bare path to a container or list entry is a submode (the prompt
+style and parses it back. A C style bare path to a container or list entry is a submode (the prompt
 shows `(config-system)`), any other bare path sets. The interactive shell starts in your style
 (`users <you> cli style`, else `system cli style`, from /etc/torq/cli.json); `switch cli` changes it
 for the session. `?` and Tab follow the style and where you are.
 
 **Scripts (`torqcli -c`)** use a private candidate that exists only for that invocation — never your
 interactive candidate, so a script cannot commit your half-done edits or leave edits behind. They
-stop at the first error, always use the Juniper style unless `--style cisco` is given, and quote
+stop at the first error, always use the J style unless `--style c` is given, and quote
 values containing `;` or `|` with double quotes. `torqcli <command>` runs one operational command
 the same way (`torqcli show system alarms`, `torqcli show configuration '|' grep host`): its words as
 your shell split them, or one argument read as a whole line (`torqcli "show configuration | grep
 host"`); its exit code says whether it worked. Configuration needs `-c`. Interactive sessions of the same user share one
-candidate (Junos `configure`); `configure private` is for later.
+candidate (as `configure` on a network device); `configure private` is for later.
 
 ## The configuration tree
 
@@ -129,10 +129,10 @@ settings (more are added one schema entry at a time):
 |---|---|---|
 | `system packages <name>` | `system/packages.json` | system |
 | `system host-name <name>` · `system time-zone <tz>` | `system/host.json` (done: `modules/host.nix`) | system |
-| `system cli style juniper\|cisco` | `system/cli.json` (done: `modules/cli.nix`, installed as `/etc/torq/cli.json`) | system |
+| `system cli style j\|c` | `system/cli.json` (done: `modules/cli.nix`, installed as `/etc/torq/cli.json`) | system |
 | `services <name>` (catalog: ssh, …) | `services.json` | system |
 | `users <name> packages <pkg>` | `users/<name>/packages.json` | user |
-| `users <name> cli style juniper\|cisco` | `users/<name>/cli.json` | user |
+| `users <name> cli style j\|c` | `users/<name>/cli.json` | user |
 
 Validation (enforced by the NixOS modules' types, the authority — the shell's schema only gives early
 errors and help): host names are RFC 1123 labels of at most 63 characters; time zones must exist in
@@ -171,7 +171,7 @@ users {
 As built (cli/src/tree.rs): statements are sorted by name at each level (so `services` comes
 before `system`), and `| compare` shows changes under the innermost `[edit …]` section that holds
 them, a whole leaf-list as one `-`/`+` pair, a new container as its leaves (`[edit users dev cli]
-+ style cisco;`, where Junos would show `+ cli { … }` under `[edit users dev]`).
++ style c;`, where a network device would show `+ cli { … }` under `[edit users dev]`).
 
 Config files, for what is not a value (docs/CONFIG-IS-THE-DEVICE.md, S3e):
 
@@ -205,7 +205,7 @@ delete <file>`; `delete <place> config` unattaches.
   with every commit, so `rollback <n>` says which commit it loaded (date, who, comment).
   `show system commit` reads the ledger, so it uses `sudo` like a commit does.
 - **`rollback <n>`** loads commit <n>'s *configuration* into the candidate — every file except
-  `flake.lock`, so it never downgrades the software (Junos keeps the two apart, too). That
+  `flake.lock`, so it never downgrades the software (network devices keep the two apart, too). That
   includes `.nix` files (e.g. turning development mode back on): `show | compare` shows each one as
   a raw diff, flagged. `rollback 0` discards the candidate.
 - **`request system software rollback <n>`** is the separate, explicit way to go back to commit
@@ -272,7 +272,7 @@ line by line.
 | `request system repair` | return a machine changed outside TorqOS to its last commit |
 | `request system revert <change>` | undo one change (a new change forward; asks unless it is only your own folder) |
 | `configure` / `config` | enter configuration mode |
-| `switch cli` | Juniper ↔ Cisco style for this session |
+| `switch cli` | J style ↔ C style for this session |
 
 Later: `commit at <time>`, `configure exclusive`. (`save` / `load`: built, S5.)
 
@@ -375,7 +375,7 @@ The broker stays small; its additions for this model:
   module's): `users/<name>/packages.json` and `users/<name>/cli.json` (2c) — a leaf joins only with
   its typed reader. Each must be a regular file (git mode 100644) of at most 64 KiB holding exactly
   its leaf's shape (`packages.json`: a list of at most 256 names; `cli.json`: exactly
-  `{"style": "juniper"|"cisco"}`). Evaluation rejects unknown files and symlinks under `users/` and
+  `{"style": "j"|"c"}`). Evaluation rejects unknown files and symlinks under `users/` and
   names that are not normal users.
 - The configuration the broker builds is always `nixosConfigurations.torq`, never derived from the
   host name (a VM test changes the host name, then commits again).
