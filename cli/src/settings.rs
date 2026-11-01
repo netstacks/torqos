@@ -53,19 +53,20 @@ fn kept_elsewhere(top: &str, v: &Value) -> Option<(String, String)> {
         if words[0] != top {
             continue;
         }
-        let mut at = vec![v];
+        // Each place the words reach, with its path (an entry's own name where `<name>` stands).
+        let mut at: Vec<(Vec<String>, &Value)> = vec![(vec![top.to_string()], v)];
         for w in &words[1..] {
             at = at
                 .into_iter()
-                .flat_map(|x| match (x, *w) {
-                    (Value::Object(o), "<name>") => o.values().collect::<Vec<_>>(),
-                    (Value::Object(o), k) => o.get(k).into_iter().collect(),
+                .flat_map(|(path, x)| match (x, *w) {
+                    (Value::Object(o), "<name>") => o.iter().map(|(k, y)| ([path.clone(), vec![k.clone()]].concat(), y)).collect::<Vec<_>>(),
+                    (Value::Object(o), k) => o.get(k).map(|y| ([path.clone(), vec![k.to_string()]].concat(), y)).into_iter().collect(),
                     _ => vec![],
                 })
                 .collect();
         }
-        if !at.is_empty() {
-            return Some((nixos.replace(" <name>", ""), hand.to_string()));
+        if let Some((path, _)) = at.first() {
+            return Some((path.join(" "), hand.to_string()));
         }
     }
     None

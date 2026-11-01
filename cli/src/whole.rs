@@ -20,15 +20,16 @@ use std::collections::BTreeMap;
 pub const MAP: &[(&str, &str, bool)] = &[
     ("networking hostName", "system host-name", true),
     ("time timeZone", "system time-zone", true),
-    ("torq packages system", "system packages", true),
-    ("torq packages user <name>", "users <name> packages", true),
+    // Software: NixOS's own places, kept in TorqOS's files (a person's own: user tier).
+    ("environment systemPackages", "system packages", true),
+    ("users users <name> packages", "users <name> packages", true),
     // Not an alias: NixOS has its own `services` (`services printing` is NixOS's and the catalog's).
     ("torq services enabled", "services", false),
 ];
 
 /// `words` with a prefix matching one side of MAP (0: NixOS, 1: hand-made) replaced by the other.
 /// Words as the hand-made schema names them, if they name a setting TorqOS keeps in its own files:
-/// by its NixOS path (`torq packages system`), or by its old name (`system packages`), as `set`
+/// by its NixOS path (`environment systemPackages`), or by its old name (`system packages`), as `set`
 /// reads them.
 pub fn hand_words(words: &[String]) -> Option<Vec<String>> {
     translate(words, 0, false).or_else(|| translate(words, 1, true).map(|_| words.to_vec()))
@@ -185,7 +186,33 @@ impl Whole<'_> {
     }
 
     /// `set <words>` (NixOS path, or an old name; `<place> config <file>` attaches a config file).
+    /// The hand-made schema of the configuration `d` is: its people are the machine's, and anyone
+    /// the configuration declares (`users users <name>`), so a person added in the candidate can be
+    /// given software in the same one.
+    fn of(&self, d: &Data) -> Option<Schema> {
+        let declared: Vec<String> = d.settings.get("users").and_then(|u| u.get("users")).and_then(|u| u.as_object()).map(|o| o.keys().cloned().collect()).unwrap_or_default();
+        let list = self.schema.nodes.get("users")?;
+        let known = list.values.as_ref()?;
+        let new: Vec<&String> = declared.iter().filter(|n| !known.contains_key(*n)).collect();
+        if new.is_empty() {
+            return None;
+        }
+        let mut s = self.schema.clone();
+        let values = s.nodes.get_mut("users")?.values.as_mut()?;
+        for n in new {
+            values.insert(n.clone(), String::new());
+        }
+        Some(s)
+    }
+
     pub fn set(&self, d: &mut Data, words: &[String]) -> Result<()> {
+        match self.of(d) {
+            Some(schema) => Whole { schema: &schema, tree: self.tree }.set_in(d, words),
+            None => self.set_in(d, words),
+        }
+    }
+
+    fn set_in(&self, d: &mut Data, words: &[String]) -> Result<()> {
         if let Some(rest) = software_words(words) {
             return match rest {
                 [url] => {
@@ -223,6 +250,13 @@ impl Whole<'_> {
     /// one, or all of a place's). What is not set is not an error: `Deleted::NotFound`, which the
     /// session says, and a paste goes on.
     pub fn delete(&self, d: &mut Data, words: &[String]) -> Result<Deleted> {
+        match self.of(d) {
+            Some(schema) => Whole { schema: &schema, tree: self.tree }.delete_in(d, words),
+            None => self.delete_in(d, words),
+        }
+    }
+
+    fn delete_in(&self, d: &mut Data, words: &[String]) -> Result<Deleted> {
         if software_words(words).is_some() || words == ["system", "software"] || words == ["system", "software", "torq"] {
             bail!("the software's source can be changed (`set system software torq source …`), not deleted: a machine always has one");
         }
@@ -375,7 +409,7 @@ mod tests {
         for line in [
             "networking hostName laptop",
             "system time-zone UTC",
-            "torq packages user dev [ htop ]",
+            "users users dev packages [ htop ]",
             "system packages vim",
             "virtualisation docker enable true",
             "networking firewall allowedTCPPorts [ 22 ]",
@@ -387,14 +421,14 @@ mod tests {
         assert_eq!(settings::files(&d.settings).keys().collect::<Vec<_>>(), ["nixos/networking.json", "nixos/virtualisation.json"]);
         assert_eq!(
             x.show(&d, &[]).unwrap(),
-            "networking {\n    firewall {\n        allowedTCPPorts [ 22 ];\n    }\n    hostName laptop;\n}\ntime {\n    timeZone UTC;\n}\ntorq {\n    packages {\n        system [ vim ];\n        user {\n            dev [ htop ];\n        }\n    }\n    services {\n        enabled [ ssh ];\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
+            "environment {\n    systemPackages [ vim ];\n}\nnetworking {\n    firewall {\n        allowedTCPPorts [ 22 ];\n    }\n    hostName laptop;\n}\ntime {\n    timeZone UTC;\n}\ntorq {\n    services {\n        enabled [ ssh ];\n    }\n}\nusers {\n    users {\n        dev {\n            packages [ htop ];\n        }\n    }\n}\nvirtualisation {\n    docker {\n        enable true;\n    }\n}\n"
         );
         assert_eq!(x.show(&d, &w("networking hostName")).unwrap(), "hostName laptop;\n", "one setting");
         assert_eq!(x.show(&d, &w("system host-name")).unwrap(), "hostName laptop;\n", "by its old name too");
         let files = x.files(&d);
         assert_eq!(files[&w("networking hostName")], "system/host.json");
         assert_eq!(files[&w("networking firewall allowedTCPPorts")], "nixos/networking.json");
-        assert_eq!(files[&w("torq packages user dev")], "users/dev/packages.json", "a person's own packages: user tier, as before");
+        assert_eq!(files[&w("users users dev packages")], "users/dev/packages.json", "a person's own packages: user tier, as before");
         // `| display set` reads back to the same configuration.
         let mut d2 = Data::default();
         for line in x.display_set(&d, &[]).unwrap().lines() {
@@ -484,7 +518,7 @@ mod tests {
         let t = t();
         let x = Whole { schema: &t.schema, tree: &t.tree };
         let mut d = Data::default();
-        for line in ["virtualisation docker enable true", "virtualisation docker rootless enable true", "networking firewall allowedTCPPorts [ 22 80 ]", "torq packages user dev [ htop jq ]"] {
+        for line in ["virtualisation docker enable true", "virtualisation docker rootless enable true", "networking firewall allowedTCPPorts [ 22 80 ]", "users users dev packages [ htop jq ]"] {
             x.set(&mut d, &w(line)).unwrap();
         }
         // A place, or a whole list, goes whole (as on a network device); one value alone.
@@ -496,8 +530,8 @@ mod tests {
         assert!(!x.show(&whole_list, &[]).unwrap().contains("allowedTCPPorts"));
         x.delete(&mut d, &w("networking firewall allowedTCPPorts 80")).unwrap();
         x.delete(&mut d, &w("virtualisation docker rootless")).unwrap();
-        x.delete(&mut d, &w("torq packages user dev jq")).unwrap();
-        assert_eq!(x.display_set(&d, &[]).unwrap(), "set networking firewall allowedTCPPorts 22\nset torq packages user dev htop\nset virtualisation docker enable true\n");
+        x.delete(&mut d, &w("users users dev packages jq")).unwrap();
+        assert_eq!(x.display_set(&d, &[]).unwrap(), "set networking firewall allowedTCPPorts 22\nset users users dev packages htop\nset virtualisation docker enable true\n");
         let e = format!("{:#}", x.set(&mut d, &w("services ssh")).unwrap_err());
         assert!(e.contains("`torq services enabled ssh`"), "{e}");
         assert!(x.set(&mut d, &w("services printing enable true")).is_ok(), "NixOS's own services are NixOS's");
@@ -523,16 +557,27 @@ mod tests {
 
 #[cfg(test)]
 #[test]
+fn a_person_added_in_the_candidate_can_have_software_in_it() {
+    let (schema, tree) = (Schema::parse(include_str!("schema-fixture.json")).unwrap(), Tree::parse(include_str!("nixos-fixture.json")).unwrap());
+    let x = Whole { schema: &schema, tree: &tree };
+    let w = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+    let mut d = Data::default();
+    assert!(format!("{:#}", x.set(&mut d, &w("users users alice packages btop")).unwrap_err()).contains("'alice' is not one of the users"));
+    x.set(&mut d, &w("users users alice extraGroups wheel")).unwrap();
+    x.set(&mut d, &w("users users alice packages btop")).unwrap();
+    assert!(x.show(&d, &w("users users alice")).unwrap().contains("packages [ btop ];"));
+    assert_eq!(x.delete(&mut d, &w("users users alice packages btop")).unwrap(), Deleted::Done);
+}
+
+#[cfg(test)]
+#[test]
 fn the_module_keeps_them_out_of_nixos_too() {
     // modules/settings-fence.nix's `elsewhere` must name every setting MAP keeps in TorqOS's own files
-    // (but torq packages, all fenced there): the evaluation refuses them in nixos/, whoever wrote it.
+    // (`*` where an entry is named): the evaluation refuses them in nixos/, whoever wrote it.
     // Read where the repo is (the dev shell); the package's own build has only cli/, and skips it.
     let Ok(fence) = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../modules/settings-fence.nix")) else { return };
     for (nixos, _, _) in MAP {
-        if nixos.starts_with("torq packages") {
-            continue;
-        }
-        let words: Vec<&str> = nixos.split(' ').filter(|w| *w != "<name>").collect();
+        let words: Vec<&str> = nixos.split(' ').map(|w| if w == "<name>" { "*" } else { w }).collect();
         let pat = format!("[ {} ]", words.iter().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(" "));
         assert!(fence.contains(&pat), "settings-fence.nix's elsewhere has no {pat}");
     }
@@ -545,11 +590,11 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     let x = Whole { schema: &schema, tree: &tree };
     let w = |s: &str| crate::session::words(s).unwrap();
     let mut d = Data::default();
-    for line in ["networking hostName laptop", "networking firewall allowedTCPPorts [ 22 ]", "torq packages user dev [ htop ]", "system packages vim", "system time-zone UTC"] {
+    for line in ["networking hostName laptop", "networking firewall allowedTCPPorts [ 22 ]", "users users dev packages [ htop ]", "system packages vim", "system time-zone UTC"] {
         x.set(&mut d, &w(line)).unwrap();
     }
     // A whole list by its old name, as by its NixOS one (`delete system packages`).
-    for name in ["system packages", "torq packages system"] {
+    for name in ["system packages", "environment systemPackages"] {
         let mut e = d.clone();
         x.set(&mut e, &w("system packages [ htop vim ]")).unwrap();
         assert_eq!(x.delete(&mut e, &w(name)).unwrap_or_else(|err| panic!("{name}: {err:#}")), Deleted::Done);
@@ -565,8 +610,9 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     // it (`system host-name` is `networking hostName` now; `system time-zone` is `time timeZone`).
     let shown = x.show(&d, &w("system")).unwrap_or_default();
     assert_eq!(x.delete(&mut d, &w("system")).unwrap(), if shown.is_empty() { Deleted::NotFound } else { Deleted::Done });
-    assert!(x.show(&d, &[]).unwrap().contains("timeZone UTC") && x.show(&d, &[]).unwrap().contains("system [ vim ]"), "{}", x.show(&d, &[]).unwrap());
+    assert!(x.show(&d, &[]).unwrap().contains("timeZone UTC") && x.show(&d, &[]).unwrap().contains("systemPackages [ vim ]"), "{}", x.show(&d, &[]).unwrap());
     x.delete(&mut d, &w("time")).unwrap();
+    x.delete(&mut d, &w("environment")).unwrap();
     x.delete(&mut d, &w("torq")).unwrap();
     assert_eq!(x.show(&d, &[]).unwrap(), "");
     assert_eq!(x.delete(&mut d, &w("virtualisation")).unwrap(), Deleted::NotFound, "nothing set below it: nothing deleted, no error");
@@ -578,6 +624,8 @@ fn review_of_s3c_one_place_one_value_and_all_means_all() {
     // One setting, one place: a kept one in a nixos/ file is refused, naming where it lives.
     let e = format!("{:#}", settings::load([("nixos/networking.json", br#"{"hostName":"x"}"# as &[u8])]).unwrap_err());
     assert!(e.contains("networking hostName is kept in its own file (`system host-name`)"), "{e}");
-    let e = format!("{:#}", settings::load([("nixos/torq.json", br#"{"packages":{"system":["vim"]}}"# as &[u8])]).unwrap_err());
-    assert!(e.contains("torq packages system is kept in its own file"), "{e}");
+    let e = format!("{:#}", settings::load([("nixos/environment.json", br#"{"systemPackages":["vim"]}"# as &[u8])]).unwrap_err());
+    assert!(e.contains("environment systemPackages is kept in its own file (`system packages`)"), "{e}");
+    let e = format!("{:#}", settings::load([("nixos/users.json", br#"{"users":{"dev":{"packages":["jq"]}}}"# as &[u8])]).unwrap_err());
+    assert!(e.contains("users users dev packages is kept in its own file (`users <name> packages`)"), "a person's, named: {e}");
 }

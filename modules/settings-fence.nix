@@ -37,12 +37,17 @@ rec {
   ];
 
   # The settings TorqOS keeps in files of its own (torqcli's whole.rs MAP): one setting, one place —
-  # set in nixos/ too, the tree would show one value and NixOS build another.
+  # set in nixos/ too, the tree would show one value and NixOS build another. `*`: any entry's name.
   elsewhere = [
     [ "networking" "hostName" ]
     [ "time" "timeZone" ]
+    [ "environment" "systemPackages" ]
+    [ "users" "users" "*" "packages" ]
     [ "torq" "services" "enabled" ]
   ];
+  keptElsewhere = path: builtins.any (pat:
+    builtins.length path == builtins.length pat && builtins.all lib.id (lib.zipListsWith segmentMatches pat path)
+  ) elsewhere;
 
   segmentMatches = pat: seg:
     if lib.hasSuffix "*" pat then lib.hasPrefix (lib.removeSuffix "*" pat) seg else pat == seg;
@@ -74,7 +79,7 @@ rec {
         else [ ];
     in
     if underscore != null then "${here}.${underscore}: a key starting with _ is a NixOS module directive (mkForce, mkMerge, …), not a setting: the tree holds data only"
-    else if builtins.elem path elsewhere then "${here}: kept in its own file by TorqOS (system/host.json, services.json), not in nixos/"
+    else if keptElsewhere path then "${here}: kept in its own file by TorqOS (as torqcli writes it), not in nixos/"
     else if fenced path then "${here}: not settable in the configuration tree (it reaches the broker or TorqOS itself)"
     else if landsInTorq != null then "environment.etc.${landsInTorq}: lands in /etc/torq, the broker's: not settable in the configuration tree"
     else lib.findFirst (p: p != null) null inner;

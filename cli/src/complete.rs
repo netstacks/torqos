@@ -506,7 +506,7 @@ mod tests {
         assert!(c(k, "show | grep").is_empty(), "grep's options are grep's");
         // delete: what the session runs — a setting, a value, a whole list or place, by either name; what
         // is not set runs too (a warning, nothing deleted).
-        for line in ["delete networking hostName", "delete system host-name", "delete networking", "delete system packages htop", "delete system packages", "delete torq packages system", "delete services httpd config", "delete virtualisation docker enable", "delete time timeZone", "delete virtualisation config"] {
+        for line in ["delete networking hostName", "delete system host-name", "delete networking", "delete system packages htop", "delete system packages", "delete environment systemPackages", "delete services httpd config", "delete virtualisation docker enable", "delete time timeZone", "delete virtualisation config"] {
             assert!(enter(k, line), "{line}: {:?}", c(k, line));
         }
         for line in ["delete nonsense", "delete networking all", "delete"] {
@@ -645,7 +645,7 @@ mod tests {
         let narrow = answer(&s, &at(Mode::Operational), &w("show system packages"), "", 30);
         assert!(narrow.lines().all(|l| crate::ui::width(l) <= 30), "{narrow}");
         // The old name, as its NixOS path.
-        for line in ["set system packages", "set torq packages system"] {
+        for line in ["set system packages", "set environment systemPackages"] {
             assert_eq!(words_of(&choices(&s, Mode::Configuration, &w(line), "")), ["<package>"], "{line}");
         }
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set system packages"), "b")), ["<package>"], "while typing a name");

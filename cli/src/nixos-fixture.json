@@ -593,6 +593,21 @@
       "type": {
         "name": "str"
       }
+    },
+    {
+      "loc": [
+        "users",
+        "users",
+        "<name>",
+        "packages"
+      ],
+      "type": {
+        "name": "listOf",
+        "elem": {
+          "name": "package"
+        }
+      },
+      "help": "The set of packages that should be made available to the user."
     }
   ]
 }

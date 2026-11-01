@@ -1508,7 +1508,7 @@ fn rules_note(d: &Data) -> String {
 /// A ledger reason from the comparison: its `+`/`-` lines, short.
 fn summary(compare: &str) -> String {
     // Each `+`/`-` line with its section (`[edit torq packages user]` + `+   dev [ jq ];` →
-    // `+ torq packages user dev [ jq ];`): a ledger reason is read on its own.
+    // `+ users users dev packages [ jq ];`): a ledger reason is read on its own.
     let mut section = String::new();
     let mut lines: Vec<String> = Vec::new();
     let mut was = String::new();
@@ -2159,7 +2159,7 @@ mod tests {
         // Your own packages, by their NixOS path: your folder, no question.
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set torq packages user dev [ htop ]"]);
+        run(&mut s, &["configure", "set users users dev packages [ htop ]"]);
         assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
         assert_eq!(m.commits.borrow()[0].2, "user");
         assert!(m.commits.borrow()[0].0.contains("+++ b/users/dev/packages.json"));
@@ -2573,7 +2573,7 @@ mod tests {
         assert_eq!(*m.ssh_calls.borrow(), 1, "a software update is evaluated for SSH");
         let (d, m) = (repo(), Fake { answer: true, ssh_state: Some((Ssh::default(), on)), ..Default::default() });
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set torq packages user dev [ htop ]", "commit"]);
+        run(&mut s, &["configure", "set users users dev packages [ htop ]", "commit"]);
         assert_eq!(*m.ssh_calls.borrow(), 0, "a person's own packages cannot turn SSH on");
     }
 
@@ -2610,9 +2610,9 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         // By its NixOS path, and by its old name: the same file.
-        run(&mut s, &["configure", "set torq packages user dev htop", "set users dev packages jq"]);
-        let out = s.exec("show torq | display detail").unwrap();
-        assert!(out.contains("## users/dev/packages.json: torq packages user dev\n") && out.contains("dev [ htop jq ];"), "{out}");
+        run(&mut s, &["configure", "set users users dev packages htop", "set users dev packages jq"]);
+        let out = s.exec("show users | display detail").unwrap();
+        assert!(out.contains("## users/dev/packages.json: users users dev packages\n") && out.contains("packages [ htop jq ];"), "{out}");
         assert!(!out.contains("system/"), "only what is shown: {out}");
         let net = s.exec("show networking | display detail").unwrap();
         assert!(net.contains("## system/host.json: networking hostName\n") && !net.contains("users/"), "{net}");
@@ -2675,13 +2675,13 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         let out = run(&mut s, &["configure", "set users dev packages jq", "show | compare"]);
-        assert!(out.contains("[edit torq packages user]\n+   dev [ jq ];\n"), "{out}");
+        assert!(out.contains("[edit users users dev]\n+   packages [ jq ];\n"), "{out}");
         let out = s.exec("commit").unwrap();
         assert_eq!(out, "commit complete (change #42)\n");
         let c = m.commits.borrow();
         let (diff, base, tier, reason, confirm) = &c[0];
         assert!(diff.contains("+++ b/users/dev/packages.json") && diff.contains("+  \"jq\""), "{diff}");
-        assert_eq!((base.as_str(), tier.as_str(), reason.as_str(), *confirm), (s.repo.head().unwrap().as_str(), "user", "+ torq packages user dev [ jq ];", None));
+        assert_eq!((base.as_str(), tier.as_str(), reason.as_str(), *confirm), (s.repo.head().unwrap().as_str(), "user", "+ users users dev packages [ jq ];", None));
         assert!(m.asked.borrow().is_empty(), "user tier: no question");
         assert_eq!(m.checks.borrow().len(), 1, "checked before committing");
         assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
@@ -2763,7 +2763,7 @@ mod tests {
         assert!(out.contains("changed but not committed"), "{out}");
         assert_eq!(s.mode, Mode::Operational);
         let mut s = session(d.path(), Some(saved.clone()), &m);
-        assert!(run(&mut s, &["configure", "show | compare"]).contains("+   dev [ htop ];"));
+        assert!(run(&mut s, &["configure", "show | compare"]).contains("+   packages [ htop ];"));
         // `torqcli -c`: a private candidate; nothing is saved.
         let mut p = session(d.path(), None, &m);
         run(&mut p, &["configure", "set users dev packages jq"]);
@@ -2840,7 +2840,7 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "set users dev packages jq"]);
         assert!(format!("{:#}", s.exec("commit").unwrap_err()).contains("busy"));
-        assert!(s.exec("show | compare").unwrap().contains("dev [ jq ]"));
+        assert!(s.exec("show | compare").unwrap().contains("+   packages [ jq ];"));
         assert_eq!(s.exec("exit").unwrap(), "The configuration has been changed but not committed.\n");
     }
 
@@ -2876,16 +2876,16 @@ mod tests {
     fn delete_takes_everything_below_as_on_a_network_device() {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
-        run(&mut s, &["configure", "set torq packages user dev [ jq ]", "set torq packages system [ htop vim ]"]);
+        run(&mut s, &["configure", "set users users dev packages [ jq ]", "set environment systemPackages [ htop vim ]"]);
         run(&mut s, &["set virtualisation docker enable true", "set virtualisation docker rootless enable true"]);
         // `all` is no word of `delete` any more: here it would be a setting's name.
         assert!(s.exec("delete virtualisation docker enable all").is_err());
         // From where you are: a place goes whole; a value alone; a whole list.
         run(&mut s, &["edit virtualisation docker"]);
         assert_eq!(s.exec("delete rootless").unwrap(), "");
-        run(&mut s, &["top", "delete torq packages system htop"]);
+        run(&mut s, &["top", "delete environment systemPackages htop"]);
         assert!(s.exec("show | compare").unwrap().contains("vim") && !s.exec("show | compare").unwrap().contains("htop"));
-        run(&mut s, &["delete torq packages system", "delete torq packages user dev"]);
+        run(&mut s, &["delete environment systemPackages", "delete users users dev packages"]);
         let c = s.exec("show | compare").unwrap();
         assert_eq!(c, "[edit virtualisation docker]\n+   enable true;\n");
         // What is not set: a warning, nothing deleted, no error (a paste goes on).
