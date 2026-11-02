@@ -109,7 +109,8 @@ first.
       the newest one. *Built (2026-11-02, ADR-028): signed commits in the public
       `netstacks/torqos-releases`, `stable` moved forward to each tested release; machines take it
       as git and check each commit's signature before loading it; an image machine's first update
-      moves it there. Done once the first release is out and a machine has updated to it.*
+      moves it there. v0.1.0 out (2026-11-02), checked from outside; done once a machine has
+      updated to it.*
 - [ ] **CI (GitHub Actions):** *test* on every push and pull request (`nix flake check`: tree
       checks and the VM tests, with KVM); *(the `test` workflow, 2026-11-02, with the DCO
       sign-off check on pull requests)* *nixpkgs bump* weekly, as a pull request the tests run
