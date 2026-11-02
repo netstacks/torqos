@@ -32,7 +32,13 @@ jobs:
       - name: User namespaces as on NixOS
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
+      # NixOS makes the disk in a small VM, a build that asks for `kvm`. The arm64 runner has no KVM:
+      # its VM falls back to emulation (QEMU's accel=kvm:tcg), slower but the same disk, as on the
+      # aarch64 machine TorqOS is developed on. The x86_64 runner has KVM.
       - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
 
       - name: Build the images
         run: |
