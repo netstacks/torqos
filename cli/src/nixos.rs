@@ -257,7 +257,11 @@ impl Tree {
                 }
                 Step::Many(names) => bail!("'{w}' is ambiguous{}: {}", if loc.is_empty() { String::new() } else { format!(" (after `{}`)", loc.join(" ")) }, names.join(", ")),
                 Step::None if n.children.contains_key("*") => bail!("'{w}' is not an entry's number (after `{}`): 1, 2, … — the next number adds one", loc.join(" ")),
-                Step::None => bail!("{}: no such setting{}", path_text(&loc, w), did_you_mean(n, w)),
+                // Another system's path (`system services ssh`): where it is here, before any near word.
+                Step::None => match crate::vocabulary::concept_of_path(words) {
+                    Some(c) => bail!("{}: no such setting here; it is {}: {}", path_text(&loc, w), c.place, c.how),
+                    None => bail!("{}: no such setting{}", path_text(&loc, w), did_you_mean(n, w)),
+                },
             }
         }
         Ok(Walk { loc, node: n, values: vec![] })
@@ -606,6 +610,8 @@ mod tests {
             ("environment systemPackages [ \"rm -rf\" ]", "not a package name"),
             ("time timeZone", "needs text"),
             ("virtualisation dokcer enable", "no such setting; did you mean docker?"),
+            ("system services ssh", "system services: no such setting here; it is services openssh: `set services openssh enable true`"),
+            ("interfaces ge-0/0/0 unit 0", "interfaces: no such setting here; it is networking interfaces:"),
             ("services httpd virtualHosts", "not a setting by itself"),
             ("boot kernel sysctl", "not a setting by itself"),
         ] {

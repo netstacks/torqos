@@ -292,24 +292,6 @@ static CONFIRMED: [Node; 3] = [
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
 ];
 
-/// Words from other CLIs and shells, where they are refused, and what to use here instead.
-const FOREIGN: &[(&str, &str, &str)] = &[
-    ("|", "count", "lines are counted with `| wc -l`"),
-    ("|", "match", "lines are matched with `| grep <pattern>`"),
-    ("|", "except", "lines are left out with `| grep -v <pattern>`"),
-    ("|", "find", "lines are found with `| grep <pattern>`"),
-    ("|", "last", "the last lines are `| tail -n <lines>`"),
-    ("|", "trim", "columns are cut with `| cut -c <from>-`"),
-    ("|", "save", "the configuration is saved with `save <file>`, in configuration mode"),
-    ("", "copy", "TorqOS has no copy: set the new place's values (`show <place> | display set` lists the old ones)"),
-    ("", "rename", "TorqOS has no rename: set the new place, then delete the old one"),
-    ("", "annotate", "a change's reason is recorded with `commit comment \"…\"`"),
-    ("", "deactivate", "TorqOS has no inactive settings: delete it (its history keeps it)"),
-    ("", "ping", "ping is a shell command: run it outside torqcli"),
-    ("", "traceroute", "traceroute is a shell command: run it outside torqcli"),
-    ("", "ssh", "ssh is a shell command: run it outside torqcli"),
-];
-
 // ── Building an Op ───────────────────────────────────────────────────────────────────────────────
 
 fn help(r: &Read) -> Result<Op> {
@@ -579,8 +561,12 @@ fn after_text(after: &[String]) -> String {
 /// stand there.
 fn refused(w: &str, after: &[String], offered: &[String]) -> String {
     let at = after_text(after);
-    let foreign_at = if after.last().is_some_and(|x| x == "|") { "|" } else if after.is_empty() { "" } else { "-" };
-    if let Some((_, _, advice)) = FOREIGN.iter().find(|(at, word, _)| *at == foreign_at && *word == w) {
+    let foreign = match after.last() {
+        Some(x) if x == "|" => Some(crate::vocabulary::At::Pipe),
+        None => Some(crate::vocabulary::At::Command),
+        Some(_) => None,
+    };
+    if let Some(advice) = foreign.and_then(|at| crate::vocabulary::instead(at, w)) {
         return format!("'{w}' is not a word here{at}: {advice}");
     }
     let hint = crate::near::hint(w, offered.iter().map(String::as_str));

@@ -832,6 +832,11 @@ impl<'a> Session<'a> {
                 out.push_str(&format!("{}{heading}\n{}", if out.is_empty() { "" } else { "\n" }, crate::complete::table(&rows, fit)));
             }
         }
+        // What other systems call it, where it is here (`ssh`: services openssh), before the places.
+        let usual: Vec<(String, String)> = crate::vocabulary::concepts_of(&terms).into_iter().map(|c| (c.place.to_string(), c.how.to_string())).collect();
+        if !usual.is_empty() {
+            out.push_str(&format!("{}On TorqOS:\n{}", if out.is_empty() { "" } else { "\n" }, crate::complete::table(&usual, fit)));
+        }
         // Places first (a service, a section: what someone searching for "ssh" is looking for), then
         // single settings. A place is said by what turning it on does, else by what it holds.
         let mut places: Vec<(usize, String, String)> = Vec::new();
