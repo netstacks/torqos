@@ -455,6 +455,60 @@ fn rebuild_outliving_a_killed_broker_keeps_the_lock() {
     assert!(done.exists(), "the lock must be held until the rebuild has finished");
 }
 
+/// First-boot setup killed after its switch: the machine boots the new system with no ledger. Its
+/// record makes that system's first start (`init`) finish setup — change #1, the commit setup made —
+/// and a history setup did not make is not taken over.
+#[test]
+fn setup_cut_short_after_its_switch_is_finished_at_the_next_start() {
+    let (dir, repo) = config_dir();
+    let state = dir.path().join("state");
+    let setup = |rebuild: &str| {
+        Command::new(env!("CARGO_BIN_EXE_torq-broker"))
+            .arg("--repo").arg(&repo)
+            .arg("--state-dir").arg(&state)
+            .arg("--rebuild-cmd").arg(rebuild)
+            .arg("--build-cmd").arg("echo /nix/store/built")
+            .arg("setup")
+            .output()
+            .unwrap()
+    };
+    assert_killed(&setup(CRASH));
+    let b = Broker::new(&repo, &state, "true");
+    assert!(b.ledger.read_all().unwrap().is_empty() && state.join("setup.json").exists(), "cut short: no history yet, its record kept");
+    assert!(format!("{:#}", b.propose(&write_diff(dir.path(), "nl.diff", NIGHT_LIGHT), "x", Actor::User, false).unwrap_err()).contains("first-boot setup was cut short"));
+    let head = b.repo.head().unwrap();
+    b.init().unwrap();
+    let entries = b.ledger.read_all().unwrap();
+    assert_eq!(kinds(&b), ["init"]);
+    assert_eq!(entries[0].body.data["commit"], head.as_str());
+    assert_eq!(entries[0].body.data["interrupted"], true);
+    assert!(!state.join("setup.json").exists());
+    b.init().unwrap();
+    assert_eq!(kinds(&b), ["init"], "once");
+
+    // Cut short again, and something else committed since: not taken over.
+    let (dir, repo) = config_dir();
+    let state = dir.path().join("state");
+    let out = Command::new(env!("CARGO_BIN_EXE_torq-broker"))
+        .arg("--repo").arg(&repo).arg("--state-dir").arg(&state)
+        .arg("--rebuild-cmd").arg(CRASH).arg("--build-cmd").arg("echo /nix/store/built")
+        .arg("setup").output().unwrap();
+    assert_killed(&out);
+    let b = Broker::new(&repo, &state, "true");
+    fs::write(repo.join("desktop.nix"), "{ nightLight = true; }\n").unwrap();
+    git(&b, &["commit", "-qam", "outside"]);
+    assert!(format!("{:#}", b.init().unwrap_err()).contains("more than setup's commit"));
+    assert!(b.ledger.read_all().unwrap().is_empty());
+
+    // On the image, a setup cut short starts again from nothing: its repo removed, its record goes too.
+    fs::remove_dir_all(repo.join(".git")).unwrap();
+    let b = Broker::new(&repo, &state, "true");
+    let b = b.with_confirm_commands("echo /nix/store/built", "true", "true", "true");
+    b.set_up().unwrap();
+    assert_eq!(kinds(&b), ["init"]);
+    assert!(!state.join("setup.json").exists());
+}
+
 fn git(b: &Broker, args: &[&str]) -> String {
     let out = Command::new("git").arg("-C").arg(b.repo.root()).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));

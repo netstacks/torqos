@@ -246,13 +246,17 @@ in
     # Runs exactly once: after that, only the broker writes to the repo. Re-running it on every
     # boot or switch would commit out-of-band edits as "baseline" with no ledger entry, and
     # during a broker apply it collides with the broker lock and fails the switch.
+    # Or: a first-boot setup cut short after its switch (its record, setup.json) — this system's
+    # first start finishes it (the broker's `init`; while setup itself still runs, it waits for
+    # nothing and changes nothing). The `|` conditions: either one, with flake.nix.
     systemd.services.torq-broker-init = {
       description = "Initialise TorqOS config repo and ledger";
       wantedBy = [ "multi-user.target" ];
       restartIfChanged = false;
       unitConfig.ConditionPathExists = [
         "${cfg.configRepo}/flake.nix"
-        "!${cfg.configRepo}/.git"
+        "|!${cfg.configRepo}/.git"
+        "|${cfg.stateDir}/setup.json"
       ];
       # Its settings (and PATH) come from /etc/torq/broker.json.
       serviceConfig = {

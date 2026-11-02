@@ -360,6 +360,18 @@ impl Pending {
 
 const PENDING_VERSION: u32 = 1;
 
+/// First-boot setup in flight (`Broker::set_up`), written to `state/setup.json` before the config
+/// repo gets its history and removed once change #1 is in the ledger. Setup switches before it
+/// ledgers: a broker that dies after the switch leaves a machine that boots its new system with no
+/// ledger. That system's `torq-broker-init` (or any broker operation) finds this record and
+/// finishes setup (`Broker::finish_setup`). Its own file, not pending.json: an apply's record must
+/// never start `torq-broker-init` (modules/broker.nix).
+#[derive(Debug, Serialize, Deserialize)]
+struct SetupRecord {
+    /// Setup's commit, recorded as soon as it exists.
+    commit: Option<String>,
+}
+
 /// fsync a directory, making a create, rename or unlink in it durable.
 fn sync_dir(dir: &Path) -> Result<()> {
     fs::File::open(dir)?.sync_all()?;
@@ -613,6 +625,11 @@ impl Broker {
     ///   difference, and `repair` returns the machine to it.
     pub fn set_up(&self) -> Result<Entry> {
         let lock = Lock::acquire(&self.state_dir)?;
+        // A setup cut short on the image starts again from nothing (the console removes what it
+        // left, the repo included): its record goes too.
+        if self.setup_record()?.is_some() && !self.repo.is_initialised() {
+            self.clear_setup()?;
+        }
         self.refuse_if_interrupted()?;
         if !self.ledger.read_all()?.is_empty() {
             bail!("this machine is already set up: it has a ledger");
@@ -625,15 +642,20 @@ impl Broker {
         if switch_running() {
             bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then set up");
         }
+        // Recorded before the repo has a history, and its commit as soon as it exists: from the
+        // switch on, the machine may start the new system, which finishes setup if this broker dies.
+        self.write_setup(&SetupRecord { commit: None })?;
         self.repo.init()?;
         let head = self.repo.head()?;
+        self.write_setup(&SetupRecord { commit: Some(head.clone()) })?;
         if let Err(e) = self.build_system(&lock, &head) {
             let _ = std::fs::remove_dir_all(self.repo.root().join(".git"));
+            let _ = self.clear_setup();
             return Err(e.context("the new configuration did not build: nothing was set up"));
         }
         let switched = self.rebuild(&lock, &head);
         let reason = if switched.is_ok() { "TorqOS set up" } else { "TorqOS set up (the switch reported a problem: show system alarms)" };
-        self.ledger.append(NewEntry {
+        let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: None,
             kind: "init".into(),
@@ -641,7 +663,9 @@ impl Broker {
             tainted: false,
             reason: reason.into(),
             data: self.with_system(json!({ "commit": head })),
-        })
+        })?;
+        self.clear_setup()?;
+        Ok(e)
     }
 
     /// `request system password` (SECURITY-MODEL.md, "Accounts and passwords"): a person's new
@@ -693,6 +717,13 @@ impl Broker {
     }
 
     pub fn init(&self) -> Result<()> {
+        // A first-boot setup cut short after its switch: finished here, at the new system's start
+        // (torq-broker-init). While setup itself holds the lock — its own switch starts this unit —
+        // there is nothing to do: setup finishes, or its record stays for the next start.
+        if self.setup_record()?.is_some() {
+            let Some(lock) = Lock::try_acquire(&self.state_dir)? else { return Ok(()) };
+            return self.finish_setup(&lock).map(drop);
+        }
         let _l = Lock::acquire(&self.state_dir)?;
         self.refuse_if_interrupted()?;
         // Once there is a ledger, init changes nothing: its baseline commit (`git add -A`) would take
@@ -870,14 +901,75 @@ impl Broker {
         }
     }
 
-    /// Atomically replace pending.json: write, fsync, rename, fsync the directory.
+    /// Atomically replace pending.json.
     fn write_pending(&self, p: &Pending) -> Result<()> {
-        let tmp = self.state_dir.join("pending.json.tmp");
+        self.write_record(&self.pending_path(), &serde_json::to_vec_pretty(p)?)
+    }
+
+    /// Atomically replace a record in the state folder: write, fsync, rename, fsync the directory.
+    fn write_record(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        fs::create_dir_all(&self.state_dir)?;
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(&serde_json::to_vec_pretty(p)?)?;
+        f.write_all(bytes)?;
         f.sync_all()?;
-        fs::rename(&tmp, self.pending_path())?;
+        fs::rename(&tmp, path)?;
         sync_dir(&self.state_dir)
+    }
+
+    fn setup_path(&self) -> PathBuf {
+        self.state_dir.join("setup.json")
+    }
+
+    fn setup_record(&self) -> Result<Option<SetupRecord>> {
+        match fs::read(self.setup_path()) {
+            Ok(b) => Ok(Some(serde_json::from_slice(&b).context("reading setup.json")?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn write_setup(&self, r: &SetupRecord) -> Result<()> {
+        self.write_record(&self.setup_path(), &serde_json::to_vec_pretty(r)?)
+    }
+
+    fn clear_setup(&self) -> Result<()> {
+        fs::remove_file(self.setup_path())?;
+        sync_dir(&self.state_dir)
+    }
+
+    /// Finish a first-boot setup cut short after its switch: the machine runs (and boots) the new
+    /// system, and its history must name it — change #1, the running system recorded as setup
+    /// would have (`status` shows any difference; `repair` returns the machine to it). Only setup's
+    /// own history is taken over: its one commit, the one it recorded. Nothing recorded: None.
+    fn finish_setup(&self, _lock: &Lock) -> Result<Option<Entry>> {
+        let Some(record) = self.setup_record()? else { return Ok(None) };
+        self.ledger.verify().context("refused: the ledger is broken (`torq-broker verify`); nothing was changed")?;
+        // Ledgered already: the broker died between its entry and removing the record.
+        if self.ledger.read_all()?.iter().any(|e| e.body.kind == "init") {
+            self.clear_setup()?;
+            return Ok(None);
+        }
+        let head = self
+            .repo
+            .head()
+            .context("first-boot setup was cut short before its configuration was committed: set the machine up again from the TorqOS image")?;
+        if self.repo.commit_count()? != 1 || record.commit.as_ref().is_some_and(|c| *c != head) {
+            bail!("first-boot setup was cut short, and the config repo now holds more than setup's commit (HEAD {head}): not taken over");
+        }
+        let e = self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: None,
+            kind: "init".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: "TorqOS set up (finished at the next start: setup was cut short after its switch)".into(),
+            data: self.with_system(json!({ "commit": head, "interrupted": true })),
+        })?;
+        self.clear_setup()?;
+        Ok(Some(e))
     }
 
     fn clear_pending(&self) -> Result<()> {
@@ -897,6 +989,9 @@ impl Broker {
     /// For operations that must not rebuild (init, propose — the agent's entry point): settle a
     /// record whose outcome was ledgered, and refuse while one still needs reconciling.
     fn refuse_if_interrupted(&self) -> Result<()> {
+        if self.setup_record()?.is_some() {
+            bail!("first-boot setup was cut short: `torq-broker init` finishes it (as the machine's next start does)");
+        }
         if let Some(p) = self.read_pending()? {
             // Only trust an outcome entry on an intact chain.
             self.ledger.verify().context("cannot settle an interrupted operation on a broken ledger")?;
@@ -927,6 +1022,10 @@ impl Broker {
         // nothing — its final append would fail only after it had committed, rebuilt or activated
         // (audit of 2026-10-31). An outcome entry found on a broken chain is not trustworthy either.
         self.ledger.verify().context("refused: the ledger is broken (`torq-broker verify`); nothing was changed")?;
+        // A setup cut short after its switch is finished before anything else (it rebuilds nothing).
+        if let Some(e) = self.finish_setup(lock)? {
+            return Ok(Some(e));
+        }
         let Some(mut p) = self.read_pending()? else { return Ok(None) };
         if self.outcome_recorded(&p)? {
             self.clear_pending()?;

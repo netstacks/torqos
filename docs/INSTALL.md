@@ -28,9 +28,13 @@ boot.
    asks again), switches to it, and records change #1, "TorqOS set up", with the system it switched
    to. The broker runs as a service of its own, so the switch (which brings back the console's
    login prompt) cannot cut it short. A machine is set up once its history has change #1: a setup
-   cut short before that, by a power cut mid-build say, runs again at the next boot and starts
-   clean; the image never takes over a repo by itself. Setup never runs again, and runs nowhere
-   but the image.
+   cut short before its switch, by a power cut mid-build say, runs again at the next boot and
+   starts clean; the image never takes over a repo by itself. Cut short after its switch, the
+   machine starts its new system with no history yet: setup kept a record of what it was doing
+   (`/var/lib/torq/state/setup.json`, written before the repo had a history), and the new
+   system's first start (`torq-broker-init`) finishes it — change #1 for setup's own commit and
+   the system running, said so in the entry; a repo holding anything more is not taken over.
+   Setup never runs again, and runs nowhere but the image.
 6. **The console shows a login prompt.** From here it is TorqOS as everywhere: `torqcli`, every
    change through the broker.
 

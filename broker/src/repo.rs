@@ -106,6 +106,11 @@ impl Repo {
         Ok(())
     }
 
+    /// How many commits HEAD's history has.
+    pub fn commit_count(&self) -> Result<usize> {
+        self.git(&["rev-list", "--count", "HEAD"])?.trim().parse().context("reading git's commit count")
+    }
+
     pub fn head(&self) -> Result<String> {
         Ok(self.git(&["rev-parse", "HEAD"])?.trim().to_string())
     }
