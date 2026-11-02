@@ -303,7 +303,7 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, Strin
 
 /// The ledger, read through the broker (it is root-only).
 fn read_ledger(cli: &Cli) -> Result<Vec<history::Entry>> {
-    let out = broker(cli, &["log", "--json", "--brief"])
+    let out = broker(cli, &["log", "--json", "--brief"])?
         .stderr(Stdio::inherit())
         .output()
         .context("running the broker")?;
@@ -315,11 +315,18 @@ fn read_ledger(cli: &Cli) -> Result<Vec<history::Entry>> {
 
 /// The broker. Its repo is never passed: the real broker (as root) manages the machine's config
 /// repo and nothing else, and `change` has refused to read a different one with it.
-fn broker(cli: &Cli, args: &[&str]) -> Command {
+/// Reached through sudo, as the owner (their password): where sudo would ask and there is no
+/// terminal to ask at (a script, `ssh host torqcli …`), said so before anything runs — not sudo's
+/// failure read as the broker's ("stopped unexpectedly").
+fn broker(cli: &Cli, args: &[&str]) -> Result<Command> {
+    use std::io::IsTerminal as _;
+    if !std::io::stdin().is_terminal() && asks_for_password(cli) {
+        bail!("this goes through the broker, as root: sudo asks for your password, and there is no terminal to ask at (run it at one, or `sudo -v` first)");
+    }
     let mut words = cli.broker.split_whitespace();
     let mut c = Command::new(words.next().unwrap_or("torq-broker"));
     c.args(words).args(args);
-    c
+    Ok(c)
 }
 
 /// A repo override only makes sense with a test broker: with the real one (anything run through

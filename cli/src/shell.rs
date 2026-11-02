@@ -94,7 +94,7 @@ impl Real<'_> {
     /// output, which would show colour codes as text), naming the shell's own commands.
     fn status_report(&self, fit: Option<usize>) -> Result<(serde_json::Value, crate::status::Report)> {
         let log = run::start_log()?;
-        let v = match run::broker_status(broker(self.cli, &["status"]), &log)? {
+        let v = match run::broker_status(broker(self.cli, &["status"])?, &log)? {
             Ok(v) => v,
             Err(why) => bail!("couldn't check this machine: {why}"),
         };
@@ -143,7 +143,7 @@ impl Machine for Real<'_> {
         let file = file.to_string_lossy();
         let args = propose_args(&file, base, reason);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let proposed = done(run::broker_json(broker(self.cli, &args), &log)?, "commit")?;
+        let proposed = done(run::broker_json(broker(self.cli, &args)?, &log)?, "commit")?;
         let seq = proposed["seq"].as_u64().context("the broker did not say which proposal it made")?;
         // What was shown (and, for the system, asked) must be what the broker applies.
         if proposed["tier"].as_str() != Some(tier) {
@@ -161,7 +161,7 @@ impl Machine for Real<'_> {
         }
         let outcome = {
             let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Committing")) };
-            run::broker_json(broker(self.cli, &args), &log)
+            run::broker_json(broker(self.cli, &args)?, &log)
         };
         match outcome.map_err(anyhow::Error::from).and_then(|o| done(o, "commit")) {
             Ok(applied) => applied["seq"].as_u64().context("the broker did not say which change it applied"),
@@ -178,7 +178,7 @@ impl Machine for Real<'_> {
 
     fn pending_confirm(&self) -> Result<Option<Waiting>> {
         let log = run::start_log()?;
-        let v = match run::broker_status(broker(self.cli, &["status"]), &log)? {
+        let v = match run::broker_status(broker(self.cli, &["status"])?, &log)? {
             Ok(v) => v,
             Err(why) => bail!("cannot check for a commit confirmed waiting: {why}"),
         };
@@ -192,7 +192,7 @@ impl Machine for Real<'_> {
 
     fn confirm(&self) -> Result<u64> {
         let log = run::start_log()?;
-        let v = done(run::broker_json(broker(self.cli, &["confirm", "--approved-by", &me()?]), &log)?, "confirm")?;
+        let v = done(run::broker_json(broker(self.cli, &["confirm", "--approved-by", &me()?])?, &log)?, "confirm")?;
         v["seq"].as_u64().context("the broker did not say what it recorded")
     }
 
@@ -294,7 +294,7 @@ impl Machine for Real<'_> {
         }
         let log = run::start_log()?;
         let file = file.to_string_lossy().into_owned();
-        let v = done(run::broker_json(broker(self.cli, &["password", "--user", user, "--hash-file", &file, "--approved-by", &me()?]), &log)?, "password")?;
+        let v = done(run::broker_json(broker(self.cli, &["password", "--user", user, "--hash-file", &file, "--approved-by", &me()?])?, &log)?, "password")?;
         Ok(format!("password changed for {user} (ledger #{})\n", v["seq"].as_u64().unwrap_or(0)))
     }
 
@@ -313,7 +313,7 @@ impl Machine for Real<'_> {
         let log = run::start_log()?;
         let v = {
             let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Repairing")) };
-            done(run::broker_json(broker(self.cli, &["repair", "--approved-by", &me()?]), &log)?, "repair")?
+            done(run::broker_json(broker(self.cli, &["repair", "--approved-by", &me()?])?, &log)?, "repair")?
         };
         Ok(format!("repaired: the machine is back at its last ledgered configuration (#{})\n", v["seq"].as_u64().unwrap_or(0)))
     }
@@ -429,7 +429,7 @@ impl Machine for Real<'_> {
         let log = run::start_log()?;
         let outcome = {
             let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Reverting")) };
-            run::broker_json(broker(self.cli, &["revert", &target.seq.to_string(), &format!("--approved-by={me}")]), &log)
+            run::broker_json(broker(self.cli, &["revert", &target.seq.to_string(), &format!("--approved-by={me}")])?, &log)
         };
         match outcome {
             Ok(run::Outcome::Refused(m)) if m.contains("later changes conflict") => {

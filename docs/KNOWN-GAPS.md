@@ -193,6 +193,14 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    included. Reading one when it is asked for would mean evaluating the configuration (seconds).
    Possible: defaults written by NixOS's manual build, or an evaluation per setting in its own
    process.
+6y. **On a machine out of dev mode, reading the history asks for a password.** The ledger is root's
+   (0700), so `show system commit`, `show system ledger`, `show system alarms` and `rollback ?` go
+   through the broker with `sudo`, which asks for the owner's password (found on the first install
+   from the image, 2026-11-02; dev mode hid it: its sudo needs none). Without a terminal it is
+   refused, saying so. Possible: the broker's read-only commands (`status`, `log`) without a
+   password (a sudo rule for exactly those), or a ledger copy readable by the owner — a decision
+   about who may read the history.
+
 ## Audit findings to fix (2026-11-01)
 
 Two audits of 2026-11-01, kept as their authors wrote them: `docs/AUDIT-2026-11-01.md` (H, M, L)
