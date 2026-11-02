@@ -488,7 +488,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::Compare { display } => self.compare(display),
+            Op::Compare { with, display } => self.compare(with, display),
             Op::Rollback { n, path } if path.is_empty() => self.rollback(n),
             Op::Rollback { n, path } => self.rollback_part(n, &path),
             Op::Commit(o) => {
@@ -755,7 +755,7 @@ impl<'a> Session<'a> {
             return self.repo.head();
         }
         let all = self.machine.configurations(&self.repo, n + 1)?.configurations;
-        let c = all.get(n).with_context(|| format!("there are only {} configurations", all.len()))?;
+        let c = all.get(n).with_context(|| format!("there is no configuration {n}: there are {} (0 to {}; `show system commit` lists them)", all.len(), all.len().saturating_sub(1)))?;
         if !self.repo.has_commit(&c.id)? {
             bail!("configuration {n} (commit {}) is no longer in the config repo", short(&c.id));
         }
@@ -976,8 +976,14 @@ impl<'a> Session<'a> {
     }
 
     /// What the candidate changes from its base (`| display diff`: as the raw diff of the files).
-    fn compare(&mut self, display: Option<Display>) -> Result<String> {
-        let a = self.against()?;
+    fn compare(&mut self, with: Option<usize>, display: Option<Display>) -> Result<String> {
+        let a = match with {
+            Some(n) => {
+                let id = self.commit_at(n)?;
+                self.against_at(&id)?
+            }
+            None => self.against()?,
+        };
         if display == Some(Display::Diff) {
             let scratch = tempfile::tempdir()?;
             return candidate::unified_diff(scratch.path(), &a.changes(&self.schema)?);
@@ -986,7 +992,8 @@ impl<'a> Session<'a> {
         let out = sections_under(&a.compare(&self.whole())?, &self.edit);
         if out.is_empty() {
             let here = if self.edit.is_empty() { String::new() } else { " here".into() };
-            return Ok(format!("No changes{here}: the candidate is the configuration in effect.\n"));
+            let what = with.map_or("the configuration in effect".to_string(), |n| format!("configuration {n} (rollback {n})"));
+            return Ok(format!("No changes{here}: the candidate is {what}.\n"));
         }
         Ok(out)
     }
@@ -1068,11 +1075,31 @@ impl<'a> Session<'a> {
 
     /// The candidate and what it is based on, read once.
     fn against(&mut self) -> Result<Against> {
+        let base = self.candidate()?.base.clone();
+        self.against_at(&base)
+    }
+
+    /// The candidate and the configuration at commit `base` (its own base, or another one:
+    /// `show | compare rollback <n>`), read once.
+    fn against_at(&mut self, base: &str) -> Result<Against> {
         let data = self.candidate_data()?;
-        let (base, new_lock, nix) = {
+        let base = base.to_string();
+        let (own, new_lock, mut nix) = {
             let c = self.candidate()?;
             (c.base.clone(), c.lock.clone(), c.nix.clone())
         };
+        // Against another configuration, the candidate is its edits on top of its own base: its
+        // config files and software as the base has them, where it has not changed them.
+        let new_lock = if base == own { new_lock } else { new_lock.or(self.repo.file_at(&own, "flake.lock")?.map(|l| String::from_utf8_lossy(&l).into_owned())) };
+        if base != own {
+            let paths: std::collections::BTreeSet<String> = self.repo.paths(&own)?.into_iter().chain(self.repo.paths(&base)?).filter(|p| p.ends_with(".nix") && p != "flake.nix").collect();
+            for p in paths {
+                if !nix.contains_key(&p) {
+                    let text = self.repo.file_at(&own, &p)?.map(|b| String::from_utf8(b).with_context(|| format!("{p}: not text"))).transpose()?;
+                    nix.insert(p, text);
+                }
+            }
+        }
         let files = self.repo.tree_files(&self.schema, &base)?;
         let lock = self.repo.file_at(&base, "flake.lock")?;
         let base_nix = nix.keys().map(|p| Ok((p.clone(), self.repo.file_at(&base, p)?))).collect::<Result<_>>()?;
@@ -2267,6 +2294,26 @@ mod tests {
 
     /// After a commit confirmed rolls back, the config repo is reset to the commit before it: git's
     /// history no longer has it, the ledger does. The numbers are the ledger's.
+    /// `show | compare rollback <n>`: the candidate against an earlier configuration — its settings,
+    /// and the config files it has from its own base, untouched.
+    #[test]
+    fn compare_with_an_earlier_configuration() {
+        let d = repo();
+        sh(d.path(), "printf '{ ... }:\\n{\\n}\\n' > system.nix && git add -A && git commit -qm third");
+        let ids: Vec<String> = Repo::new(d.path()).history(3).unwrap().into_iter().map(|c| c.id).collect();
+        let conf = |id: &str, what: &str, seq| Configuration { id: id.into(), date: "d".into(), who: "viper".into(), what: what.into(), seq: Some(seq) };
+        let m = Fake { ledger: Some(vec![conf(&ids[0], "third", 3), conf(&ids[1], "second", 2), conf(&ids[2], "first", 1)]), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure"]);
+        assert_eq!(s.exec("show | compare rollback 0").unwrap(), "No changes: the candidate is configuration 0 (rollback 0).\n");
+        let one = s.exec("show | compare rollback 1").unwrap();
+        assert!(one.contains("[edit config files]") && one.contains("+++ b/system.nix") && !one.contains("hostName"), "the file it has from its base: {one}");
+        let two = s.exec("show | compare rollback 2").unwrap();
+        assert!(two.contains("-   hostName one;") && two.contains("+   hostName two;"), "{two}");
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n", "against its own base, as before");
+        assert!(s.exec("show | compare rollback 9").unwrap_err().to_string().contains("9"), "a configuration it does not have");
+    }
+
     #[test]
     fn rollback_numbers_are_the_ledgers() {
         let d = repo();
@@ -2288,7 +2335,7 @@ mod tests {
         s.exec("rollback 1").unwrap();
         assert!(s.exec("show | compare").unwrap().contains("+   hostName two;"));
         let e = format!("{:#}", s.exec("rollback 3").unwrap_err());
-        assert_eq!(e, "there are only 3 configurations", "the line is named once, by the shell");
+        assert_eq!(e, "there is no configuration 3: there are 3 (0 to 2; `show system commit` lists them)", "the line is named once, by the shell");
     }
 
     #[test]
@@ -3021,7 +3068,7 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         assert_eq!(run(&mut s, &["configure", "rollback 1"]), "Entering configuration mode\nLoaded configuration 1: 1 change from the configuration in effect (`show | compare` lists them; `commit` makes it the machine's).\n");
         assert_eq!(s.exec("show | compare").unwrap(), "[edit networking]\n-   hostName two;\n+   hostName one;\n");
-        assert!(format!("{:#}", s.exec("rollback 9").unwrap_err()).contains("only 2 configurations"));
+        assert!(format!("{:#}", s.exec("rollback 9").unwrap_err()).contains("there is no configuration 9: there are 2 (0 to 1;"));
         assert!(format!("{:#}", s.exec("rollback x").unwrap_err()).contains("not a number"));
         for huge in ["rollback 18446744073709551615", "run show system rollback 18446744073709551615"] {
             assert!(format!("{:#}", s.exec(huge).unwrap_err()).contains("configuration numbers go from 0 to 10000"), "{huge}");
@@ -3345,7 +3392,7 @@ mod tests {
         // As on a network device: 0 is the base, `+` is what 1 has.
         assert_eq!(s.exec("show system rollback 0 compare 1").unwrap(), "[edit networking]\n-   hostName two;\n+   hostName one;\n");
         assert_eq!(s.exec("show system rollback 1 compare 0").unwrap(), "[edit networking]\n-   hostName one;\n+   hostName two;\n");
-        assert!(format!("{:#}", s.exec("show system rollback 5").unwrap_err()).contains("only 2 configurations"));
+        assert!(format!("{:#}", s.exec("show system rollback 5").unwrap_err()).contains("there is no configuration 5: there are 2 (0 to 1;"));
         assert!(format!("{:#}", s.exec("show system rollback x").unwrap_err()).contains("not a number"));
     }
 

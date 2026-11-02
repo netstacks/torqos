@@ -321,7 +321,7 @@ fn show_candidate(r: &Read) -> Result<Op> {
         if !r.path.is_empty() {
             bail!("| compare compares the whole candidate: `show | compare`");
         }
-        return Ok(Op::Compare { display: offered("a comparison", COMPARISON, r.display)? });
+        return Ok(Op::Compare { with: r.number(Value::Rollback), display: offered("a comparison", COMPARISON, r.display)? });
     }
     Ok(Op::ShowCandidate { path: r.path.clone(), display: offered("a configuration", CONFIGURATION_VIEWS, r.display)? })
 }
@@ -631,10 +631,21 @@ fn apply_pipes(node: &Node, segments: &mut [Vec<String>], read: &mut Read, befor
         seg[0] = word.clone();
         after.push(word.clone());
         match word.as_str() {
-            "compare" | "display" if seg.len() > 2 || (word == "compare" && seg.len() > 1) => {
-                bail!("'{}' is not a word here: nothing may follow `{}`", seg.last().cloned().unwrap_or_default(), after.join(" "))
+            "display" if seg.len() > 2 => bail!("'{}' is not a word here: nothing may follow `{}`", seg[2], after.join(" ")),
+            // `| compare rollback <n>`: against configuration n (read as the line's Rollback value).
+            "compare" => {
+                if let Some(w) = seg.get(1).cloned() {
+                    seg[1] = resolve(&w, &["rollback".to_string()], &after)?;
+                    let at = format!("{} rollback", after.join(" "));
+                    let Some(n) = seg.get(2) else { bail!("| compare rollback needs <number> (0 is the configuration in effect, 1 the one before, …)") };
+                    Value::Rollback.check(n)?;
+                    if let Some(extra) = seg.get(3) {
+                        bail!("'{extra}' is not a word here: nothing may follow `{at} {n}`");
+                    }
+                    read.values.push((Value::Rollback, n.clone()));
+                }
+                read.compare = true;
             }
-            "compare" => read.compare = true,
             "no-more" if seg.len() > 1 => bail!("'{}' is not a word here: nothing may follow `| no-more`", seg[1]),
             "no-more" => read.no_more = true,
             "display" => {
@@ -747,13 +758,14 @@ pub fn offers(walked: &Walked) -> Vec<Offer> {
 pub fn pipe_help(mode: Mode, words: &[String]) -> Option<String> {
     let line: Vec<String> = words.iter().cloned().chain(std::iter::once("|".to_string())).collect();
     let next = pipe_next(mode, &line);
-    let first: Vec<&str> = next.iter().take(3).map(|(w, _)| w.as_str()).collect();
+    let first: Vec<&str> = next.iter().take(3).map(|(w, _, _)| w.as_str()).collect();
     (!first.is_empty()).then(|| format!("Pipe the output ({}, …)", first.join(", ")))
 }
 
-/// What may come after the last `|` of a line, and its help: the command's own pipes, then the
-/// filters; after `| display`, the views; after a filter's name, its own words (none offered).
-pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String)> {
+/// What may come after the last `|` of a line, its help, and the kind of value a placeholder is: the
+/// command's own pipes, then the filters; after `| display`, the views; after `| compare rollback`,
+/// a configuration; after a filter's name, what it needs (its own options: not offered).
+pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String, Option<Value>)> {
     let Some(bar) = words.iter().position(|x| x == "|") else { return vec![] };
     let Ok(mut walked) = walk(mode, &words[..bar]) else { return vec![] };
     let Some(node) = walked.node().filter(|n| n.whole.is_some() && n.pipes != Pipes::None) else { return vec![] };
@@ -762,19 +774,21 @@ pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String)> {
     let Ok(filters) = apply_pipes(node, &mut segments, &mut walked.read, &walked.words) else { return vec![] };
     match last.as_slice() {
         [] => {
-            let mut out: Vec<(String, String)> = Vec::new();
+            let mut out: Vec<(String, String, Option<Value>)> = Vec::new();
             if filters.is_empty() {
                 for w in pipe_words(node, &walked.read) {
                     let help = if w == "compare" { "What the candidate changes" } else { "Show it differently" };
-                    out.push((w, help.to_string()));
+                    out.push((w, help.to_string(), None));
                 }
             }
-            out.extend(crate::filter::FILTERS.iter().map(|t| (t.name.to_string(), t.help.to_string())));
+            out.extend(crate::filter::FILTERS.iter().map(|t| (t.name.to_string(), t.help.to_string(), None)));
             if !walked.read.no_more {
-                out.push(("no-more".into(), "All of it at once, not a screenful at a time".into()));
+                out.push(("no-more".into(), "All of it at once, not a screenful at a time".into(), None));
             }
             out
         }
+        [c] if c == "compare" && filters.is_empty() => vec![("rollback".into(), "What it changes from an earlier configuration".into(), None)],
+        [c, r] if c == "compare" && r == "rollback" && filters.is_empty() => vec![(Value::Rollback.placeholder().into(), "0 is the configuration in effect, 1 the one before, …".into(), Some(Value::Rollback))],
         [d] if d == "display" && filters.is_empty() => views(node, &walked.read).into_iter().map(|v| {
             let help = match v.as_str() {
                 "set" => "As set commands",
@@ -782,10 +796,10 @@ pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String)> {
                 "detail" => "With the commits and store paths behind it",
                 _ => "As the raw diff of the files (what the broker records)",
             };
-            (v, help.to_string())
+            (v, help.to_string(), None)
         }).collect(),
         // A filter that needs something: what (its own options are its own: not offered).
-        [f] => crate::filter::tool(f).and_then(|t| t.needs).map(|(what, like)| vec![(what.to_string(), format!("As in `{like}`"))]).unwrap_or_default(),
+        [f] => crate::filter::tool(f).and_then(|t| t.needs).map(|(what, like)| vec![(what.to_string(), format!("As in `{like}`"), None)]).unwrap_or_default(),
         _ => vec![],
     }
 }

@@ -89,11 +89,29 @@ pub fn choices_at(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Cho
     all.into_iter().filter(|c| c.is_placeholder() || c.word.starts_with(partial)).collect()
 }
 
+/// The values of a kind there are to offer (after its placeholder), a command's or a pipe's.
+fn values(at: &At, kind: Option<crate::grammar::Value>) -> Vec<Choice> {
+    match kind {
+        // A configuration number: the configurations themselves, newest first.
+        Some(crate::grammar::Value::Rollback) => at.configurations.get().iter().enumerate().map(|(n, c)| Choice::new(&n.to_string(), c)).collect(),
+        // A Nix file of the configuration: the ones it has.
+        Some(crate::grammar::Value::NixFile) => at.files.iter().map(|f| Choice::new(f, "")).collect(),
+        // An interface: the machine's.
+        Some(crate::grammar::Value::Interface) => at.interfaces.iter().map(|i| Choice::new(i, "")).collect(),
+        _ => vec![],
+    }
+}
+
 /// What may follow `words` at `at`: the grammar's words and values, configuration paths from the
 /// tree, and after a `|`, the pipes.
 fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
     if words.iter().any(|w| w == "|") {
-        return crate::grammar::pipe_next(at.mode, words).into_iter().map(|(w, h)| Choice::new(&w, &h)).collect();
+        let mut out = Vec::new();
+        for (w, h, kind) in crate::grammar::pipe_next(at.mode, words) {
+            out.push(Choice::new(&w, &h));
+            out.extend(values(at, kind));
+        }
+        return out;
     }
     let Ok(walked) = crate::grammar::walk(at.mode, words) else { return vec![] };
     let mut out = Vec::new();
@@ -102,15 +120,7 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
             crate::grammar::Offer::Word(w, h) => out.push(Choice::new(w, h)),
             crate::grammar::Offer::Value(w, h, kind) => {
                 out.push(Choice::new(&w, h));
-                match kind {
-                    // A configuration number: the configurations themselves, newest first.
-                    Some(crate::grammar::Value::Rollback) => out.extend(at.configurations.get().iter().enumerate().map(|(n, c)| Choice::new(&n.to_string(), c))),
-                    // A Nix file of the configuration: the ones it has.
-                    Some(crate::grammar::Value::NixFile) => out.extend(at.files.iter().map(|f| Choice::new(f, ""))),
-                    // An interface: the machine's.
-                    Some(crate::grammar::Value::Interface) => out.extend(at.interfaces.iter().map(|i| Choice::new(i, ""))),
-                    _ => {}
-                }
+                out.extend(values(at, kind));
             }
             crate::grammar::Offer::Path { verb, from_top } => {
                 let path: Vec<String> = if from_top { walked.read.path.clone() } else { at.edit.iter().chain(&walked.read.path).cloned().collect() };
@@ -515,6 +525,8 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "g")), ["grep"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration | grep"), "")), ["<pattern>"], "what grep needs; its options are its own");
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration | sort"), "")), ["<[Enter]>", "|"], "sort needs nothing");
+        let at = At { mode: Mode::Configuration, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(|| vec!["#2 now".into(), "#1 before".into()]), files: vec![], interfaces: vec![] };
+        assert_eq!(words_of(&choices_at(&s, &at, &w("show | compare rollback"), "")), ["<number>", "0", "1"], "the configurations, as `rollback ?` lists them");
         assert!(choices(&s, Mode::Configuration, &w("show | grep x | display"), "").is_empty(), "after a filter, no display");
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show packages x |"), "")), filters, "a search is a show like any other");
         assert!(choices(&s, Mode::Configuration, &w("set system |"), "").is_empty(), "only a show");

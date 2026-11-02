@@ -85,7 +85,9 @@ pub enum Op {
     /// `show [path]`: the candidate.
     ShowCandidate { path: Vec<String>, display: Option<Display> },
     /// `show | compare`: what the candidate changes.
-    Compare { display: Option<Display> },
+    /// `show | compare [rollback <n>]`: what the candidate changes from its base, or from
+    /// configuration n.
+    Compare { with: Option<usize>, display: Option<Display> },
     /// `rollback [<n> [<path>]]`: configuration n into the candidate — or only the place `path`,
     /// put back as configuration n has it (`rollback 0 networking hostName` undoes one change).
     Rollback { n: usize, path: Vec<String> },
@@ -250,7 +252,8 @@ pub fn render(op: &Op) -> String {
         Op::Top { then: None } => "top".into(),
         Op::Top { then: Some(op) } => format!("top {}", render(op)),
         Op::ShowCandidate { path, display } => format!("{}{}", sep("show", path), display_text(display)),
-        Op::Compare { display } => format!("show | compare{}", display_text(display)),
+        Op::Compare { with: None, display } => format!("show | compare{}", display_text(display)),
+        Op::Compare { with: Some(n), display } => format!("show | compare rollback {n}{}", display_text(display)),
         Op::Rollback { n, path } => sep(&format!("rollback {n}"), path),
         Op::Commit(o) => commit(o),
         Op::Run(op) => format!("run {}", render(op)),
@@ -320,8 +323,9 @@ mod tests {
             (Mode::Configuration, Op::ShowCandidate { path: vec![], display: None }),
             (Mode::Configuration, Op::ShowCandidate { path: v("system"), display: set }),
             (Mode::Configuration, Op::ShowCandidate { path: vec![], display: detail }),
-            (Mode::Configuration, Op::Compare { display: None }),
-            (Mode::Configuration, Op::Compare { display: diff }),
+            (Mode::Configuration, Op::Compare { with: None, display: None }),
+            (Mode::Configuration, Op::Compare { with: None, display: diff }),
+            (Mode::Configuration, Op::Compare { with: Some(3), display: None }),
             (Mode::Configuration, Op::Rollback { n: 2, path: vec![] }),
             (Mode::Configuration, Op::Rollback { n: 0, path: v("networking hostName") }),
             (Mode::Configuration, Op::Save { file: "/home/dev/my device.conf".into() }),
@@ -438,7 +442,16 @@ mod tests {
         let (o, c) = (Mode::Operational, Mode::Configuration);
         assert_eq!(pl(o, "show configuration | grep 'a b'").unwrap().1, [f("grep", "\"a b\"")]);
         assert_eq!(pl(o, "show configuration | grep \"a|b\"").unwrap().1, [f("grep", "\"a|b\"")], "a quoted | is the pattern's");
-        assert_eq!(pl(c, "show | compare | grep x").unwrap(), (Op::Compare { display: None }, vec![f("grep", "x")]));
+        assert_eq!(pl(c, "show | compare | grep x").unwrap(), (Op::Compare { with: None, display: None }, vec![f("grep", "x")]));
+        assert_eq!(pl(c, "show | comp roll 2 | display diff").unwrap().0, Op::Compare { with: Some(2), display: Some(Display::Diff) }, "abbreviated, as everywhere");
+        for (line, want) in [
+            ("show | compare 2", "'2' is not a word here (after `show | compare`) (one of: rollback)"),
+            ("show | compare rollback", "| compare rollback needs <number>"),
+            ("show | compare rollback x", "'x' is not a number"),
+            ("show | compare rollback 1 2", "'2' is not a word here: nothing may follow `show | compare rollback 1`"),
+        ] {
+            assert!(err(c, line).contains(want), "{line}: {}", err(c, line));
+        }
         let (op, fs) = pl(c, "show system | display set | wc -l").unwrap();
         assert_eq!((op, fs), (Op::ShowCandidate { path: w("system"), display: Some(Display::Set) }, vec![f("wc", "-l")]));
         assert_eq!(pl(c, "run show system alarms | wc -l").unwrap().0, Op::Run(Box::new(Op::ShowAlarms { display: None })));
