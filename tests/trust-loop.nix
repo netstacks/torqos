@@ -244,47 +244,54 @@ pkgs.testers.runNixOSTest {
             run = machine.succeed if ok else machine.fail
             return run(f"su - dev -c {shlex.quote(cmd)}")
         screen = "tmux capture-pane -p -t t"
+        def on_screen(test):
+            # Waits for the screen to pass `test`; if it never does, the log shows the screen.
+            try:
+                machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + test)}", timeout=30)
+            except Exception:
+                print(as_dev(screen))
+                raise
         as_dev("tmux new-session -d -s t -x 160 -y 50 torqcli")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q dev@machine')}", timeout=30)
+        on_screen(' | grep -q dev@machine')
         as_dev("tmux send-keys -t t configure Enter")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q dev@machine#')}", timeout=30)
+        on_screen(' | grep -q dev@machine#')
         as_dev("tmux send-keys -t t 'commit ' '?'")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q Possible.completions')}", timeout=30)
+        on_screen(' | grep -q Possible.completions')
         out = as_dev(screen)
         assert "<[Enter]>" in out and "Execute this command" in out and "confirmed" in out, out
         # The line is still there after the list, ready to finish.
         assert out.rstrip().splitlines()[-1].endswith("commit"), out
         as_dev("tmux send-keys -t t C-u 'set time ti' Tab")
         # (capture-pane drops trailing spaces, so the space Tab adds is not seen here.)
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"set time timeZone\"')}", timeout=30)
+        on_screen(' | grep -q \"set time timeZone\"')
         # Where configuration mode is shows above the prompt.
         as_dev("tmux send-keys -t t C-u 'edit system' Enter")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"[edit system]\"')}", timeout=30)
+        on_screen(' | grep -qF \"[edit system]\"')
         as_dev("tmux send-keys -t t top Enter")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -v \"^$\" | tail -n 2 | head -n 1 | grep -qxF \"[edit]\"')}", timeout=30)
+        on_screen(' | grep -v \"^$\" | tail -n 2 | head -n 1 | grep -qxF \"[edit]\"')
         # A paste runs every line as it arrives (no Enter after it), each error naming its line — and a
         # commit after a failed line asks first, a question the paste cannot answer.
         as_dev("tmux send-keys -t t C-u")
         as_dev("printf 'set system host-name my_laptop\\nset users dev packages vim\\ncommit\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -p -t t")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"1 line failed since you last looked at\"')}", timeout=30)
+        on_screen(' | grep -q \"1 line failed since you last looked at\"')
         out = as_dev(screen)
         assert "error: set system host-name my_laptop:" in out, out
         as_dev("tmux send-keys -t t n Enter")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"error: commit: not committed\"')}", timeout=30)
+        on_screen(' | grep -q \"error: commit: not committed\"')
         as_dev("tmux send-keys -t t 'show | compare' Enter")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qE \"^\\+   packages \\[.* vim \\];\"')}", timeout=30)
+        on_screen(' | grep -qE \"^\\+   packages \\[.* vim \\];\"')
         # Without bracketed paste (a serial console, screen): the same, and no line is lost.
         as_dev("printf 'set users dev packages htop\\nset users dev packages jq\\nshow | compare\\n' | tmux load-buffer - && tmux paste-buffer -t t")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qE \"^\\+   packages \\[.*(htop.*vim|vim.*htop).*\\];\"')}", timeout=30)
+        on_screen(' | grep -qE \"^\\+   packages \\[.*(htop.*vim|vim.*htop).*\\];\"')
         # `load merge terminal`: a configuration pasted in brace format (a comment in it is left out),
         # ended by Ctrl-D, as on a network device.
         as_dev("tmux send-keys -t t 'load merge terminal' Enter")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"[Type ^D at a new line to end input]\"')}", timeout=30)
+        on_screen(' | grep -qF \"[Type ^D at a new line to end input]\"')
         as_dev("printf 'time {\\n    /* where it stands */\\n    timeZone Europe/Berlin;\\n}\\n' | tmux load-buffer - && tmux paste-buffer -t t")
         as_dev("tmux send-keys -t t C-d")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -q \"load complete\"')}", timeout=30)
+        on_screen(' | grep -q \"load complete\"')
         as_dev("tmux send-keys -t t 'show | compare' Enter")
-        machine.wait_until_succeeds(f"su - dev -c {shlex.quote(screen + ' | grep -qF \"+   timeZone Europe/Berlin;\"')}", timeout=30)
+        on_screen(' | grep -qF \"+   timeZone Europe/Berlin;\"')
         # Leave.
         last_line = screen + " | grep -v '^$' | tail -n 1"
         as_dev("tmux send-keys -t t exit Enter")
