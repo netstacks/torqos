@@ -70,7 +70,8 @@ jobs:
           body="nixpkgs moved to the newest commit of $RELEASE: [${OLD:0:12}...${NEW:0:12}](https://github.com/NixOS/nixpkgs/compare/$OLD...$NEW).
 
           Merge once its tests pass."
-          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number -q '.[].number')" ]; then
+          open=$(gh pr list --head "$BRANCH" --state open --json number -q '.[].number')
+          if [ -n "$open" ]; then
             gh pr edit "$BRANCH" --title "nixpkgs: $RELEASE at ${NEW:0:12}" --body "$body"
           else
             gh pr create --head "$BRANCH" --base main --title "nixpkgs: $RELEASE at ${NEW:0:12}" --body "$body"
