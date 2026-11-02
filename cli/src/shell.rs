@@ -655,7 +655,15 @@ enum Invocation {
     Command(Vec<String>),
 }
 
-const USAGE: &str = "usage: torqcli [--verbose] [-c \"<command>; <command>…\" | <command>]";
+/// How torqcli is run, named as it was (`torq` or `torqcli`).
+fn usage(name: &str) -> String {
+    format!("usage: {name} [--verbose] [-c \"<command>; <command>…\" | <command>]")
+}
+
+/// The name torqcli was run by (`torq`, `torqcli`).
+fn own_name() -> String {
+    std::env::args().next().and_then(|a| Path::new(&a).file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "torqcli".into())
+}
 
 /// `--verbose`: errors in full (every cause, and where the whole log is) instead of one clear line.
 static VERBOSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -695,29 +703,35 @@ fn describe(e: &anyhow::Error) -> String {
     out
 }
 
-fn parse_args(args: &[String]) -> Result<Invocation> {
-    let usage = || anyhow::anyhow!(USAGE);
+/// The command line (`name`: as torqcli was run). A refusal says why, then how torqcli is run.
+fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
+    // (One line, as every message: the usage after the reason.)
+    let refuse = |why: String| anyhow::anyhow!("{why}; {}", usage(name));
     let mut run = Invocation::Interactive;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             // (Read before anything runs: see `describe`.)
             "-v" | "--verbose" => {}
-            "-c" if run == Invocation::Interactive => run = Invocation::Script(it.next().ok_or_else(usage)?.clone()),
+            "-c" if run == Invocation::Interactive => {
+                let Some(line) = it.next() else { return Err(refuse("-c needs the commands to run, as in -c \"show system alarms\"".into())) };
+                run = Invocation::Script(line.clone());
+            }
+            "-c" => return Err(refuse("-c once: every command in one -c, separated by ;".into())),
             "-h" | "--help" => return Ok(Invocation::Help),
-            o if o.starts_with('-') => return Err(usage()),
+            o if o.starts_with('-') => return Err(refuse(format!("'{o}' is not an option of {name} (--verbose, -c, --help)"))),
             _ if run == Invocation::Interactive => {
                 let rest: Vec<String> = std::iter::once(a).chain(it).cloned().collect();
                 let w = if rest.len() == 1 { crate::session::words(&rest[0])? } else { rest };
                 if matches!(w.first().map(String::as_str), Some("configure" | "config")) {
-                    bail!("torqcli <command> runs one operational command; to change the configuration: torqcli -c \"configure; set …; commit\"");
+                    bail!("{name} <command> runs one operational command; to change the configuration: {name} -c \"configure; set …; commit\"");
                 }
                 if w.is_empty() {
-                    return Err(usage());
+                    return Err(refuse("an empty command".into()));
                 }
                 return Ok(Invocation::Command(w));
             }
-            _ => return Err(usage()),
+            _ => return Err(refuse(format!("'{a}' after -c's commands: every command goes in -c, separated by ;"))),
         }
     }
     Ok(run)
@@ -734,7 +748,7 @@ fn verbose_is_torqclis_own_option_only() {
 #[cfg(test)]
 #[test]
 fn a_command_on_the_command_line() {
-    let a = |s: &[&str]| parse_args(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+    let a = |s: &[&str]| parse_args("torq", &s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
     let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     assert_eq!(a(&[]).unwrap(), Invocation::Interactive);
     assert_eq!(a(&["show", "system", "alarms"]).unwrap(), Invocation::Command(w(&["show", "system", "alarms"])));
@@ -747,16 +761,27 @@ fn a_command_on_the_command_line() {
         assert!(a(bad).is_err(), "{bad:?}");
     }
     let e = format!("{:#}", a(&["configure"]).unwrap_err());
-    assert!(e.contains("torqcli -c"), "{e}");
+    assert!(e.contains("torq -c"), "named as it was run: {e}");
+    for (bad, why) in [
+        (&["-c"][..], "-c needs the commands to run, as in -c \"show system alarms\"; usage: torq [--verbose]"),
+        (&["-c", "x", "-c", "y"], "-c once: every command in one -c, separated by ;"),
+        (&["-c", "x", "show"], "'show' after -c's commands: every command goes in -c"),
+        (&["-x"], "'-x' is not an option of torq (--verbose, -c, --help)"),
+        (&[""], "an empty command"),
+    ] {
+        let e = format!("{:#}", a(bad).unwrap_err());
+        assert!(e.starts_with(why), "{bad:?}: {e}");
+    }
 }
 fn run_shell(args: &[String]) -> Result<i32> {
     // First-boot setup (the image's console, as root): its own program, not a shell.
     if args == ["setup"] {
         return crate::setup::run().map(|()| 0);
     }
-    let run = parse_args(args)?;
+    let name = own_name();
+    let run = parse_args(&name, args)?;
     if run == Invocation::Help {
-        say(&format!("{USAGE}\n\nWith no command: the shell (`help` there says how to use it). A command: that one operational\ncommand, its output on standard output. -c: commands separated by ;, stopping at the first that\nfails; their changes are their own (end with `commit` to keep them). --verbose: errors in full.\n"));
+        say(&format!("{}\n\nWith no command: the shell (`help` there says how to use it). A command: that one operational\ncommand, its output on standard output. -c: commands separated by ;, stopping at the first that\nfails; their changes are their own (end with `commit` to keep them). --verbose: errors in full.\n", usage(&name)));
         return Ok(0);
     }
     // The overrides exist only in a development build (`cargo build`): the released torqcli (the Nix
