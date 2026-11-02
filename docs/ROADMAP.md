@@ -114,7 +114,8 @@ first.
 - [ ] **CI (GitHub Actions):** *test* on every push and pull request (`nix flake check`: tree
       checks and the VM tests, with KVM); *(the `test` workflow, 2026-11-02, with the DCO
       sign-off check on pull requests)* *nixpkgs bump* weekly, as a pull request the tests run
-      on; *release* on a `v*` tag: the images built on x86_64 and arm64 runners, checksums, a
+      on *(the `bump` workflow, 2026-11-02: one branch, `bump/nixpkgs`, replaced each week until
+      merged)*; *release* on a `v*` tag: the images built on x86_64 and arm64 runners, checksums, a
       GitHub Release, the tagged source copied to the release repo and `stable` moved *(the
       `release` workflow, 2026-11-02; the key an Actions secret for now, ADR-028)*. The move to the
       next NixOS release (every six months) stays a person's.

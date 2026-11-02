@@ -1,0 +1,79 @@
+# The weekly nixpkgs bump (docs/ROADMAP.md, M2 "CI"): nixpkgs moved to the newest commit of the
+# NixOS release TorqOS follows (flake.nix: nixpkgs.url), as a pull request a person merges once the
+# tests pass on it. One branch, `bump/nixpkgs`: a week with no merge replaces its bump with the
+# newer one. The move to the next NixOS release (every six months) stays a person's.
+name: bump
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  # To start the tests on the bump (a push made with this workflow's token starts none).
+  actions: write
+
+concurrency:
+  group: bump
+  cancel-in-progress: false
+
+jobs:
+  nixpkgs:
+    runs-on: ubuntu-latest
+    env:
+      BRANCH: bump/nixpkgs
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: nix flake update nixpkgs
+        id: update
+        run: |
+          release=$(jq -r .nodes.nixpkgs.original.ref flake.lock)
+          old=$(jq -r .nodes.nixpkgs.locked.rev flake.lock)
+          nix flake update nixpkgs
+          new=$(jq -r .nodes.nixpkgs.locked.rev flake.lock)
+          printf "old=%s\nnew=%s\nrelease=%s\n" "$old" "$new" "$release" >> "$GITHUB_OUTPUT"
+          if [ "$old" = "$new" ]; then echo "nixpkgs is at the newest $release commit already ($new)."; fi
+
+      - name: The bump, on its branch
+        if: steps.update.outputs.old != steps.update.outputs.new
+        env:
+          OLD: ${{ steps.update.outputs.old }}
+          NEW: ${{ steps.update.outputs.new }}
+          RELEASE: ${{ steps.update.outputs.release }}
+        run: |
+          bot="github-actions[bot]"
+          email="41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add flake.lock
+          git -c user.name="$bot" -c user.email="$email" commit -q -s -F - <<MSG
+          nixpkgs: $RELEASE at ${NEW:0:12}
+
+          From ${OLD:0:12}: https://github.com/NixOS/nixpkgs/compare/$OLD...$NEW
+          MSG
+          git push -q --force origin "HEAD:refs/heads/$BRANCH"
+
+      - name: Its pull request
+        if: steps.update.outputs.old != steps.update.outputs.new
+        env:
+          OLD: ${{ steps.update.outputs.old }}
+          NEW: ${{ steps.update.outputs.new }}
+          RELEASE: ${{ steps.update.outputs.release }}
+        run: |
+          body="nixpkgs moved to the newest commit of $RELEASE: [${OLD:0:12}...${NEW:0:12}](https://github.com/NixOS/nixpkgs/compare/$OLD...$NEW).
+
+          Merge once the \`test\` run on this branch passes."
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number -q '.[].number')" ]; then
+            gh pr edit "$BRANCH" --title "nixpkgs: $RELEASE at ${NEW:0:12}" --body "$body"
+          else
+            gh pr create --head "$BRANCH" --base main --title "nixpkgs: $RELEASE at ${NEW:0:12}" --body "$body"
+          fi
+
+      - name: The tests, on the bump
+        if: steps.update.outputs.old != steps.update.outputs.new
+        run: gh workflow run test.yml --ref "$BRANCH"
