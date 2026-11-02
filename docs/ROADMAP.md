@@ -122,7 +122,10 @@ first.
       (plain files on the release page; checked with `ssh-keygen -Y verify`, nothing to install).
       *(Built with the release, 2026-11-02; INSTALL.md says how.)*
 - [ ] **ISO installer** for real hardware: the same image and first-boot setup, plus disk choice.
-- [ ] **VM tests:** the image boots on a blank VM, first-boot setup, a commit, a rollback, an update.
+- [x] **VM tests:** the image boots on a blank VM, first-boot setup, a commit, a rollback, an update.
+      *(tests/image.nix, 2026-11-02: boot to setup, setup on the console, change #1, the update to a
+      signed release and the refusal of a forged one; commits and rollbacks in trust-loop.nix. The
+      builds are prebuilt, as a VM test cannot build systems.)*
 - [ ] **Designs to settle first** (audits of 2026-10-31; KNOWN-GAPS 6r): where first-boot passwords
       live, since the config repo is readable by every user (a hash there can be cracked offline);
       checksums or signatures for the qcow2 and ISO themselves. (Decided, ADR-025: "SSH keys only"

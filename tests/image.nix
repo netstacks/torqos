@@ -48,6 +48,8 @@ pkgs.testers.runNixOSTest {
   name = "torq-image";
 
   nodes.releases = { config, ... }: {
+    # git, for the test to read and move the repository's branches.
+    environment.systemPackages = [ pkgs.git ];
     networking.firewall.allowedTCPPorts = [ 443 ];
     users.users.git = { isSystemUser = true; group = "git"; };
     users.groups.git = { };
@@ -144,21 +146,25 @@ pkgs.testers.runNixOSTest {
         on_console("Your user name:")
         answer("alice")
         on_console("Password:")
-        answer("correct horse battery")
+        answer("Torq-7731-secret")
         on_console("Password again:")
-        answer("correct horse battery")
+        answer("Torq-7731-secret")
         on_console("Choose [1]:")
         answer("")
         on_console("logging in: not from other machines")
         answer("")
         machine.wait_until_succeeds("test -s /var/lib/torq/state/ledger.jsonl", timeout=300)
-        on_console("TorqOS is set up (change #1 in its history). Log in as alice.", timeout=300)
+        # The switch brings the console's login prompt, which takes the console from setup.
+        machine.wait_for_unit("getty@tty1.service")
+        on_console("first login:", timeout=300)
         out = machine.succeed("torq-broker log")
         assert "init" in out and "TorqOS set up" in out, out
         machine.succeed("torq-broker verify")
         # The owner's password: outside the repo, readable by the system only; the account, as setup said.
         machine.succeed("test \"$(stat -c %a:%U /var/lib/torq/secrets/passwords/alice)\" = 600:root")
-        machine.fail("grep -rq correct /var/lib/torq/config")
+        # Neither the password nor its hash is anywhere in the config repo (its history included).
+        found = machine.succeed("grep -rlaF -e Torq-7731-secret -e \"$(cat /var/lib/torq/secrets/passwords/alice)\" /var/lib/torq/config || true")
+        assert found == "", found
         machine.succeed("id alice")
         machine.succeed("test \"$(cat /proc/sys/kernel/hostname)\" = first")
         machine.succeed("jq -e '.user == \"alice\"' /var/lib/torq/config/nixos/torq.json")
@@ -170,19 +176,18 @@ pkgs.testers.runNixOSTest {
         return run(f"su - alice -c {shlex.quote(cmd)} 2>&1")
 
     with subtest("the first update moves the machine to the releases, checking the release key signed them"):
-        out = as_alice("torqcli -c 'request system update'")
+        # (One `-c`: its candidate is its own, gone when it ends.)
+        out = as_alice("torqcli -c 'request system update; configure; show | compare'")
         assert "the update moves it to TorqOS's releases (git+https://releases/torqos-releases?ref=stable)" in out, out
-        rev = releases.succeed("git -C /srv/git/torqos-releases.git rev-parse stable").strip()
+        rev = releases.succeed("git -c safe.directory='*' -C /srv/git/torqos-releases.git rev-parse stable").strip()
         assert f"TorqOS release {rev[:12]}: signed by the TorqOS release key." in out, out
-        out = as_alice("torqcli -c 'configure; show | compare'")
         assert "+   source git+https://releases/torqos-releases?ref=stable;" in out, out
 
     with subtest("a release the key did not sign is refused, and nothing is loaded"):
-        forged = releases.succeed("git -C /srv/git/torqos-releases.git rev-parse forged").strip()
-        releases.succeed(f"git -C /srv/git/torqos-releases.git update-ref refs/heads/stable {forged}")
-        out = as_alice("torqcli -c 'request system update'", ok=False)
+        forged = releases.succeed("git -c safe.directory='*' -C /srv/git/torqos-releases.git rev-parse forged").strip()
+        releases.succeed(f"git -c safe.directory='*' -C /srv/git/torqos-releases.git update-ref refs/heads/stable {forged}")
+        out = as_alice("torqcli -c 'request system update; configure; show | compare'", ok=False)
         assert f"release {forged[:12]} is not signed by the TorqOS release key" in out, out
-        out = as_alice("torqcli -c 'configure; show | compare | display diff'")
-        assert forged not in out and rev in out, "the candidate keeps the signed release: " + out
+        assert "+   source" not in out, "nothing loaded: " + out
   '';
 }
