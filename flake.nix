@@ -16,6 +16,16 @@
       linuxSystems = [ "x86_64-linux" "aarch64-linux" ];
       allSystems = linuxSystems ++ [ "aarch64-darwin" ];
       forSystems = systems: f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      # The image (packages.image), in one disk format: `ext` its file name's, `args` qemu-img's.
+      imageAs = pkgs: ext: args:
+        let
+          system = pkgs.stdenv.hostPlatform.system;
+          whole = self.nixosConfigurations."image-${system}".config.system.build.images.qemu-efi;
+        in
+        pkgs.runCommand "torqos-${ext}-${system}" { nativeBuildInputs = [ pkgs.qemu-utils ]; } ''
+          mkdir $out
+          qemu-img convert ${args} ${whole}/*.qcow2 $out/torqos-${system}.${ext}
+        '';
     in
     {
       # ── Packages ─────────────────────────────────────────────────────────────
@@ -24,18 +34,13 @@
         torq = pkgs.callPackage ./cli/package.nix { };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
       })) (forSystems linuxSystems (pkgs: {
-        # The TorqOS image (docs/INSTALL.md): a qcow2 to download and boot; first-boot setup on its
-        # console. `nix build .#image`. Compressed (a download a third the size or less; UTM and
-        # QEMU run it as it is): NixOS's image builder makes it whole, qemu-img compresses it.
-        image =
-          let
-            system = pkgs.stdenv.hostPlatform.system;
-            whole = self.nixosConfigurations."image-${system}".config.system.build.images.qemu-efi;
-          in
-          pkgs.runCommand "torqos-image-${system}" { nativeBuildInputs = [ pkgs.qemu-utils ]; } ''
-            mkdir $out
-            qemu-img convert -c -O qcow2 ${whole}/*.qcow2 $out/torqos-${system}.qcow2
-          '';
+        # The TorqOS image (docs/INSTALL.md): a disk to download and boot; first-boot setup on its
+        # console. NixOS's image builder makes it whole; qemu-img writes it in the form a platform
+        # takes. `nix build .#image`: a qcow2, compressed (a download a third the size or less; UTM,
+        # QEMU and Proxmox run it as it is). `nix build .#image-vmdk`: the same disk for VMware ESXi
+        # (a sparse VMDK, which `vmkfstools -i` makes the host's own disk).
+        image = imageAs pkgs "qcow2" "-c -O qcow2";
+        image-vmdk = imageAs pkgs "vmdk" "-O vmdk -o adapter_type=lsilogic";
       }));
 
       # ── The distribution, as one NixOS module ────────────────────────────────

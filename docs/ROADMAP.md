@@ -95,8 +95,8 @@ first.
 
 - [ ] **qcow2 image** (aarch64 first, testable here; then x86_64): download, boot in any VM (UTM,
       QEMU, Proxmox), log in. The config repo and ledger are created on first boot. *aarch64 done:
-      installed in UTM from the image (2026-11-02). x86_64 (ESXi: the same disk as VMDK) next,
-      built by CI.*
+      installed in UTM from the image (2026-11-02). x86_64 (qcow2, and a VMDK for ESXi) built by
+      CI's `image` workflow, run by hand; to try on ESXi.*
 - [ ] **First-boot setup**, like a network device's initial configuration dialog: host name,
       time zone, the owner's account and password, how to log in remotely (password, SSH key, or
       both), asked once at the console, committed as change #1. No default password ships;
@@ -110,7 +110,8 @@ first.
       `netstacks/torqos-release`; development stays in the private one), with a `stable` branch
       machines point at (`github:…/stable`), moved only to tested releases.*
 - [ ] **CI (GitHub Actions):** *test* on every push and pull request (`nix flake check`: tree
-      checks and the VM tests, with KVM); *nixpkgs bump* weekly, as a pull request the tests run
+      checks and the VM tests, with KVM); *(the `test` workflow, 2026-11-02, with the DCO
+      sign-off check on pull requests)* *nixpkgs bump* weekly, as a pull request the tests run
       on; *release* on a `v*` tag: the images built on x86_64 and arm64 runners, checksums, a
       draft GitHub Release, the tagged source copied to the release repo and `stable` moved. The
       move to the next NixOS release (every six months) stays a person's. *To decide: where the

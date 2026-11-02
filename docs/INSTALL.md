@@ -39,6 +39,25 @@ boot.
 6. **The console shows a login prompt.** From here it is TorqOS as everywhere: `torqcli`, every
    change through the broker.
 
+## Running it
+
+The image is one EFI disk; first-boot setup is on its console (give the VM a display). The disk is
+small (about 5 GB): give the VM a bigger one, and the root file system grows to fill it at boot.
+
+- **UTM, QEMU, Proxmox:** `torqos-<arch>.qcow2` (`nix build .#image`), as it is, UEFI firmware.
+- **VMware ESXi** (x86_64): `torqos-x86_64-linux.vmdk` (`nix build .#image-vmdk`, or the `image`
+  workflow's artifact), a sparse VMDK, which ESXi copies into a disk of its own:
+  1. Upload it to a datastore (Storage → Datastore browser → Upload).
+  2. In the ESXi shell (SSH to the host), in that datastore's folder:
+     `vmkfstools -i torqos-x86_64-linux.vmdk torqos.vmdk -d thin`, then delete the upload.
+  3. Create a VM: guest OS Linux, "Other Linux (64-bit)" (the newest kernel offered); remove the
+     new disk it proposes and add an existing one, `torqos.vmdk`, growing it to the size wanted;
+     VM Options → Boot Options → firmware **EFI**, Secure Boot off (ROADMAP: later). Any of ESXi's
+     disk controllers (PVSCSI, LSI Logic, SATA, NVMe) and network cards (VMXNET3, E1000e) works.
+  4. Power it on: the console shows setup.
+
+  *Built by CI (2026-11-02); not yet tried on an ESXi host.*
+
 ## What is in the image
 
 Only what a TorqOS machine needs: Linux and systemd; Nix, git and nixpkgs's source, with which the
@@ -90,7 +109,8 @@ needs only what differs from the image (the host name, the user): usually nothin
 Done (2026-11-01; tried end to end in QEMU: the image boots to setup, setup switches, the owner
 logs in, change #1 is in the history and `show system alarms` is clean):
 
-1. The image: a qcow2 of the factory system that boots in UTM/QEMU (aarch64 first).
+1. The image: a qcow2 of the factory system that boots in UTM/QEMU (aarch64 first); x86_64 and
+   a VMDK for ESXi built by CI (the `image` workflow), 2026-11-02.
 2. Setup on the console (`torqcli setup`, as root, on the image only, until change #1).
 3. Passwords outside the repo, and `request system password`; existing passwords carried over.
 4. SSH by password, protected, and noted by `show system alarms`.

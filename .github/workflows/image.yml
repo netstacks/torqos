@@ -1,0 +1,37 @@
+# The TorqOS image for x86_64 (docs/INSTALL.md): the qcow2 (QEMU, Proxmox) and the VMDK (VMware
+# ESXi), built on an x86_64 runner and kept as the run's artifact. Run by hand (Actions → image →
+# Run workflow, or `gh workflow run image.yml`). The release workflow, on a tag, comes later
+# (docs/ROADMAP.md, M2 "CI"); aarch64 is built on an arm64 machine for now.
+name: image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make room
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Build the images
+        run: |
+          nix build -L .#packages.x86_64-linux.image --out-link qcow2
+          nix build -L .#packages.x86_64-linux.image-vmdk --out-link vmdk
+          mkdir out
+          cp -L qcow2/*.qcow2 vmdk/*.vmdk out/
+          cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: torqos-x86_64-linux
+          path: out/
+          retention-days: 14
