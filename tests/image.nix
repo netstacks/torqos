@@ -126,7 +126,12 @@ pkgs.testers.runNixOSTest {
 
     # The console's text, as it is on the screen (/dev/vcs1: no line breaks, just the cells).
     def on_console(text, timeout=120):
-        machine.wait_until_succeeds(f"grep -aqF {shlex.quote(text)} /dev/vcs1", timeout=timeout)
+        try:
+            machine.wait_until_succeeds(f"grep -aqF {shlex.quote(text)} /dev/vcs1", timeout=timeout)
+        except Exception:
+            # What the screen shows instead, and what runs on it.
+            print(machine.execute("fgconsole; tr -s ' ' < /dev/vcs1; echo; systemctl status --no-pager torq-setup; journalctl -b --no-pager -u torq-setup | tail -20")[1])
+            raise
 
     def answer(text):
         machine.send_chars(text + "\n")
