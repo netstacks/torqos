@@ -11,6 +11,9 @@ pkgs.testers.runNixOSTest {
     imports = [ self.nixosModules.default ];
     torq.user = "dev";
     torq.desktop.enable = false;
+    # NixOS's test instrumentation gives root an empty password, for logging in by hand; the driver
+    # needs none (its own root shell), and TorqOS asserts root has none (modules/accounts.nix).
+    users.users.root.hashedPasswordFile = pkgs.lib.mkForce null;
     # Rebuilds are stubbed through the broker's fixed settings (a root broker refuses a
     # TORQ_REBUILD_CMD from its caller). What a real machine would run is checked below.
     torq.broker.rebuildCommand = "true";

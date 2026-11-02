@@ -8,10 +8,13 @@
 pkgs.testers.runNixOSTest {
   name = "torq-accounts";
 
-  nodes.machine = {
+  nodes.machine = { pkgs, ... }: {
     imports = [ self.nixosModules.default ];
     torq.user = "alice";
     torq.desktop.enable = false;
+    # NixOS's test instrumentation gives root an empty password, for logging in by hand; the driver
+    # needs none (its own root shell), and TorqOS asserts root has none (modules/accounts.nix).
+    users.users.root.hashedPasswordFile = pkgs.lib.mkForce null;
     users.users.bob.isNormalUser = true;
     users.users.carol.isNormalUser = true;
   };
