@@ -447,6 +447,7 @@ mod tests {
             ("show configuration |", "a | needs something after it (one of: display, cut, grep"),
             ("show configuration | sed s/a/b/", "'sed' is not a word here (after `show configuration |`) (one of: display, cut, grep"),
             ("show configuration | sh -c x", "'sh' is not a word here"),
+            ("show configuration | grep", "| grep needs <pattern>, as in `| grep host`"),
         ] {
             let e = err(o, line);
             assert!(e.contains(want), "{line}: {e}");

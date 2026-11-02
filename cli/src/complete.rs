@@ -74,9 +74,9 @@ const ENTER: (&str, &str) = ("<[Enter]>", "Execute this command");
 /// and `<[Enter]>` when the line could run as it is.
 pub fn choices_at(k: &Know, at: &At, words: &[String], partial: &str) -> Vec<Choice> {
     let mut all = next(k, at, words, partial);
-    // (After a filter's own name, its options are its own: `| grep ?` lists nothing.)
-    let is_filter = |w: &String| crate::filter::FILTERS.iter().any(|(f, _)| f == w);
-    if partial.is_empty() && !words.last().is_some_and(is_filter) {
+    // (After a filter that needs something, only that: `| grep ?` is <pattern>.)
+    let needs = |w: &String| crate::filter::tool(w).is_some_and(|t| t.needs.is_some());
+    if partial.is_empty() && !words.last().is_some_and(needs) {
         if let Ok((op, _)) = crate::syntax::parse_line(at.mode, words) {
             if let Some(help) = crate::grammar::pipe_help(at.mode, words).filter(|_| !all.iter().any(|c| c.word == "|")) {
                 all.push(Choice::new("|", &help));
@@ -511,7 +511,8 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run show system alarms |"), "")), with_display);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show | grep x |"), "")), filters, "after a filter, only filters");
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration |"), "g")), ["grep"]);
-        assert!(choices(&s, Mode::Operational, &w("show configuration | grep"), "").is_empty(), "grep's options are grep's");
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration | grep"), "")), ["<pattern>"], "what grep needs; its options are its own");
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show configuration | sort"), "")), ["<[Enter]>", "|"], "sort needs nothing");
         assert!(choices(&s, Mode::Configuration, &w("show | grep x | display"), "").is_empty(), "after a filter, no display");
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show packages x |"), "")), filters, "a search is a show like any other");
         assert!(choices(&s, Mode::Configuration, &w("set system |"), "").is_empty(), "only a show");
@@ -573,7 +574,7 @@ mod tests {
         assert!(enter(k, "show | compare") && c(k, "show | compare").contains(&"|".to_string()));
         assert!(enter(k, "show | display set") && c(k, "show | display set").contains(&"|".to_string()));
         assert!(enter(k, "show | grep x") && c(k, "show | grep x").contains(&"|".to_string()), "{:?}", c(k, "show | grep x"));
-        assert!(c(k, "show | grep").is_empty(), "grep's options are grep's");
+        assert_eq!(c(k, "show | grep"), ["<pattern>"], "what grep needs");
         // delete: what the session runs — a setting, a value, a whole list or place, by either name; what
         // is not set runs too (a warning, nothing deleted).
         for line in ["delete networking hostName", "delete system host-name", "delete networking", "delete system packages htop", "delete system packages", "delete environment systemPackages", "delete services httpd config", "delete virtualisation docker enable", "delete time timeZone", "delete virtualisation config"] {

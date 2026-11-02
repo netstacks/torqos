@@ -602,7 +602,7 @@ fn resolve(w: &str, offered: &[String], after: &[String]) -> Result<String> {
 /// the filters, each word as it is meant (abbreviations expanded). Reads them into `read`; the
 /// filters are returned.
 fn apply_pipes(node: &Node, segments: &mut [Vec<String>], read: &mut Read, before: &[String]) -> Result<Vec<crate::filter::Filter>> {
-    let filter_names: Vec<String> = crate::filter::FILTERS.iter().map(|(t, _)| t.to_string()).collect();
+    let filter_names: Vec<String> = crate::filter::FILTERS.iter().map(|t| t.name.to_string()).collect();
     let mut filters = Vec::new();
     let mut after: Vec<String> = before.to_vec();
     for seg in segments.iter_mut() {
@@ -641,7 +641,12 @@ fn apply_pipes(node: &Node, segments: &mut [Vec<String>], read: &mut Read, befor
                     _ => Display::Diff,
                 });
             }
-            _ => filters.push(crate::filter::Filter { tool: word, args: seg[1..].to_vec() }),
+            _ => {
+                if let Some((what, like)) = crate::filter::tool(&word).and_then(|t| t.needs).filter(|_| seg.len() == 1) {
+                    bail!("| {word} needs {what}, as in `{like}`");
+                }
+                filters.push(crate::filter::Filter { tool: word, args: seg[1..].to_vec() })
+            }
         }
         after.extend(seg[1..].iter().cloned());
     }
@@ -757,7 +762,7 @@ pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String)> {
                     out.push((w, help.to_string()));
                 }
             }
-            out.extend(crate::filter::FILTERS.iter().map(|(t, h)| (t.to_string(), h.to_string())));
+            out.extend(crate::filter::FILTERS.iter().map(|t| (t.name.to_string(), t.help.to_string())));
             if !walked.read.no_more {
                 out.push(("no-more".into(), "All of it at once, not a screenful at a time".into()));
             }
@@ -772,6 +777,8 @@ pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String)> {
             };
             (v, help.to_string())
         }).collect(),
+        // A filter that needs something: what (its own options are its own: not offered).
+        [f] => crate::filter::tool(f).and_then(|t| t.needs).map(|(what, like)| vec![(what.to_string(), format!("As in `{like}`"))]).unwrap_or_default(),
         _ => vec![],
     }
 }

@@ -15,17 +15,30 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// The filters, with the help `?` shows.
-pub const FILTERS: &[(&str, &str)] = &[
-    ("cut", "Parts of each line (cut -d' ' -f2)"),
-    ("grep", "Only the lines matching a pattern (grep -v, -i, -E, -c …)"),
-    ("head", "The first lines (head -n 5)"),
-    ("sort", "Sorted (sort -r, -u, -k2 …)"),
-    ("tail", "The last lines (tail -n 5)"),
-    ("tr", "Characters replaced or deleted (tr a-z A-Z)"),
-    ("uniq", "Repeated lines once (uniq -c)"),
-    ("wc", "Count lines, words, characters (wc -l)"),
+/// A filter: the real tool's name, the help `?` shows, and what it cannot run without (as `?`
+/// shows it, and an example), if anything.
+pub struct Tool {
+    pub name: &'static str,
+    pub help: &'static str,
+    pub needs: Option<(&'static str, &'static str)>,
+}
+
+/// The filters.
+pub const FILTERS: &[Tool] = &[
+    Tool { name: "cut", help: "Parts of each line (cut -d' ' -f2)", needs: Some(("<what to keep>", "| cut -d' ' -f2")) },
+    Tool { name: "grep", help: "Only the lines matching a pattern (grep -v, -i, -E, -c …)", needs: Some(("<pattern>", "| grep host")) },
+    Tool { name: "head", help: "The first lines (head -n 5)", needs: None },
+    Tool { name: "sort", help: "Sorted (sort -r, -u, -k2 …)", needs: None },
+    Tool { name: "tail", help: "The last lines (tail -n 5)", needs: None },
+    Tool { name: "tr", help: "Characters replaced or deleted (tr a-z A-Z)", needs: Some(("<characters>", "| tr a-z A-Z")) },
+    Tool { name: "uniq", help: "Repeated lines once (uniq -c)", needs: None },
+    Tool { name: "wc", help: "Count lines, words, characters (wc -l)", needs: None },
 ];
+
+/// The filter named `name`.
+pub fn tool(name: &str) -> Option<&'static Tool> {
+    FILTERS.iter().find(|t| t.name == name)
+}
 
 /// One filter: the tool and its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +85,8 @@ fn command(f: &Filter) -> Result<Command> {
     if let Some(a) = std::env::var_os("LOCALE_ARCHIVE").and_then(|a| std::fs::canonicalize(a).ok()).filter(|a| a.starts_with("/nix/store/")) {
         c.arg("--setenv").arg("LOCALE_ARCHIVE").arg(a);
     }
+    // Named as people know it (`grep: …`, not its store path), in what it says.
+    c.args(["--argv0", &f.tool]);
     c.arg("--").arg(Path::new(bin).join(&f.tool)).args(&f.args);
     Ok(c)
 }
@@ -183,7 +198,7 @@ mod tests {
         let e = format!("{:#}", apply(&f("grep -Q x"), OUT.into()).unwrap_err());
         assert!(e.starts_with("| grep: ") && e.contains("Q"), "{e}");
         let e = format!("{:#}", apply(&f("grep '\\('"), OUT.into()).unwrap_err());
-        assert!(e.starts_with("| grep: "), "{e}");
+        assert!(e.starts_with("| grep: ") && !e.contains("/nix/store"), "the tool by its name, not its store path: {e}");
         let e = format!("{:#}", apply(&f("head -n x"), OUT.into()).unwrap_err());
         assert!(e.starts_with("| head: "), "{e}");
         assert!(!e.contains("head: head:"), "the tool named once: {e}");
@@ -210,8 +225,8 @@ mod tests {
         for p in [bwrap, sh] {
             assert!(p.starts_with("/nix/store/") && Path::new(p).exists(), "{p}");
         }
-        for (tool, _) in FILTERS {
-            let p = Path::new(bin).join(tool);
+        for t in FILTERS {
+            let p = Path::new(bin).join(t.name);
             assert!(p.starts_with("/nix/store/") && p.exists(), "{}", p.display());
         }
     }
