@@ -47,10 +47,10 @@ $ torqcli -c "configure; set users users viper packages htop; commit"
 | add / change | `set environment systemPackages jq` |
 | remove | `delete environment systemPackages jq` (one value); `delete environment systemPackages`, `delete networking` (everything below); not set: a warning |
 | go down / up / to the top | `edit networking` · `up` (or `exit`) · `top` |
-| compare with the active configuration | `show \| compare` |
+| compare with the active configuration | `show \| compare` (`show \| compare rollback <n>`: with an earlier one) |
 | show the configuration | `show` (candidate) / `show configuration` (operational) |
 | run an operational command | `run <command>` |
-| leave configuration | `exit` at the top, `exit configuration-mode`, or Ctrl-D from anywhere |
+| leave configuration | `exit` at the top, `exit configuration-mode`, or Ctrl-D from anywhere (it leaves configuration mode, not torqcli) |
 | help | `help`, `help <command>`, `help <words>` |
 
 `up` goes one level at a time. A set of named entries is a level of its own (`services httpd
@@ -83,13 +83,20 @@ come next for `?` and Tab, answers `help`, and says why a line is refused, so th
   of range: minutes go from 1 to 1440`).
 - A command of the other mode says so, wherever it stands ("'edit' is a configuration-mode command
   (after `file`): `configure` first").
-- Words from other CLIs and shells say what to use here: `| count` → `| wc -l`, `| match` and `|
-  find` → `| grep`, `| except` → `| grep -v`, `| last` → `| tail -n`, `| trim` → `| cut`, `| save` →
-  `save <file>`; `copy`, `rename`, `annotate`, `deactivate` say what TorqOS does instead; `ping`,
-  `traceroute`, `ssh` are shell commands, run outside torqcli.
+- Other CLIs' words and paths are one table (`cli/src/vocabulary.rs`), read wherever one is
+  refused and by `help`: `| count` → `| wc -l`, `| match` and `| find` → `| grep`, `| except` →
+  `| grep -v`, `| last` → `| tail -n`, `| trim` → `| cut`, `| save` → `save <file>`; `copy`,
+  `rename`, `annotate`, `deactivate` say what TorqOS does instead; `ping`, `traceroute`, `ssh` are
+  shell commands, run outside torqcli. Another CLI's path says where the setting is here and how it
+  is set: `set system services ssh` → `services openssh`, `set interfaces …` → `networking
+  interfaces`, `system name-server`, `ntp`, `login`, `syslog`, `routing-options`, `firewall` (an old
+  name that works here, `system host-name`, needs none).
 - `help` lists the mode's commands; `help <command>` says what it is and what may follow it
   (abbreviated as anywhere: `help sh sys`); `help <words>` searches the commands of both modes and
-  the settings for those words, whole words first (`mountPoint` is *mount* and *point*).
+  the settings: first where the concept usually is here ("On TorqOS:", from the table above), then
+  places (a service, a section: `virtualisation docker`), then single settings — each closest
+  first: a word as a whole part of a name (`hostname` is hostName), its beginning, inside one word
+  (`ssh` in openssh; never across two: `mountPoint` is *mount* and *point*), then in the help.
 
 Configuration paths (old names, entries people name) and values are not the grammar's: the tree reads
 them, with the setting's own rules (below). `?` offers only what can be set: not NixOS's `_module`,
@@ -106,11 +113,14 @@ number of **filters**, the real Linux tools with their own options (ADR-017): `|
 `show configuration | grep -i host`, `show system commit | head -n 5 | wc -l`. They read the show's
 output inside a sandbox that has nothing else (no files, no network), from the system's own
 coreutils and grep; words are split as a shell does (`'single'` quotes are literal). `help` and
-`file show` take filters too.
+`file show` take filters too. A filter that cannot run without something says so (`| grep needs
+<pattern>, as in | grep host`; `| grep ?` offers `<pattern>`); a tool's own error is said in its
+name (`| grep: missing closing parenthesis`).
 
 **The pager.** Output taller than the window, from a line typed at the prompt, is shown a screenful
 at a time, as on a network device: `---(more N%)---`, Space for the next screenful, Enter for one
-more line, `n` for the rest at once, `q` (or Ctrl-C, or any other key) to stop. Lines that wrap count
+more line, `n` for the rest at once, `q` (or Ctrl-C) to stop, `h` for the keys; any other key is
+ignored (the rest is not lost to a slip). Lines that wrap count
 as the rows they take. Never for a script, piped output, or a paste's later lines (they come at once;
 the first line of a paste may page, the rest wait for it). `| no-more`, anywhere among the pipes,
 shows it all at once.
@@ -138,8 +148,9 @@ counting changes as settings (a changed value is one change): "Loaded configurat
 the configuration in effect", "Discarded 1 change", "No changes to discard". `show | compare` with
 nothing pending, two configurations with the same settings, and `show` of a place with nothing set
 say so. Every way out says what is kept: `configure` with changes left from before says so (and how
-to list or discard them); `exit` from torqcli keeps the candidate and says so; Ctrl-D is `exit`, from
-wherever you are; `-c` ends saying its uncommitted changes are discarded. `save` and `load` read a
+to list or discard them); `exit` from torqcli keeps the candidate and says so; Ctrl-D in
+configuration mode leaves it as `exit configuration-mode` does, and in operational mode leaves
+torqcli; `-c` ends saying its uncommitted changes are discarded. `save` and `load` read a
 relative file name as in the home folder, as on a network device, wherever torqcli was started; `save`
 says the full path.
 
@@ -206,6 +217,11 @@ commit would:
   without `:`. `?` says the form ("a number from 1 to 100", "text matching …"); a refusal says it,
   with the setting's own help. A host name, user name or package name that is not one says what one
   is ("letters, digits and -, at most 63, …").
+- Where NixOS takes any text but the value has a form (an interface address, a route, a gateway, a
+  name server), TorqOS states the form as data in the schema (modules/nixos-schema.nix, `forms`),
+  read by the same pattern check, and named in words: `'999.1.1.1' is not an IPv4 address`; `?`
+  says `<an IPv4 address>`. A set named after something on the machine says so (`names`:
+  `networking interfaces`), and `?` offers what the machine has (its interfaces).
 - Read-only settings (`networking fqdnOrHostName` and 88 more) are left out of the tree: never
   offered, never settable.
 - Setting names abbreviate as command words do (a unique beginning is the name, stored as the name;
@@ -400,7 +416,7 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `show system ledger [<count>]` | every change as the ledger has it (`#85`, who made it), refused and failed ones too |
 | `show version` | what this machine runs: TorqOS (and where it comes from, from the lock), NixOS, the kernel, torqcli |
 | `show system uptime` | how long the machine has run, its load, and its last change |
-| `show interfaces` | each network interface's state, addresses and hardware address |
+| `show interfaces [<interface>]` | each network interface's (or one's) state, addresses and hardware address; `?` offers the machine's |
 | `show system storage` | each disk's size and use, and the system versions kept |
 | `show packages <words>` | search this machine's nixpkgs: each package as it is typed (`htop`, `python3Packages.rich`), its version and description, closest first (the name itself, a set's package of that name, names beginning with the words, names holding them, then descriptions); `*` marks what the configuration installs |
 | `set torq unfree packages [ <name> … ]` · `set torq unfree all true` | (configuration mode) allow unfree software (Postman, VS Code, …): by name, or all of it; refused otherwise, saying so (modules/unfree.nix) |
