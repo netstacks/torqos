@@ -71,6 +71,8 @@ and-quit`, `rollback <n> [<place>]`, `up [<n>]`, `top [<command>]` (a command fr
 back where you were — unless it moves), `show system commit`, `?` help, Tab completion, history (↑).
 `?` lists what may come next, `|` after any whole `show`, and `<[Enter]>` when the line would run as
 it is (decided as the session decides it: the line is dry-run on a copy of the candidate).
+Inside quotes `?` is a character: an address with a query is typed `"git+https://…?ref=stable"`
+(one typed without quotes loses its `?`, and a source that did is refused, with the quoted address).
 
 **One grammar** (cli/src/grammar.rs, ADR-025 #1): the command language is declared once — each
 command's words, help, values (checked, with their range), the pipes its output takes, and how a

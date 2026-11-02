@@ -96,6 +96,19 @@ pub fn valid(url: &str) -> Result<()> {
              git+https://…, https://… (a tarball) or path:/<absolute folder>"
         );
     }
+    // A query (`ref=stable`) with no `?` before it: at the prompt `?` lists what may come next
+    // instead of being typed, so a pasted address loses it. No repository or host has `=` in its
+    // name; a folder may (`path:`).
+    if let Some(eq) = url.find('=').filter(|_| !url.starts_with("path:") && !url.contains('?')) {
+        // Where the `?` was: before the name of the query Nix reads (`ref`, `rev`, `dir`, …).
+        let names = ["ref", "rev", "dir", "host", "narHash", "submodules", "shallow", "allRefs", "lfs"];
+        let fixed = names.iter().find(|n| url[..eq].ends_with(*n)).map(|n| format!("{}?{}", &url[..eq - n.len()], &url[eq - n.len()..]));
+        bail!(
+            "'{url}' has a query (`=`) but no `?` before it: at the prompt, `?` lists what may come next \
+             instead of typing it. Put the address in quotes: \"{}\"",
+            fixed.as_deref().unwrap_or("…?…")
+        );
+    }
     Ok(())
 }
 
@@ -170,5 +183,19 @@ mod tests {
         }
         assert!(image_own("path:/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source") && !image_own("path:/home/viper/torq") && !image_own(RELEASES));
         valid(RELEASES).unwrap();
+    }
+
+    /// A query whose `?` was taken by the prompt (`?` lists choices there): refused, with the address
+    /// as it was meant, quoted.
+    #[test]
+    fn a_query_that_lost_its_question_mark() {
+        let e = format!("{:#}", valid("git+https://github.com/netstacks/torqos-releasesref=stable").unwrap_err());
+        assert_eq!(
+            e,
+            "'git+https://github.com/netstacks/torqos-releasesref=stable' has a query (`=`) but no `?` before it: at the prompt, `?` lists what may come next instead of typing it. Put the address in quotes: \"git+https://github.com/netstacks/torqos-releases?ref=stable\""
+        );
+        assert!(format!("{:#}", valid("https://example.com/xa=b").unwrap_err()).ends_with("in quotes: \"…?…\""), "a query Nix does not name: no guess");
+        valid("github:netstacks/torqos?dir=sub").unwrap();
+        valid("path:/home/dev/a=b").unwrap();
     }
 }
