@@ -1,0 +1,41 @@
+// TorqOS's fastfetch configuration. TorqOS installs it for everyone (/etc/xdg/fastfetch/config.jsonc,
+// modules/branding.nix), its logo beside it: `fastfetch` shows it once installed
+// (`set environment systemPackages fastfetch`). For one person: ~/.config/fastfetch/config.jsonc.
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    "source": "~/.config/fastfetch/torqos-logo-fastfetch.txt",
+    "color": { "1": "38;5;208", "2": "97" },   // 1 = torque orange ring, 2 = white prompt
+    "padding": { "top": 1, "right": 4 }
+  },
+  "display": {
+    "color": { "keys": "38;5;208", "title": "38;5;208" }
+  },
+  "modules": [
+    "title",
+    "separator",
+    "os",
+    {
+      "type": "command", "key": "Generation",
+      "text": "readlink /nix/var/nix/profiles/system | grep -o '[0-9]\\+' || echo n/a"
+    },
+    {
+      "type": "command", "key": "Last change",
+      "text": "git -C /var/lib/torq/config log -1 --format='%s · %cr' 2>/dev/null || echo n/a"
+    },
+    {
+      "type": "command", "key": "Secure Boot",
+      "text": "bootctl status 2>/dev/null | grep -i 'secure boot' | head -1 | sed 's/.*: *//' || echo unknown"
+    },
+    "kernel",
+    "uptime",
+    "packages",
+    "shell",
+    "cpu",
+    "memory",
+    "disk",
+    "break",
+    "colors"
+  ]
+}
