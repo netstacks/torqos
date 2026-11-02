@@ -680,8 +680,7 @@ impl Broker {
         if !policy::user_name_ok(user) || !self.people.iter().any(|p| p == user) {
             bail!("'{user}' is not a person's account on this machine");
         }
-        let shaped = ["$6$", "$y$", "$2b$"].iter().any(|p| hash.starts_with(p)) && hash.len() < 512 && !hash.contains([':', '\n', '\r']);
-        if !shaped {
+        if !policy::password_hash_ok(hash) {
             bail!("not a password hash this machine reads (SHA-512 or yescrypt crypt)");
         }
         // At once: the running system's own tool. It fails for an account this machine does not have.
@@ -791,6 +790,12 @@ impl Broker {
         // top of whatever the configuration has become (second audit, M2; KNOWN-GAPS 6g).
         if actor == Actor::Agent && base.is_none() {
             bail!("refused: an agent's proposal needs --base (the commit it was prepared against)");
+        }
+        // A reason is one line of text: it becomes the commit's subject, above the trailers the
+        // ledger is checked against (Approved-By, Ledger-Entry): a line break or control character
+        // could forge one (audit of 2026-11-01, N4).
+        if reason.trim().is_empty() || reason.chars().any(char::is_control) {
+            bail!("refused: the reason is one line of text (no line breaks or control characters), not empty");
         }
         self.refuse_unledgered_head()?;
         if let Some(base) = base {

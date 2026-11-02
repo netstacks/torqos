@@ -312,7 +312,8 @@ fn run(mut cli: Cli) -> Result<()> {
             }
             println!("proposal #{} · tier: {} · actor: {}{}", e.body.seq, e.body.tier, e.body.actor,
                 if tainted { " · TAINTED" } else { "" });
-            println!("files: {}", e.body.data["files"]);
+            // (Names as the proposal wrote them: escaped as everything shown is, audit of 2026-11-01, L1.)
+            println!("files: {}", printable(&e.body.data["files"].to_string()));
             println!("\n{}", printable_text(e.body.data["diff"].as_str().unwrap_or_default()));
             println!("approve with: torq-broker apply {} --approved-by <name>", e.body.seq);
         }

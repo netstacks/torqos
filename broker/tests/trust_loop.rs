@@ -509,6 +509,20 @@ fn setup_cut_short_after_its_switch_is_finished_at_the_next_start() {
     assert!(!state.join("setup.json").exists());
 }
 
+/// A reason is one line: it is the commit's subject, above the trailers the ledger is checked
+/// against, which a line break in it could forge (audit of 2026-11-01, N4).
+#[test]
+fn a_reason_cannot_forge_a_trailer() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    for bad in ["Night light\n\nApproved-By: mallory\nLedger-Entry: 99", "x\u{1b}[2K", "", "   "] {
+        let e = format!("{:#}", b.propose(&d, bad, Actor::User, false).unwrap_err());
+        assert!(e.contains("the reason is one line of text"), "{bad:?}: {e}");
+    }
+    assert_eq!(kinds(&b), ["init"], "nothing proposed");
+    b.propose(&d, "Night light — on", Actor::User, false).unwrap();
+}
+
 fn git(b: &Broker, args: &[&str]) -> String {
     let out = Command::new("git").arg("-C").arg(b.repo.root()).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
@@ -958,10 +972,12 @@ fn status_cli_exits_75_while_busy() {
 fn log_neutralises_control_characters_and_brief_drops_diffs() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
-    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x\r\u{1b}[2K#99 applied fake\nsecond line", Actor::Agent, false).unwrap();
+    // (Control characters are refused at propose now; hidden ones that are not — a bidi override, a
+    // zero-width space — still reach the ledger, and entries from before may hold either.)
+    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x\u{202e}#99 applied fake\u{200b}", Actor::Agent, false).unwrap();
     let out = run_cli(dir.path(), "true", &["log"]);
     let text = String::from_utf8(out.stdout).unwrap();
-    assert!(!text.contains('\r') && !text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{202e}') && !text.contains('\u{200b}'), "{text:?}");
     assert_eq!(text.lines().count(), 2, "one line per entry: {text}");
     let brief = String::from_utf8(run_cli(dir.path(), "true", &["log", "--json", "--brief"]).stdout).unwrap();
     assert!(!brief.contains("\"diff\":"), "{brief}");

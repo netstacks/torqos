@@ -1216,7 +1216,8 @@ impl<'a> Session<'a> {
         let (confirm, comment) = (o.confirm, o.comment);
         let scratch = tempfile::tempdir()?;
         let diff = candidate::unified_diff(scratch.path(), &changes)?;
-        let reason = comment.unwrap_or_else(|| summary(&compare));
+        // One line of text, as the broker takes it (a tab or an escape typed in a comment: shown, not sent).
+        let reason = crate::history::one_line(&comment.unwrap_or_else(|| summary(&compare)), usize::MAX);
         let seq = self.machine.commit(&diff, &base, tier, &reason, confirm)?;
         self.discard()?;
         Ok(match confirm {

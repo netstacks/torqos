@@ -114,6 +114,22 @@ pub fn is_user_data(p: &str) -> bool {
     user_name_ok(name) && USER_LEAVES.contains(&leaf)
 }
 
+/// A password hash in crypt's form, whole: `$6$[rounds=N$]salt$hash` (SHA-512), `$y$params$salt$hash`
+/// (yescrypt), `$2b$cost$salt+hash` (bcrypt) — not only its prefix: `$6$` alone would be set as it
+/// is and lock the account out (audit of 2026-11-01, N11).
+pub fn password_hash_ok(hash: &str) -> bool {
+    let crypt = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'/');
+    let parts: Vec<&str> = hash.split('$').collect();
+    hash.len() < 512
+        && match parts.as_slice() {
+            ["", "6", salt, h] => crypt(salt) && crypt(h),
+            ["", "6", rounds, salt, h] => rounds.strip_prefix("rounds=").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) && crypt(salt) && crypt(h),
+            ["", "y", params, salt, h] => crypt(params) && crypt(salt) && crypt(h),
+            ["", "2b", cost, rest] => cost.len() == 2 && cost.bytes().all(|b| b.is_ascii_digit()) && rest.len() == 53 && crypt(rest),
+            _ => false,
+        }
+}
+
 /// A conservative user name: what `useradd` accepts by default, minus uppercase.
 pub fn user_name_ok(name: &str) -> bool {
     let mut chars = name.chars();
@@ -152,6 +168,17 @@ pub fn check_allowed(actor: Actor, tier: Tier) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_password_hash_is_whole() {
+        for good in ["$6$salt$abcDEF012./", "$6$rounds=5000$salt$abc", "$y$j9T$salt$hash", &format!("$2b$12${}", "a".repeat(53))] {
+            assert!(password_hash_ok(good), "{good}");
+        }
+        for bad in ["$6$", "$6$salt", "$6$salt$", "$y$j9T$$hash", "$6$sa:lt$h", "$6$rounds=$s$h", "$2b$12$short", "!", "", "$1$salt$hash"] {
+            assert!(!password_hash_ok(bad), "{bad}");
+        }
+    }
+
 
     #[test]
     fn classifies() {
