@@ -50,6 +50,36 @@ fn as_typed(e: anyhow::Error, typed: &[String], hand: &[String]) -> anyhow::Erro
     e
 }
 
+/// The short names (MAP's old names that still work) that may be typed next after `path`: each one's
+/// next word, its hand-made schema node (for its help), and the setting it is short for, as `?`
+/// offers them. `is_place(words)`: whether the tree has a place or setting there — a `<name>` never
+/// stands for one of the tree's own words (`users users` is NixOS's, not a person), and a short name
+/// never hides a real one.
+pub fn shorthands_after(path: &[String], is_place: impl Fn(&[String]) -> bool) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for (nixos, hand, alias) in MAP {
+        let pat: Vec<&str> = hand.split(' ').collect();
+        if !alias || pat.len() != path.len() + 1 {
+            continue;
+        }
+        let mut name = None;
+        let fits = pat.iter().zip(path).enumerate().all(|(i, (p, w))| match *p {
+            "<name>" => {
+                name = Some(w.clone());
+                !is_place(&[&path[..i], std::slice::from_ref(w)].concat())
+            }
+            p => p == w,
+        });
+        let next = pat[path.len()].to_string();
+        if !fits || is_place(&[path.to_vec(), vec![next.clone()]].concat()) {
+            continue;
+        }
+        let real = nixos.split(' ').map(|p| if p == "<name>" { name.clone().unwrap_or_default() } else { p.to_string() }).collect::<Vec<_>>().join(" ");
+        out.push((next, hand.to_string(), real));
+    }
+    out
+}
+
 /// `words` with a prefix matching one side of MAP (0: NixOS, 1: hand-made) replaced by the other.
 /// Words as the hand-made schema names them, if they name a setting TorqOS keeps in its own files:
 /// by its NixOS path (`environment systemPackages`), or by its old name (`system packages`), as `set`

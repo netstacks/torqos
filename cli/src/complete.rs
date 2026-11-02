@@ -125,6 +125,15 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
             crate::grammar::Offer::Path { verb, from_top } => {
                 let path: Vec<String> = if from_top { walked.read.path.clone() } else { at.edit.iter().chain(&walked.read.path).cloned().collect() };
                 let mut c = tree_choices(k, &path, if verb == "edit" { "show" } else { verb });
+                // The short names that work here (`system packages`), said as what they are short for.
+                let is_place = |w: &[String]| k.tree.locate(w).is_ok();
+                let short: Vec<Choice> = crate::whole::shorthands_after(&path, is_place)
+                    .into_iter()
+                    .filter(|(w, _, _)| !c.iter().any(|x| x.word == *w))
+                    .map(|(w, node, real)| Choice::new(&w, &format!("Short for {real}: {}", k.schema.nodes.get(&node).map_or("", |n| n.help.as_str()))))
+                    .collect();
+                let bar = c.iter().position(|x| x.word == "|").unwrap_or(c.len());
+                c.splice(bar..bar, short);
                 if verb == "edit" {
                     c.retain(|x| x.word != "|");
                 }
@@ -749,6 +758,21 @@ mod tests {
         let at = At { files: vec!["hardware-configuration.nix".into(), "services/httpd.nix".into()], ..at };
         assert_eq!(words_of(&choices_at(&s, &at, &w("file show"), "s")), ["<nix-file>", "services/httpd.nix"]);
         assert_eq!(words_of(&choices_at(&s, &at, &w("save"), "")), ["<file>"]);
+    }
+
+    /// The short names that work (`system packages`) are offered where they may be typed, said as
+    /// what they are short for; never where a word is the tree's own (`users users`).
+    #[test]
+    fn short_names_are_offered_as_what_they_are_short_for() {
+        let s = schema();
+        let at = At { mode: Mode::Configuration, edit: vec![], data: crate::whole::Data::default(), configurations: Later::new(Vec::new), files: vec![], interfaces: vec![] };
+        let c = choices_at(&s, &at, &w("set system"), "");
+        let p = c.iter().find(|x| x.word == "packages").expect("system packages offered");
+        assert!(p.help.starts_with("Short for environment systemPackages: Software installed for everyone"), "{}", p.help);
+        assert!(c.iter().any(|x| x.word == "host-name" && x.help.starts_with("Short for networking hostName")));
+        let c = choices_at(&s, &at, &w("set users dev"), "");
+        assert!(c.iter().any(|x| x.word == "packages" && x.help.starts_with("Short for users users dev packages")), "{:?}", words_of(&c));
+        assert!(!choices_at(&s, &at, &w("set users users"), "").iter().any(|x| x.help.starts_with("Short for")), "users users is NixOS's own");
     }
 
     /// A set named after something on the machine (its interfaces) offers what the machine has, after
