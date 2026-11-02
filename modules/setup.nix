@@ -84,13 +84,6 @@ in
       restartIfChanged = false;
       serviceConfig = {
         Type = "idle";
-        # First, the devices found at boot set up (udev's queue empty): a graphics driver loading late
-        # (bochs-drm on QEMU's standard VGA, seconds after setup would start) moves the console to a
-        # framebuffer and loses what was on the screen — setup's first question with it, leaving a
-        # screen that asks nothing (tests/image.nix). Loading it is part of setting up its device, so
-        # once udev is done the console is the one setup keeps. NixOS has no systemd-udev-settle
-        # unit to order after; a device that never settles delays setup a minute, not for good (`-`).
-        ExecStartPre = "-${config.systemd.package}/bin/udevadm settle --timeout=60";
         ExecStart = "${lib.getExe config.torq.cli.package} setup";
         StandardInput = "tty";
         StandardOutput = "tty";

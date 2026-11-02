@@ -24,6 +24,7 @@ const SYSTEMD_RUN: &str = "/run/current-system/sw/bin/systemd-run";
 const JOURNALCTL: &str = "/run/current-system/sw/bin/journalctl";
 /// The broker's own service while it sets the machine up (its log: `journalctl -u torq-setup-broker`).
 const BROKER_UNIT: &str = "torq-setup-broker";
+const WELCOME: &str = "Welcome to TorqOS. This machine has no configuration yet: a few questions set it up.";
 
 /// How the owner logs in from other machines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +163,7 @@ pub fn run() -> Result<()> {
         // build would fail on them. Before change #1 nothing else on the image uses them.
         let _ = std::fs::remove_dir_all(repo);
         let _ = std::fs::remove_dir_all(BUILD_CACHE);
-        println!("\nWelcome to TorqOS. This machine has no configuration yet: a few questions set it up.\n");
+        println!("\n{WELCOME}\n");
         let a = ask()?;
         match apply(&a) {
             Ok(()) => {
@@ -278,8 +279,7 @@ fn until<T>(mut ask: impl FnMut() -> Result<String>, check: impl Fn(&str) -> Res
 
 /// One answer, `default` if none is typed.
 fn line(question: &str, default: &str) -> Result<String> {
-    if default.is_empty() { print!("{question}: ") } else { print!("{question} [{default}]: ") }
-    std::io::stdout().flush()?;
+    asked(&if default.is_empty() { format!("{question}: ") } else { format!("{question} [{default}]: ") })?;
     let mut s = String::new();
     if std::io::stdin().lock().read_line(&mut s)? == 0 {
         bail!("the console closed");
@@ -290,15 +290,42 @@ fn line(question: &str, default: &str) -> Result<String> {
 
 /// A secret, not shown as it is typed.
 fn secret(question: &str) -> Result<String> {
-    print!("{question}: ");
-    std::io::stdout().flush()?;
     let _hidden = crate::shell::Echo::set(false);
+    asked(&format!("{question}: "))?;
     let mut s = String::new();
     if std::io::stdin().lock().read_line(&mut s)? == 0 {
         bail!("the console closed");
     }
     println!();
     Ok(s.trim_end_matches(['\n', '\r']).to_string())
+}
+
+/// Ask, and wait until an answer is typed. A graphics driver loading late (bochs-drm on QEMU's
+/// standard VGA, seconds into setup; a GPU's on real hardware) takes the console over, and what was on
+/// the screen may be lost — the question with it, leaving a screen that asks nothing. Such a console
+/// changes size (VGA text's 80x25 to the framebuffer's), so while waiting a size change means the
+/// question is shown again, with the welcome. (Not timed to the driver: nothing tells whether one is
+/// coming, or when.) A console hands over one line a read, so nothing typed sits unread in stdin's
+/// buffer while this waits on the terminal itself.
+fn asked(prompt: &str) -> Result<()> {
+    use rustix::event::{poll, PollFd, PollFlags, Timespec};
+    let stdin = std::io::stdin();
+    let size = || rustix::termios::tcgetwinsize(&stdin).ok().map(|w| (w.ws_row, w.ws_col));
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    let mut was = size();
+    loop {
+        let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
+        if poll(&mut fds, Some(&Timespec { tv_sec: 0, tv_nsec: 500_000_000 }))? > 0 {
+            return Ok(());
+        }
+        let now = size();
+        if now != was {
+            was = now;
+            print!("\n{WELCOME}\n\n{prompt}");
+            std::io::stdout().flush()?;
+        }
+    }
 }
 
 /// A password as NixOS reads it: SHA-512 crypt, with many rounds (slow to guess, quick to check

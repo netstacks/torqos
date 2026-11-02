@@ -138,6 +138,13 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the image boots to setup, with nobody to log in as and nothing listening"):
         on_console("Welcome to TorqOS. This machine has no configuration yet")
+        on_console("Machine name [torq]:")
+        # A graphics driver taking the console over late can lose what was on the screen, and
+        # changes its size: setup asks again. (The x86_64 VM's bochs-drm may do it by itself, or not:
+        # done here, on purpose.)
+        machine.succeed("printf '\\033[H\\033[2J' > /dev/tty1 && stty -F /dev/tty1 rows 30 cols 100")
+        on_console("Welcome to TorqOS. This machine has no configuration yet")
+        on_console("Machine name [torq]:")
         machine.succeed("systemctl is-active torq-setup")
         machine.fail("systemctl is-active getty@tty1")
         machine.succeed("passwd -S root | grep -q ' L '")
