@@ -496,7 +496,7 @@ fn setup_cut_short_after_its_switch_is_finished_at_the_next_start() {
     assert_killed(&out);
     let b = Broker::new(&repo, &state, "true");
     fs::write(repo.join("desktop.nix"), "{ nightLight = true; }\n").unwrap();
-    git(&b, &["commit", "-qam", "outside"]);
+    git(&b, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "outside"]);
     assert!(format!("{:#}", b.init().unwrap_err()).contains("more than setup's commit"));
     assert!(b.ledger.read_all().unwrap().is_empty());
 

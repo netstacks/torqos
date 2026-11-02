@@ -155,7 +155,8 @@ pkgs.testers.runNixOSTest {
         out = machine.fail("su - dev -c 'torqcli -c \"show system commit\"' 2>&1")
         assert "could not read the ledger" in out, out
         out = machine.succeed("torqcli -c 'show system commit'")
-        assert " host" in out.splitlines()[0] and "tester" in out.splitlines()[0], out
+        # (A heading, then the newest configuration: 0.)
+        assert out.splitlines()[0].startswith("Rollback") and " host" in out.splitlines()[1] and "tester" in out.splitlines()[1], out
         out = machine.fail("su - dev -c 'torqcli -c \"configure; set system host-name my_laptop\"' 2>&1")
         assert "is not a valid system host-name" in out, out
         # Piped input is a script: it stops at its first error (exit 1) and runs nothing after it.
