@@ -347,6 +347,27 @@ impl<'a> Session<'a> {
         crate::ui::Ui::plain_at(self.fit)
     }
 
+    /// A sentence a command answers with, as its own line(s): wrapped to the window (ADR-025, one
+    /// output path). Data — a configuration, a comparison, a table — is not a sentence.
+    fn said(&self, text: &str) -> String {
+        format!("{}\n", self.ui().line("", text))
+    }
+
+    /// A sentence marked `! ` (paint.rs shows it as a warning).
+    fn noted(&self, text: &str) -> String {
+        format!("{}\n", self.ui().line("! ", text))
+    }
+
+    /// The rules between settings (whole::software_allowed) are checked on the whole configuration,
+    /// as `commit` checks them — never line by line, where their order would decide. After a change
+    /// that breaks one, the person hears it at once; `commit` refuses until it holds.
+    fn rules_note(&self, d: &Data) -> String {
+        match crate::whole::software_allowed(d) {
+            Ok(()) => String::new(),
+            Err(e) => self.noted(&format!("{e:#} — `commit` refuses until then")),
+        }
+    }
+
     /// Whether `words`, from where configuration mode is, name a place (somewhere to go), not a setting.
     /// Where configuration mode is (`edit system`): its words, for the prompt.
     pub fn edit_path(&self) -> &[String] {
@@ -445,7 +466,7 @@ impl<'a> Session<'a> {
                 let mut d = self.candidate_data()?;
                 let was = d.source.clone();
                 self.whole().set(&mut d, &full)?;
-                let note = rules_note(&d);
+                let note = self.rules_note(&d);
                 if d.source != was {
                     // A new source is locked now, in the candidate: what `commit` installs is shown first.
                     let shown = self.lock_source(d.source.as_deref().unwrap_or_default())?;
@@ -470,9 +491,9 @@ impl<'a> Session<'a> {
                 let mut d = self.candidate_data()?;
                 let done = self.whole().delete(&mut d, &full)?;
                 if done == crate::whole::Deleted::NotFound {
-                    return Ok(format!("! nothing deleted: {} is not set\n", if full.is_empty() { "anything".to_string() } else { full.join(" ") }));
+                    return Ok(self.noted(&format!("nothing deleted: {} is not set", if full.is_empty() { "anything".to_string() } else { full.join(" ") })));
                 }
-                let note = rules_note(&d);
+                let note = self.rules_note(&d);
                 self.put_data(d)?;
                 self.save()?;
                 Ok(note)
@@ -499,7 +520,7 @@ impl<'a> Session<'a> {
                 }
                 self.mode = Mode::Operational;
                 self.edit.clear();
-                Ok(format!("{out}Exiting configuration mode\n"))
+                Ok(format!("{out}{}", self.said("Exiting configuration mode")))
             }
             Op::Run(op) => {
                 let was = self.mode;
@@ -527,7 +548,7 @@ impl<'a> Session<'a> {
             Pending::Quitting => "they are kept for your next `configure`",
             Pending::Discarded => "they are discarded: these commands work on a candidate of their own (end with `commit` to keep them)",
         };
-        format!("{}\n", self.ui().line("", &format!("The candidate has changes not yet committed: {then}.")))
+        self.said(&format!("The candidate has changes not yet committed: {then}."))
     }
 
     /// Out of configuration mode, saying if the candidate holds changes.
@@ -607,21 +628,19 @@ impl<'a> Session<'a> {
     fn configure(&mut self) -> Result<String> {
         self.mode = Mode::Configuration;
         let head = self.repo.head()?;
-        let c = self.candidate()?;
-        let mut out = String::from("Entering configuration mode\n");
-        let base = c.base.clone();
+        let mut out = self.said("Entering configuration mode");
+        let base = self.candidate()?.base.clone();
         if base == head && self.pending()? > 0 {
             out.push_str(&self.pending_note(Pending::Entering));
         }
         let c = self.candidate()?;
         if c.base != head {
-            out.push_str(&format!(
-                "The configuration has been changed since your candidate was started ({} → {}): \
+            let (was, now) = (short(&c.base).to_string(), short(&head).to_string());
+            out.push_str(&self.said(&format!(
+                "The configuration has been changed since your candidate was started ({was} → {now}): \
                  `show | compare` is against the old one, and `commit` will be refused; \
-                 `rollback 0` starts over from the current configuration.\n",
-                short(&c.base),
-                short(&head)
-            ));
+                 `rollback 0` starts over from the current configuration."
+            )));
         }
         Ok(out)
     }
@@ -668,7 +687,7 @@ impl<'a> Session<'a> {
                             _ => {
                                 let m_data = self.configuration_of(&m_id)?;
                                 let out = self.whole().compare(&n_data, &m_data);
-                                Ok(if out.is_empty() { format!("No differences: configurations {n} and {m} have the same settings.\n") } else { out })
+                                Ok(if out.is_empty() { self.said(&format!("No differences: configurations {n} and {m} have the same settings.")) } else { out })
                             }
                         }
                     }
@@ -691,7 +710,7 @@ impl<'a> Session<'a> {
                 let from_old: Vec<Vec<String>> = old.iter().map(|new| new.split(' ').take(2).map(String::from).collect()).collect();
                 let on: std::collections::BTreeSet<Vec<String>> = on_in_tree.chain(from_old.iter().cloned()).collect();
                 if on.is_empty() {
-                    return Ok(format!("{}\n", self.ui().line("", "No services are turned on in the configuration: `set services <name> enable true` turns one on (`help <word>` finds it).")));
+                    return Ok(self.said("No services are turned on in the configuration: `set services <name> enable true` turns one on (`help <word>` finds it)."));
                 }
                 let fit = self.ui().width();
                 let mut rows = Vec::new();
@@ -708,7 +727,7 @@ impl<'a> Session<'a> {
                 if !old.is_empty() {
                     let moves: Vec<String> = old.iter().map(|new| format!("`set {new}`")).collect();
                     let how = format!("Some come from the old list of services (services.json). To move them: {}, `delete torq services enabled`, then commit.", moves.join(", "));
-                    out.push_str(&format!("{}\n", self.ui().line("! ", &how)));
+                    out.push_str(&self.noted(&how));
                 }
                 Ok(out)
             }
@@ -908,7 +927,7 @@ impl<'a> Session<'a> {
             }
             _ => self.machine.update_lock(&base, all)?,
         };
-        self.load_software(new, "This machine has the newest software: nothing to load.\n")
+        self.load_software(new, "This machine has the newest software: nothing to load.")
     }
 
     /// `set system software torq source <url>`: lock that source (the newest it has), as
@@ -921,7 +940,7 @@ impl<'a> Session<'a> {
         let base_lock = self.repo.file_at(&base, "flake.lock")?;
         let shown = software_compare(base_lock.as_deref(), &Some(lock.clone()));
         self.candidate()?.lock = Some(lock);
-        Ok(format!("{shown}The new source is locked into the candidate: `commit` installs it.\n"))
+        Ok(format!("{shown}{}", self.said("The new source is locked into the candidate: `commit` installs it.")))
     }
 
     /// `request system software rollback <n>`: commit n's software into the candidate.
@@ -943,7 +962,7 @@ impl<'a> Session<'a> {
         }
         let lock = self.repo.file_at(&id, "flake.lock")?.with_context(|| format!("configuration {n} has no flake.lock"))?;
         let lock = String::from_utf8(lock).with_context(|| format!("configuration {n}'s flake.lock is not text"))?;
-        self.load_software(lock, &format!("Configuration {n} has this machine's software already: nothing to load.\n"))
+        self.load_software(lock, &format!("Configuration {n} has this machine's software already: nothing to load."))
     }
 
     /// Put `lock` in the candidate as its software and say what it changes (or `same`, if nothing).
@@ -960,17 +979,17 @@ impl<'a> Session<'a> {
         c.lock = (!shown.is_empty()).then_some(lock);
         self.save()?;
         let mut out = match (shown.is_empty(), had) {
-            (true, false) => same.to_string(),
-            (true, true) => format!("{}The software loaded into the candidate before is dropped.\n", same.replace(": nothing to load", "")),
-            (false, _) => format!("{shown}Loaded into the candidate: `commit` (in configuration mode) installs it.\n"),
+            (true, false) => self.said(same),
+            (true, true) => format!("{}{}", self.said(&same.replace(": nothing to load", "")), self.said("The software loaded into the candidate before is dropped.")),
+            (false, _) => format!("{shown}{}", self.said("Loaded into the candidate: `commit` (in configuration mode) installs it.")),
         };
         if base != head {
-            out.push_str(&format!(
+            out.push_str(&self.said(&format!(
                 "The configuration has changed since your candidate was started ({} → {}): `commit` will be \
-                 refused; `rollback 0` starts over (without this software), then load it again.\n",
+                 refused; `rollback 0` starts over (without this software), then load it again.",
                 short(&base),
                 short(&head)
-            ));
+            )));
         }
         Ok(out)
     }
@@ -993,7 +1012,7 @@ impl<'a> Session<'a> {
         if out.is_empty() {
             let here = if self.edit.is_empty() { String::new() } else { " here".into() };
             let what = with.map_or("the configuration in effect".to_string(), |n| format!("configuration {n} (rollback {n})"));
-            return Ok(format!("No changes{here}: the candidate is {what}.\n"));
+            return Ok(self.said(&format!("No changes{here}: the candidate is {what}.")));
         }
         Ok(out)
     }
@@ -1021,7 +1040,7 @@ impl<'a> Session<'a> {
         if kept.is_some() {
             out.push_str(" The software loaded into the candidate is kept.");
         }
-        Ok(format!("{}\n", self.ui().line("", &out)))
+        Ok(self.said(&out))
     }
 
     /// `rollback <n> <path>`: the place `path` (from where configuration mode is) put back as
@@ -1050,7 +1069,7 @@ impl<'a> Session<'a> {
             0 if before == after => "it already was".to_string(),
             k => format!("{} undone", changes(k)),
         };
-        Ok(format!("{}\n", self.ui().line("", &format!("Put back {} as {which} has it: {what}.", at.join(" ")))))
+        Ok(self.said(&format!("Put back {} as {which} has it: {what}.", at.join(" "))))
     }
 
     /// The configuration's Nix files (as `file list` lists them: the candidate's in configuration mode).
@@ -1120,13 +1139,13 @@ impl<'a> Session<'a> {
             // The rules between settings, as `commit` applies them.
             crate::whole::software_allowed(&a.data)?;
             self.machine.check(&base, &files)?;
-            return Ok("configuration check succeeds\n".into());
+            return Ok(self.said("configuration check succeeds"));
         }
         // A commit confirmed waiting freezes every other change (the broker refuses them): say so
         // before evaluating, asking or proposing anything.
         let waiting = self.machine.pending_confirm()?;
         if changes.is_empty() {
-            let Some(w) = waiting else { return Ok("commit complete (no changes)\n".into()) };
+            let Some(w) = waiting else { return Ok(self.said("commit complete (no changes)")) };
             if o.confirm.is_some() {
                 bail!("change #{} is already waiting for confirmation until {}: `commit` confirms it", w.seq, w.deadline);
             }
@@ -1135,7 +1154,7 @@ impl<'a> Session<'a> {
                 bail!("change #{} is waiting for {} to confirm it; it rolls back at {} unless they do", w.seq, w.by.as_deref().unwrap_or("?"), w.deadline);
             }
             let n = self.machine.confirm()?;
-            return Ok(format!("commit complete: change #{} confirmed (#{n})\n", w.seq));
+            return Ok(self.said(&format!("commit complete: change #{} confirmed (#{n})", w.seq)));
         }
         if let Some(w) = waiting {
             bail!(
@@ -1203,10 +1222,11 @@ impl<'a> Session<'a> {
         self.discard()?;
         Ok(match confirm {
             Some(m) => format!(
-                "commit confirmed will be automatically rolled back in {m} minute{} unless confirmed (change #{seq})\ncommit complete\n",
-                if m == 1 { "" } else { "s" }
+                "{}{}",
+                self.said(&format!("commit confirmed will be automatically rolled back in {m} minute{} unless confirmed (change #{seq})", if m == 1 { "" } else { "s" })),
+                self.said("commit complete")
             ),
-            None => format!("commit complete (change #{seq})\n"),
+            None => self.said(&format!("commit complete (change #{seq})")),
         })
     }
 
@@ -1259,7 +1279,7 @@ impl<'a> Session<'a> {
             FileAction::Edit => {
                 let was = text_of(self, &path)?;
                 let start = was.clone().unwrap_or_else(|| new_nix_file(&path));
-                let Some(mut now) = self.machine.edit(&path, &start)? else { return Ok(format!("{path}: unchanged\n")) };
+                let Some(mut now) = self.machine.edit(&path, &start)? else { return Ok(self.said(&format!("{path}: unchanged"))) };
                 // Not Nix as written: edited again if the person wants (as visudo does); else kept as it
                 // is, nothing typed lost — `commit` refuses it until it is Nix.
                 let mut broken = None;
@@ -1277,7 +1297,7 @@ impl<'a> Session<'a> {
                     }
                 }
                 if Some(&now) == was.as_ref() {
-                    return Ok(format!("{path}: unchanged\n"));
+                    return Ok(self.said(&format!("{path}: unchanged")));
                 }
                 self.candidate()?.nix.insert(path.clone(), Some(now));
                 self.save()?;
@@ -1287,9 +1307,9 @@ impl<'a> Session<'a> {
                     format!(" (not attached anywhere yet: `set <place> config {path}`)")
                 };
                 if let Some(why) = broken {
-                    return Ok(format!("{path}: changed in the candidate, but not Nix yet ({why}): `file edit {path}` to fix it; `commit` refuses it until then\n"));
+                    return Ok(self.said(&format!("{path}: changed in the candidate, but not Nix yet ({why}): `file edit {path}` to fix it; `commit` refuses it until then")));
                 }
-                Ok(format!("{path}: changed in the candidate{hint}; `show | compare` shows it, `commit` makes it so\n"))
+                Ok(self.said(&format!("{path}: changed in the candidate{hint}; `show | compare` shows it, `commit` makes it so")))
             }
             FileAction::Delete => {
                 if text_of(self, &path)?.is_none() {
@@ -1303,7 +1323,7 @@ impl<'a> Session<'a> {
                 let c = self.candidate()?;
                 if exists { c.nix.insert(path.clone(), None) } else { c.nix.remove(&path) };
                 self.save()?;
-                Ok(format!("{path}: deleted in the candidate\n"))
+                Ok(self.said(&format!("{path}: deleted in the candidate")))
             }
             FileAction::List => unreachable!("file list has no path"),
         }
@@ -1350,7 +1370,7 @@ impl<'a> Session<'a> {
         let path = in_home(file);
         write_private(&path, text.as_bytes())?;
         let n = text.lines().count();
-        Ok(format!("Wrote {n} line{} of configuration to {}\n", if n == 1 { "" } else { "s" }, path.display()))
+        Ok(self.said(&format!("Wrote {n} line{} of configuration to {}", if n == 1 { "" } else { "s" }, path.display())))
     }
 
     /// `load override|merge|set <file>`: a saved configuration into the candidate, from the top — all
@@ -1404,7 +1424,8 @@ impl<'a> Session<'a> {
             self.exec_words(&w).with_context(|| format!("line {}: {}", i + 1, crate::history::one_line(line, 80)))?;
             n += 1;
         }
-        Ok(format!("load complete ({n} line{})\n{}", if n == 1 { "" } else { "s" }, rules_note(&self.candidate_data()?)))
+        let d = self.candidate_data()?;
+        Ok(format!("{}{}", self.said(&format!("load complete ({n} line{})", if n == 1 { "" } else { "s" })), self.rules_note(&d)))
     }
 
     /// `load override` (the file is the candidate) or `load merge` (the file's settings set onto it).
@@ -1450,11 +1471,11 @@ impl<'a> Session<'a> {
         if d.source != cur.source {
             out = self.lock_source(d.source.as_deref().unwrap_or_default())?;
         }
-        let note = rules_note(&d);
+        let note = self.rules_note(&d);
         self.put_data(d)?;
         self.candidate()?.nix = nix;
         self.save()?;
-        out.push_str("load complete\n");
+        out.push_str(&self.said("load complete"));
         out.push_str(&note);
         Ok(out)
     }
@@ -1667,15 +1688,6 @@ fn sections_at(compare: &str, path: &[String]) -> String {
     out
 }
 
-/// The rules between settings (whole::software_allowed) are checked on the whole configuration, as
-/// `commit` checks them — never line by line, where their order would decide. After a change that
-/// breaks one, the person hears it at once; `commit` refuses until it holds.
-fn rules_note(d: &Data) -> String {
-    match crate::whole::software_allowed(d) {
-        Ok(()) => String::new(),
-        Err(e) => format!("! {e:#} — `commit` refuses until then\n"),
-    }
-}
 
 /// A ledger reason from the comparison: its `+`/`-` lines, short.
 fn summary(compare: &str) -> String {
@@ -2508,6 +2520,10 @@ mod tests {
         assert_eq!(s.exec("file edit a.nix").unwrap(), "a.nix: changed in the candidate, but not Nix yet (unexpected end of file, at a.nix:3:1): `file edit a.nix` to fix it; `commit` refuses it until then\n");
         assert_eq!(s.exec("file show a.nix").unwrap(), broken, "kept as typed");
         assert_eq!(s.exec("rollback 0").unwrap(), "Discarded 1 change: the candidate is the configuration in effect.\n", "a file is one change, however many lines");
+        // A sentence a command answers with fits the window (said): not cut mid-word by the terminal.
+        s.screen = || Some(40);
+        let said = s.exec("rollback 0").unwrap();
+        assert!(said.lines().count() > 1 && said.lines().all(|l| l.chars().count() <= 40), "{said}");
     }
 
     #[test]
