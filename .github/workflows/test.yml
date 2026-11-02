@@ -20,9 +20,9 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same branch replaces a run still going.
+# A newer push to the same branch replaces a run still going (a run of one check, only one of that check).
 concurrency:
-  group: test-${{ github.ref }}
+  group: test-${{ github.ref }}-${{ inputs.check || 'all' }}
   cancel-in-progress: true
 
 jobs:
