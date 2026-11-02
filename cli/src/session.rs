@@ -67,9 +67,12 @@ pub trait Machine {
     /// `set system software torq source`: the `flake.lock` that locking `torq` (with `all`, every
     /// input) makes, from the configuration at commit `base` with its flake.nix as `flake_nix`.
     fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String>;
-    /// Whether commit `rev` of TorqOS's releases is signed by the release key (release.rs): what
+    /// Where this machine's releases are (/etc/torq/releases.json, modules/releases.nix): a flake
+    /// reference, `git+https://…?ref=stable`.
+    fn releases(&self) -> Result<String>;
+    /// Whether commit `rev` of the releases (`repo`) is signed by the release key (release.rs): what
     /// git says of its signature, or why it is refused.
-    fn check_release(&self, rev: &str) -> Result<String>;
+    fn check_release(&self, repo: &str, rev: &str) -> Result<String>;
 }
 
 
@@ -926,10 +929,10 @@ impl<'a> Session<'a> {
             // An image's own TorqOS has no newer version: the first update moves the machine to the
             // releases (ADR-028), as `set system software torq source` would.
             _ if source.as_deref().is_some_and(crate::software::image_own) => {
-                let releases = crate::software::RELEASES;
+                let releases = self.machine.releases()?;
                 let mut d = self.candidate_data()?;
-                d.source = Some(releases.into());
-                let shown = self.lock_source(releases, all)?;
+                d.source = Some(releases.clone());
+                let shown = self.lock_source(&releases, all)?;
                 self.put_data(d)?;
                 self.save()?;
                 let moved = self.said(&format!("This machine runs the TorqOS it was installed with: the update moves it to TorqOS's releases ({releases})."));
@@ -958,8 +961,9 @@ impl<'a> Session<'a> {
     /// If `lock` takes TorqOS from the releases, the release key's word on that commit (ADR-028): one
     /// it did not sign is refused, before anything is loaded.
     fn release_signed(&self, lock: &str) -> Result<String> {
-        let Some(rev) = crate::software::release_commit(lock) else { return Ok(String::new()) };
-        self.machine.check_release(&rev)?;
+        let repo = crate::software::releases_repo(&self.machine.releases()?);
+        let Some(rev) = crate::software::release_commit(lock, &repo) else { return Ok(String::new()) };
+        self.machine.check_release(&repo, &rev)?;
         Ok(self.said(&format!("TorqOS release {}: signed by the TorqOS release key.", short(&rev))))
     }
 
@@ -2056,7 +2060,11 @@ mod tests {
             self.flakes.borrow_mut().push(flake_nix.into());
             Ok(self.newest(all))
         }
-        fn check_release(&self, rev: &str) -> Result<String> {
+        fn releases(&self) -> Result<String> {
+            Ok(RELEASES.into())
+        }
+        fn check_release(&self, repo: &str, rev: &str) -> Result<String> {
+            assert_eq!(repo, "https://github.com/netstacks/torqos-releases", "the machine's releases");
             self.release_checks.borrow_mut().push(rev.into());
             match &self.release {
                 Some((r, true)) if r == rev => Ok("Good \"git\" signature for torqos-release".into()),
@@ -2205,6 +2213,8 @@ mod tests {
         assert!(e.contains("put the text in \"double quotes\""), "an apostrophe opens a quote, as in a shell: {e}");
     }
 
+    /// The test machine's releases (as /etc/torq/releases.json says).
+    const RELEASES: &str = "git+https://github.com/netstacks/torqos-releases?ref=stable";
     /// A `flake.lock` whose `torq` input was last changed at `t` (seconds).
     fn lock(t: u64) -> String {
         format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"lastModified":{t},"narHash":"h{t}"}}}}}},"version":7}}"#)
@@ -2260,7 +2270,7 @@ mod tests {
             sh(d.path(), &format!("printf '{{\\n  inputs = {{\\n    torq.url = \"{source}\";\\n  }};\\n}}\\n' > flake.nix && git add -A && git commit -qm flake"));
             d
         };
-        let releases = crate::software::RELEASES;
+        let releases = RELEASES;
 
         // From the image: moved to the releases, the newest one checked, both in the candidate.
         let d = machine(image);

@@ -497,9 +497,15 @@ impl Machine for Real<'_> {
     fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
         self.relock(base, Some(flake_nix), all)
     }
-    fn check_release(&self, rev: &str) -> Result<String> {
+    fn releases(&self) -> Result<String> {
+        let file = "/etc/torq/releases.json";
+        let text = fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("{file} is not JSON"))?;
+        v["url"].as_str().map(String::from).with_context(|| format!("{file} names no releases (url)"))
+    }
+    fn check_release(&self, repo: &str, rev: &str) -> Result<String> {
         let _p = run::Progress::start("Checking the release's signature");
-        crate::release::check(crate::software::RELEASES_REPO, rev, Path::new(crate::release::SIGNERS))
+        crate::release::check(repo, rev, Path::new(crate::release::SIGNERS))
     }
     fn ask(&self, question: &str) -> crate::session::Answer {
         ask_person(question)

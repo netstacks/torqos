@@ -58,6 +58,8 @@ let
     nixos-bad-option = c: c.virtualisation.docker.enable;
     # The fence (modules/settings-fence.nix): what reaches the broker's guard is not the tree's.
     nixos-fence-broker = c: c.torq.broker.rebuildCommand;
+    # Which releases a machine updates from, and the key they are signed with, are TorqOS's own.
+    nixos-fence-releases = c: c.torq.releases.url;
     nixos-fence-etc = c: c.environment.etc."torq/broker.json".text;
     nixos-fence-unit = c: c.systemd.services.torq-broker-init.enable;
     # The bypasses the review of S3a demonstrated: module directives in the data, what the broker's
