@@ -8,6 +8,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # And as the first step of a release (release.yml).
+  workflow_call:
 
 permissions:
   contents: read

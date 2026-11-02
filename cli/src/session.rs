@@ -67,6 +67,9 @@ pub trait Machine {
     /// `set system software torq source`: the `flake.lock` that locking `torq` (with `all`, every
     /// input) makes, from the configuration at commit `base` with its flake.nix as `flake_nix`.
     fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String>;
+    /// Whether commit `rev` of TorqOS's releases is signed by the release key (release.rs): what
+    /// git says of its signature, or why it is refused.
+    fn check_release(&self, rev: &str) -> Result<String>;
 }
 
 
@@ -462,7 +465,7 @@ impl<'a> Session<'a> {
                 let note = self.rules_note(&d);
                 if d.source != was {
                     // A new source is locked now, in the candidate: what `commit` installs is shown first.
-                    let shown = self.lock_source(d.source.as_deref().unwrap_or_default())?;
+                    let shown = self.lock_source(d.source.as_deref().unwrap_or_default(), false)?;
                     self.put_data(d)?;
                     self.save()?;
                     return Ok(format!("{shown}{note}"));
@@ -912,29 +915,52 @@ impl<'a> Session<'a> {
     /// `request system update [all]`: the newest TorqOS (with `all`, every input) into the candidate.
     fn update(&mut self, all: bool) -> Result<String> {
         let base = self.candidate()?.base.clone();
+        let source = self.base_source()?;
         // With a new source in the candidate, the update is of that source (its flake.nix as it will be).
         let new = match self.candidate()?.source.clone() {
-            Some(url) if Some(&url) != self.base_source()?.as_ref() => {
+            Some(url) if Some(&url) != source.as_ref() => {
                 let flake = self.repo.file_at(&base, "flake.nix")?.context("this machine has no flake.nix")?;
                 let flake = crate::software::with_source(&String::from_utf8(flake).context("flake.nix is not text")?, &url)?;
                 self.machine.lock_with(&base, &flake, all)?
             }
+            // An image's own TorqOS has no newer version: the first update moves the machine to the
+            // releases (ADR-028), as `set system software torq source` would.
+            _ if source.as_deref().is_some_and(crate::software::image_own) => {
+                let releases = crate::software::RELEASES;
+                let mut d = self.candidate_data()?;
+                d.source = Some(releases.into());
+                let shown = self.lock_source(releases, all)?;
+                self.put_data(d)?;
+                self.save()?;
+                let moved = self.said(&format!("This machine runs the TorqOS it was installed with: the update moves it to TorqOS's releases ({releases})."));
+                return Ok(format!("{moved}{shown}"));
+            }
             _ => self.machine.update_lock(&base, all)?,
         };
-        self.load_software(new, "This machine has the newest software: nothing to load.")
+        let signed = self.release_signed(&new)?;
+        Ok(format!("{}{signed}", self.load_software(new, "This machine has the newest software: nothing to load.")?))
     }
 
-    /// `set system software torq source <url>`: lock that source (the newest it has), as
-    /// `request system update` locks the current one, into the candidate.
-    fn lock_source(&mut self, url: &str) -> Result<String> {
+    /// `set system software torq source <url>`: lock that source (the newest it has; with `all`,
+    /// every input too), as `request system update` locks the current one, into the candidate.
+    fn lock_source(&mut self, url: &str, all: bool) -> Result<String> {
         let base = self.candidate()?.base.clone();
         let flake = self.repo.file_at(&base, "flake.nix")?.context("this machine has no flake.nix")?;
         let flake = crate::software::with_source(&String::from_utf8(flake).context("flake.nix is not text")?, url)?;
-        let lock = self.machine.lock_with(&base, &flake, false)?;
+        let lock = self.machine.lock_with(&base, &flake, all)?;
+        let signed = self.release_signed(&lock)?;
         let base_lock = self.repo.file_at(&base, "flake.lock")?;
         let shown = software_compare(base_lock.as_deref(), &Some(lock.clone()));
         self.candidate()?.lock = Some(lock);
-        Ok(format!("{shown}{}", self.said("The new source is locked into the candidate: `commit` installs it.")))
+        Ok(format!("{shown}{signed}{}", self.said("The new source is locked into the candidate: `commit` installs it.")))
+    }
+
+    /// If `lock` takes TorqOS from the releases, the release key's word on that commit (ADR-028): one
+    /// it did not sign is refused, before anything is loaded.
+    fn release_signed(&self, lock: &str) -> Result<String> {
+        let Some(rev) = crate::software::release_commit(lock) else { return Ok(String::new()) };
+        self.machine.check_release(&rev)?;
+        Ok(self.said(&format!("TorqOS release {}: signed by the TorqOS release key.", short(&rev))))
     }
 
     /// `request system software rollback <n>`: commit n's software into the candidate.
@@ -1463,7 +1489,7 @@ impl<'a> Session<'a> {
         // A new source is locked as `set` locks it (what `commit` installs is shown first).
         let mut out = String::new();
         if d.source != cur.source {
-            out = self.lock_source(d.source.as_deref().unwrap_or_default())?;
+            out = self.lock_source(d.source.as_deref().unwrap_or_default(), false)?;
         }
         let note = self.rules_note(&d);
         self.put_data(d)?;
@@ -1907,6 +1933,10 @@ mod tests {
         ssh_calls: RefCell<usize>,
         /// The flake.nix each source was locked with.
         flakes: RefCell<Vec<String>>,
+        /// The newest TorqOS is this commit of the releases, signed by the release key or not (else:
+        /// `NEWER`, from no releases); and the commits whose signature was checked.
+        release: Option<(String, bool)>,
+        release_checks: RefCell<Vec<String>>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<()> {
@@ -2007,12 +2037,28 @@ mod tests {
         }
         fn update_lock(&self, base: &str, all: bool) -> Result<String> {
             self.bases.borrow_mut().push(base.into());
-            Ok(lock(if all { NEWER_ALL } else { NEWER }))
+            Ok(self.newest(all))
         }
         fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
             self.bases.borrow_mut().push(base.into());
             self.flakes.borrow_mut().push(flake_nix.into());
-            Ok(lock(if all { NEWER_ALL } else { NEWER }))
+            Ok(self.newest(all))
+        }
+        fn check_release(&self, rev: &str) -> Result<String> {
+            self.release_checks.borrow_mut().push(rev.into());
+            match &self.release {
+                Some((r, true)) if r == rev => Ok("Good \"git\" signature for torqos-release".into()),
+                _ => bail!("release {} is not signed by the TorqOS release key", &rev[..12]),
+            }
+        }
+    }
+    impl Fake {
+        /// What locking finds newest: the release, if a test gives one.
+        fn newest(&self, all: bool) -> String {
+            match &self.release {
+                Some((rev, _)) => format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"type":"git","url":"https://github.com/netstacks/torqos-releases","rev":"{rev}","lastModified":{NEWER},"narHash":"r"}}}}}},"version":7}}"#),
+                None => lock(if all { NEWER_ALL } else { NEWER }),
+            }
         }
     }
 
@@ -2189,6 +2235,62 @@ mod tests {
         // `all`: every input.
         let out = s.exec("run request system update all").unwrap();
         assert!(out.contains(&format!("+   torq {};", crate::pkg::ymd(NEWER_ALL))) && out.ends_with("Loaded into the candidate: `commit` (in configuration mode) installs it.\n"), "{out}");
+    }
+
+    /// ADR-028: a machine set up from the image runs the TorqOS inside it; its first update moves it to
+    /// the releases. From then on, an update takes only a commit the release key signed.
+    #[test]
+    fn updates_come_from_the_releases_signed() {
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let image = "path:/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source";
+        let machine = |source: &str| {
+            let d = repo_with_software();
+            sh(d.path(), &format!("printf '{{\\n  inputs = {{\\n    torq.url = \"{source}\";\\n  }};\\n}}\\n' > flake.nix && git add -A && git commit -qm flake"));
+            d
+        };
+        let releases = crate::software::RELEASES;
+
+        // From the image: moved to the releases, the newest one checked, both in the candidate.
+        let d = machine(image);
+        let m = Fake { answer: true, release: Some((rev.into(), true)), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("request system update").unwrap();
+        assert!(out.starts_with(&format!("This machine runs the TorqOS it was installed with: the update moves it to TorqOS's releases ({releases}).\n[edit system software]\n")), "{out}");
+        assert!(out.ends_with("TorqOS release 0123456789ab: signed by the TorqOS release key.\nThe new source is locked into the candidate: `commit` installs it.\n"), "{out}");
+        assert_eq!(*m.release_checks.borrow(), [rev]);
+        assert!(m.flakes.borrow()[0].contains(&format!("torq.url = \"{releases}\";")), "locked as it will be");
+        s.exec("configure").unwrap();
+        let compare = s.exec("show | compare").unwrap();
+        assert!(compare.starts_with(&format!("[edit system software torq]\n-   source {image};\n+   source {releases};\n")), "{compare}");
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
+        assert!(m.commits.borrow()[0].0.contains(&format!("+    torq.url = \"{releases}\";")));
+
+        // A commit the release key did not sign: refused, and nothing is loaded.
+        let d = machine(image);
+        let m = Fake { answer: true, release: Some((rev.into(), false)), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", s.exec("request system update").unwrap_err());
+        assert_eq!(e, "release 0123456789ab is not signed by the TorqOS release key");
+        s.exec("configure").unwrap();
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
+
+        // On the releases already: the update is of them, checked the same way.
+        let d = machine(releases);
+        let m = Fake { answer: true, release: Some((rev.into(), true)), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("request system update").unwrap();
+        assert!(out.ends_with("Loaded into the candidate: `commit` (in configuration mode) installs it.\nTorqOS release 0123456789ab: signed by the TorqOS release key.\n"), "{out}");
+        let m = Fake { answer: true, release: Some((rev.into(), false)), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        assert!(format!("{:#}", s.exec("request system update").unwrap_err()).contains("not signed by the TorqOS release key"));
+        s.exec("configure").unwrap();
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
+        // Any other source: no releases, nothing to check.
+        let d = machine("github:netstacks/torqos");
+        let m = Fake { answer: true, ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        s.exec("request system update").unwrap();
+        assert!(m.release_checks.borrow().is_empty());
     }
 
     #[test]

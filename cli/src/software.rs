@@ -38,8 +38,6 @@ pub fn with_source(flake: &str, url: &str) -> Result<String> {
         .collect())
 }
 
-/// Whether `url` may be a source: a flake reference of a kind TorqOS can be fetched from, written
-/// with plain URL characters only (it is put inside a Nix string: no quote, backslash or `${`).
 /// Whether `url` is a folder someone can write to (`path:`, outside the read-only store): whoever
 /// can write there decides what the next build installs, so it is for developing TorqOS only (dev
 /// mode). A path in the store cannot change — an image's own TorqOS (docs/INSTALL.md) — and is
@@ -59,6 +57,36 @@ fn store_path(p: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || "+._?=-".contains(c))
 }
 
+/// TorqOS's releases (ADR-028): each one a commit signed by the release key, `stable` the newest.
+/// Fetched as git, so what is built is exactly the commit whose signature was checked.
+pub const RELEASES: &str = "git+https://github.com/netstacks/torqos-releases?ref=stable";
+
+/// The releases' repository, as git fetches it.
+pub const RELEASES_REPO: &str = "https://github.com/netstacks/torqos-releases";
+
+/// Whether `url` is an image's own TorqOS (`path:` a store path): what a machine set up from the
+/// image starts from, until its first update moves it to the releases.
+pub fn image_own(url: &str) -> bool {
+    url.strip_prefix("path:").is_some_and(store_path)
+}
+
+/// The commit a flake.lock takes TorqOS at, if it is one of the releases' (as git, or as
+/// `github:netstacks/torqos-releases`): a commit whose signature is checked before it is loaded.
+pub fn release_commit(lock: &str) -> Option<String> {
+    let lock: serde_json::Value = serde_json::from_str(lock).ok()?;
+    let node = lock["nodes"]["root"]["inputs"]["torq"].as_str()?;
+    let locked = &lock["nodes"][node]["locked"];
+    let repo = |s: &str| s.trim_end_matches('/').trim_end_matches(".git").to_ascii_lowercase();
+    let releases = match locked["type"].as_str()? {
+        "git" => repo(locked["url"].as_str()?) == RELEASES_REPO,
+        "github" => format!("https://github.com/{}/{}", locked["owner"].as_str()?, locked["repo"].as_str()?).to_ascii_lowercase() == RELEASES_REPO,
+        _ => false,
+    };
+    releases.then(|| locked["rev"].as_str().map(String::from)).flatten()
+}
+
+/// Whether `url` may be a source: a flake reference of a kind TorqOS can be fetched from, written
+/// with plain URL characters only (it is put inside a Nix string: no quote, backslash or `${`).
 pub fn valid(url: &str) -> Result<()> {
     let plain = !url.is_empty() && url.chars().all(|c| c.is_ascii_alphanumeric() || ":/._~?&=%+@-".contains(c));
     let kinds = ["github:", "gitlab:", "sourcehut:", "git+https://", "https://", "path:/"];
@@ -121,5 +149,26 @@ mod tests {
         for bad in ["", "github:", "path:relative", "path:/a/../b", "file:///etc", "github:a/b\";x", "github:a/${b}", "github:a/b c", "github:a\\b", "/home/x", "git+ssh://h/r", "github:a/b\n"] {
             assert!(valid(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_releases_commit_a_lock_names() {
+        let lock = |locked: &str| format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq_2","nixpkgs":"nixpkgs"}}}},"torq_2":{{"locked":{locked}}}}},"root":"root","version":7}}"#);
+        let git = lock(r#"{"type":"git","url":"https://github.com/netstacks/torqos-releases","ref":"refs/heads/stable","rev":"abc123"}"#);
+        assert_eq!(release_commit(&git).as_deref(), Some("abc123"));
+        let gh = lock(r#"{"type":"github","owner":"NetStacks","repo":"torqos-releases","rev":"def456"}"#);
+        assert_eq!(release_commit(&gh).as_deref(), Some("def456"), "the tarball form names a commit too; GitHub is case-blind");
+        let dotgit = lock(r#"{"type":"git","url":"https://github.com/netstacks/torqos-releases.git/","rev":"abc123"}"#);
+        assert_eq!(release_commit(&dotgit).as_deref(), Some("abc123"));
+        for other in [
+            lock(r#"{"type":"git","url":"https://github.com/netstacks/torqos","rev":"abc123"}"#),
+            lock(r#"{"type":"git","url":"https://github.com/netstacks/torqos-releases-evil","rev":"abc123"}"#),
+            lock(r#"{"type":"path","path":"/nix/store/x-source"}"#),
+            "not json".into(),
+        ] {
+            assert_eq!(release_commit(&other), None, "{other}");
+        }
+        assert!(image_own("path:/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source") && !image_own("path:/home/viper/torq") && !image_own(RELEASES));
+        valid(RELEASES).unwrap();
     }
 }

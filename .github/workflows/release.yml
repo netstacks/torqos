@@ -1,0 +1,111 @@
+# A release (docs/DECISIONS.md, ADR-028), on a `v*` tag pushed here: the tests, the images of
+# both architectures, then, only if all of that passed, the release itself in the public
+# netstacks/torqos-releases:
+#   - the tagged source as one commit there, signed with the release key, tagged, and `stable`
+#     moved to it (never for a pre-release, `v1.2.0-rc1`): what machines update to;
+#   - a GitHub Release with the images (the VMDK gzipped: a release file is at most 2 GiB),
+#     SHA256SUMS, its signature, and the key to check it with.
+# Secrets: TORQOS_RELEASE_KEY (the release key's private half), TORQOS_RELEASES_TOKEN (a token
+# that may write to netstacks/torqos-releases only).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  image:
+    uses: ./.github/workflows/image.yml
+
+  publish:
+    needs: [test, image]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: torqos-*
+          merge-multiple: true
+          path: files
+
+      - name: The release key
+        env:
+          KEY: ${{ secrets.TORQOS_RELEASE_KEY }}
+        run: |
+          (umask 077 && printf '%s\n' "$KEY" > "$RUNNER_TEMP/release-key")
+          # The key the machines check with is the one this signs with.
+          test "$(ssh-keygen -y -f "$RUNNER_TEMP/release-key" | cut -d' ' -f1,2)" = "$(cut -d' ' -f3,4 release/allowed_signers)"
+
+      - name: Checksums, signed
+        run: |
+          cd files
+          for f in *.vmdk; do gzip -9n "$f"; done
+          rm -f SHA256SUMS
+          sha256sum *.qcow2 *.vmdk.gz > SHA256SUMS
+          ssh-keygen -Y sign -q -f "$RUNNER_TEMP/release-key" -n file SHA256SUMS
+          cp ../release/allowed_signers .
+          ssh-keygen -Y verify -f allowed_signers -I torqos-release -n file -s SHA256SUMS.sig < SHA256SUMS
+          cat SHA256SUMS
+
+      - name: The source, signed, in the releases
+        env:
+          TOKEN: ${{ secrets.TORQOS_RELEASES_TOKEN }}
+        run: |
+          git clone -q "https://x-access-token:${TOKEN}@github.com/netstacks/torqos-releases.git" "$RUNNER_TEMP/releases"
+          cd "$RUNNER_TEMP/releases"
+          git rm -rq --ignore-unmatch .
+          # The tagged source, without this repository's workflows (they are for building, here).
+          git -C "$GITHUB_WORKSPACE" archive "$TAG" | tar -x --exclude=.github
+          git add -A
+          sign=(-c user.name="TorqOS release" -c user.email="release@torqos.invalid" -c gpg.format=ssh -c user.signingkey="$RUNNER_TEMP/release-key")
+          git "${sign[@]}" commit -q -S -m "TorqOS $TAG"
+          git "${sign[@]}" tag -s "$TAG" -m "TorqOS $TAG"
+          git -c gpg.ssh.allowedSignersFile="$GITHUB_WORKSPACE/release/allowed_signers" -c gpg.format=ssh verify-commit HEAD
+          git push -q origin HEAD:main "refs/tags/$TAG"
+          # `stable` only moves forward (no force): a release is never replaced by an older one.
+          case "$TAG" in
+            *-*) echo "$TAG is a pre-release: stable stays where it is" ;;
+            *) git push -q origin HEAD:stable ;;
+          esac
+
+      - name: The GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.TORQOS_RELEASES_TOKEN }}
+        run: |
+          fingerprint=$(ssh-keygen -lf <(cut -d' ' -f3,4 release/allowed_signers) | cut -d' ' -f2)
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          TorqOS $TAG.
+
+          **Images** (how to run them: docs/INSTALL.md, "Running it"):
+          - \`torqos-<arch>.qcow2\`: UTM, QEMU, Proxmox, as it is.
+          - \`torqos-<arch>.vmdk.gz\`: VMware ESXi; \`gunzip\` it first.
+
+          **Check a download** (OpenSSH, nothing to install):
+          \`\`\`
+          ssh-keygen -Y verify -f allowed_signers -I torqos-release -n file -s SHA256SUMS.sig < SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+          \`\`\`
+          The release key: \`$fingerprint\`.
+
+          **Machines already installed:** \`request system update\` moves them here; each checks the
+          release was signed with the key it was installed with.
+          EOF
+          pre=()
+          case "$TAG" in *-*) pre=(--prerelease) ;; esac
+          gh release create "$TAG" -R netstacks/torqos-releases "${pre[@]}" --verify-tag \
+            --title "TorqOS $TAG" --notes-file "$RUNNER_TEMP/notes.md" files/*
+
+      - name: Forget the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release-key"

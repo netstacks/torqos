@@ -497,6 +497,10 @@ impl Machine for Real<'_> {
     fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
         self.relock(base, Some(flake_nix), all)
     }
+    fn check_release(&self, rev: &str) -> Result<String> {
+        let _p = run::Progress::start("Checking the release's signature");
+        crate::release::check(crate::software::RELEASES_REPO, rev, Path::new(crate::release::SIGNERS))
+    }
     fn ask(&self, question: &str) -> crate::session::Answer {
         ask_person(question)
     }

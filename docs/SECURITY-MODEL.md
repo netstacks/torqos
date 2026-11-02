@@ -68,7 +68,10 @@ machine with UEFI and a TPM.
   off, removing a key, another owner — shows it (the keys that will be able to log in, or that
   passwords will be accepted), and is refused if SSH is keys only and there are none: with SSH
   already on as much as when it turns on (audit of 2026-11-01). Keys only stays one `set` away.
-- **Images** carry a checksum signed with a TorqOS release key, and the one command that checks it.
+- **Releases are signed** (ADR-028): each image's checksum, with the TorqOS release key, and the one
+  command that checks it (INSTALL.md); and each release's source, a git commit the key signed.
+  A machine updates only to a commit signed with the key it was installed with
+  (`/etc/torq/release-signers`): torqcli checks it before the update enters the candidate.
 
 ## Threat model
 

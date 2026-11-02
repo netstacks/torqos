@@ -6,11 +6,18 @@ boot.
 
 ## From download to a running machine
 
-1. **The project builds a release**: the image (`torqos-<version>-<arch>.qcow2`, later an ISO), its
-   checksum file, and a signature of that file made with the TorqOS release key (`ssh-keygen -Y
-   sign`). Plain files on a release page: no service.
-2. **Someone downloads and (optionally) checks it**: one command, `ssh-keygen -Y verify`, with the
-   published public key.
+1. **The project builds a release** (ADR-028): the images (`torqos-<arch>.qcow2`,
+   `torqos-<arch>.vmdk.gz`; later an ISO), their checksums (`SHA256SUMS`), and a signature of that
+   file made with the TorqOS release key (`SHA256SUMS.sig`), with the key (`allowed_signers`).
+   Plain files on the release page of `netstacks/torqos-releases`: no service.
+2. **Someone downloads and (optionally) checks it**, with OpenSSH and coreutils:
+   ```
+   ssh-keygen -Y verify -f allowed_signers -I torqos-release -n file -s SHA256SUMS.sig < SHA256SUMS
+   sha256sum -c --ignore-missing SHA256SUMS
+   ```
+   The first says `Good "file" signature for torqos-release with ED25519 key SHA256:…`: compare
+   that fingerprint with the one published in the release notes and in the repo
+   (`release/allowed_signers`), so the key itself is not just the download's word.
 3. **They boot it.** The image is a complete TorqOS — the same modules as any TorqOS machine — with
    no user account: `root` is locked, SSH is off, nothing listens. The console shows setup instead of
    a login prompt.
@@ -45,8 +52,9 @@ The image is one EFI disk; first-boot setup is on its console (give the VM a dis
 small (about 5 GB): give the VM a bigger one, and the root file system grows to fill it at boot.
 
 - **UTM, QEMU, Proxmox:** `torqos-<arch>.qcow2` (`nix build .#image`), as it is, UEFI firmware.
-- **VMware ESXi** (x86_64): `torqos-x86_64-linux.vmdk` (`nix build .#image-vmdk`, or the `image`
-  workflow's artifact), a sparse VMDK, which ESXi copies into a disk of its own:
+- **VMware ESXi** (x86_64): `torqos-x86_64-linux.vmdk` (a release has it gzipped: `gunzip` it first;
+  or `nix build .#image-vmdk`, or the `image` workflow's artifact), a sparse VMDK, which ESXi copies
+  into a disk of its own:
   1. Upload it to a datastore (Storage → Datastore browser → Upload).
   2. In the ESXi shell (SSH to the host), in that datastore's folder:
      `vmkfstools -i torqos-x86_64-linux.vmdk torqos.vmdk -d thin`, then delete the upload.
@@ -71,8 +79,11 @@ The config repo's `flake.nix` names TorqOS's source (`system software torq sourc
 machine starts from the TorqOS **inside the image**: its own source, in the read-only store, locked by
 hash in the config repo's `flake.lock` — so setup needs no network for TorqOS itself. A `path:`
 source is allowed outside dev mode only there, in the store: nothing can change it (a folder anyone
-can write to stays a dev-mode source). Updates move the source to a newer release (where releases are
-published: decided before any machine outside this VM needs updates; ROADMAP M2).
+can write to stays a dev-mode source). The first `request system update` moves the machine to
+TorqOS's releases (`git+https://github.com/netstacks/torqos-releases?ref=stable`, ADR-028); every
+update after takes the newest release on `stable`, and only one signed with the release key the
+machine was installed with (`/etc/torq/release-signers`): anything else is refused before it is
+loaded.
 
 NixOS's own software (the kernel, services, applications) comes signed from NixOS's binary cache, as
 on any NixOS machine; the machine builds TorqOS's few small pieces itself (ADR-023). Setup's switch
@@ -119,8 +130,9 @@ logs in, change #1 is in the history and `show system alarms` is clean):
 
 Next:
 
-6. A VM test: the image boots, setup, a commit, a rollback.
-7. The release: checksum and signature (`ssh-keygen -Y`), and how to check them.
+6. The release (ADR-028): built and signed by CI on a tag, published in
+   `netstacks/torqos-releases`; machines update to it, signature checked. *Built 2026-11-02.*
+7. A VM test: the image boots, setup, a commit, a rollback, an update to a signed release.
 8. Then the ISO for real hardware (disk choice added).
 
 Known: setup runs on the first text console (tty1) only. A VM started with a serial console alone

@@ -371,3 +371,34 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** The crates and packages say Apache-2.0. Pull requests are checked for sign-offs
   (with CI). Owning the project through a company rather than a person is the owner's to arrange,
   outside the repo; none of this is legal advice.
+
+## ADR-028 — Releases: signed commits in a public repo, checked by every machine
+- **Context:** A machine installed from the image runs the TorqOS inside it, with nowhere to update
+  from; development is in a private repo. Nix fetches what a flake names and checks its hash
+  against the lock, but checks no signature: whoever controls where TorqOS comes from decides what
+  every machine builds next, as root.
+- **Decision:** Releases are made by CI (`.github/workflows/release.yml`) on a `v*` tag, after the
+  tests and both images pass. Each is one commit of the tagged source in the public
+  `netstacks/torqos-releases` (no development history, no workflows), signed with the TorqOS release
+  key (SSH, ed25519), tagged; `stable` moves to it, forward only, and never for a pre-release
+  (`v1.2.0-rc1`). The GitHub Release carries the images (the VMDK gzipped: release files are at most
+  2 GiB), `SHA256SUMS`, its signature (`ssh-keygen -Y sign`, namespace `file`) and the key.
+  Machines take TorqOS as git (`git+https://github.com/netstacks/torqos-releases?ref=stable`), so
+  what is built is exactly the commit checked. Before a lock taking a releases commit enters the
+  candidate (`request system update`, `set system software torq source`), torqcli fetches that
+  commit and `git verify-commit` checks it against the key the machine was installed with
+  (`/etc/torq/release-signers`, from `release/allowed_signers`); a commit the key did not sign is
+  refused and nothing is loaded. A machine on the image's own TorqOS is moved to the releases by its
+  first `request system update`.
+- **Consequences:**
+  - **The key.** Its private half is an Actions secret of the development repo for now
+    (`TORQOS_RELEASE_KEY`; GitHub can use it, never show it); the owner keeps a copy, and moving it
+    to a hardware key, with signing by hand, is later. A new key reaches machines as an update
+    signed by the old one.
+  - **Writing to the releases** takes a token that may write to that repo only
+    (`TORQOS_RELEASES_TOKEN`, a fine-grained token: it expires, at most a year).
+  - **Not covered yet:** an attacker able to move `stable` back to an older signed release
+    (a downgrade): `stable` only moves forward when CI moves it, and `show | compare` shows the
+    version before a commit, but the machine does not refuse an older release by itself. The check
+    is torqcli's, at update: a person who edits the lock by hand is past it (as they are past any
+    check, being able to commit).

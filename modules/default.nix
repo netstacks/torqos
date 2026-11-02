@@ -15,5 +15,6 @@
     ./schema.nix
     ./nixos-schema.nix
     ./services.nix
+    ./releases.nix
   ];
 }

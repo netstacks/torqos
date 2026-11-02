@@ -27,6 +27,7 @@ mod settings;
 mod whole;
 mod attach;
 mod software;
+mod release;
 mod saved;
 mod paint;
 mod pkg;

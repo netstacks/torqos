@@ -1,11 +1,13 @@
 # The TorqOS images (docs/INSTALL.md), x86_64 and aarch64, each built on a runner of its own
 # architecture: the qcow2 (UTM, QEMU, Proxmox) and the VMDK (VMware ESXi), kept as the run's
 # artifacts with their checksums. Run by hand (Actions → image → Run workflow, or `gh workflow run
-# image.yml`). The release workflow, on a tag, comes later (docs/ROADMAP.md, M2 "CI").
+# image.yml`), and as a step of every release (release.yml).
 name: image
 
 on:
   workflow_dispatch:
+  # And by a release (release.yml), on its tag.
+  workflow_call:
 
 permissions:
   contents: read

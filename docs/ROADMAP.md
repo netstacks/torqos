@@ -106,19 +106,20 @@ first.
       against guessing), the /etc/nixos guard on, nothing
       installed that is not needed.
 - [ ] **Releases** (`v0.1.0`, …) at one URL machines fetch from; `request system update` moves to
-      the newest one. *Decided (2026-11-02): public, in a new repo of their own (e.g.
-      `netstacks/torqos-release`; development stays in the private one), with a `stable` branch
-      machines point at (`github:…/stable`), moved only to tested releases.*
+      the newest one. *Built (2026-11-02, ADR-028): signed commits in the public
+      `netstacks/torqos-releases`, `stable` moved forward to each tested release; machines take it
+      as git and check each commit's signature before loading it; an image machine's first update
+      moves it there. Done once the first release is out and a machine has updated to it.*
 - [ ] **CI (GitHub Actions):** *test* on every push and pull request (`nix flake check`: tree
       checks and the VM tests, with KVM); *(the `test` workflow, 2026-11-02, with the DCO
       sign-off check on pull requests)* *nixpkgs bump* weekly, as a pull request the tests run
       on; *release* on a `v*` tag: the images built on x86_64 and arm64 runners, checksums, a
-      draft GitHub Release, the tagged source copied to the release repo and `stable` moved. The
-      move to the next NixOS release (every six months) stays a person's. *To decide: where the
-      release key lives — recommended: on the maintainer's machine, signing the draft's checksums
-      by hand (GitHub never holds it).*
+      GitHub Release, the tagged source copied to the release repo and `stable` moved *(the
+      `release` workflow, 2026-11-02; the key an Actions secret for now, ADR-028)*. The move to the
+      next NixOS release (every six months) stays a person's.
 - [ ] **Downloads checked:** each image published with a checksum signed by a TorqOS release key
       (plain files on the release page; checked with `ssh-keygen -Y verify`, nothing to install).
+      *(Built with the release, 2026-11-02; INSTALL.md says how.)*
 - [ ] **ISO installer** for real hardware: the same image and first-boot setup, plus disk choice.
 - [ ] **VM tests:** the image boots on a blank VM, first-boot setup, a commit, a rollback, an update.
 - [ ] **Designs to settle first** (audits of 2026-10-31; KNOWN-GAPS 6r): where first-boot passwords
