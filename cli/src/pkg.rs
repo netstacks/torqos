@@ -1,7 +1,7 @@
 //! Packages: installed software is JSON in the config repo (ADR-011). The pure parts live
 //! here; `main.rs` does the I/O (reading the repo, evaluating, talking to the broker).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 /// The user names the broker accepts as user tier (broker/src/policy.rs, `is_user_data`).
 pub fn valid_user(name: &str) -> bool {
@@ -47,6 +47,22 @@ pub fn expand_keys_pattern(pattern: &str, home: &str, user: &str, uid: &str) -> 
         }
     }
     Ok(if out.starts_with('/') { out } else { format!("{}/{out}", home.trim_end_matches('/')) })
+}
+
+/// What `ssh-keygen -l` says an authorized_keys line is (`256 SHA256:… alice@laptop (ED25519)`), or
+/// None if it is not a key: OpenSSH's own reading, not a guess from its shape (audit of 2026-11-01).
+pub fn key_id(line: &str) -> Result<Option<String>> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("ssh-keygen")
+        .args(["-l", "-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("running ssh-keygen")?;
+    child.stdin.take().context("ssh-keygen's input")?.write_all(line.as_bytes())?;
+    let out = child.wait_with_output()?;
+    Ok(out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()))
 }
 
 /// What an authorized_keys line's options mean for who gets in, as a prefix for its description:

@@ -77,8 +77,9 @@ pub fn valid_user(u: &str) -> Result<()> {
     Ok(())
 }
 
-/// One SSH public key line (`ssh-ed25519 AAAA… comment`), as it is pasted: its type and key checked
-/// for shape, the line returned trimmed.
+/// One SSH public key line (`ssh-ed25519 AAAA… comment`), as it is pasted: one line of a type
+/// TorqOS admits, and a key as OpenSSH reads it (pkg::key_id) — a malformed one would leave a
+/// keys-only machine with nobody able to log in. The line returned trimmed.
 pub fn valid_key(k: &str) -> Result<String> {
     const TYPES: &[&str] = &[
         "ssh-ed25519",
@@ -93,7 +94,7 @@ pub fn valid_key(k: &str) -> Result<String> {
     let mut parts = k.split_whitespace();
     let (kind, body) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
     let base64 = body.len() >= 16 && body.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b));
-    if !TYPES.contains(&kind) || !base64 || k.contains(['\n', '\r']) || k.chars().any(char::is_control) {
+    if !TYPES.contains(&kind) || !base64 || k.contains(['\n', '\r']) || k.chars().any(char::is_control) || crate::pkg::key_id(k)?.is_none() {
         bail!("not an SSH public key: one line like `ssh-ed25519 AAAAC3Nza… you@laptop` (the .pub file's content)");
     }
     Ok(k.to_string())
@@ -330,9 +331,10 @@ mod tests {
         for bad in ["root", "Alice", "1x", "a b", "nobody", ""] {
             assert!(valid_user(bad).is_err(), "{bad:?}");
         }
-        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtorq alice@laptop";
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBvgBOByqNMQxVNX1cIbQG/J5i0lGrLOjoNzyapKOo5G alice@laptop";
         assert_eq!(valid_key(&format!("  {key}\n")).unwrap(), key);
-        for bad in ["ssh-dss AAAAB3NzaC1kc3MAAACBAx", "hello", "ssh-ed25519", "ssh-ed25519 not*base64*at-all!"] {
+        // Shaped like a key, but not one (the audit's): OpenSSH says so.
+        for bad in ["ssh-ed25519 AAAAAAAAAAAAAAAA", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtorq alice@laptop", "ssh-dss AAAAB3NzaC1kc3MAAACBAx", "hello", "ssh-ed25519", "ssh-ed25519 not*base64*at-all!"] {
             assert!(valid_key(bad).is_err(), "{bad:?}");
         }
     }

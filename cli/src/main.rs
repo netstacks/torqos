@@ -293,13 +293,7 @@ fn owner_keys(copy: &Path, host: &str, owner: &str) -> Result<Vec<(String, Strin
     let mut keys = Vec::new();
     for (place, text) in sources {
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-            let mut c = Command::new("ssh-keygen");
-            c.args(["-l", "-f", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-            let mut child = c.spawn().context("running ssh-keygen")?;
-            child.stdin.take().unwrap().write_all(line.as_bytes())?;
-            let out = child.wait_with_output()?;
-            if out.status.success() {
-                let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if let Some(id) = pkg::key_id(line)? {
                 keys.push((pkg::key_options_note(line), id, place.clone()));
             }
         }

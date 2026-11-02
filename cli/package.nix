@@ -1,4 +1,4 @@
-{ lib, stdenv, rustPlatform, symlinkJoin, git, diffutils, coreutils, gnugrep, bubblewrap, bash }:
+{ lib, stdenv, rustPlatform, symlinkJoin, git, diffutils, coreutils, gnugrep, bubblewrap, bash, openssh }:
 
 let
   # The filters after a torqcli `show` (`| grep`, `| wc` …, cli/src/filter.rs, ADR-017) run from these
@@ -21,8 +21,9 @@ rustPlatform.buildRustPackage {
   # For the dev shell (flake.nix), so `cargo test` there builds the same way.
   passthru = { inherit filterEnv; };
 
-  # The candidate's tests read a real git repo and build diffs.
-  nativeCheckInputs = [ git diffutils ];
+  # The candidate's tests read a real git repo and build diffs; a key is read by OpenSSH's
+  # ssh-keygen (pkg::key_id), on the machine from its system packages.
+  nativeCheckInputs = [ git diffutils openssh ];
 
   # torqcli, the shell (ADR-016), is this program under its own name.
   postInstall = ''
