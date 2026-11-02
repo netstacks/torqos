@@ -93,18 +93,21 @@ as NixOS's do (ADR-023): almost everything comes signed from NixOS's own binary 
 builds TorqOS's few small pieces itself, in minutes — no service for the project to run. Ease of use
 first.
 
-- [ ] **qcow2 image** (aarch64 first, testable here; then x86_64): download, boot in any VM (UTM,
+- [x] **qcow2 image** (aarch64 first, testable here; then x86_64): download, boot in any VM (UTM,
       QEMU, Proxmox), log in. The config repo and ledger are created on first boot. *aarch64 done:
       installed in UTM from the image (2026-11-02). x86_64 and aarch64 (qcow2, and a VMDK for ESXi)
-      built by CI's `image` workflow, run by hand; to try on ESXi.*
-- [ ] **First-boot setup**, like a network device's initial configuration dialog: host name,
+      built by CI (the `image` workflow, and with each release); the x86_64 VMDK booted on ESXi 8.0.3
+      (torq5, 2026-11-02).*
+- [x] **First-boot setup**, like a network device's initial configuration dialog: host name,
       time zone, the owner's account and password, how to log in remotely (password, SSH key, or
       both), asked once at the console, committed as change #1. No default password ships;
       passwords live outside the config repo (proposed: SECURITY-MODEL.md, "Accounts and
       passwords"). *Done; tried on the first install (2026-11-02).*
-- [ ] **Customer-safe defaults:** dev mode off, SSH as chosen at first boot (passwords protected
+- [x] **Customer-safe defaults:** dev mode off, SSH as chosen at first boot (passwords protected
       against guessing), the /etc/nixos guard on, nothing
-      installed that is not needed.
+      installed that is not needed. *(2026-11-02: tests/ssh.nix checks SSH's protections, and found
+      the guessing protection blind (KNOWN-GAPS 6za, fixed); fonts, icons, NixOS's installer tools
+      and bcache's left out of a machine without a screen, ~45 MB.)*
 - [ ] **Releases** (`v0.1.0`, …) at one URL machines fetch from; `request system update` moves to
       the newest one. *Built (2026-11-02, ADR-028): signed commits in the public
       `netstacks/torqos-releases`, `stable` moved forward to each tested release; machines take it

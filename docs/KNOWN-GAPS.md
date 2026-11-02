@@ -209,6 +209,24 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
      `commit` now show the configuration's warnings (all of NixOS's, which were dropped before),
      `commit` with the comparison before it asks. Tested: tests/tree.nix (`groups-missing`,
      `groups-docker`, the template), the session's tests.
+6za. **Password guessing over SSH was never blocked** (found 2026-11-02, by tests/ssh.nix) — fixed.
+   - **What happened:** with passwords allowed (setup's "password" or "either"), sshguard ran and saw
+     nothing: NixOS has it read the journal's `sshd` lines, and OpenSSH (9.8 on) logs logins as
+     `sshd-session`. Only OpenSSH's own few seconds' penalty slowed a guesser.
+   - **Fixed:** modules/services.nix has sshguard read both. tests/ssh.nix checks every SSH
+     protection: keys only by default, the owner only, never root, and a guesser's address in the
+     firewall's block set, a right key refused after.
+6zb. **Setup's first question could be lost from the screen** (found 2026-11-02, by tests/image.nix on
+   x86_64) — fixed.
+   - **What happened:** a graphics driver loading after setup started (bochs-drm on QEMU's
+     standard VGA, as on Proxmox; a GPU's on real hardware) took the console over, and what was on
+     it was gone: a screen asking nothing while setup waited. Ordering setup after
+     systemd-udev-settle (20e1b3d, in v0.1.1) did nothing: NixOS has no such unit. Waiting for
+     udev's queue does not help either: the driver loaded after it was empty.
+   - **Fixed:** while it waits for an answer, setup shows its question again (with the welcome)
+     when the console changes size, as a takeover does. tests/image.nix makes one on purpose.
+     A takeover that keeps the size would still lose the screen; Enter then answers with the
+     default shown in brackets, and the next question appears.
 
 ## Audit findings to fix (2026-11-01)
 
@@ -236,7 +254,7 @@ is 6p, N18 is 6 (below).
 | N4 | `propose --reason` may hold newlines: forged git trailers | fixed: a reason is one line, no control characters (refused at propose; torqcli sends one clean line) |
 | N5 | Only torq-broker-init is sandboxed; SECURITY-MODEL says all are | open — sandbox the root units, fix the sentence |
 | N6 | `systemd tmpfiles` and `environment.etc."nixos/*"` reach the broker's inputs and the /etc/nixos guard | open — fence them |
-| N7 | Setup offers password SSH by default; no test of the image's invariants | default fixed (none: Enter turns nothing on); tests/image.nix open |
+| N7 | Setup offers password SSH by default; no test of the image's invariants | fixed: none by default (Enter turns nothing on); tests/image.nix checks the image, tests/ssh.nix SSH's protections |
 | N8 | "A person at a terminal" is a tty check: `script`/`expect` pass it | open — say so (KNOWN-GAPS 4); absolute `id` |
 | N9 | Signing the ledger on the machine cannot keep root out | open — restate: signed by the build, anchored off the machine |
 | N10 | `save <file>` writes anywhere (`.ssh/authorized_keys`) | open — confine save/load |
