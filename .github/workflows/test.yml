@@ -47,7 +47,7 @@ jobs:
             system-features = nixos-test benchmark big-parallel kvm
 
       - name: nix flake check
-        run: nix flake check -L
+        run: nix flake check -L --keep-going
 
   signed-off:
     if: github.event_name == 'pull_request'

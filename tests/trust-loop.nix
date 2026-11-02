@@ -278,6 +278,9 @@ pkgs.testers.runNixOSTest {
         assert "error: set system host-name my_laptop:" in out, out
         as_dev("tmux send-keys -t t n Enter")
         on_screen(' | grep -q \"error: commit: not committed\"')
+        # A person reads the answer before typing on: a line the prompt did not wait for is taken as
+        # more of the paste the question ended (WAITING, cli/src/shell.rs), and not run.
+        machine.sleep(1)
         as_dev("tmux send-keys -t t 'show | compare' Enter")
         on_screen(' | grep -qE \"^\\+   packages \\[.* vim \\];\"')
         # Without bracketed paste (a serial console, screen): the same, and no line is lost.
@@ -290,6 +293,7 @@ pkgs.testers.runNixOSTest {
         as_dev("printf 'time {\\n    /* where it stands */\\n    timeZone Europe/Berlin;\\n}\\n' | tmux load-buffer - && tmux paste-buffer -t t")
         as_dev("tmux send-keys -t t C-d")
         on_screen(' | grep -q \"load complete\"')
+        machine.sleep(1)  # (as after the question above: read, then type)
         as_dev("tmux send-keys -t t 'show | compare' Enter")
         on_screen(' | grep -qF \"+   timeZone Europe/Berlin;\"')
         # Leave.
