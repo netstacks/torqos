@@ -7,7 +7,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # By hand: all of it, or one check while looking into it (`gh workflow run test.yml -f check=image`).
   workflow_dispatch:
+    inputs:
+      check:
+        description: "One check (image, trust-loop, …); empty: all of them"
+        required: false
+        default: ""
   # And as the first step of a release (release.yml).
   workflow_call:
 
@@ -49,7 +55,14 @@ jobs:
             system-features = nixos-test benchmark big-parallel kvm
 
       - name: nix flake check
+        if: inputs.check == ''
         run: nix flake check -L --keep-going
+
+      - name: One check
+        if: inputs.check != ''
+        env:
+          CHECK: ${{ inputs.check }}
+        run: nix build -L --no-link ".#checks.x86_64-linux.$CHECK"
 
   signed-off:
     if: github.event_name == 'pull_request'

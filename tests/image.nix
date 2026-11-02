@@ -126,8 +126,11 @@ pkgs.testers.runNixOSTest {
         try:
             machine.wait_until_succeeds(f"grep -aqF {shlex.quote(text)} /dev/vcs1", timeout=timeout)
         except Exception:
-            # What the screen shows instead, and what runs on it.
-            print(machine.execute("fgconsole; tr -s ' ' < /dev/vcs1; echo; systemctl status --no-pager torq-setup; journalctl -b --no-pager -u torq-setup | tail -20")[1])
+            # What the screen shows instead, what runs on it, and when the console and setup came up
+            # (seconds from boot).
+            print(machine.execute("fgconsole; tr -s ' ' < /dev/vcs1; echo; systemctl status --no-pager torq-setup; "
+                "journalctl -b --no-pager -o short-monotonic -u torq-setup -u systemd-udev-settle -u systemd-udev-trigger -u systemd-vconsole-setup -u getty@tty1; "
+                "journalctl -b --no-pager -o short-monotonic -k --grep 'Console|fbcon|drm'")[1])
             raise
 
     def answer(text):
