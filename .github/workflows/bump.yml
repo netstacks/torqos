@@ -9,11 +9,11 @@ on:
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
+# The branch and its pull request are pushed and opened with TORQOS_RELEASES_TOKEN (a person's
+# token, allowed this repository too): what this workflow's own token pushes or opens starts no
+# workflow, and the tests and the sign-off check must run on the bump.
 permissions:
-  contents: write
-  pull-requests: write
-  # To start the tests on the bump (a push made with this workflow's token starts none).
-  actions: write
+  contents: read
 
 concurrency:
   group: bump
@@ -24,9 +24,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BRANCH: bump/nixpkgs
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.TORQOS_RELEASES_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.TORQOS_RELEASES_TOKEN }}
 
       - uses: cachix/install-nix-action@v31
 
@@ -67,13 +69,9 @@ jobs:
         run: |
           body="nixpkgs moved to the newest commit of $RELEASE: [${OLD:0:12}...${NEW:0:12}](https://github.com/NixOS/nixpkgs/compare/$OLD...$NEW).
 
-          Merge once the \`test\` run on this branch passes."
+          Merge once its tests pass."
           if [ -n "$(gh pr list --head "$BRANCH" --state open --json number -q '.[].number')" ]; then
             gh pr edit "$BRANCH" --title "nixpkgs: $RELEASE at ${NEW:0:12}" --body "$body"
           else
             gh pr create --head "$BRANCH" --base main --title "nixpkgs: $RELEASE at ${NEW:0:12}" --body "$body"
           fi
-
-      - name: The tests, on the bump
-        if: steps.update.outputs.old != steps.update.outputs.new
-        run: gh workflow run test.yml --ref "$BRANCH"
