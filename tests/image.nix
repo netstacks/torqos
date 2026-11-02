@@ -87,7 +87,7 @@ pkgs.testers.runNixOSTest {
     };
   };
 
-  nodes.machine = { lib, options, ... }: {
+  nodes.machine = { lib, ... }: {
     imports = [ self.nixosModules.default ];
     # The image: setup on its console, its own TorqOS as the source a new machine starts from.
     torq.setup.enable = true;
@@ -112,9 +112,6 @@ pkgs.testers.runNixOSTest {
     torq.broker.rebuildCommand = "/run/booted-system/specialisation/alice/bin/switch-to-configuration switch";
     torq.broker.bootCommand = "nix-env -p {profile} --set {system}";
     virtualisation.memorySize = 2048;
-    # The kernel's and systemd's log on the serial port only: the screen (tty1) is setup's, as on a
-    # machine that boots quietly; a test VM's would scroll setup off a 25-line screen.
-    virtualisation.qemu.consoles = lib.mkForce (lib.filter (c: c != "tty0") options.virtualisation.qemu.consoles.default);
     nix.settings.min-free = 0;
   };
 
