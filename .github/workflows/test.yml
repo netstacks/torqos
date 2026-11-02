@@ -35,6 +35,12 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # Ubuntu (24.04 on) keeps capabilities from unprivileged user namespaces (AppArmor), which
+      # torqcli's filters run in (bubblewrap, with a network namespace of its own): NixOS does not, so
+      # the tests run here as on a TorqOS machine.
+      - name: User namespaces as on NixOS
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
