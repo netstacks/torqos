@@ -93,8 +93,8 @@ underneath and show what they set (`| display detail`).
 
 ```
 system host-name torq-utm                     (networking hostName)
-user cwdavis applications [ htop cowsay ]     (that user's own programs)
-user cwdavis group [ admin ]
+user alice applications [ htop cowsay ]       (that user's own programs)
+user alice group [ admin ]
 user group admin system read-write            (may approve system changes)
 user group users1 system read                 (sees the configuration; commits only their own folder)
 user group users1 applications [ htop ]
@@ -107,7 +107,7 @@ user group users1 applications [ htop ]
   setting wins, as in NixOS, but `commit` says plainly when one weakens a TorqOS default ("this
   allows password logins over SSH").
 - An application's own settings are either its state (what it saves when you click, as today) or,
-  per user and per application, a declared file (`user cwdavis applications htop config …`, using
+  per user and per application, a declared file (`user alice applications htop config …`, using
   home-manager, NixOS's per-user tool).
 
 ## Humans free, the AI fenced — permanently
