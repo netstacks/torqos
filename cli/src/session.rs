@@ -25,6 +25,9 @@ pub trait Machine {
     fn ask(&self, question: &str) -> Answer;
     /// A person edits `text` (the config file `path`) in their editor; None: they left it unchanged.
     fn edit(&self, path: &str, text: &str) -> Result<Option<String>>;
+    /// Why `text` is not Nix as written (Nix's own words, with the place in `path`), if it is not:
+    /// parsed only, never evaluated.
+    fn nix_syntax(&self, path: &str, text: &str) -> Result<Option<String>>;
     /// What a person pastes or types at the terminal, up to Ctrl-D (`load … terminal`), at most
     /// `max` bytes.
     fn read_terminal(&self, max: usize) -> Result<String>;
@@ -1229,13 +1232,26 @@ impl<'a> Session<'a> {
             },
             FileAction::Edit => {
                 let was = text_of(self, &path)?;
-                let start = was.clone().unwrap_or_else(|| "{ ... }:\n{\n}\n".into());
-                let Some(now) = self.machine.edit(&path, &start)? else { return Ok(format!("{path}: unchanged\n")) };
+                let start = was.clone().unwrap_or_else(|| new_nix_file(&path));
+                let Some(mut now) = self.machine.edit(&path, &start)? else { return Ok(format!("{path}: unchanged\n")) };
+                // Not Nix as written: edited again if the person wants (as visudo does); else kept as it
+                // is, nothing typed lost — `commit` refuses it until it is Nix.
+                let mut broken = None;
+                loop {
+                    if now.contains('\0') {
+                        bail!("{path}: not text; not kept");
+                    }
+                    let Some(why) = self.machine.nix_syntax(&path, &now)? else { break };
+                    match self.machine.ask(&format!("{path} is not Nix as written: {why}\nEdit it again? ")) {
+                        Answer::Yes => now = self.machine.edit(&path, &now)?.unwrap_or(now),
+                        Answer::No | Answer::NobodyToAsk => {
+                            broken = Some(why.lines().next().unwrap_or_default().to_string());
+                            break;
+                        }
+                    }
+                }
                 if Some(&now) == was.as_ref() {
                     return Ok(format!("{path}: unchanged\n"));
-                }
-                if now.contains('\0') {
-                    bail!("{path}: not text; not kept");
                 }
                 self.candidate()?.nix.insert(path.clone(), Some(now));
                 self.save()?;
@@ -1244,6 +1260,9 @@ impl<'a> Session<'a> {
                 } else {
                     format!(" (not attached anywhere yet: `set <place> config {path}`)")
                 };
+                if let Some(why) = broken {
+                    return Ok(format!("{path}: changed in the candidate, but not Nix yet ({why}): `file edit {path}` to fix it; `commit` refuses it until then\n"));
+                }
                 Ok(format!("{path}: changed in the candidate{hint}; `show | compare` shows it, `commit` makes it so\n"))
             }
             FileAction::Delete => {
@@ -1725,6 +1744,18 @@ fn in_home(file: &str) -> std::path::PathBuf {
     }
 }
 
+/// A new config file as `file edit` starts it: an empty NixOS module, saying what it is and how it
+/// is written (comments: Nix ignores them).
+fn new_nix_file(path: &str) -> String {
+    format!(
+        "# {path}: part of this machine's configuration, for what the tree's settings cannot say\n\
+         # (Nix code: functions, software built here). Written as in NixOS's configuration.nix:\n\
+         #   services.httpd.enable = true;\n\
+         # `set <place> config {path}` attaches it; `commit check` evaluates it.\n\
+         {{ config, lib, pkgs, ... }}:\n{{\n}}\n"
+    )
+}
+
 /// How well `term` (small letters) is found for `help`, in a command's or setting's `name` (its
 /// words, `services openssh enable`) or its `help`: 4 as a whole part of the name (`hostname` is
 /// hostName, `ssh` is not openssh), 3 at the beginning of one or of a word in it (`host`), 2 inside
@@ -1802,6 +1833,7 @@ mod tests {
         ssh_asked: RefCell<Vec<Files>>,
         /// What `file edit` leaves a file as (None: unchanged), and what it was given.
         edit_to: Option<String>,
+        edit_again: Option<String>,
         /// What `load … terminal` reads (None: no terminal).
         typed: Option<String>,
         edited: RefCell<Vec<(String, String)>>,
@@ -1837,9 +1869,14 @@ mod tests {
                 (false, false) => Answer::NobodyToAsk,
             }
         }
+        /// (The first edit leaves `edit_to`; any later one, `edit_again`.)
         fn edit(&self, path: &str, text: &str) -> Result<Option<String>> {
             self.edited.borrow_mut().push((path.into(), text.into()));
-            Ok(self.edit_to.clone())
+            Ok(if self.edited.borrow().len() > 1 && self.edit_again.is_some() { self.edit_again.clone() } else { self.edit_to.clone() })
+        }
+        /// (Not Nix: a text with an unclosed `{`, as far as a test needs.)
+        fn nix_syntax(&self, path: &str, text: &str) -> Result<Option<String>> {
+            Ok((text.matches('{').count() != text.matches('}').count()).then(|| format!("unexpected end of file, at {path}:3:1")))
         }
         fn read_terminal(&self, _: usize) -> Result<String> {
             self.typed.clone().context("no terminal")
@@ -2393,13 +2430,34 @@ mod tests {
 
     /// Config files: attached in the tree, edited in the candidate, shown as their raw diff, committed
     /// as the files they are (system tier, asked), kept across sessions; SSH counted however it is set.
+    /// A file that is not Nix as written: edited again when the person wants, else kept as it is
+    /// (nothing typed lost), saying so.
+    #[test]
+    fn a_file_not_nix_is_edited_again_or_kept_saying_so() {
+        let broken = "{ ... }:\n{\n  services.httpd.enable = true;\n";
+        let fixed = "{ ... }:\n{\n  services.httpd.enable = true;\n}\n";
+        let (d, m) = (repo(), Fake { answer: true, edit_to: Some(broken.into()), edit_again: Some(fixed.into()), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure"]);
+        assert!(s.exec("file edit a.nix").unwrap().starts_with("a.nix: changed in the candidate (not attached"));
+        assert_eq!(m.edited.borrow()[1], ("a.nix".into(), broken.into()), "edited again from what was typed");
+        assert!(m.asked.borrow()[0].starts_with("a.nix is not Nix as written: unexpected end of file, at a.nix:3:1\nEdit it again?"), "{:?}", m.asked.borrow());
+        assert_eq!(s.exec("file show a.nix").unwrap(), fixed);
+        let (d, m) = (repo(), Fake { no: true, edit_to: Some(broken.into()), ..Default::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure"]);
+        assert_eq!(s.exec("file edit a.nix").unwrap(), "a.nix: changed in the candidate, but not Nix yet (unexpected end of file, at a.nix:3:1): `file edit a.nix` to fix it; `commit` refuses it until then\n");
+        assert_eq!(s.exec("file show a.nix").unwrap(), broken, "kept as typed");
+    }
+
     #[test]
     fn config_files_are_part_of_the_configuration() {
         let (d, m) = (repo(), Fake { answer: true, edit_to: Some("{ ... }:\n{\n  services.httpd.enable = true;\n}\n".into()), ..Default::default() });
         let saved = d.path().join("candidate.json");
         let mut s = session(d.path(), Some(saved.clone()), &m);
         run(&mut s, &["configure", "file edit services/httpd.nix"]);
-        assert_eq!(m.edited.borrow()[0], ("services/httpd.nix".into(), "{ ... }:\n{\n}\n".into()), "a new file starts as an empty module");
+        assert_eq!(m.edited.borrow()[0], ("services/httpd.nix".into(), new_nix_file("services/httpd.nix")), "a new file starts as an empty module, saying what it is");
+        assert!(new_nix_file("services/httpd.nix").contains("set <place> config services/httpd.nix") && new_nix_file("x.nix").ends_with("{ config, lib, pkgs, ... }:\n{\n}\n"));
         run(&mut s, &["set services httpd config services/httpd.nix"]);
         assert_eq!(s.exec("show services httpd").unwrap(), "config services/httpd.nix;\n");
         assert_eq!(s.exec("show services | display set").unwrap(), "set services httpd config services/httpd.nix\n", "whole lines, to paste back");

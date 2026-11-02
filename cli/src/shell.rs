@@ -525,6 +525,26 @@ impl Machine for Real<'_> {
         let now = fs::read_to_string(&f).with_context(|| format!("{path}: not text; nothing changed"))?;
         Ok((now != text).then_some(now))
     }
+    /// Nix's parser, on its own (`--parse`: nothing evaluated, nothing read or built).
+    fn nix_syntax(&self, path: &str, text: &str) -> Result<Option<String>> {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("/run/current-system/sw/bin/nix-instantiate")
+            .args(["--parse", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("running nix-instantiate --parse")?;
+        child.stdin.take().context("nix-instantiate's input")?.write_all(text.as_bytes())?;
+        let out = child.wait_with_output()?;
+        if out.status.success() {
+            return Ok(None);
+        }
+        // Nix's words, the file named as the person knows it, the lines it points at kept.
+        let why = String::from_utf8_lossy(&out.stderr).replace("«stdin»", path);
+        let lines: Vec<String> = why.lines().map(|l| l.strip_prefix("error: ").unwrap_or(l).trim_end().to_string()).filter(|l| !l.trim().is_empty()).collect();
+        Ok(Some(lines.join("\n")))
+    }
 
 }
 
