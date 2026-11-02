@@ -57,11 +57,13 @@ $ torqcli -c "configure; set users users viper packages htop; commit"
 virtualHosts`, as a network device's `interfaces` is above `ge-0/0/0`): `up` from an entry goes into
 its set, where entries can be set and shown. `up ?` offers `<n>`.
 
-Turning SSH on (`set services openssh enable true`, or any other way: whether a commit turns it on is
-read from the evaluated configuration) shows at `commit` exactly which keys will be able to log in,
-as the changed configuration has them. If SSH lets in keys only and there are none, the commit is
-refused (nobody could log in), saying to add a key or allow passwords; with passwords allowed it says
-so. `request system revert` checks the same.
+A change to who can log in over SSH (read from the evaluated configurations before and after it,
+so every way counts: turning it on, allowing passwords or turning them off, a key removed, another
+owner) shows at `commit` exactly which keys will be able to log in, as the changed configuration has
+them, or that passwords will be accepted. If SSH lets in keys only and there are none, the commit is
+refused (nobody could log in), saying to add a key or allow passwords — whether SSH turns on with it
+or was on already. `request system revert` checks the same, with the same function
+(`session::ssh_review`).
 
 And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`, `commit
 and-quit`, `rollback <n> [<place>]`, `up [<n>]`, `top [<command>]` (a command from the top, then

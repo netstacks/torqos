@@ -64,8 +64,10 @@ machine with UEFI and a TPM.
   blocked (sshguard); 3 tries a connection; only the owner may log in (`AllowUsers`). These are
   defaults a person can change. `root` never logs in over SSH: an assertion refuses any
   `PermitRootLogin` but `no`. `show system alarms` notes that SSH accepts passwords. A commit (or
-  revert) that turns SSH on shows the keys that will be able to log in, and is refused if SSH is keys
-  only and there are none. Keys only stays one `set` away.
+  revert) that changes who can log in over SSH — turning it on, allowing passwords or turning them
+  off, removing a key, another owner — shows it (the keys that will be able to log in, or that
+  passwords will be accepted), and is refused if SSH is keys only and there are none: with SSH
+  already on as much as when it turns on (audit of 2026-11-01). Keys only stays one `set` away.
 - **Images** carry a checksum signed with a TorqOS release key, and the one command that checks it.
 
 ## Threat model

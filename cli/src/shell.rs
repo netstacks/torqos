@@ -80,17 +80,13 @@ impl Real<'_> {
         }
         // Not evaluable: then the broker's build of it fails just the same, and nothing is switched on —
         // said, not a reason to refuse here.
-        let (now, then) = match self.ssh(&head, &files) {
+        let states = match self.ssh(&head, &files) {
             Ok(s) => s,
             Err(e) => return Ok(format!("(SSH not checked: the configuration it leaves does not evaluate: {})\n", history::one_line(&format!("{e:#}"), 120))),
         };
-        if !then.on || now.on {
-            return Ok(String::new());
-        }
-        let (owner, keys) = self.ssh_keys(&head, &files)?;
-        // Asked at the terminal: its sentences fit it (ui.rs).
+        // Asked at the terminal: its sentences fit it (ui.rs). As a commit is asked (session.rs).
         let ui = crate::ui::Ui::plain_at(crate::ui::fit(crate::ui::columns(false)));
-        crate::session::ssh_turned_on(&owner, &keys, then.passwords, "reverted", &ui)
+        crate::session::ssh_review(self, states, &head, &files, "reverted", &ui)
     }
 
 

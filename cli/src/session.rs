@@ -1187,10 +1187,9 @@ impl<'a> Session<'a> {
         // Any system-tier change can (a software update too: TorqOS's own modules may change how SSH is
         // set up; audit of 2026-10-31) — only a person's own data files cannot.
         let ssh_relevant = files.iter().any(|(p, _)| self.schema.tier_of(p) != Some("user"));
-        let (was, now) = if ssh_relevant { self.machine.ssh(&base, &files)? } else { Default::default() };
-        if now.on && !was.on {
-            let (owner, keys) = self.machine.ssh_keys(&base, &files)?;
-            shown.push_str(&ssh_turned_on(&owner, &keys, now.passwords, "committed", &ui)?);
+        if ssh_relevant {
+            let states = self.machine.ssh(&base, &files)?;
+            shown.push_str(&ssh_review(self.machine, states, &base, &files, "committed", &ui)?);
         }
         // How the machine boots: a mistake shows only at the next restart (no `commit confirmed` timer runs
         // on a system that does not come up), so say so before anyone approves it.
@@ -1741,24 +1740,44 @@ fn settings_changed(compare: &str) -> usize {
     seen.len()
 }
 
-/// What turning SSH on lets in, said before a person approves it (a commit, a revert — `verb`):
-/// passwords as well as keys, or keys only (modules/services.nix) — and keys only with none: nobody
-/// could log in, so refused.
-pub fn ssh_turned_on(owner: &str, keys: &[String], passwords: bool, verb: &str, ui: &crate::ui::Ui) -> Result<String> {
-    let mut out = String::new();
-    if passwords {
-        out.push_str(&format!("{}\n", ui.line("! ", "SSH will accept passwords as well as keys (services openssh settings PasswordAuthentication): repeated wrong guesses are blocked.")));
-    } else if keys.is_empty() {
+/// What a change does to who can log in over SSH, said before a person approves it (a commit, a
+/// revert — `verb`), whenever it changes that, not only when SSH turns on (audit of 2026-11-01):
+/// `states` is SSH before and after it (evaluated: every way of setting it counts).
+/// - Passwords accepted after it, and newly (SSH just on, or passwords just allowed): said so, with
+///   the keys if SSH just turned on.
+/// - Keys only after it, and none: refused — nobody could log in, and getting back in needs the
+///   console. Keys only, and newly so (SSH just on, passwords just turned off) or other keys than
+///   before (a key removed, another owner): the keys, approved as they are.
+pub fn ssh_review(m: &dyn Machine, states: (Ssh, Ssh), base: &str, files: &[(String, Option<String>)], verb: &str, ui: &crate::ui::Ui) -> Result<String> {
+    let (was, now) = states;
+    if !now.on {
+        return Ok(String::new());
+    }
+    let listed = |owner: &str, keys: &[String]| if keys.is_empty() { String::new() } else { format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")) };
+    if now.passwords {
+        if was.on && was.passwords {
+            return Ok(String::new());
+        }
+        let mut out = format!("{}\n", ui.line("! ", "SSH will accept passwords as well as keys (services openssh settings PasswordAuthentication): repeated wrong guesses are blocked."));
+        if !was.on {
+            let (owner, keys) = m.ssh_keys(base, files)?;
+            out.push_str(&listed(&owner, &keys));
+        }
+        return Ok(out);
+    }
+    let (owner, keys) = m.ssh_keys(base, files)?;
+    if keys.is_empty() {
+        let how = if was.on { "would let in" } else { "lets in" };
         bail!(
-            "not {verb}: SSH here lets in {owner}'s keys only, and they have none, so nobody could log in; \
+            "not {verb}: SSH here {how} {owner}'s keys only, and they have none, so nobody could log in; \
              add a public key to ~/.ssh/authorized_keys first, or allow passwords too \
              (`set services openssh settings PasswordAuthentication true`)"
         );
     }
-    if !keys.is_empty() {
-        out.push_str(&format!("Keys that will be able to log in as {owner}:\n{}\n", keys.join("\n")));
+    if was.on && !was.passwords && m.ssh_keys(base, &[])? == (owner.clone(), keys.clone()) {
+        return Ok(String::new());
     }
-    Ok(out)
+    Ok(listed(&owner, &keys))
 }
 
 /// The software a configuration's lock names: its own inputs, each with when it is from
@@ -1881,6 +1900,8 @@ mod tests {
         ssh_state: Option<(Ssh, Ssh)>,
         /// The keys turning SSH on would admit, and what was asked about.
         keys: Vec<String>,
+        /// The keys before the change, where a test says they differ (else: as after it).
+        keys_before: Option<Vec<String>>,
         ssh_asked: RefCell<Vec<Files>>,
         /// What `file edit` leaves a file as (None: unchanged), and what it was given.
         edit_to: Option<String>,
@@ -1969,7 +1990,10 @@ mod tests {
         }
         fn ssh_keys(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)> {
             self.ssh_asked.borrow_mut().push(files.to_vec());
-            Ok(("dev".into(), self.keys.clone()))
+            match (&self.keys_before, files.is_empty()) {
+                (Some(before), true) => Ok(("dev".into(), before.clone())),
+                _ => Ok(("dev".into(), self.keys.clone())),
+            }
         }
         fn revert(&self, seq: u64, me: &str) -> Result<String> {
             Ok(format!("reverted {seq} for {me}\n"))
@@ -2422,6 +2446,45 @@ mod tests {
         assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
         let q = m.asked.borrow()[0].clone();
         assert!(q.contains("Keys that will be able to log in as dev:\n    256 SHA256:abc dev@mac (ED25519)  (from /home/dev/.ssh/authorized_keys)\n"), "{q}");
+    }
+
+    /// SSH already on: a change to who can log in is checked as turning it on is (audit of
+    /// 2026-11-01) — the last key removed, passwords turned off with no key: refused; other keys:
+    /// shown; nothing about SSH changed: nothing asked.
+    #[test]
+    fn a_change_to_who_can_log_in_is_checked_with_ssh_already_on() {
+        let keys_only = Ssh { on: true, passwords: false };
+        let with_passwords = Ssh { on: true, passwords: true };
+        let key = "    256 SHA256:abc dev@mac (ED25519)  (from /home/dev/.ssh/authorized_keys)".to_string();
+        let commit = |m: &Fake| {
+            let d = repo();
+            let mut s = session(d.path(), None, m);
+            run(&mut s, &["configure", "set system host-name three"]);
+            s.exec("commit").map_err(|e| format!("{e:#}"))
+        };
+        // The last key removed, SSH keys only.
+        let m = Fake { answer: true, ssh_state: Some((keys_only, keys_only)), keys_before: Some(vec![key.clone()]), ..Default::default() };
+        let e = commit(&m).unwrap_err();
+        assert!(e.contains("not committed: SSH here would let in dev's keys only, and they have none"), "{e}");
+        assert!(m.commits.borrow().is_empty());
+        // Passwords turned off, no key.
+        let m = Fake { answer: true, ssh_state: Some((with_passwords, keys_only)), ..Default::default() };
+        assert!(commit(&m).unwrap_err().contains("they have none"));
+        // Passwords turned off, with a key: the keys are approved as they are.
+        let m = Fake { answer: true, ssh_state: Some((with_passwords, keys_only)), keys: vec![key.clone()], ..Default::default() };
+        commit(&m).unwrap();
+        assert!(m.asked.borrow()[0].contains("Keys that will be able to log in as dev:"), "{}", m.asked.borrow()[0]);
+        // Other keys than before: shown.
+        let m = Fake { answer: true, ssh_state: Some((keys_only, keys_only)), keys: vec![key.clone()], keys_before: Some(vec![]), ..Default::default() };
+        commit(&m).unwrap();
+        assert!(m.asked.borrow()[0].contains("Keys that will be able to log in as dev:"));
+        // The same keys: nothing to say. Passwords newly allowed: said.
+        let m = Fake { answer: true, ssh_state: Some((keys_only, keys_only)), keys: vec![key.clone()], ..Default::default() };
+        commit(&m).unwrap();
+        assert!(!m.asked.borrow()[0].contains("Keys that"), "{}", m.asked.borrow()[0]);
+        let m = Fake { answer: true, ssh_state: Some((keys_only, with_passwords)), keys: vec![key], ..Default::default() };
+        commit(&m).unwrap();
+        assert!(m.asked.borrow()[0].contains("! SSH will accept passwords"), "{}", m.asked.borrow()[0]);
     }
 
     #[test]
