@@ -37,6 +37,14 @@ in
     };
 
     fonts.packages = with pkgs; [ inter jetbrains-mono noto-fonts noto-fonts-color-emoji ];
+    # What base.nix leaves out of a machine without a screen.
+    fonts.fontconfig.enable = true;
+    xdg = {
+      autostart.enable = true;
+      icons.enable = true;
+      mime.enable = true;
+      sounds.enable = true;
+    };
 
     environment.systemPackages = with pkgs; [
       quickshell # TODO(M3): ship the TorqOS shell (shell/) instead of the bare toolkit

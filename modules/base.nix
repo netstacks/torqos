@@ -86,6 +86,22 @@ in
       info.enable = lib.mkDefault false;
       doc.enable = lib.mkDefault false;
     };
+    # Nothing a machine without a screen uses (as NixOS's own minimal profile): fonts, icons, sounds,
+    # file types and autostart entries are a desktop's (desktop.nix turns them back on).
+    fonts.fontconfig.enable = lib.mkDefault false;
+    xdg = {
+      autostart.enable = lib.mkDefault false;
+      icons.enable = lib.mkDefault false;
+      mime.enable = lib.mkDefault false;
+      sounds.enable = lib.mkDefault false;
+    };
+    # NixOS's installer tools install NixOS onto another disk, describe this one's hardware, enter
+    # a mounted NixOS, or read its options: the image is installed already, torqcli reads and sets
+    # every option (`?`, `show`), and the broker builds with nixos-rebuild, which stays. bcache's
+    # tools are for a cache disk TorqOS never sets up.
+    system.tools = lib.genAttrs [ "nixos-install" "nixos-generate-config" "nixos-enter" "nixos-option" "nixos-build-vms" ]
+      (_: { enable = lib.mkDefault false; });
+    boot.bcache.enable = lib.mkDefault false;
 
     system.stateVersion = lib.mkDefault "26.05";
   };
