@@ -70,12 +70,7 @@ in
     systemd.services.torq-setup = {
       description = "TorqOS first-boot setup";
       wantedBy = [ "multi-user.target" ];
-      # After the devices found at boot are set up: a graphics driver loading late (bochs-drm on
-      # QEMU's standard VGA, at about a minute into a slow boot) moves the console to a framebuffer
-      # and loses what was on the screen — setup's first question with it, leaving a screen that asks
-      # nothing. Settled, the console is the one setup keeps.
-      wants = [ "systemd-udev-settle.service" ];
-      after = [ "systemd-user-sessions.service" "systemd-udev-settle.service" ];
+      after = [ "systemd-user-sessions.service" ];
       conflicts = [ "getty@tty1.service" ];
       # Setup runs the broker, which switches to the new system — where this unit does not exist. A
       # switch stops units it removes, which would kill setup and the broker mid-switch: this one
@@ -89,6 +84,13 @@ in
       restartIfChanged = false;
       serviceConfig = {
         Type = "idle";
+        # First, the devices found at boot set up (udev's queue empty): a graphics driver loading late
+        # (bochs-drm on QEMU's standard VGA, seconds after setup would start) moves the console to a
+        # framebuffer and loses what was on the screen — setup's first question with it, leaving a
+        # screen that asks nothing (tests/image.nix). Loading it is part of setting up its device, so
+        # once udev is done the console is the one setup keeps. NixOS has no systemd-udev-settle
+        # unit to order after; a device that never settles delays setup a minute, not for good (`-`).
+        ExecStartPre = "-${config.systemd.package}/bin/udevadm settle --timeout=60";
         ExecStart = "${lib.getExe config.torq.cli.package} setup";
         StandardInput = "tty";
         StandardOutput = "tty";
