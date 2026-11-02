@@ -60,7 +60,7 @@ pub enum Op {
     /// `show version`, `show system uptime`, `show interfaces`, `show system storage`: the machine.
     ShowVersion,
     ShowUptime,
-    ShowInterfaces,
+    ShowInterfaces { name: Option<String> },
     ShowStorage,
     Request(Request),
     /// `file show|edit|delete <path>`, `file list`: the config repo's config files (in configuration
@@ -209,7 +209,8 @@ pub fn render(op: &Op) -> String {
         Op::ShowPackages { terms } => sep("show packages", terms),
         Op::ShowVersion => "show version".into(),
         Op::ShowUptime => "show system uptime".into(),
-        Op::ShowInterfaces => "show interfaces".into(),
+        Op::ShowInterfaces { name: None } => "show interfaces".into(),
+        Op::ShowInterfaces { name: Some(n) } => format!("show interfaces {}", quote(n)),
         Op::ShowStorage => "show system storage".into(),
         Op::Request(r) => match r {
             Request::Repair => "request system repair".into(),
@@ -290,7 +291,8 @@ mod tests {
             (Mode::Operational, Op::ShowServices),
             (Mode::Operational, Op::ShowVersion),
             (Mode::Operational, Op::ShowUptime),
-            (Mode::Operational, Op::ShowInterfaces),
+            (Mode::Operational, Op::ShowInterfaces { name: None }),
+            (Mode::Operational, Op::ShowInterfaces { name: Some("enp0s1".into()) }),
             (Mode::Operational, Op::ShowStorage),
             (Mode::Operational, Op::ShowLedger { count: None }),
             (Mode::Operational, Op::ShowLedger { count: Some(5) }),

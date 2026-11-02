@@ -107,6 +107,8 @@ fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
                     Some(crate::grammar::Value::Rollback) => out.extend(at.configurations.get().iter().enumerate().map(|(n, c)| Choice::new(&n.to_string(), c))),
                     // A Nix file of the configuration: the ones it has.
                     Some(crate::grammar::Value::NixFile) => out.extend(at.files.iter().map(|f| Choice::new(f, ""))),
+                    // An interface: the machine's.
+                    Some(crate::grammar::Value::Interface) => out.extend(at.interfaces.iter().map(|i| Choice::new(i, ""))),
                     _ => {}
                 }
             }
@@ -738,7 +740,7 @@ mod tests {
     }
 
     /// A set named after something on the machine (its interfaces) offers what the machine has, after
-    /// what the configuration has.
+    /// what the configuration has; so does a command about them.
     #[test]
     fn the_machines_interfaces_are_offered() {
         let s = schema();
@@ -746,6 +748,9 @@ mod tests {
         let c = choices_at(&s, &at, &w("set networking interfaces"), "");
         assert_eq!(words_of(&c), ["enp0s1", "wlan0", "<name>"]);
         assert_eq!(c[0].help, "On this machine");
+        // And `show interfaces <interface>`: the machine's, after the command itself.
+        let op = At { mode: Mode::Operational, ..at };
+        assert_eq!(words_of(&choices_at(&s, &op, &w("show interfaces"), "")), ["<[Enter]>", "<interface>", "enp0s1", "wlan0", "|"]);
     }
 
     /// A list's entries by number: those the configuration has, then the next, which adds one.

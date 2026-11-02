@@ -891,9 +891,9 @@ fn paged(text: &str) {
     }
 }
 
-/// The machine's network interfaces, by name (the kernel's list; the loopback left out).
+/// The machine's network interfaces, by name (the kernel's list).
 fn interfaces() -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir("/sys/class/net").map(|d| d.filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != "lo").collect()).unwrap_or_default();
+    let mut names: Vec<String> = fs::read_dir("/sys/class/net").map(|d| d.filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
     names.sort();
     names
 }

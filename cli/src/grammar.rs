@@ -40,6 +40,8 @@ pub enum Value {
     File,
     /// A Nix file of the configuration (`file show|edit|delete`).
     NixFile,
+    /// A network interface of the machine (`show interfaces <interface>`).
+    Interface,
     /// Free text (a comment).
     Text,
 }
@@ -55,6 +57,7 @@ impl Value {
             Value::User => "<user>",
             Value::File => "<file>",
             Value::NixFile => "<nix-file>",
+            Value::Interface => "<interface>",
             Value::Text => "<\"text\">",
         }
     }
@@ -76,7 +79,7 @@ impl Value {
             Value::Change => whole(w.strip_prefix('#').unwrap_or(w), "change numbers", 1, u64::MAX).map(drop),
             Value::Minutes => whole(w, "minutes", 1, 1440).map(drop),
             Value::User if !w.is_empty() => Ok(()),
-            Value::File | Value::NixFile if !w.is_empty() => Ok(()),
+            Value::File | Value::NixFile | Value::Interface if !w.is_empty() => Ok(()),
             Value::Text => Ok(()),
             _ => bail!("an empty word is not a {}", self.placeholder()),
         }
@@ -231,7 +234,7 @@ static ROOTS: &[Node] = &[
 
 static SHOW: &[Node] = &[
     fixed("configuration", "The configuration in effect", In::Op).whole(show_active).pipes(Pipes::Views(CONFIGURATION_VIEWS)).then(&[node(Word::Path, "A part of it", In::Op).whole(show_active).pipes(Pipes::Views(CONFIGURATION_VIEWS))]),
-    fixed("interfaces", "The network interfaces, their state and addresses", In::Op).whole(|_| Ok(Op::ShowInterfaces)).pipes(Pipes::Filters),
+    fixed("interfaces", "The network interfaces, their state and addresses", In::Op).whole(interfaces).pipes(Pipes::Filters).then(&[value(Value::Interface, "One of them").whole(interfaces).pipes(Pipes::Filters)]),
     fixed("packages", "Search the software you can install", In::Op).then(&[node(Word::Terms, "Words to search for, in names and descriptions", In::Op).whole(|r| Ok(Op::ShowPackages { terms: r.terms.clone() })).pipes(Pipes::Filters)]),
     fixed("services", "The services the configuration turns on", In::Op).whole(|_| Ok(Op::ShowServices)).pipes(Pipes::Filters),
     fixed("system", "This machine", In::Op).then(SHOW_SYSTEM),
@@ -330,6 +333,10 @@ fn show_active(r: &Read) -> Result<Op> {
 fn show_rollback(r: &Read) -> Result<Op> {
     let n: Vec<usize> = r.values.iter().filter(|(k, _)| *k == Value::Rollback).filter_map(|(_, v)| v.parse().ok()).collect();
     Ok(Op::ShowRollback { n: n.first().copied().unwrap_or(0), compare: n.get(1).copied(), display: r.display })
+}
+
+fn interfaces(r: &Read) -> Result<Op> {
+    Ok(Op::ShowInterfaces { name: r.value(Value::Interface).map(String::from) })
 }
 
 fn ledger(r: &Read) -> Result<Op> {

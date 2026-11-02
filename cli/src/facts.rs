@@ -62,17 +62,21 @@ pub fn uptime(f: &Facts, last: Option<&str>, ui: &Ui) -> String {
     rows(&r, ui)
 }
 
-/// `show interfaces`: each network interface, its state, addresses and hardware address. Data:
-/// never wrapped (a filter reads whole lines).
-pub fn interfaces(f: &Facts) -> String {
+/// `show interfaces [<name>]`: each network interface (or the one named), its state, addresses and
+/// hardware address. Data: never wrapped (a filter reads whole lines).
+pub fn interfaces(f: &Facts, name: Option<&str>) -> anyhow::Result<String> {
+    if let Some(n) = name.filter(|n| !f.interfaces.iter().any(|i| i.name == *n)) {
+        let names: Vec<&str> = f.interfaces.iter().map(|i| i.name.as_str()).collect();
+        anyhow::bail!("'{n}' is not an interface of this machine{} (one of: {})", crate::near::hint(n, names.iter().copied()), names.join(", "));
+    }
     let mut t = Table::new(&[Col::Left("Interface"), Col::Left("State"), Col::Left("Address"), Col::Left("Hardware address")]);
-    for i in &f.interfaces {
+    for i in f.interfaces.iter().filter(|i| name.is_none_or(|n| i.name == n)) {
         t.row(vec![i.name.clone(), i.state.clone(), i.addresses.first().map_or("-", String::as_str).to_string(), i.mac.clone()]);
         for a in i.addresses.iter().skip(1) {
             t.row(vec![String::new(), String::new(), a.clone()]);
         }
     }
-    t.render(&Ui::plain_at(None))
+    Ok(t.render(&Ui::plain_at(None)))
 }
 
 /// `show system storage`: each filesystem's size and use, and the system versions kept on it.
@@ -144,8 +148,10 @@ mod tests {
         assert!(v.starts_with("TorqOS        torq 2026-11-01\nNixOS         26.05.20261029.6f06d20\nLinux kernel  6.18.59\ntorqcli       "), "{v}");
         let u = uptime(&f, Some("#85, 2026-11-01 20:10: M2"), &Ui::plain());
         assert_eq!(u, "Up           1 hour 31 minutes\nLoad         0.10 0.25 1.00 (over 1, 5 and 15 minutes)\nLast change  #85, 2026-11-01 20:10: M2\n");
-        let i = interfaces(&f);
+        let i = interfaces(&f, None).unwrap();
         assert_eq!(i, "Interface  State    Address          Hardware address\nenp0s1     up       192.168.64.4/24  ae:21:5a:0b:a0:55\n                    fd5c::1/64\nlo         unknown  -                00:00:00:00:00:00\n");
+        assert_eq!(interfaces(&f, Some("lo")).unwrap(), "Interface  State    Address  Hardware address\nlo         unknown  -        00:00:00:00:00:00\n", "the one named");
+        assert_eq!(format!("{:#}", interfaces(&f, Some("enp0s2")).unwrap_err()), "'enp0s2' is not an interface of this machine; did you mean enp0s1? (one of: enp0s1, lo)");
         let s = storage(&f, &Ui::plain());
         assert!(s.starts_with("Filesystem  Size  Used  Free  Use  Mounted on\n/dev/vda2    62G   33G   27G  53%  /\nSystem versions kept: 23"), "{s}");
         assert_eq!((duration(45), duration(3600), duration(90061), duration(0)), ("45 seconds".into(), "1 hour".into(), "1 day 1 hour".into(), "0 seconds".into()));
