@@ -398,9 +398,31 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     to a hardware key, with signing by hand, is later. A new key reaches machines as an update
     signed by the old one.
   - **Writing to the releases** takes a token that may write to that repo only
-    (`TORQOS_RELEASES_TOKEN`, a fine-grained token: it expires, at most a year).
+    (`TORQOS_RELEASES_TOKEN`, a fine-grained token: it expires, at most a year). Since
+    2026-11-02 it may also push to this repo and open its pull requests, for the weekly nixpkgs
+    bump (`.github/workflows/bump.yml`): what Actions' own token pushes starts no workflow, and
+    the bump's tests must run.
   - **Not covered yet:** an attacker able to move `stable` back to an older signed release
     (a downgrade): `stable` only moves forward when CI moves it, and `show | compare` shows the
     version before a commit, but the machine does not refuse an older release by itself. The check
     is torqcli's, at update: a person who edits the lock by hand is past it (as they are past any
     check, being able to commit).
+
+## ADR-029 — TorqOS names itself, as a NixOS derivative
+- **Context:** A TorqOS machine said it was NixOS everywhere it names itself: `/etc/os-release`
+  (`NAME=NixOS`, NixOS's version, URLs and logo), the boot menu, the console's greeting. The
+  project now has its own identity (`branding/`, from the TorqOS brand kit).
+- **Decision:** `modules/branding.nix` sets NixOS's own options for a derivative:
+  `system.nixos.distroName = "TorqOS"`, `distroId = "torqos"` (so os-release says
+  `ID_LIKE=nixos`), and os-release's values: TorqOS's version (torqcli's, one number) with the NixOS
+  release under it (`VERSION="0.1.1 (NixOS 26.05)"`), the public repository's URLs, the logo's
+  icon name and Torque orange (`ANSI_COLOR="38;5;208"`). NixOS's build id and its release's end of
+  support stay. The console's `/etc/issue` shows the wordmark and the version; setup shows the
+  wordmark over its welcome; a fastfetch configuration is installed for whoever installs fastfetch;
+  the icons are installed with a desktop. The shell's prompt and colours are unchanged.
+  `torq.branding` is fenced from the tree.
+- **Consequences:** Tools that ask "is this NixOS?" by `ID` see `torqos` and must read `ID_LIKE`;
+  NixOS's own switch checks `/etc/NIXOS`, which every TorqOS machine has. The version in
+  os-release is the TorqOS release a machine runs, so a machine updated to a release says so. The
+  repository's files are Apache-2.0; the name and logo are not licensed as trademarks
+  (branding/README.md).

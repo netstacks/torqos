@@ -47,6 +47,8 @@ in
     };
 
     environment.systemPackages = with pkgs; [
+      # TorqOS's icons (branding/), for what shows the system's logo (os-release's LOGO).
+      config.torq.branding.package
       quickshell # TODO(M3): ship the TorqOS shell (shell/) instead of the bare toolkit
       foot
       fuzzel

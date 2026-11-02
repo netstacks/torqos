@@ -25,6 +25,8 @@ const JOURNALCTL: &str = "/run/current-system/sw/bin/journalctl";
 /// The broker's own service while it sets the machine up (its log: `journalctl -u torq-setup-broker`).
 const BROKER_UNIT: &str = "torq-setup-broker";
 const WELCOME: &str = "Welcome to TorqOS. This machine has no configuration yet: a few questions set it up.";
+/// TorqOS's wordmark, shown over the welcome (modules/branding.nix).
+const BANNER: &str = "/etc/torq/banner";
 
 /// How the owner logs in from other machines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +165,7 @@ pub fn run() -> Result<()> {
         // build would fail on them. Before change #1 nothing else on the image uses them.
         let _ = std::fs::remove_dir_all(repo);
         let _ = std::fs::remove_dir_all(BUILD_CACHE);
-        println!("\n{WELCOME}\n");
+        println!("\n{}\n", welcome());
         let a = ask()?;
         match apply(&a) {
             Ok(()) => {
@@ -300,6 +302,14 @@ fn secret(question: &str) -> Result<String> {
     Ok(s.trim_end_matches(['\n', '\r']).to_string())
 }
 
+/// The welcome, under TorqOS's wordmark when the system has one.
+fn welcome() -> String {
+    match std::fs::read_to_string(BANNER) {
+        Ok(banner) => format!("{}\n\n{WELCOME}", banner.trim_end()),
+        Err(_) => WELCOME.to_string(),
+    }
+}
+
 /// Ask, and wait until an answer is typed. A graphics driver loading late (bochs-drm on QEMU's
 /// standard VGA, seconds into setup; a GPU's on real hardware) takes the console over, and what was on
 /// the screen may be lost — the question with it, leaving a screen that asks nothing. Such a console
@@ -322,7 +332,7 @@ fn asked(prompt: &str) -> Result<()> {
         let now = size();
         if now != was {
             was = now;
-            print!("\n{WELCOME}\n\n{prompt}");
+            print!("\n{}\n\n{prompt}", welcome());
             std::io::stdout().flush()?;
         }
     }

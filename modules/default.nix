@@ -16,5 +16,6 @@
     ./nixos-schema.nix
     ./services.nix
     ./releases.nix
+    ./branding.nix
   ];
 }

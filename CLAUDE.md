@@ -48,6 +48,7 @@ templates/config/      the per-machine config repo the broker manages
                        (`nix flake new -t .#config /var/lib/torq/config`)
 broker/                Rust crate: torq-broker (ledger, policy, git, rebuild, rollback)
 tests/                 NixOS VM tests
+branding/              the TorqOS logo, icons, terminal logos and palette (modules/branding.nix)
 docs/                  design docs and decision log
 ```
 

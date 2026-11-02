@@ -39,6 +39,7 @@ rec {
     [ "torq" "schema" ]
     [ "torq" "nixosSchema" ]
     [ "torq" "releases" ]
+    [ "torq" "branding" ]
     [ "nixpkgs" ]
     [ "nix" "package" ]
     [ "systemd" "package" ]
