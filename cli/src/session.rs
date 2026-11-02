@@ -1051,11 +1051,10 @@ impl<'a> Session<'a> {
         self.file(FileAction::List, None).map(|out| out.lines().map(|l| l.trim().to_string()).filter(|l| l.ends_with(".nix")).collect()).unwrap_or_default()
     }
 
-    /// How many settings the candidate changes, as `show | compare` shows them: each setting added,
-    /// removed or changed once (a changed value is a `-` and a `+` of one setting).
+    /// How many changes the candidate holds (Against::count).
     fn pending(&mut self) -> Result<usize> {
         let a = self.against()?;
-        Ok(settings_changed(&a.compare(&self.whole())?))
+        a.count(&self.whole())
     }
 
     /// Whether the candidate differs from its base.
@@ -1552,18 +1551,30 @@ impl Against {
     /// (as written: Nix is shown, never interpreted), then the software's.
     fn compare(&self, w: &crate::whole::Whole) -> Result<String> {
         let mut out = w.compare(&self.base_data(w.schema)?, &self.data);
-        let edited: Vec<candidate::Change> = self
-            .nix
-            .iter()
-            .filter(|(p, t)| self.base_nix.get(*p).cloned().flatten().as_deref() != t.as_deref().map(str::as_bytes))
-            .map(|(p, t)| (p.clone(), self.base_nix.get(p).and_then(|b| b.as_deref()), t.clone()))
-            .collect();
+        let edited = self.edited_files();
         if !edited.is_empty() {
             let scratch = tempfile::tempdir()?;
             out.push_str(&format!("[edit config files]\n{}", candidate::unified_diff(scratch.path(), &edited)?));
         }
         out.push_str(&software_compare(self.lock.as_deref(), &self.new_lock));
         Ok(out)
+    }
+
+    /// The config files the candidate changes (None: deleted), with what they were.
+    fn edited_files(&self) -> Vec<candidate::Change<'_>> {
+        self.nix
+            .iter()
+            .filter(|(p, t)| self.base_nix.get(*p).cloned().flatten().as_deref() != t.as_deref().map(str::as_bytes))
+            .map(|(p, t)| (p.clone(), self.base_nix.get(p).and_then(|b| b.as_deref()), t.clone()))
+            .collect()
+    }
+
+    /// How many changes the candidate holds: each setting added, removed or changed once (a changed
+    /// value is a `-` and a `+` of one setting), each software input moved, each config file
+    /// changed once — however many lines its diff has.
+    fn count(&self, w: &crate::whole::Whole) -> Result<usize> {
+        let settings = w.compare(&self.base_data(w.schema)?, &self.data) + &software_compare(self.lock.as_deref(), &self.new_lock);
+        Ok(settings_changed(&settings) + self.edited_files().len())
     }
 }
 
@@ -1675,7 +1686,8 @@ fn short(id: &str) -> &str {
     &id[..id.len().min(12)]
 }
 
-/// The settings a comparison changes: its `+` and `-` lines, each setting (its section and name) once.
+/// The settings a comparison of settings changes (no config file's diff: Against::count): its `+`
+/// and `-` lines, each setting (its section and name) once.
 fn settings_changed(compare: &str) -> usize {
     let mut section = "";
     let mut seen = std::collections::BTreeSet::new();
@@ -2448,6 +2460,7 @@ mod tests {
         run(&mut s, &["configure"]);
         assert_eq!(s.exec("file edit a.nix").unwrap(), "a.nix: changed in the candidate, but not Nix yet (unexpected end of file, at a.nix:3:1): `file edit a.nix` to fix it; `commit` refuses it until then\n");
         assert_eq!(s.exec("file show a.nix").unwrap(), broken, "kept as typed");
+        assert_eq!(s.exec("rollback 0").unwrap(), "Discarded 1 change: the candidate is the configuration in effect.\n", "a file is one change, however many lines");
     }
 
     #[test]
