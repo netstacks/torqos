@@ -47,6 +47,16 @@ in
       networking.hostName = lib.mkIf (settings.host != null) settings.host;
       time.timeZone = lib.mkIf (settings.zone != null) settings.zone;
     })
+    # The running machine has the name its configuration gives it at every switch, not only from
+    # the next start: NixOS writes /etc/hostname, which systemd reads when the machine boots — a
+    # commit (first-boot setup's too) left the old name until a restart, while the configuration
+    # showed the new one.
+    (lib.mkIf (config.networking.hostName != "") {
+      system.activationScripts.torqHostname = {
+        deps = [ "etc" ];
+        text = "printf %s ${lib.escapeShellArg config.networking.hostName} > /proc/sys/kernel/hostname";
+      };
+    })
     {
       torq.schema = {
         "system host-name" = {

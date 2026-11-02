@@ -27,6 +27,8 @@ pkgs.testers.runNixOSTest {
     torq.broker.buildCommand = "readlink -f /run/booted-system/specialisation/confirmtarget";
     torq.broker.bootCommand = "nix-env -p {profile} --set {system}";
     specialisation.noguard.configuration.torq.broker.guardEtcNixos = false;
+    # A switch to a configuration with another name: the running name follows (modules/host.nix).
+    specialisation.renamed.configuration.networking.hostName = pkgs.lib.mkForce "renamed";
     # The test VM's disk is tiny: min-free would garbage-collect mid-test, deleting the unrooted
     # nixpkgs source the stray-rebuild check uses.
     nix.settings.min-free = 0;
@@ -436,5 +438,12 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"grep -q 'nightLight = true' {repo}/desktop.nix")
         assert last_entry()["kind"] == "confirmed"
         machine.succeed("torq-broker status")
+
+    with subtest("a switch gives the machine the name its configuration says, at once"):
+        assert machine.succeed("hostname").strip() == "machine"
+        machine.succeed("/run/booted-system/specialisation/renamed/bin/switch-to-configuration test")
+        assert machine.succeed("hostname").strip() == "renamed", machine.succeed("hostname")
+        machine.succeed("/run/booted-system/bin/switch-to-configuration test")
+        assert machine.succeed("hostname").strip() == "machine"
   '';
 }
