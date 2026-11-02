@@ -17,7 +17,8 @@ boot.
 4. **Setup asks, once**, like a network device's initial configuration dialog:
    - the machine's name and time zone;
    - the owner's user name and password (twice);
-   - how to log in remotely: not at all, by password, by SSH key (pasted), or both.
+   - how to log in remotely: not at all (the default: Enter turns nothing on), by password, by SSH
+     key (pasted), or both.
 5. **Setup writes the machine's configuration** — the config repo at `/var/lib/torq/config`, from the
    template, with those answers as tree files (`system/host.json`: name and time zone;
    `nixos/torq.json`: the owner; for remote login, `nixos/services.json` with NixOS's

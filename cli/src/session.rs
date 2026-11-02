@@ -429,15 +429,8 @@ impl<'a> Session<'a> {
             // A command from the top, as on a network device: back where you were after it — unless
             // it is itself a move (`top edit system`).
             Op::Top { then: Some(op) } => {
-                // A move: `edit`, `up`, `top`, `exit` — or a `top` around one (`top top edit x`).
-                fn moves(op: &Op) -> bool {
-                    match op {
-                        Op::Top { then: Some(op) } => moves(op),
-                        Op::Edit { .. } | Op::Up { .. } | Op::Top { then: None } | Op::Exit | Op::End => true,
-                        _ => false,
-                    }
-                }
-                let moved = moves(&op);
+                // A move: `edit`, `up`, `exit` (a `top` inside `top` is not a line: grammar.rs).
+                let moved = matches!(*op, Op::Edit { .. } | Op::Up { .. } | Op::Top { .. } | Op::Exit | Op::End);
                 let was = std::mem::take(&mut self.edit);
                 let r = self.run(*op);
                 // Back where it was — unless it moved, or left configuration mode (`commit and-quit`).
@@ -3356,8 +3349,8 @@ mod tests {
         // An empty word is never another word (`exit ""` is not `exit configuration-mode`).
         assert!(s.exec_words(&["exit".to_string(), String::new()]).is_err());
         assert_eq!(s.edit_path(), w("networking"));
-        // Nested `top` comes back; `top commit and-quit` leaves configuration mode for good.
-        run(&mut s, &["top top show time"]);
+        // `top <command>` comes back; `top commit and-quit` leaves configuration mode for good.
+        run(&mut s, &["top show time"]);
         assert_eq!(s.edit_path(), w("networking"), "back where it was");
         // At a level where nothing changes but elsewhere something does: said.
         run(&mut s, &["top set time timeZone UTC"]);

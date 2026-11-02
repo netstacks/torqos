@@ -119,9 +119,11 @@ reviewed steps, broker first. Next: the rest of M1.5, then M2, Install: a qcow2 
 - **Packages, services, updates, history** (ADR-011–013) are torqcli commands now (4g): the earlier
   `torq pkg/service/update/log/undo/status` are gone and say what replaced each; `torq` is torqcli.
   Drift is checked at boot and every 15 min.
-- **A stray `nixos-rebuild` cannot switch the machine away** from its ledgered config:
-  `/etc/nixos` holds stubs that refuse (`torq.broker.guardEtcNixos`). This happened once from
-  another tool on this VM; never build `/etc/nixos` or any config other than the broker's.
+- **A stray `nixos-rebuild` (the default `/etc/nixos`) cannot switch the machine away** from its
+  ledgered config: `/etc/nixos` holds stubs that refuse (`torq.broker.guardEtcNixos`). This happened
+  once from another tool on this VM. Root can still switch any other way (`--flake /tmp/x`, a
+  built system's `switch-to-configuration`): that is drift, reported afterwards, not prevented.
+  Never build `/etc/nixos` or any config other than the broker's.
 - **Way of working:** small steps; an independent reviewer agent behind every meaningful change;
   mutation-check new guards (break them, see a test fail); verify in the Nix sandbox and VM test.
 - **M1.5 `torqcli` (ADR-016) is built and live:** one syntax (ADR-021), candidate, `commit check`,

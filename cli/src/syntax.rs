@@ -376,6 +376,7 @@ mod tests {
             (Mode::Configuration, "request system repair", "'request' is an operational-mode command: `run request …` runs it from here"),
             (Mode::Configuration, "run configure", "'configure' is not a word here (after `run`)"),
             (Mode::Configuration, "top exit", "'exit' is not a word here (after `top`)"),
+            (Mode::Configuration, "top top show", "'top' is not a word here (after `top`) (one of: commit, delete, edit"),
             (Mode::Operational, "exit now", "'now' is not a word here: nothing may follow `exit`"),
             (Mode::Operational, "show packages", "needs <word> (words to search for, in names and descriptions)"),
             (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, commit, ledger, rollback, storage, uptime"),

@@ -467,8 +467,16 @@ impl Walked {
         self.here.node()
     }
     /// What may follow, for `?`.
+    /// What may follow: the words here, but never a command inside itself (`top top …`: once leads
+    /// there already) — so a line nests no deeper than `top run …` (audit of 2026-11-01, L4).
     pub fn next(&self) -> Vec<&'static Node> {
-        self.here.next(&self.read)
+        self.here.next(&self.read).into_iter().filter(|n| !self.reenters(n, None)).collect()
+    }
+
+    /// Whether `n` leads into a command the line is already inside (or into `entering`, the one it
+    /// is about to enter).
+    fn reenters(&self, n: &Node, entering: Option<&Node>) -> bool {
+        n.then.iter().any(|c| matches!(c.word, Word::Command(_)) && (entering.is_some_and(|e| std::ptr::eq(e, c)) || self.outer.iter().any(|(o, _)| std::ptr::eq(*o, c))))
     }
     pub fn mode(&self) -> Mode {
         self.here.mode()
@@ -498,7 +506,7 @@ pub fn walk(mode: Mode, words: &[String]) -> Result<Walked, Stop> {
 /// One word more.
 fn step(walked: &mut Walked, w: &String) -> Result<(), Stop> {
     let here = walked.here;
-    let next = here.next(&walked.read);
+    let next = walked.next();
     // A whole command of another mode (`run`, `top`): from here on, that command, from its start.
     if let Some(n) = next.iter().find(|n| matches!(n.word, Word::Command(_))) {
         let Word::Command(m) = n.word else { unreachable!() };
@@ -742,7 +750,7 @@ pub fn offers(walked: &Walked) -> Vec<Offer> {
             Word::Path => out.push(Offer::Path { verb: walked.read.fixed.first().copied().unwrap_or("show"), from_top }),
             Word::Command(m) => {
                 let start = Here::Start { mode: m, top: false };
-                out.extend(start.next(&Read::default()).into_iter().filter_map(|x| match x.word {
+                out.extend(start.next(&Read::default()).into_iter().filter(|x| !walked.reenters(x, Some(n))).filter_map(|x| match x.word {
                     Word::Fixed(w) => Some(Offer::Word(w, x.help)),
                     _ => None,
                 }));

@@ -198,7 +198,9 @@ fn ask() -> Result<Answers> {
     };
     println!("\nLogging in from other machines (SSH):\n  1  not at all\n  2  with your password\n  3  with an SSH key\n  4  with either");
     let remote = until(
-        || line("Choose", "2"),
+        // Not at all unless asked for (SECURITY-MODEL: keys only unless passwords are set; audit of
+        // 2026-11-01, N7): Enter turns nothing on.
+        || line("Choose", "1"),
         |c| match c {
             "1" => Ok(Remote::No),
             "2" => Ok(Remote::Password),

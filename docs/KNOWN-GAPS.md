@@ -214,20 +214,20 @@ is 6p, N18 is 6 (below).
 | L1 | Proposal file names printed unescaped | fixed: escaped as everything the broker shows |
 | L2 | `XDG_STATE_HOME` taken without an owner check | open |
 | L3 | A save file may hold a file and its deletion marker | open |
-| L4 | Nested `top` without limit | open |
+| L4 | Nested `top` without limit | fixed: a command is never inside itself (`top top` refused; the grammar's `Walked::next`, for `?` too) |
 | N3 | A torn ledger append (power cut, full disk) stops every broker command, recovery too | open — write-ahead copy, repaired and ledgered |
 | N4 | `propose --reason` may hold newlines: forged git trailers | fixed: a reason is one line, no control characters (refused at propose; torqcli sends one clean line) |
 | N5 | Only torq-broker-init is sandboxed; SECURITY-MODEL says all are | open — sandbox the root units, fix the sentence |
 | N6 | `systemd tmpfiles` and `environment.etc."nixos/*"` reach the broker's inputs and the /etc/nixos guard | open — fence them |
-| N7 | Setup offers password SSH by default; no test of the image's invariants | open — default keys or none; tests/image.nix |
+| N7 | Setup offers password SSH by default; no test of the image's invariants | default fixed (none: Enter turns nothing on); tests/image.nix open |
 | N8 | "A person at a terminal" is a tty check: `script`/`expect` pass it | open — say so (KNOWN-GAPS 4); absolute `id` |
 | N9 | Signing the ledger on the machine cannot keep root out | open — restate: signed by the build, anchored off the machine |
 | N10 | `save <file>` writes anywhere (`.ssh/authorized_keys`) | open — confine save/load |
 | N11 | The broker takes `$6$` alone as a hash | fixed: crypt's whole form (`policy::password_hash_ok`) |
-| N14 | `TORQ_NIXOS_SCHEMA` honoured in release builds | open — development builds only |
+| N14 | `TORQ_NIXOS_SCHEMA` honoured in release builds | not so: only a test reads it; torqcli reads /etc/torq/nixos-schema.json, fixed |
 | N15 | Helpers found through PATH (`nix`, `git`, `id`, `ssh-keygen`, …) | open — absolute paths |
 | N16 | The broker reads `--diff`/`--hash-file` without an owner check or O_NOFOLLOW | open (matters with the M3 socket) |
-| N17 | The /etc/nixos guard stops the default path only; CLAUDE.md says more | open — reword |
+| N17 | The /etc/nixos guard stops the default path only; CLAUDE.md says more | CLAUDE.md reworded; the guard is as SECURITY-MODEL says |
 | N19 | Every proposal's diff is in the ledger; each call parses it all | open — diffs by hash beside it |
 
 Its design notes (§4) are for the AI layer and M3: `SO_PEERCRED` names an account, not a person;
