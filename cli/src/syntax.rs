@@ -57,11 +57,13 @@ pub enum Op {
     /// `show system ledger [<count>]`: the ledger itself — every change, refused and failed ones too.
     ShowLedger { count: Option<usize> },
     ShowPackages { terms: Vec<String> },
-    /// `show version`, `show system uptime`, `show interfaces`, `show system storage`: the machine.
+    /// `show version`, `show system uptime`, `show interfaces`, `show system storage`, `show users`:
+    /// the machine.
     ShowVersion,
     ShowUptime,
     ShowInterfaces { name: Option<String> },
     ShowStorage,
+    ShowUsers,
     Request(Request),
     /// `file show|edit|delete <path>`, `file list`: the config repo's config files (in configuration
     /// mode, the candidate's; in operational mode, the active ones; `edit` and `delete` only there).
@@ -214,6 +216,7 @@ pub fn render(op: &Op) -> String {
         Op::ShowInterfaces { name: None } => "show interfaces".into(),
         Op::ShowInterfaces { name: Some(n) } => format!("show interfaces {}", quote(n)),
         Op::ShowStorage => "show system storage".into(),
+        Op::ShowUsers => "show users".into(),
         Op::Request(r) => match r {
             Request::Repair => "request system repair".into(),
             Request::Password { user: None } => "request system password".into(),
@@ -297,6 +300,7 @@ mod tests {
             (Mode::Operational, Op::ShowInterfaces { name: None }),
             (Mode::Operational, Op::ShowInterfaces { name: Some("enp0s1".into()) }),
             (Mode::Operational, Op::ShowStorage),
+            (Mode::Operational, Op::ShowUsers),
             (Mode::Operational, Op::ShowLedger { count: None }),
             (Mode::Operational, Op::ShowLedger { count: Some(5) }),
             (Mode::Operational, Op::ShowPackages { terms: v("rip grep") }),

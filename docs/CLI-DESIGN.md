@@ -1,3 +1,4 @@
+| `show users` | the people with an account here (NixOS's isNormalUser: numbers 1000 to 29999), where each is logged in now, and their groups; it says where groups are set (`users users <name> extraGroups`) |
 # CLI design — `torqcli`, the TorqOS shell
 
 Status: **plan** (milestone M1.5 in `ROADMAP.md`; ADR-016). TorqOS is driven like a network
@@ -448,8 +449,9 @@ candidate whose base is no longer the active configuration warns that `commit` w
 ledger is root's, and stays unreadable to users) — its configurations, newest first, with who
 approved each; without the broker there are no numbers, rather than git's; `rollback <n>`, `show system rollback <n>`
 and `request system software rollback <n>` use the same numbers (`rollback 0`: what is active). `show packages` searches this machine's nixpkgs.
-`show version`, `show system uptime`, `show interfaces` and `show system storage` read the running
-machine (/proc, `ip -j addr`, `df`, the system profiles; cli/src/facts.rs).
+`show version`, `show system uptime`, `show interfaces`, `show system storage` and `show users` read
+the running machine (/proc, `ip -j addr`, `df`, the system profiles, /etc/passwd and /etc/group,
+`loginctl`; cli/src/facts.rs).
 
 ## How it is built
 

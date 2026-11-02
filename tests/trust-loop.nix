@@ -147,6 +147,13 @@ pkgs.testers.runNixOSTest {
         assert "## also set outside this configuration, in Nix: desktop.nix\n" in out, out
         out = machine.succeed("su - dev -c 'torqcli -c \"configure; set system time-zone UTC; show | compare\"'")
         assert "[edit time]\n+   timeZone UTC;" in out, out
+        # The people here, as the running machine has them: the owner alone (no system account), with
+        # TorqOS's groups for them, their own first; and where groups are set.
+        out = machine.succeed("su - dev -c 'torqcli -c \"show users\"'")
+        lines = out.splitlines()
+        assert lines[0].split() == ["User", "Logged", "in", "Groups"] and lines[1].startswith("dev "), out
+        assert lines[1].split()[-4:] == ["users", "wheel", "audio", "video"], out
+        assert lines[2].startswith("A person's groups: `set users users <name> extraGroups <group>`"), out
         # save / load: as the user, private; a saved configuration loaded back is the same candidate.
         out = machine.succeed("su - dev -c 'torqcli -c \"configure; set system time-zone UTC; save /home/dev/saved.conf; rollback 0; load override /home/dev/saved.conf; show | compare\"'")
         assert "Wrote " in out and "[edit time]\n+   timeZone UTC;" in out, out

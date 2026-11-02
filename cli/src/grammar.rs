@@ -238,6 +238,7 @@ static SHOW: &[Node] = &[
     fixed("packages", "Search the software you can install", In::Op).then(&[node(Word::Terms, "Words to search for, in names and descriptions", In::Op).whole(|r| Ok(Op::ShowPackages { terms: r.terms.clone() })).pipes(Pipes::Filters)]),
     fixed("services", "The services the configuration turns on", In::Op).whole(|_| Ok(Op::ShowServices)).pipes(Pipes::Filters),
     fixed("system", "This machine", In::Op).then(SHOW_SYSTEM),
+    fixed("users", "The people with an account here: where they are logged in, and their groups", In::Op).whole(|_| Ok(Op::ShowUsers)).pipes(Pipes::Filters),
     fixed("version", "What this machine runs: TorqOS, NixOS, Linux", In::Op).whole(|_| Ok(Op::ShowVersion)).pipes(Pipes::Filters),
 ];
 

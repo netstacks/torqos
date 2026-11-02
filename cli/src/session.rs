@@ -392,7 +392,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers => {
                 self.show_operational(op)
             }
             Op::Request(r) => self.request(r),
@@ -755,6 +755,7 @@ impl<'a> Session<'a> {
             }
             Op::ShowInterfaces { name } => crate::facts::interfaces(&self.machine.facts()?, name.as_deref()),
             Op::ShowStorage => Ok(crate::facts::storage(&self.machine.facts()?, &self.ui())),
+            Op::ShowUsers => Ok(crate::facts::users(&self.machine.facts()?, &self.ui())),
             Op::ShowLedger { count } => self.machine.ledger(count.unwrap_or(20), self.fit),
             other => bail!("not an operational show: {other:?}"),
         }

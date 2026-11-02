@@ -1,5 +1,5 @@
 //! What the machine is and how it is doing — `show version`, `show system uptime`, `show
-//! interfaces`, `show system storage` — as a network device answers them. The facts are read from
+//! interfaces`, `show system storage`, `show users` — as a network device answers them. The facts are read from
 //! the running system (shell.rs: /proc, `ip -j`, `df`); laying them out is pure, and tested here.
 
 use crate::ui::{Col, Table, Ui};
@@ -19,6 +19,8 @@ pub struct Facts {
     pub filesystems: Vec<Filesystem>,
     /// The system versions kept, each one bootable.
     pub generations: usize,
+    /// The people with an account here.
+    pub people: Vec<Person>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -29,6 +31,16 @@ pub struct Interface {
     pub mac: String,
     /// Addresses with their prefix length (`192.168.64.4/24`).
     pub addresses: Vec<String>,
+}
+
+/// A person's account on the machine (`show users`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Person {
+    pub name: String,
+    /// Their groups: their own first, then the others as /etc/group lists them.
+    pub groups: Vec<String>,
+    /// Where they are logged in now (`pts/0 from 192.168.64.1`, `tty1`).
+    pub sessions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -94,6 +106,64 @@ pub fn storage(f: &Facts, ui: &Ui) -> String {
     out
 }
 
+/// `show users`: the people with an account here, where each is logged in now, and their groups —
+/// and where a person's groups are set, since the groups are what is changed most.
+pub fn users(f: &Facts, ui: &Ui) -> String {
+    let mut t = Table::new(&[Col::Left("User"), Col::Left("Logged in"), Col::Text("Groups")]);
+    for p in &f.people {
+        t.row(vec![p.name.clone(), p.sessions.first().map_or("-", String::as_str).to_string(), p.groups.join(" ")]);
+        for s in p.sessions.iter().skip(1) {
+            t.row(vec![String::new(), s.clone()]);
+        }
+    }
+    let mut out = t.render(ui);
+    let how = "A person's groups: `set users users <name> extraGroups <group>` in configuration mode (`docker`, say, once `virtualisation docker enable true`).";
+    out.push_str(&format!("{}\n", ui.line("", how)));
+    out
+}
+
+/// The people in /etc/passwd and /etc/group, as the files have them: a person's account (NixOS's
+/// isNormalUser) has a number from 1000, below the build accounts' (30000 on).
+pub fn people(passwd: &str, group: &str) -> Vec<Person> {
+    let groups: Vec<(&str, &str, Vec<&str>)> = group
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            Some((*f.first()?, *f.get(2)?, f.get(3)?.split(',').filter(|m| !m.is_empty()).collect()))
+        })
+        .collect();
+    passwd
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            let (name, id, own) = (*f.first()?, f.get(2)?.parse::<u32>().ok()?, *f.get(3)?);
+            if !(1000..30000).contains(&id) {
+                return None;
+            }
+            let theirs = groups.iter().filter(|(_, g, _)| *g == own).chain(groups.iter().filter(|(_, g, m)| *g != own && m.contains(&name)));
+            Some(Person { name: name.to_string(), groups: theirs.map(|(n, _, _)| n.to_string()).collect(), sessions: vec![] })
+        })
+        .collect()
+}
+
+/// Logins, from `loginctl show-session <ids> -p Name -p Class -p TTY -p RemoteHost` (a block of
+/// `Key=value` lines per session): whose, and where (`pts/0 from 192.168.64.1`). A person's own
+/// service manager (class `manager`) is not a login.
+pub fn sessions(show: &str) -> Vec<(String, String)> {
+    show.split("\n\n")
+        .filter_map(|block| {
+            let get = |k: &str| block.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=')).unwrap_or_default();
+            if !get("Class").starts_with("user") {
+                return None;
+            }
+            let from = Some(get("RemoteHost")).filter(|h| !h.is_empty()).map(|h| format!("from {h}"));
+            let at: Vec<String> = Some(get("TTY")).filter(|t| !t.is_empty()).map(String::from).into_iter().chain(from).collect();
+            Some((get("Name").to_string(), if at.is_empty() { "a session".into() } else { at.join(" ") }))
+        })
+        .filter(|(name, _)| !name.is_empty())
+        .collect()
+}
+
 /// Two columns: a name, then its value.
 fn rows(r: &[(&str, String)], ui: &Ui) -> String {
     let mut t = Table::new(&[Col::Left(""), Col::Text("")]);
@@ -138,6 +208,7 @@ mod tests {
             ],
             filesystems: vec![Filesystem { device: "/dev/vda2".into(), mount: "/".into(), size: 62 << 30, used: 33 << 30, free: 27 << 30 }],
             generations: 23,
+            people: vec![],
         }
     }
 
@@ -156,5 +227,22 @@ mod tests {
         assert!(s.starts_with("Filesystem  Size  Used  Free  Use  Mounted on\n/dev/vda2    62G   33G   27G  53%  /\nSystem versions kept: 23"), "{s}");
         assert_eq!((duration(45), duration(3600), duration(90061), duration(0)), ("45 seconds".into(), "1 hour".into(), "1 day 1 hour".into(), "0 seconds".into()));
         assert_eq!((size(512), size(87 << 20), size(1536 << 30)), ("512B".into(), "87M".into(), "1.5T".into()));
+    }
+
+    #[test]
+    fn the_people_here_their_groups_and_logins() {
+        let passwd = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\nnixbld1:x:30001:30000::/var/empty:/bin/nologin\nsshd:x:998:998::/var/empty:/bin/nologin\n";
+        let group = "root:x:0:\nwheel:x:1:viper\nusers:x:100:\ndocker:x:131:sam,viper\nnixbld:x:30000:nixbld1\n";
+        let mut people = people(passwd, group);
+        assert_eq!(people.iter().map(|p| (p.name.as_str(), p.groups.join(" "))).collect::<Vec<_>>(), [("viper", "users wheel docker".into()), ("sam", "users docker".into())], "people only, their own group first");
+
+        let show = "Name=viper\nClass=user\nTTY=pts/0\nRemoteHost=192.168.64.1\n\nName=viper\nClass=manager\nTTY=\nRemoteHost=\n\nName=viper\nClass=user\nTTY=tty1\nRemoteHost=\n\nName=sam\nClass=user\nTTY=\nRemoteHost=10.0.0.9\n";
+        let s = sessions(show);
+        assert_eq!(s, [("viper".into(), "pts/0 from 192.168.64.1".into()), ("viper".into(), "tty1".into()), ("sam".into(), "from 10.0.0.9".into())], "a service manager is not a login");
+
+        people[0].sessions = vec!["pts/0 from 192.168.64.1".into(), "tty1".into()];
+        let f = Facts { people, ..Default::default() };
+        let u = users(&f, &Ui::plain());
+        assert!(u.starts_with("User   Logged in                Groups\nviper  pts/0 from 192.168.64.1  users wheel docker\n       tty1\nsam    -                        users docker\nA person's groups: `set users users <name> extraGroups <group>`"), "{u}");
     }
 }

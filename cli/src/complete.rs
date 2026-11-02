@@ -470,7 +470,7 @@ mod tests {
     fn commands_of_each_mode() {
         let s = schema();
         assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "exit", "file", "help", "quit", "request", "show"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "interfaces", "packages", "services", "system", "version"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "interfaces", "packages", "services", "system", "users", "version"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "rollback", "storage", "uptime"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["password", "repair", "revert", "software", "update"]);

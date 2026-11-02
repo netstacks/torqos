@@ -399,7 +399,26 @@ impl Machine for Real<'_> {
             })
             .collect();
         let generations = fs::read_dir("/nix/var/nix/profiles").map(|d| d.filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with("system-") && e.file_name().to_string_lossy().ends_with("-link")).count()).unwrap_or(0);
-        Ok(crate::facts::Facts { nixos: read("/run/current-system/nixos-version")?, kernel: read("/proc/sys/kernel/osrelease")?, uptime, load, interfaces, filesystems, generations })
+        // People and where they are logged in: the account files, and systemd's own record of logins.
+        let mut people = crate::facts::people(&read("/etc/passwd")?, &read("/etc/group")?);
+        let loginctl = "/run/current-system/sw/bin/loginctl";
+        let list = std::process::Command::new(loginctl).args(["list-sessions", "--json=short"]).output().context("running loginctl")?;
+        let ids: Vec<String> = serde_json::from_slice::<serde_json::Value>(&list.stdout)
+            .context("reading loginctl's answer")?
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s["session"].as_str().map(String::from))
+            .collect();
+        if !ids.is_empty() {
+            let show = std::process::Command::new(loginctl).arg("show-session").args(&ids).args(["-p", "Name", "-p", "Class", "-p", "TTY", "-p", "RemoteHost"]).output().context("running loginctl")?;
+            for (name, at) in crate::facts::sessions(&String::from_utf8_lossy(&show.stdout)) {
+                if let Some(p) = people.iter_mut().find(|p| p.name == name) {
+                    p.sessions.push(at);
+                }
+            }
+        }
+        Ok(crate::facts::Facts { nixos: read("/run/current-system/nixos-version")?, kernel: read("/proc/sys/kernel/osrelease")?, uptime, load, interfaces, filesystems, generations, people })
     }
 
     /// As `torq undo` did, with a commit's rule for asking: a change only to your own folder goes
