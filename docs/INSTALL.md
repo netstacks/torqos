@@ -56,7 +56,7 @@ small (about 5 GB): give the VM a bigger one, and the root file system grows to 
      disk controllers (PVSCSI, LSI Logic, SATA, NVMe) and network cards (VMXNET3, E1000e) works.
   4. Power it on: the console shows setup.
 
-  *Built by CI (2026-11-02); not yet tried on an ESXi host.*
+  *Tried on ESXi 8.0 U3 (2026-11-02): boots to setup, its disk on PVSCSI, network VMXNET3, EFI.*
 
 ## What is in the image
 
