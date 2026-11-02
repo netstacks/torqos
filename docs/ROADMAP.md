@@ -94,18 +94,28 @@ builds TorqOS's few small pieces itself, in minutes — no service for the proje
 first.
 
 - [ ] **qcow2 image** (aarch64 first, testable here; then x86_64): download, boot in any VM (UTM,
-      QEMU, Proxmox), log in. The config repo and ledger are created on first boot.
+      QEMU, Proxmox), log in. The config repo and ledger are created on first boot. *aarch64 done:
+      installed in UTM from the image (2026-11-02). x86_64 (ESXi: the same disk as VMDK) next,
+      built by CI.*
 - [ ] **First-boot setup**, like a network device's initial configuration dialog: host name,
       time zone, the owner's account and password, how to log in remotely (password, SSH key, or
       both), asked once at the console, committed as change #1. No default password ships;
       passwords live outside the config repo (proposed: SECURITY-MODEL.md, "Accounts and
-      passwords").
+      passwords"). *Done; tried on the first install (2026-11-02).*
 - [ ] **Customer-safe defaults:** dev mode off, SSH as chosen at first boot (passwords protected
       against guessing), the /etc/nixos guard on, nothing
       installed that is not needed.
 - [ ] **Releases** (`v0.1.0`, …) at one URL machines fetch from; `request system update` moves to
-      the newest one. (The repo is private: where releases are published is decided before any
-      machine outside this VM needs updates.)
+      the newest one. *Decided (2026-11-02): public, in a new repo of their own (e.g.
+      `netstacks/torqos-release`; development stays in the private one), with a `stable` branch
+      machines point at (`github:…/stable`), moved only to tested releases.*
+- [ ] **CI (GitHub Actions):** *test* on every push and pull request (`nix flake check`: tree
+      checks and the VM tests, with KVM); *nixpkgs bump* weekly, as a pull request the tests run
+      on; *release* on a `v*` tag: the images built on x86_64 and arm64 runners, checksums, a
+      draft GitHub Release, the tagged source copied to the release repo and `stable` moved. The
+      move to the next NixOS release (every six months) stays a person's. *To decide: where the
+      release key lives — recommended: on the maintainer's machine, signing the draft's checksums
+      by hand (GitHub never holds it).*
 - [ ] **Downloads checked:** each image published with a checksum signed by a TorqOS release key
       (plain files on the release page; checked with `ssh-keygen -Y verify`, nothing to install).
 - [ ] **ISO installer** for real hardware: the same image and first-boot setup, plus disk choice.
