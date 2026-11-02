@@ -625,7 +625,13 @@ fn check_name(key: &str, list: &Node, name: &str, existing: bool) -> Result<()> 
     if let Some(values) = &list.values {
         if !values.contains_key(name) {
             let known = values.keys().cloned().collect::<Vec<_>>().join(", ");
-            bail!("'{name}' is not one of the {key} on this machine ({known})");
+            // How a new one is made, where the list says what its names are (a person: declared in
+            // the candidate, counted in the same one — whole.rs).
+            let new = match list.ty.as_deref() {
+                Some("user-name") => format!("; a new person first: `set users users {name} isNormalUser true`"),
+                _ => String::new(),
+            };
+            bail!("'{name}' is not one of the {key} on this machine ({known}){new}");
         }
     }
     Ok(())

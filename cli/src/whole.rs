@@ -609,8 +609,8 @@ fn a_person_added_in_the_candidate_can_have_software_in_it() {
     let x = Whole { schema: &schema, tree: &tree };
     let w = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
     let mut d = Data::default();
-    assert!(format!("{:#}", x.set(&mut d, &w("users users alice packages btop")).unwrap_err()).contains("'alice' is not one of the users"));
-    x.set(&mut d, &w("users users alice extraGroups wheel")).unwrap();
+    assert!(format!("{:#}", x.set(&mut d, &w("users users alice packages btop")).unwrap_err()).contains("'alice' is not one of the users on this machine (dev); a new person first: `set users users alice isNormalUser true`"));
+    x.set(&mut d, &w("users users alice isNormalUser true")).unwrap();
     x.set(&mut d, &w("users users alice packages btop")).unwrap();
     assert!(x.show(&d, &w("users users alice")).unwrap().contains("packages [ btop ];"));
     assert_eq!(x.delete(&mut d, &w("users users alice packages btop")).unwrap(), Deleted::Done);

@@ -507,6 +507,18 @@
       }
     },
     {
+      "loc": [
+        "users",
+        "users",
+        "<name>",
+        "isNormalUser"
+      ],
+      "type": {
+        "name": "bool"
+      },
+      "help": "Indicates whether this is an account for a real user."
+    },
+    {
       "help": "The user's auxiliary groups.",
       "loc": [
         "users",
