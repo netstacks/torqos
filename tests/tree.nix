@@ -76,6 +76,9 @@ let
     nixos-elsewhere-packages = c: map (p: p.outPath or p) c.environment.systemPackages;
     # A person's password is never in the configuration (settings-fence.nix, rule 3).
     nixos-password = c: c.users.users.dev.hashedPassword;
+    # A file named as a module directive, NixOS's old name for users.users (audit of 2026-11-01).
+    nixos-fence-underscore-file = c: c.torq.broker.rebuildCommand;
+    nixos-fence-alias-users = c: c.users.users.dev.hashedPassword;
     # Config files: only .nix files inside the config repo (config-files.json).
     config-bad-dotdot = c: c.networking.hostName;
     config-bad-abs = c: c.networking.hostName;
@@ -110,6 +113,11 @@ let
     ++ lib.optional (tryValue (configOf "template").system.build.toplevel.drvPath == null) "template: does not evaluate as a machine"
     ++ lib.optional (tryValue (configOf "template").fileSystems."/".device != "/dev/vda1") "template: its hardware file is not attached"
     ++ lib.optional (tryValue (configOf "template").torq.desktop.enable != false) "template: the desktop is on"
+    # The root account is locked: a config file cannot give it a password (modules/accounts.nix).
+    ++ lib.optional (!(lib.any (lib.hasInfix "root never has a password") (torqFailures (configOf "config-root-password")))) "config-root-password: root got a password"
+    # TorqOS from a folder (path:) only in dev mode, by the configuration's own lock (modules/dev.nix).
+    ++ lib.optional (!(lib.any (lib.hasInfix "comes from a folder") (torqFailures (configOf "dev-folder-off")))) "dev-folder-off: TorqOS from a folder without dev mode was not refused"
+    ++ lib.concatMap (case: lib.optional (lib.any (lib.hasInfix "comes from a folder") (torqFailures (configOf case))) "${case}: refused, but may come from there") [ "dev-folder-on" "dev-store" ]
     ++ lib.concatLists (lib.mapAttrsToList (case: probe:
       lib.optional (tryValue (probe (configOf case)) != null) "${case}: evaluated, but must be refused") nixosInvalid);
 

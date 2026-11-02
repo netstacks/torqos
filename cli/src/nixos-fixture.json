@@ -2,6 +2,14 @@
   "version": 1,
   "fence": [
     [
+      "users",
+      "extraUsers"
+    ],
+    [
+      "users",
+      "extraGroups"
+    ],
+    [
       "torq",
       "broker"
     ],

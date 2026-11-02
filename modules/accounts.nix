@@ -28,6 +28,15 @@ in
   };
 
   config = {
+    # The root account is locked (SECURITY-MODEL.md): nothing gives it a password, however it is
+    # written (audit of 2026-11-01, N2).
+    assertions = [
+      {
+        assertion = lib.all (k: (config.users.users.root.${k} or null) == null) [ "password" "hashedPassword" "initialPassword" "initialHashedPassword" "hashedPasswordFile" ];
+        message = "torq: root never has a password (it is locked; a person logs in as themselves, then sudo).";
+      }
+    ];
+
     users.mutableUsers = false;
 
     # A machine from before this (its passwords set with `passwd`, in /etc/shadow only): each

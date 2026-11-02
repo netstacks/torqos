@@ -15,6 +15,9 @@
 # its identity (KNOWN-GAPS #4, M3). Changing what is fenced here is a change to TorqOS itself, or a
 # reviewed .nix file.
 #
+#     NixOS's old names for a place (`users.extraUsers` for `users.users`) are refused too: through
+#     one, a setting would be out of every rule written for its real name (audit of 2026-11-01, N2).
+#
 #  3. A person's password is never in the configuration: everyone on the machine can read it, and
 #     its history keeps every value forever (a hash there can be cracked offline). Passwords live
 #     in /var/lib/torq/secrets (modules/accounts.nix); `request system password` changes one.
@@ -23,7 +26,13 @@
 { lib }:
 
 rec {
-  patterns = [
+  # NixOS's aliases of a place the rules name: set at the real name, as torqcli does.
+  aliases = [
+    [ "users" "extraUsers" ]
+    [ "users" "extraGroups" ]
+  ];
+
+  patterns = aliases ++ [
     [ "torq" "broker" ]
     [ "torq" "packages" ]
     [ "torq" "cli" "package" ]
@@ -89,6 +98,7 @@ rec {
         else [ ];
     in
     if underscore != null then "${here}.${underscore}: a key starting with _ is a NixOS module directive (mkForce, mkMerge, …), not a setting: the tree holds data only"
+    else if matchesAny aliases path then "${here}: NixOS's old name for ${if lib.elemAt path 1 == "extraUsers" then "users.users" else "users.groups"}: set it there (one place, every rule)"
     else if keptElsewhere path then "${here}: kept in its own file by TorqOS (as torqcli writes it), not in nixos/"
     else if matchesAny passwords path then "${here}: a password is never in the configuration (everyone can read it, and its history keeps it): `request system password <user>` sets one"
     else if fenced path then "${here}: not settable in the configuration tree (it reaches the broker or TorqOS itself)"

@@ -83,5 +83,11 @@ in
   imports = lib.concatLists (lib.mapAttrsToList (at: rels:
     if rels == [ ] then throw "torq: config-files.json: ${if at == "" then "the top" else "`${at}`"}: an empty list (no files: no entry)"
     else map (configFile at) (lib.toList rels)) attached);
-  config = lib.genAttrs names (name: under (options.${name} or { }) (checked name (read name)));
+  # A file is one of NixOS's top-level settings, by name: never a module directive (`_type.json`,
+  # whose value would make the whole of nixos/ an mkMerge or mkOverride: audit of 2026-11-01, N1),
+  # never a name no option has.
+  config = lib.genAttrs names (name:
+    if lib.hasPrefix "_" name || !(options ? ${name})
+    then throw "torq: nixos/${name}.json: '${name}' is not one of NixOS's settings (a file here is one: networking.json, services.json, …)"
+    else under options.${name} (checked name (read name)));
 }

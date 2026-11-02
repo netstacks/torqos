@@ -193,6 +193,48 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    included. Reading one when it is asked for would mean evaluating the configuration (seconds).
    Possible: defaults written by NixOS's manual build, or an evaluation per setting in its own
    process.
+## Audit findings to fix (2026-11-01)
+
+Two audits of 2026-11-01, kept as their authors wrote them: `docs/AUDIT-2026-11-01.md` (H, M, L)
+and `docs/FABLE_AUDIT.md` (N, plus its check of the first). Each is fixed when the work it belongs to
+comes up, not all at once; this list is where they are tracked. Already elsewhere here: M1 is 6e, M7
+is 6p, N18 is 6 (below).
+
+| # | What | Status |
+|---|---|---|
+| H1 | First-boot setup not crash-resumable | fixed (dfae2d3): setup.json, finished at the next start |
+| H2 | SSH lockout check only when SSH turns on | fixed (f44bd94): `session::ssh_review` on every change |
+| M5 | `path:` source guard reads JSON, not the evaluated configuration | fixed: an assertion in modules/dev.nix (the configuration's own lock) |
+| M6 | Setup accepts a key that only looks like one | fixed: `ssh-keygen -l` decides (`pkg::key_id`) |
+| N1 | **high:** a `_`-named `nixos/*.json` file (`_type`, `contents`) gets past the fence | fixed: a file there is named after a top-level NixOS option, never `_` (modules/nixos-settings.nix; tree: nixos-fence-underscore-file) |
+| N2 | **high:** `users extraUsers` (NixOS's alias) gets past the password rule; root can get a password | fixed: the aliases are fenced (settings-fence.nix `aliases`); an assertion keeps root without a password, a config file included (tree: nixos-fence-alias-users, config-root-password) |
+| M2 / N12 | A missing boot profile is not a problem to `status`; `repair` counts it as fine | open (apply/restore half fixed) |
+| M3 | A password change can take effect without its ledger entry; no fsync of the folder | open — one transaction |
+| M4 / N13 | Outside-switch checks are a moment's; `confirm` has none (nor the unledgered-HEAD check) | open |
+| L1 | Proposal file names printed unescaped | open |
+| L2 | `XDG_STATE_HOME` taken without an owner check | open |
+| L3 | A save file may hold a file and its deletion marker | open |
+| L4 | Nested `top` without limit | open |
+| N3 | A torn ledger append (power cut, full disk) stops every broker command, recovery too | open — write-ahead copy, repaired and ledgered |
+| N4 | `propose --reason` may hold newlines: forged git trailers | open — refuse control characters |
+| N5 | Only torq-broker-init is sandboxed; SECURITY-MODEL says all are | open — sandbox the root units, fix the sentence |
+| N6 | `systemd tmpfiles` and `environment.etc."nixos/*"` reach the broker's inputs and the /etc/nixos guard | open — fence them |
+| N7 | Setup offers password SSH by default; no test of the image's invariants | open — default keys or none; tests/image.nix |
+| N8 | "A person at a terminal" is a tty check: `script`/`expect` pass it | open — say so (KNOWN-GAPS 4); absolute `id` |
+| N9 | Signing the ledger on the machine cannot keep root out | open — restate: signed by the build, anchored off the machine |
+| N10 | `save <file>` writes anywhere (`.ssh/authorized_keys`) | open — confine save/load |
+| N11 | The broker takes `$6$` alone as a hash | open |
+| N14 | `TORQ_NIXOS_SCHEMA` honoured in release builds | open — development builds only |
+| N15 | Helpers found through PATH (`nix`, `git`, `id`, `ssh-keygen`, …) | open — absolute paths |
+| N16 | The broker reads `--diff`/`--hash-file` without an owner check or O_NOFOLLOW | open (matters with the M3 socket) |
+| N17 | The /etc/nixos guard stops the default path only; CLAUDE.md says more | open — reword |
+| N19 | Every proposal's diff is in the ledger; each call parses it all | open — diffs by hash beside it |
+
+Its design notes (§4) are for the AI layer and M3: `SO_PEERCRED` names an account, not a person;
+approve-once for user tier; taint set by the tool layer; what strict mode can mean; where an update
+credential lives; the broker checking the `path:` rule itself; the threat table's "later" items.
+Its §5 lists claims without a test.
+
 ## Security defaults that are not real yet
 6. **`lockdown=integrity` does nothing:** the kernel command line has it, but the lockdown LSM is
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing
