@@ -15,6 +15,6 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "TorqOS privileged change broker";
     mainProgram = "torq-broker";
-    license = with lib.licenses; [ mit asl20 ];
+    license = lib.licenses.asl20;
   };
 }

@@ -3,7 +3,7 @@ name = "torq"
 version = "0.1.0"
 edition = "2021"
 description = "TorqOS command line (unprivileged): changes the system by proposing diffs to torq-broker"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1"

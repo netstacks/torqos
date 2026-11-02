@@ -357,3 +357,17 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** The first read of a session asks for the password; sudo's timestamp covers the
   rest for its usual few minutes. A script reads the history only with `sudo -v` first or at a
   terminal. An agent (M3) gets its own read access through the broker's socket, not this way.
+
+## ADR-027 — Apache-2.0, every contribution signed off (DCO)
+- **Context:** TorqOS is to be published as an open-source distribution; the repo had no licence
+  (the crates said "MIT OR Apache-2.0", never decided), which leaves it all rights reserved. The
+  owner's aim: as little legal exposure as possible, for the maintainer and for users.
+- **Decision:** Apache License 2.0 (`LICENSE`, the text as apache.org publishes it): no warranty and
+  no liability, as every open-source licence says, and also a patent licence from every contributor
+  for what their contribution uses, ended for anyone who sues claiming TorqOS infringes a patent;
+  contributions are under the same licence by default (section 5). Every contribution is signed off
+  under the Developer Certificate of Origin 1.1 (`DCO`, `CONTRIBUTING.md`): a record that whoever
+  gave it had the right to.
+- **Consequences:** The crates and packages say Apache-2.0. Pull requests are checked for sign-offs
+  (with CI). Owning the project through a company rather than a person is the owner's to arrange,
+  outside the repo; none of this is legal advice.

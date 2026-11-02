@@ -33,6 +33,6 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "TorqOS command line (unprivileged): changes the system by proposing to torq-broker";
     mainProgram = "torq";
-    license = with lib.licenses; [ mit asl20 ];
+    license = lib.licenses.asl20;
   };
 }
