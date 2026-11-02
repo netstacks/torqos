@@ -327,22 +327,13 @@ fn render(choices: &[Choice], fit: usize) -> String {
 /// help a sentence beside its word, wrapped under the help column (or under the word in a narrow
 /// window), never back to the left edge.
 pub fn table(rows: &[(String, String)], fit: usize) -> String {
-    let width = rows.iter().map(|(w, _)| w.chars().count()).max().unwrap_or(0).min(COLUMN);
-    let mut out = String::new();
+    use crate::ui::{Col, Table};
+    // A word wider than the column: its help on the next line, in the help column.
+    let mut t = Table::new(&[Col::Left(""), Col::Text("")]).indent(2).widest(0, COLUMN).lines(HELP_LINES);
     for (word, help) in rows {
-        let help = summary(help);
-        if help.is_empty() {
-            out.push_str(&format!("  {word}\n"));
-        } else if word.chars().count() > width && fit.saturating_sub(width + 4) >= crate::ui::NARROWEST {
-            // A word wider than the column: its help on the next line, in the help column (where the
-            // window leaves no room there, ui::hang puts it under the word).
-            out.push_str(&format!("  {word}\n"));
-            out.push_str(&crate::ui::hang(&" ".repeat(width + 4), &help, Some(fit), HELP_LINES));
-        } else {
-            out.push_str(&crate::ui::hang(&format!("  {word:<width$}  "), &help, Some(fit), HELP_LINES));
-        }
+        t.row(vec![word.clone(), summary(help)]);
     }
-    out
+    t.render(&crate::ui::Ui::plain_at(Some(fit)))
 }
 
 /// The widest a word column gets; a wider word has its help on the next line.

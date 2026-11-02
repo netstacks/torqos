@@ -4,8 +4,8 @@
 //!
 //! The layout, in one place (CLI-DESIGN.md, "Layout"): lines fit the window, 20 to 80 columns
 //! (`fit`); a sentence is wrapped by whoever writes it, under where its text starts (`Ui::line`,
-//! `hang`); tables lay out to the same width; data (a configuration, a comparison, a diff) is never
-//! wrapped. Without a window to fit (a script, or a filter reading the output) nothing is wrapped:
+//! `hang`); every table is a `Table` (data columns never broken, a text column wrapped); data (a
+//! configuration, a comparison, a diff) is never wrapped. Without a window to fit (a script, or a filter reading the output) nothing is wrapped:
 //! a line stays one line. Everything here but `columns` is a pure function, for snapshot tests.
 
 use std::time::Duration;
@@ -104,17 +104,6 @@ impl Ui {
         }
         out
     }
-
-    /// `left` with `right` (dimmed) at the end of the table's line (`width`), or two spaces after
-    /// `left` when it does not fit. `indent` is how many columns precede `left` on its line.
-    pub fn with_right(&self, left: &str, right: &str, indent: usize) -> String {
-        if right.is_empty() {
-            return left.to_string();
-        }
-        let used = indent + width(left) + width(right);
-        let gap = if used + 2 <= self.width() { self.width() - used } else { 2 };
-        format!("{left}{}{}", " ".repeat(gap), self.dim(right))
-    }
 }
 
 /// The machine's own text console (TERM=linux) has a small font without ✓ ⚠ ✗ ↶ …: there, plain
@@ -155,14 +144,15 @@ pub fn fit(columns: Option<usize>) -> Option<usize> {
 /// `lead` then `text`, as lines, each ending in a newline. With a window `fit` wide and `text` too
 /// long for the line: wrapped under where it starts (never back to the left edge), or — with less
 /// than 20 columns beside a `lead` wider than 4 — on the lines after it, indented 4; at most `max` lines, the last
-/// ending in `…` when there was more. Otherwise one line, exactly as it is.
+/// ending in `…` when there was more (one line: always beside its lead). Otherwise one line, exactly
+/// as it is.
 ///
 /// What follows a `lead` that ends in `! ` starts where its text started: paint.rs keeps those
 /// lines yellow by that.
 pub fn hang(lead: &str, text: &str, fit: Option<usize>, max: usize) -> String {
     let Some(fit) = fit.filter(|&f| width(lead) + width(text) > f) else { return format!("{lead}{text}\n") };
     // Under it only gains room when `lead` is wider than the 4 columns it would be indented.
-    let beside = width(lead) <= 4 || fit.saturating_sub(width(lead)) >= NARROWEST;
+    let beside = max <= 1 || width(lead) <= 4 || fit.saturating_sub(width(lead)) >= NARROWEST;
     let column = if beside { width(lead) } else { 4 };
     let room = fit.saturating_sub(column).max(1);
     let mut lines = wrap(text, room, room);
@@ -178,7 +168,8 @@ pub fn hang(lead: &str, text: &str, fit: Option<usize>, max: usize) -> String {
         }
     }
     let mut out = String::new();
-    if !beside {
+    // (A lead of only spaces has nothing to show on a line of its own.)
+    if !beside && !lead.trim().is_empty() {
         out.push_str(&format!("{}\n", lead.trim_end()));
     }
     for (i, line) in lines.iter().enumerate() {
@@ -186,6 +177,129 @@ pub fn hang(lead: &str, text: &str, fit: Option<usize>, max: usize) -> String {
         out.push_str(&format!("{start}{line}\n"));
     }
     out
+}
+
+/// A column of a `Table`: its heading (empty: none) and how its cells line up. `Text`, the last
+/// column only, is a sentence: wrapped under where it starts when there is a window to fit.
+#[derive(Clone, Copy)]
+pub enum Col<'a> {
+    Left(&'a str),
+    Right(&'a str),
+    Text(&'a str),
+}
+
+/// A table, the one layout of every table torqcli shows (ADR-025): data columns as wide as their
+/// widest cell, never broken (a filter reads whole lines; an address is not cut), two spaces apart;
+/// then, if there is one, the text column, wrapped (`hang`), never cut unless `lines` says. A column
+/// may be capped (`widest`): a cell wider than that stands on its own line, the rest of its row on
+/// the next, in the columns. A column empty in every row takes no room. A heading row when any
+/// column has a heading; lines of their own (a day's name) between rows.
+pub struct Table<'a> {
+    cols: Vec<Col<'a>>,
+    rows: Vec<Row>,
+    indent: usize,
+    widest: Vec<Option<usize>>,
+    lines: usize,
+}
+
+enum Row {
+    Cells(Vec<String>),
+    Line(String),
+}
+
+impl<'a> Table<'a> {
+    pub fn new(cols: &[Col<'a>]) -> Self {
+        Table { cols: cols.to_vec(), rows: vec![], indent: 0, widest: vec![None; cols.len()], lines: usize::MAX }
+    }
+
+    /// Columns from the left edge.
+    pub fn indent(mut self, n: usize) -> Self {
+        self.indent = n;
+        self
+    }
+
+    /// Column `col` is at most `n` wide: a wider cell stands on its own line.
+    pub fn widest(mut self, col: usize, n: usize) -> Self {
+        self.widest[col] = Some(n);
+        self
+    }
+
+    /// At most `n` lines of text per row, the last ending in `…` when there was more (a summary).
+    pub fn lines(mut self, n: usize) -> Self {
+        self.lines = n;
+        self
+    }
+
+    /// A row: a cell per column (missing ones empty).
+    pub fn row(&mut self, cells: Vec<String>) {
+        self.rows.push(Row::Cells(cells));
+    }
+
+    /// A line of its own between rows, as it is (a day's name).
+    pub fn line(&mut self, text: String) {
+        self.rows.push(Row::Line(text));
+    }
+
+    pub fn render(&self, ui: &Ui) -> String {
+        let data = self.cols.len() - usize::from(matches!(self.cols.last(), Some(Col::Text(_))));
+        let heads: Vec<String> = self
+            .cols
+            .iter()
+            .map(|c| match *c {
+                Col::Left(h) | Col::Right(h) | Col::Text(h) => h.to_string(),
+            })
+            .collect();
+        let heading = heads.iter().any(|h| !h.is_empty()).then_some(Row::Cells(heads));
+        let rows: Vec<&Row> = heading.iter().chain(&self.rows).collect();
+        let widths: Vec<usize> = (0..data)
+            .map(|i| {
+                let w = rows.iter().filter_map(|r| match r {
+                    Row::Cells(c) => Some(c.get(i).map_or(0, |c| width(c))),
+                    Row::Line(_) => None,
+                });
+                let w = w.max().unwrap_or(0);
+                self.widest[i].map_or(w, |cap| w.min(cap))
+            })
+            .collect();
+        // Where each column starts (an empty one takes no room).
+        let starts: Vec<usize> = (0..=data).map(|i| self.indent + widths[..i].iter().filter(|w| **w > 0).map(|w| w + 2).sum::<usize>()).collect();
+        let mut out = String::new();
+        for r in rows {
+            let cells = match r {
+                Row::Line(l) => {
+                    out.push_str(&format!("{l}\n"));
+                    continue;
+                }
+                Row::Cells(c) => c,
+            };
+            let mut line = " ".repeat(self.indent);
+            for i in (0..data).filter(|i| widths[*i] > 0 || self.widest[*i].is_some()) {
+                let cell = cells.get(i).map_or("", String::as_str);
+                let gap = widths[i].saturating_sub(width(cell));
+                if width(cell) > widths[i] {
+                    // Wider than its column may be: on its own line; the row goes on below it.
+                    line.push_str(cell);
+                    out.push_str(&format!("{}\n", line.trim_end()));
+                    line = " ".repeat(starts[i + 1]);
+                    continue;
+                }
+                match self.cols[i] {
+                    Col::Right(_) => line.push_str(&format!("{}{cell}", " ".repeat(gap))),
+                    _ => line.push_str(&format!("{cell}{}", " ".repeat(gap))),
+                }
+                line.push_str("  ");
+            }
+            let text = cells.get(data).map_or("", String::as_str);
+            if data < self.cols.len() && !text.is_empty() {
+                // Beside the cells; where a cell went on its own line and the window leaves too little
+                // room beside the columns, under them (hang).
+                out.push_str(&hang(&line, text, ui.fit, self.lines));
+            } else if !line.trim().is_empty() {
+                out.push_str(&format!("{}\n", line.trim_end()));
+            }
+        }
+        out
+    }
 }
 
 /// `text` in lines: the first at most `first` characters, the rest at most `room`, broken between
@@ -251,6 +365,29 @@ pub fn elapsed(d: Duration) -> String {
 mod tests {
     use super::*;
 
+    /// One layout for every table: data columns as wide as their widest cell (never broken), right-
+    /// aligned where numbers are, a heading, the text column wrapped under where it starts, a capped
+    /// column's wide cell on its own line, lines of their own between rows.
+    #[test]
+    fn a_table() {
+        let mut t = Table::new(&[Col::Left("Name"), Col::Right("Size"), Col::Text("What")]).indent(2);
+        t.row(vec!["a".into(), "5G".into(), "the first one, with a longer sentence than fits".into()]);
+        t.line("  Later".into());
+        t.row(vec!["bbbbbb".into(), "120M".into(), String::new()]);
+        assert_eq!(
+            t.render(&at(40)),
+            "  Name    Size  What\n  a         5G  the first one, with a\n                longer sentence than\n                fits\n  Later\n  bbbbbb  120M\n"
+        );
+        assert_eq!(t.render(&Ui::plain()).lines().nth(1), Some("  a         5G  the first one, with a longer sentence than fits"), "no window: one line");
+        let mut capped = Table::new(&[Col::Left(""), Col::Text("")]).indent(2).widest(0, 4);
+        capped.row(vec!["ab".into(), "Short.".into()]);
+        capped.row(vec!["abcdefgh".into(), "Beside the column, on the next line.".into()]);
+        assert_eq!(capped.render(&at(80)), "  ab    Short.\n  abcdefgh\n        Beside the column, on the next line.\n");
+        let mut data = Table::new(&[Col::Left("Interface"), Col::Left("Address")]);
+        data.row(vec!["eth0".into(), "fe80::1234:5678:9abc:def0/64".into()]);
+        assert_eq!(data.render(&at(20)).lines().nth(1), Some("eth0       fe80::1234:5678:9abc:def0/64"), "data is never wrapped");
+    }
+
     fn at(fit: usize) -> Ui {
         Ui { color: false, fit: Some(fit) }
     }
@@ -258,7 +395,6 @@ mod tests {
     #[test]
     fn plain_has_no_escapes_colour_has() {
         let p = Ui::plain();
-        assert_eq!(p.with_right("Installed htop", "change 23", 4), format!("Installed htop{}change 23", " ".repeat(80 - 4 - 14 - 9)));
         assert!(!p.warn("x").contains('\x1b') && !p.error("x").contains('\x1b'));
         assert!(Ui { color: true, ..Ui::plain() }.ok("x").contains("\x1b[32m"));
     }
@@ -311,17 +447,6 @@ mod tests {
         assert_eq!(Ui::plain().error("a\n  because: b"), "error: a\n  because: b\n");
         assert_eq!(at(33).error("short\n  because: the reason, long enough to wrap"), "error: short\n  because: the reason, long\n            enough to wrap\n".replace("            ", "  "));
         assert_eq!(Ui::plain().error(""), "error:\n");
-    }
-
-    #[test]
-    fn lines_fit_80_columns() {
-        let p = Ui::plain();
-        let line = format!("  ✓ {}", p.with_right("Installed htop", "change 23 · rolled back", 4));
-        assert_eq!(width(&line), 80, "{line:?}");
-        let long = p.with_right(&"x".repeat(70), "change 23 · rolled back", 4);
-        assert!(long.contains("  change 23"), "falls back to two spaces when it cannot fit");
-        let narrow = at(40).with_right("Installed htop", "change 23", 4);
-        assert_eq!(4 + width(&narrow), 40, "right-aligned to a narrower window: {narrow:?}");
     }
 
     #[test]

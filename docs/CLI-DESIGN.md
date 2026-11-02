@@ -591,9 +591,16 @@ and never with NO_COLOR, TERM=dumb, or when the output is not a terminal. There 
   a commit's date and author), never back at the left edge. Beside a lead wider than 4 with under
   20 columns left, the text goes on the lines after it, indented 4. Nothing guesses at print time
   which lines are sentences.
-- **Tables** (`show system ledger`, the `?` list, `help`) lay out to the same width, in one layout
-  (`complete::table`): a word wider than the column has its help on the next line, in the same
-  column, not pushed right; in a window too narrow for that, under the word.
+- **Every table is a `ui::Table`** (the `?` list, `help`, `show system commit`, the ledger,
+  `show version`, `uptime`, `interfaces`, `storage`, `show packages`, status): data columns as wide
+  as their widest cell and never broken (an address, a date, a change number); a heading row where
+  the columns need naming; then the text column (a subject, a help), wrapped under where it starts,
+  or — with under 20 columns beside — on the lines after, indented 4. A column may be capped (the
+  `?` word column at 24): a wider cell stands on its own line and the rest of its row goes on below,
+  in the columns. A column empty in every row takes no room.
+- **The ledger is one line per entry**, its text cut to the window (`…`) and never wrapped, so a
+  reason cannot draw what looks like another entry; who made each change is a column of its own,
+  never cut (`⚠ tainted` included). `show system commit` shows each subject whole.
 - **Taller than the window:** the pager (above); `| no-more` skips it.
 - **Data is never wrapped or cut:** a configuration, `show | compare`, a diff, `| display set`;
   the terminal wraps a long line itself.

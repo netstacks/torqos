@@ -216,6 +216,9 @@ impl Machine for Real<'_> {
                 serde_json::Value::String(s) => history::one_line(s, 120),
                 other => history::one_line(&other.to_string(), 120),
             };
+            use crate::ui::{Col, Table};
+            // Data (commits, store paths): never wrapped.
+            let mut t = Table::new(&[Col::Left(""), Col::Left("")]).indent(2);
             for (label, key) in [
                 ("config repo commit", "head"),
                 ("ledgered commit", "ledgered_commit"),
@@ -224,9 +227,10 @@ impl Machine for Real<'_> {
                 ("running system", "running_system"),
                 ("next boot", "next_boot"),
             ] {
-                out.push_str(&format!("  {label:<20} {}\n", fact(key)));
+                t.row(vec![label.to_string(), fact(key)]);
             }
-            out.push_str(&format!("  {:<20} {} status\n", "from", history::one_line(&self.cli.broker, 80)));
+            t.row(vec!["from".to_string(), format!("{} status", history::one_line(&self.cli.broker, 80))]);
+            out.push_str(&t.render(&crate::ui::Ui::plain_at(None)));
         }
         Ok(out)
     }
@@ -245,16 +249,13 @@ impl Machine for Real<'_> {
         }
         // A table: name and version, then the description as a sentence beside them (ui.rs); `*`: in
         // the configuration already, as on a network device.
-        let ui = crate::ui::Ui::plain_at(fit);
-        let name = found.iter().map(|(n, _, _)| n.chars().count()).max().unwrap_or(0).min(30);
-        let version = found.iter().map(|(_, v, _)| v.chars().count()).max().unwrap_or(0).min(16);
-        let mut out: String = found
-            .iter()
-            .map(|(n, v, d)| {
-                let mark = if installed.contains(n) { "* " } else { "  " };
-                format!("{}\n", ui.line(&format!("{mark}{n:<name$}  {v:<version$}  "), d))
-            })
-            .collect();
+        use crate::ui::{Col, Table};
+        let mut t = Table::new(&[Col::Left(""), Col::Left(""), Col::Text("")]).widest(0, 32).widest(1, 16);
+        for (n, v, d) in &found {
+            let mark = if installed.contains(n) { "* " } else { "  " };
+            t.row(vec![format!("{mark}{n}"), v.clone(), d.clone()]);
+        }
+        let mut out = t.render(&crate::ui::Ui::plain_at(fit));
         if found.iter().any(|(n, _, _)| installed.contains(n)) {
             out.push_str("* installed by this configuration\n");
         }
@@ -1294,7 +1295,8 @@ fn configurations_of(entries: &[history::Entry], count: usize, clock: &history::
                 // Local time, as the ledger shows it (`show system ledger`).
                 date: history::local_stamp(&e.ts, clock),
                 who: history::one_line(&who, 20),
-                what: history::one_line(&e.reason, 80),
+                // Whole: the table wraps it in a window (ui::Table).
+                what: history::one_line(&e.reason, usize::MAX),
                 seq: Some(e.seq),
             })
         })

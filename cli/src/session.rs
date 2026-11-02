@@ -631,16 +631,15 @@ impl<'a> Session<'a> {
                 let all = &h.configurations;
                 // Each configuration: its rollback number (0 is in effect), its change number (the
                 // ledger's, as `request system revert` takes it), when, who, what.
-                let width = all.iter().map(|c| c.who.chars().count()).max().unwrap_or(0);
-                let change = |c: &Configuration| c.seq.map_or("-".to_string(), |s| format!("#{s}"));
-                let cw = all.iter().map(|c| change(c).len()).max().unwrap_or(1);
+                use crate::ui::{Col, Table};
+                let mut t = Table::new(&[Col::Left("Rollback"), Col::Left("Change"), Col::Left("When"), Col::Left("By"), Col::Text("What")]);
                 for (n, c) in all.iter().enumerate() {
-                    let row = format!("{n:<3} {:<cw$}  {}  {:<width$}  ", change(c), c.date, c.who);
-                    out.push_str(&format!("{}\n", self.ui().line(&row, &c.what)));
+                    t.row(vec![n.to_string(), c.seq.map_or("-".to_string(), |s| format!("#{s}")), c.date.clone(), c.who.clone(), c.what.clone()]);
                     if display == Some(Display::Detail) {
-                        out.push_str(&format!("    commit {}\n", crate::history::one_line(&c.id, 64)));
+                        t.line(format!("    commit {}", crate::history::one_line(&c.id, 64)));
                     }
                 }
+                out.push_str(&t.render(&self.ui()));
                 // The ledger says where the config repo is (by the broker's count); if it is elsewhere, 0 —
                 // what is active — is not the newest line above.
                 let head = self.repo.head()?;
@@ -729,7 +728,7 @@ impl<'a> Session<'a> {
             Op::ShowVersion => {
                 let head = self.repo.head()?;
                 let software = self.software(&head)?.unwrap_or_else(|| "(its flake.lock names no inputs)".into());
-                Ok(crate::facts::version(&self.machine.facts()?, &software))
+                Ok(crate::facts::version(&self.machine.facts()?, &software, &self.ui()))
             }
             Op::ShowUptime => {
                 let all = self.machine.configurations(&self.repo, 1)?.configurations;
@@ -2204,15 +2203,16 @@ mod tests {
         let long = "Install htop and jq for viper, and turn on the firewall";
         let m = Fake { ledger: Some(vec![Configuration { id: head, date: "d".into(), who: "viper".into(), what: long.into(), seq: Some(1) }]), ..Default::default() };
         let mut s = session(d.path(), None, &m);
-        assert_eq!(s.exec("show system commit").unwrap(), format!("0   #1  d  viper  {long}\n"), "no screen (a script): one line");
-        s.screen = || Some(48);
-        assert_eq!(s.exec("show system commit").unwrap(), "0   #1  d  viper  Install htop and jq for viper,\n                  and turn on the firewall\n");
-        s.screen = || Some(30);
-        assert_eq!(s.exec("show system commit").unwrap(), "0   #1  d  viper\n    Install htop and jq for\n    viper, and turn on the\n    firewall\n", "too narrow beside it: under it");
+        let head = "Rollback  Change  When  By     What\n";
+        assert_eq!(s.exec("show system commit").unwrap(), format!("{head}0         #1      d     viper  {long}\n"), "no screen (a script): one line");
+        s.screen = || Some(60);
+        assert_eq!(s.exec("show system commit").unwrap(), format!("{head}0         #1      d     viper  Install htop and jq for\n{0}viper, and turn on the\n{0}firewall\n", " ".repeat(31)), "wrapped under where it starts");
+        s.screen = || Some(40);
+        assert_eq!(s.exec("show system commit").unwrap(), format!("{head}0         #1      d     viper\n    Install htop and jq for viper, and\n    turn on the firewall\n"), "too narrow beside it: under it");
         #[cfg(target_os = "linux")] // the filters' sandbox
         {
             s.screen = || Some(44);
-            assert_eq!(s.exec("show system commit | wc -l").unwrap(), "1\n", "a filter reads one line per commit");
+            assert_eq!(s.exec("show system commit | wc -l").unwrap(), "2\n", "a filter reads one line per commit (and the heading)");
         }
     }
 
@@ -2231,7 +2231,7 @@ mod tests {
         };
         let mut s = session(d.path(), None, &m);
         let commits = s.exec("show system commit").unwrap();
-        assert_eq!(commits, "0   #3  d  broker  Change #2 rolled back\n1   #2  d  viper   host two\n2   #1  d  user    init\n", "rollback number, change number");
+        assert_eq!(commits, "Rollback  Change  When  By      What\n0         #3      d     broker  Change #2 rolled back\n1         #2      d     viper   host two\n2         #1      d     user    init\n", "rollback number, change number");
         assert!(s.exec("show system commit | display detail").unwrap().contains(&format!("    commit {two}\n")));
         assert_eq!(s.exec("request system revert #2").unwrap(), s.exec("request system revert 2").unwrap(), "a change number as the ledger writes it");
         assert_eq!(s.exec("show system rollback 1").unwrap(), "networking {\n    hostName two;\n}\n", "git's history alone has no 1");
@@ -2883,7 +2883,7 @@ mod tests {
         assert_eq!(s.exec("show configuration | grep host").unwrap(), "    hostName two;\n");
         assert_eq!(s.exec("show configuration | grep -v host | wc -l").unwrap(), "2\n");
         assert_eq!(s.exec("show configuration | grep nothing").unwrap(), "", "nothing matched: no error");
-        assert_eq!(s.exec("show system commit | wc -l").unwrap(), "2\n");
+        assert_eq!(s.exec("show system commit | wc -l").unwrap(), "3\n", "a heading and two configurations");
         assert_eq!(s.exec("show configuration | display set | grep -o 'hostName [a-z]*'").unwrap(), "hostName two\n");
         run(&mut s, &["configure", "set system host-name three", "set system time-zone UTC"]);
         assert_eq!(s.exec("show | compare | grep '^+'").unwrap(), "+   hostName three;\n+   timeZone UTC;\n");
@@ -3301,7 +3301,7 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         assert_eq!(s.exec("show configuration").unwrap(), "networking {\n    hostName two;\n}\n");
         assert_eq!(s.exec("show configuration | display set").unwrap(), "set networking hostName two\n");
-        assert!(s.exec("show system commit").unwrap().starts_with("0   "));
+        assert!(s.exec("show system commit").unwrap().lines().nth(1).is_some_and(|l| l.starts_with("0 ")));
         assert!(format!("{:#}", s.exec("set system host-name x").unwrap_err()).contains("'set' is a configuration-mode command: `configure` first"));
         run(&mut s, &["configure", "set system host-name three"]);
         assert_eq!(s.exec("run show configuration").unwrap(), "networking {\n    hostName two;\n}\n", "run: the active one");

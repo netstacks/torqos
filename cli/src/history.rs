@@ -249,7 +249,10 @@ pub fn asked_by<'a>(entries: &'a [Entry], e: &'a Entry) -> &'a str {
 pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock) -> String {
     let shown: Vec<&Entry> = entries.iter().filter(|e| !(e.kind == "proposal" && settled(entries, e.seq))).collect();
     let today = (clock.now + clock.offset).div_euclid(86_400);
-    let mut out = String::new();
+    use crate::ui::{Col, Table};
+    // One line per entry, cut to the window if need be: what an entry says cannot look like another
+    // entry. Who made it in its own column, never cut.
+    let mut t = Table::new(&[Col::Left(""), Col::Left(""), Col::Right(""), Col::Left(""), Col::Text("")]).indent(4).lines(1);
     let mut day = None;
     for e in &shown[shown.len().saturating_sub(limit)..] {
         let local = parse_ts(&e.ts).map(|t| t + clock.offset);
@@ -262,33 +265,29 @@ pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock
                 Some(d) => crate::pkg::ymd((d * 86_400) as u64),
                 None => "Unknown date".to_string(),
             };
-            out.push_str(&format!("  {}\n", ui.bold(&label)));
+            t.line(format!("  {}", ui.bold(&label)));
         }
         let time = local.map(|t| format!("{:02}:{:02}", t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60)).unwrap_or_else(|| "--:--".into());
         let (symbol, text) = describe(entries, e);
-        // Its change number, as everywhere (`request system revert #85`).
-        let right = format!("#{}", e.seq);
         // Who made it: the person who approved it, else who asked (an agent, the broker on its own).
-        let mut who = String::new();
-        let actor = asked_by(entries, e);
-        match (&e.approved_by, actor) {
-            (Some(p), _) => who.push_str(&format!(" — {}", one_line(p, 16))),
-            (None, "user" | "") => {}
-            (None, a) => who.push_str(&format!(" — by {}", one_line(a, 16))),
-        }
+        let mut who = match (&e.approved_by, asked_by(entries, e)) {
+            (Some(p), _) => one_line(p, 16),
+            (None, "user" | "") => String::new(),
+            (None, a) => format!("asked by {}", one_line(a, 16)),
+        };
         if e.tainted {
             who.push_str(" ⚠ tainted");
         }
-        let room = ui.width().saturating_sub(4 + 5 + 3 + 2 + crate::ui::width(&right) + 2 + crate::ui::width(&who));
-        let text = format!("{}{who}", one_line(&text, room.max(10)));
         let symbol = match symbol {
             "✓" => ui.green(symbol),
             "✗" => ui.red(symbol),
             "⚠" => ui.yellow(symbol),
             s => s.to_string(),
         };
-        out.push_str(&format!("    {time}   {symbol} {}\n", ui.with_right(&text, &right, 4 + 5 + 3 + 2)));
+        // Its change number, as everywhere (`request system revert #85`).
+        t.row(vec![time, symbol, format!("#{}", e.seq), who.trim_start().to_string(), one_line(&text, usize::MAX)]);
     }
+    let mut out = t.render(ui);
     if shown.is_empty() {
         out.push_str("  Nothing has changed yet.\n");
     } else {
@@ -362,7 +361,7 @@ mod tests {
         assert!(!out.chars().any(|c| c == '\r' || c == '\u{1b}'), "{out:?}");
         // CR and LF are whitespace: collapsed to spaces (one line); ESC is shown, not interpreted.
         assert!(out.contains(r"x \u{1b}[2K#99"), "{out}");
-        assert!(out.contains("— by agent ⚠ tainted"), "who proposed it, and that it was tainted: {out}");
+        assert!(out.contains("#48  asked by agent ⚠ tainted  Proposed"), "who proposed it, and that it was tainted: {out}");
         assert_eq!(clean("a\u{202e}b"), r"a\u{202e}b"); // bidi override
         assert_eq!(clean("plain — text"), "plain — text");
     }
@@ -390,11 +389,11 @@ mod tests {
         let out = render(&ledger(), 100, &Ui::plain(), &clock());
         let expected = [
             "  Today",
-            "    08:00   · TorqOS set up                                                   #1",
-            "    08:01   ✓ Install htop for viper                                          #3",
-            "    08:02   ✓ Install jq system-wide                                          #5",
-            "    08:03   ↶ Undid \"Install jq system-wide\"                                  #6",
-            "    08:04   · Proposed, not applied: Install vim for viper                    #7",
+            "    08:00  ·  #1  TorqOS set up",
+            "    08:01  ✓  #3  Install htop for viper",
+            "    08:02  ✓  #5  Install jq system-wide",
+            "    08:03  ↶  #6  Undid \"Install jq system-wide\"",
+            "    08:04  ·  #7  Proposed, not applied: Install vim for viper",
             "",
             "  To undo one change: request system revert <change> (its number, like #85).",
         ]
@@ -402,11 +401,11 @@ mod tests {
         assert_eq!(out.trim_end(), expected, "\n{out}");
         assert!(out.lines().all(|l| crate::ui::width(l) <= crate::ui::WIDTH), "80 columns");
         assert_eq!(render(&ledger(), 2, &Ui::plain(), &clock()).lines().filter(|l| l.starts_with("    ")).count(), 2);
-        // A narrow terminal: each row fits it, its change number still at the end.
-        let narrow = render(&ledger(), 100, &Ui { fit: Some(50), ..Ui::plain() }, &clock());
-        assert!(narrow.lines().all(|l| crate::ui::width(l) <= 50), "\n{narrow}");
-        let row = narrow.lines().find(|l| l.contains("Install htop for viper")).unwrap_or_default();
-        assert!(crate::ui::width(row) == 50 && row.ends_with(" #3"), "right-aligned to 50: {row:?}");
+        // A narrow terminal: each entry one line that fits it, cut (a reason cannot draw an entry).
+        let narrow = render(&ledger(), 100, &Ui { fit: Some(30), ..Ui::plain() }, &clock());
+        assert!(narrow.lines().all(|l| crate::ui::width(l) <= 30), "\n{narrow}");
+        assert_eq!(narrow.lines().filter(|l| l.starts_with("    ")).count(), 5, "one line per entry:\n{narrow}");
+        assert!(narrow.contains("\n    08:04  ·  #7  Proposed,…\n"), "\n{narrow}");
     }
 
     #[test]
@@ -433,12 +432,12 @@ mod tests {
         lines.push(r#"{"seq":8,"ts":"2026-10-30T12:05:00Z","kind":"proposal","actor":"agent","tier":"user","reason":"Install x","data":{}}"#.into());
         lines.push(r#"{"seq":9,"ts":"2026-10-30T12:05:05Z","kind":"apply_failed","actor":"broker","tier":"user","reason":"Rebuild failed; ...","data":{"proposal":8,"restored":true}}"#.into());
         let out = render(&parse(&lines.join("\n")).unwrap(), 10, &Ui::plain(), &clock());
-        assert!(out.contains("✗ Failed: Install x (nothing changed) — by agent"), "an agent's failure stays the agent's:\n{out}");
+        assert!(out.contains("#9  asked by agent  Failed: Install x (nothing changed)"), "an agent's failure stays the agent's:\n{out}");
         assert!(!out.contains("by broker"), "{out}");
         lines.push(r#"{"seq":10,"ts":"2026-10-30T12:06:00Z","kind":"proposal","actor":"agent","tier":"user","reason":"Install y","data":{}}"#.into());
         lines.push(r#"{"seq":11,"ts":"2026-10-30T12:07:00Z","kind":"interrupted","actor":"broker","tier":"user","reason":"...","data":{"op":"apply","target":10}}"#.into());
         let out = render(&parse(&lines.join("\n")).unwrap(), 10, &Ui::plain(), &clock());
-        assert!(out.contains("⚠ Interrupted: Install y — by agent") && !out.contains("Proposed, not applied"), "{out}");
+        assert!(out.contains("#11  asked by agent  Interrupted: Install y") && !out.contains("Proposed, not applied"), "{out}");
     }
 
 }
