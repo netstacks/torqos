@@ -473,6 +473,7 @@ fn setup_cut_short_after_its_switch_is_finished_at_the_next_start() {
             .unwrap()
     };
     assert_killed(&setup(CRASH));
+    fs::write(state.join("confirm-system"), "").unwrap(); // as nix build --out-link leaves it
     let b = Broker::new(&repo, &state, "true");
     assert!(b.ledger.read_all().unwrap().is_empty() && state.join("setup.json").exists(), "cut short: no history yet, its record kept");
     assert!(format!("{:#}", b.propose(&write_diff(dir.path(), "nl.diff", NIGHT_LIGHT), "x", Actor::User, false).unwrap_err()).contains("first-boot setup was cut short"));
@@ -483,6 +484,7 @@ fn setup_cut_short_after_its_switch_is_finished_at_the_next_start() {
     assert_eq!(entries[0].body.data["commit"], head.as_str());
     assert_eq!(entries[0].body.data["interrupted"], true);
     assert!(!state.join("setup.json").exists());
+    assert!(!state.join("confirm-system").exists(), "setup settled, so its build is not a GC root any more");
     b.init().unwrap();
     assert_eq!(kinds(&b), ["init"], "once");
 
@@ -503,10 +505,11 @@ fn setup_cut_short_after_its_switch_is_finished_at_the_next_start() {
     // On the image, a setup cut short starts again from nothing: its repo removed, its record goes too.
     fs::remove_dir_all(repo.join(".git")).unwrap();
     let b = Broker::new(&repo, &state, "true");
-    let b = b.with_confirm_commands("echo /nix/store/built", "true", "true", "true");
+    let b = b.with_confirm_commands("touch {link}; echo /nix/store/built", "true", "true", "true");
     b.set_up().unwrap();
     assert_eq!(kinds(&b), ["init"]);
     assert!(!state.join("setup.json").exists());
+    assert!(!state.join("confirm-system").exists(), "set up, so its build is not a GC root any more");
 }
 
 /// A reason is one line: it is the commit's subject, above the trailers the ledger is checked

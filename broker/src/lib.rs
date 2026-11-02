@@ -940,7 +940,10 @@ impl Broker {
         self.write_record(&self.setup_path(), &serde_json::to_vec_pretty(r)?)
     }
 
+    /// Setup settled (set up, failed, or finished at the next start): its build no longer needs a
+    /// root of its own either.
     fn clear_setup(&self) -> Result<()> {
+        self.drop_build_link();
         fs::remove_file(self.setup_path())?;
         sync_dir(&self.state_dir)
     }
