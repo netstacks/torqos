@@ -343,3 +343,17 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** a larger rewrite of torqcli's grammar and settings layer now, instead of ~30
   patches; afterwards a new command or setting gets `?`, Tab, help, checks and errors by being
   declared once. Acceptance: the walk of every `?` and fresh usability reviews, before shipping.
+
+## ADR-026 — The history is privileged
+- **Context:** On the first install from the image (2026-11-02), out of dev mode, reading the
+  history — `show system commit`, `show system ledger`, `show system alarms`, `rollback ?` — asked
+  for the owner's `sudo` password: the ledger is root's (`/var/lib/torq/state`, 0700) and is read
+  through the broker. Dev mode had hidden it (its sudo needs none). The options were a password-free
+  rule for the broker's read-only commands, a copy of the ledger the owner can read, or keeping it.
+- **Decision:** Keep it: the history is privileged. Reading it is the owner borrowing root through
+  `sudo` with their own password, as changing the machine is (SECURITY-MODEL.md). Where sudo would
+  ask and there is no terminal to ask at, torqcli says so before running anything (`broker()` in
+  cli/src/main.rs), never "the broker stopped unexpectedly".
+- **Consequences:** The first read of a session asks for the password; sudo's timestamp covers the
+  rest for its usual few minutes. A script reads the history only with `sudo -v` first or at a
+  terminal. An agent (M3) gets its own read access through the broker's socket, not this way.
