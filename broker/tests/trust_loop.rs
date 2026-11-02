@@ -773,18 +773,18 @@ fn live_index_lock_is_refused_stale_one_removed() {
     let (_dir, b, _) = crashed_apply();
     let index_lock = b.repo.index_lock();
     fs::write(&index_lock, "").unwrap();
-    let ready = b.repo.root().parent().unwrap().join("holder-ready");
-    // Open the lock, say so, then become `sleep` (exec: one process, so killing it releases the fd).
+    // Open the lock, then become `sleep` (exec: one process, so killing it releases the fd). Ready once
+    // it is `sleep`: the lock is open by then, and the name is the one the refusal must give.
     let mut holder = Command::new("sh")
         .arg("-c")
-        .arg("exec 3<\"$0\"; : > \"$1\"; exec sleep 30")
+        .arg("exec 3<\"$0\"; exec sleep 30")
         .arg(&index_lock)
-        .arg(&ready)
         .spawn()
         .unwrap();
+    let comm = format!("/proc/{}/comm", holder.id());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !ready.exists() {
-        assert!(std::time::Instant::now() < deadline, "holder never opened the lock");
+    while fs::read_to_string(&comm).unwrap_or_default().trim() != "sleep" {
+        assert!(std::time::Instant::now() < deadline, "holder never became sleep with the lock open");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let err = format!("{:#}", b.reconcile("casey").unwrap_err());
