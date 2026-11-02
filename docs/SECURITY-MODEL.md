@@ -65,7 +65,7 @@ machine with UEFI and a TPM.
   however it is turned on (modules/services.nix): keys only unless
   `services.openssh.settings.PasswordAuthentication` is set, and then repeated wrong guesses are
   blocked (sshguard); 3 tries a connection; only the owner may log in (`AllowUsers`). These are
-  defaults a person can change. `root` never logs in over SSH: an assertion refuses any
+  defaults a person can change (tests/ssh.nix checks each). `root` never logs in over SSH: an assertion refuses any
   `PermitRootLogin` but `no`. `show system alarms` notes that SSH accepts passwords. A commit (or
   revert) that changes who can log in over SSH — turning it on, allowing passwords or turning them
   off, removing a key, another owner — shows it (the keys that will be able to log in, or that
