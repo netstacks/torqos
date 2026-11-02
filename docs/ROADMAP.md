@@ -95,8 +95,8 @@ first.
 
 - [ ] **qcow2 image** (aarch64 first, testable here; then x86_64): download, boot in any VM (UTM,
       QEMU, Proxmox), log in. The config repo and ledger are created on first boot. *aarch64 done:
-      installed in UTM from the image (2026-11-02). x86_64 (qcow2, and a VMDK for ESXi) built by
-      CI's `image` workflow, run by hand; to try on ESXi.*
+      installed in UTM from the image (2026-11-02). x86_64 and aarch64 (qcow2, and a VMDK for ESXi)
+      built by CI's `image` workflow, run by hand; to try on ESXi.*
 - [ ] **First-boot setup**, like a network device's initial configuration dialog: host name,
       time zone, the owner's account and password, how to log in remotely (password, SSH key, or
       both), asked once at the console, committed as change #1. No default password ships;

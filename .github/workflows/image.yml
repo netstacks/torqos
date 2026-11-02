@@ -1,7 +1,7 @@
-# The TorqOS image for x86_64 (docs/INSTALL.md): the qcow2 (QEMU, Proxmox) and the VMDK (VMware
-# ESXi), built on an x86_64 runner and kept as the run's artifact. Run by hand (Actions → image →
-# Run workflow, or `gh workflow run image.yml`). The release workflow, on a tag, comes later
-# (docs/ROADMAP.md, M2 "CI"); aarch64 is built on an arm64 machine for now.
+# The TorqOS images (docs/INSTALL.md), x86_64 and aarch64, each built on a runner of its own
+# architecture: the qcow2 (UTM, QEMU, Proxmox) and the VMDK (VMware ESXi), kept as the run's
+# artifacts with their checksums. Run by hand (Actions → image → Run workflow, or `gh workflow run
+# image.yml`). The release workflow, on a tag, comes later (docs/ROADMAP.md, M2 "CI").
 name: image
 
 on:
@@ -12,7 +12,13 @@ permissions:
 
 jobs:
   image:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { system: x86_64-linux, runner: ubuntu-latest }
+          - { system: aarch64-linux, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -30,14 +36,14 @@ jobs:
 
       - name: Build the images
         run: |
-          nix build -L .#packages.x86_64-linux.image --out-link qcow2
-          nix build -L .#packages.x86_64-linux.image-vmdk --out-link vmdk
+          nix build -L .#packages.${{ matrix.system }}.image --out-link qcow2
+          nix build -L .#packages.${{ matrix.system }}.image-vmdk --out-link vmdk
           mkdir out
           cp -L qcow2/*.qcow2 vmdk/*.vmdk out/
           cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
-          name: torqos-x86_64-linux
+          name: torqos-${{ matrix.system }}
           path: out/
           retention-days: 14
