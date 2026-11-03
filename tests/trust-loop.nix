@@ -1,5 +1,5 @@
 # NixOS VM test: the M1 trust loop inside a real NixOS system.
-# Rebuilds are stubbed (`true`) — this test proves broker/ledger/git behaviour, not nixos-rebuild.
+# Rebuilds are stubbed (`true`) — this test proves broker/ledger/git behaviour, not the build and switch.
 { pkgs, self }:
 
 pkgs.testers.runNixOSTest {
@@ -432,6 +432,9 @@ pkgs.testers.runNixOSTest {
         assert e["data"]["restored"] and e["data"]["applied"] == a["seq"], e
         assert running() == booted, "the old system runs again"
         machine.succeed("test ! -e /etc/torq-test/new-system")
+        # The ledger line is the rollback's last step, not its end: the broker that wrote it holds
+        # the lock until it exits, and a status asked in between is told "busy" (exit 75), rightly.
+        machine.wait_until_fails(f"systemctl is-active {unit}.service", timeout=60)
         machine.succeed("torq-broker status")
 
     with subtest("commit confirmed: a restart before confirming rolls back"):
@@ -445,6 +448,8 @@ pkgs.testers.runNixOSTest {
         e = last_entry()
         assert e["data"]["by_reboot"] and e["data"]["restored"] and e["data"]["applied"] == a["seq"], e
         machine.succeed(f"grep -q 'nightLight = false' {repo}/desktop.nix")
+        # Its broker done, not only its ledger line written (as above).
+        machine.wait_until_succeeds("test \"$(systemctl show -P SubState torq-confirm-boot)\" = exited", timeout=60)
         machine.succeed("torq-broker status")
         machine.succeed("torq-broker verify")
 
@@ -487,5 +492,17 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == renamed
         machine.succeed("/run/booted-system/bin/switch-to-configuration test")
         assert machine.succeed("hostname").strip() == "machine"
+
+    with subtest("while the switch unit runs — left by a broker that died, or started by hand — the broker applies nothing"):
+        # The unit's name is what the broker checks (`torq-switch.service`, as it checks
+        # nixos-rebuild's): a unit of that name a person starts holds the broker off the same way.
+        # The night light is still on from the confirmed commit above: undone, to have a change.
+        broker(f"revert {a['seq']} --approved-by tester")
+        machine.succeed("systemd-run --unit=torq-switch --quiet sleep 120")
+        seq = propose_night_light()
+        out = machine.fail(f"torq-broker apply {seq} --approved-by tester 2>&1")
+        assert "running outside the broker" in out, out
+        machine.succeed("systemctl stop torq-switch.service")
+        machine.succeed(f"torq-broker apply {seq} --approved-by tester")
   '';
 }

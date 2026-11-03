@@ -75,7 +75,7 @@ pub const REBUILD: &str = concat!(
     "d=$(mktemp -d) && trap 'rm -rf \"$d\"' EXIT",
     " && sys=$(nix build --no-update-lock-file --out-link \"$d/system\" --print-out-paths {flake}#nixosConfigurations.torq.config.system.build.toplevel)",
     " && nix-env -p /nix/var/nix/profiles/system --set \"$sys\"",
-    " && systemd-run --collect --no-ask-password --pipe --quiet --service-type=exec --unit=torq-switch -E LOCALE_ARCHIVE --wait \"$sys/bin/switch-to-configuration\" switch"
+    " && systemd-run --collect --no-ask-password --pipe --quiet --service-type=exec --unit=torq-switch --wait \"$sys/bin/switch-to-configuration\" switch"
 );
 /// `{link}`: a GC root for the built system until it settles (confirmed or rolled back).
 pub const BUILD: &str = "nix build --no-update-lock-file --out-link {link} --print-out-paths {flake}#nixosConfigurations.torq.config.system.build.toplevel";

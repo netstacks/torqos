@@ -129,4 +129,8 @@ Hardware guidance: integrated-graphics machines are lowest risk for removing Mic
 - No display server by default.
 - Minimal enabled services; all TorqOS services use systemd sandboxing.
 - `nix.settings.allowed-users` restricted; only the broker may trigger system rebuilds.
+- The boot menu's entries cannot be edited (systemd-boot's editor off, `modules/security.nix`): a
+  kernel command line typed at boot is a root shell. A system-tier commit can turn it on,
+  ledgered. Checked on the disk the installer writes (`tests/installer.nix`) until the
+  EFI-partition test of ADR-033 checks the menu itself.
 

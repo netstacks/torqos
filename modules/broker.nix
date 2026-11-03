@@ -27,10 +27,10 @@ in
       default = "torq";
       description = ''
         The `nixosConfigurations.<name>` in the config repo that this machine is built from; the
-        template's flake always exposes `torq`. The broker rebuilds `--flake <repo>#<name>`
-        explicitly, and the name is fixed rather than the host name: without a name, nixos-rebuild
-        picks one by the *running* host name, and if the name followed the host name, changing the
-        host name would leave the next rebuild looking for a configuration that does not exist.
+        template's flake always exposes `torq`. The broker builds `<repo>#nixosConfigurations.<name>`
+        explicitly, and the name is fixed rather than the host name: if it followed the host name,
+        changing the host name would leave the next build looking for a configuration that does not
+        exist.
       '';
     };
     rebuildCommand = lib.mkOption {
@@ -42,7 +42,7 @@ in
         "d=$(mktemp -d) && trap 'rm -rf \"$d\"' EXIT"
         " && sys=$(nix build --no-update-lock-file --out-link \"$d/system\" --print-out-paths {flake}#nixosConfigurations.${cfg.configName}.config.system.build.toplevel)"
         " && nix-env -p /nix/var/nix/profiles/system --set \"$sys\""
-        " && systemd-run --collect --no-ask-password --pipe --quiet --service-type=exec --unit=torq-switch -E LOCALE_ARCHIVE --wait \"$sys/bin/switch-to-configuration\" switch"
+        " && systemd-run --collect --no-ask-password --pipe --quiet --service-type=exec --unit=torq-switch --wait \"$sys/bin/switch-to-configuration\" switch"
       ];
       defaultText = lib.literalMD "build the commit, `nix-env --set` the system profile, `switch-to-configuration switch` in the transient unit `torq-switch` (broker/src/config.rs `REBUILD`)";
       description = ''
@@ -91,7 +91,7 @@ in
       default = true;
       description = ''
         Replace /etc/nixos/configuration.nix and /etc/nixos/flake.nix with stubs that refuse to
-        build. A plain `nixos-rebuild switch` would otherwise build them and replace the whole
+        build. A build of it by hand (`nix build`, or `nixos-rebuild` brought along) would otherwise build them and replace the whole
         system with a stock NixOS one, outside the broker and the ledger. Files already there
         (or symlinks) are moved aside to `<name>.pre-torq` first, never overwritten. Turning
         this off, or rolling back past it, deletes whatever is at those two paths (NixOS cleans up
@@ -188,7 +188,7 @@ in
       };
      }
 
-    # A stray `nixos-rebuild switch` (a person, or another tool following stock NixOS habits) must
+    # A stray build of /etc/nixos (a person, or another tool following stock NixOS habits) must
     # fail loudly instead of switching the machine away from its ledgered config.
      (lib.mkIf cfg.guardEtcNixos (
       let

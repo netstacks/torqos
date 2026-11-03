@@ -15,8 +15,8 @@
 
 ## How changes are controlled
 
-- **One writer.** Only TorqOS's broker writes the machine's configuration. A stray `nixos-rebuild`
-  against `/etc/nixos` is refused.
+- **One writer.** Only TorqOS's broker writes the machine's configuration. A stray build of
+  `/etc/nixos` (where stock NixOS keeps its configuration) is refused.
 - **A person approves.** A system change shows its comparison and needs a yes at a terminal.
 - **Nothing hidden.** Any Nix file in a change is shown as its raw diff before you approve it.
 - **Drift is visible.** Changes made around TorqOS (with `sudo`, for example) are reported by

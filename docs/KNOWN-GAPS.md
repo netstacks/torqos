@@ -351,16 +351,24 @@ Its §5 lists claims without a test.
    sequence in a USB disk's INQUIRY string could redraw the list); a cciss disk's `cciss!c0d0`
    name is not mapped to its `/dev/cciss/c0d0`. And the installer does not ignore SIGINT, SIGQUIT
    or SIGTERM itself (Rust has no safe way without a new crate): with the console's signal keys
-   off only root, or systemd stopping it at shutdown, sends one, and a write stopped by one leaves
-   no partition table (ADR-031 step 4).
+   off and logind ignoring the power, reboot, suspend and hibernate keys and the lid (since
+   2026-11-03: before, the power key was a poweroff that stopped the installer between the write
+   and the hardware file, leaving a system without one), only root sends one — nobody logs in to
+   the installer — and a write stopped by one leaves no partition table (ADR-031 step 4).
+   One window remains (review of 5f99d05): on a disk exactly the image's size, the image's own
+   backup partition table lands at the disk's last sector near the end of the stream, so a power
+   cut in the seconds before the first MiB is written leaves a disk a firmware could restore the
+   table from — holding everything the image has, but not yet read back. Holding back the image's
+   last MiB too, written with its first, would close it.
 
-6zd. **The skeleton's loose ends** (review of `slim`, ADR-032, 2026-11-03; none a defect). No test
-   fakes an active `torq-switch.service` to prove the broker refuses to race it: dropping that name
-   from `SWITCH_UNITS` (broker/src/lib.rs) passes every test. The switch's `-E LOCALE_ARCHIVE`
-   (broker/src/config.rs `REBUILD`) passes nothing under the broker, whose environment has none,
-   and should go. The boot menu's editor lock (`editor` off in `loader.conf`) is untested until
-   the EFI-partition test (ADR-033); meanwhile a grep of the installed ESP's `loader.conf` in
-   tests/installer.nix would cover it. Wording still naming `nixos-rebuild` as what the broker
-   runs: two pages of `user-docs/`, modules/broker.nix, broker/src/lib.rs. modules/base.nix says
-   `documentation enable true` brings documentation back; man pages need `documentation man
-   enable true` as well.
+6zd. **The skeleton's loose ends** (review of `slim`, ADR-032, 2026-11-03; none a defect) —
+   closed the same day: a broker test fakes an active `torq-switch.service` as one fakes
+   nixos-rebuild's unit (`apply_and_revert_wait_for_the_brokers_own_switch_unit`); the switch's
+   `-E LOCALE_ARCHIVE` is gone (the broker's environment never had one to pass); the boot menu's
+   editor lock is checked on the disk the installer writes (`editor 0` in its `loader.conf`,
+   tests/installer.nix) until the EFI-partition test (ADR-033); the image test checks htop and
+   man are not there (curl is one of NixOS's core packages, and stays: ADR-032); the wording naming `nixos-rebuild` as what the broker runs is gone from
+   `user-docs/`, modules/broker.nix and broker/src/lib.rs; modules/base.nix says man pages need
+   `documentation man enable true` as well; and trust-loop starts a real `torq-switch` unit by
+   hand and checks the broker applies nothing until it stops. Still open: no test would notice
+   `-E LOCALE_ARCHIVE` put back (harmless: it passes nothing).

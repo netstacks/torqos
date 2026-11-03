@@ -145,6 +145,11 @@ pkgs.testers.runNixOSTest {
         # Under TorqOS's wordmark; and the machine says it is TorqOS, on NixOS (modules/branding.nix).
         on_console("set  |  commit  |  rollback")
         machine.succeed(". /etc/os-release && test \"$NAME $ID $ID_LIKE\" = 'TorqOS torqos nixos' && test \"$VERSION_ID\" = '${self.packages.${pkgs.stdenv.hostPlatform.system}.torq.version}'")
+        # The base is what TorqOS runs and nothing else (ADR-032): no htop or man pages (jq this
+        # test's own machine adds; curl is one of NixOS's core packages; the NixOS tools are the
+        # trust-loop test's check).
+        for tool in ["htop", "man"]:
+            machine.fail(f"command -v {tool}")
         # A graphics driver taking the console over late can lose what was on the screen, and
         # changes its size: setup asks again. (The x86_64 VM's bochs-drm may do it by itself, or not:
         # done here, on purpose.)

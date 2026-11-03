@@ -79,11 +79,12 @@ in
     # The skeleton (ADR-032): what TorqOS itself runs, and nothing a configuration can add. git is
     # the config repo's, which torqcli reads (the minimal build: no manuals, Perl or Python). The
     # editor is nano (NixOS's, small: `file edit` uses it unless $EDITOR says otherwise). Anything
-    # else — curl, htop, jq, a desktop — is a package or setting to put in the configuration.
+    # else — htop, jq, a desktop — is a package or setting to put in the configuration.
     environment.systemPackages = [ pkgs.gitMinimal ];
     # Nothing NixOS adds unasked (perl, rsync, strace on the shell's path), and no documentation:
     # the NixOS and Nix manuals, info, /share/doc and the man pages with their tools (~85 MB). A
-    # configuration turns it back on (`set documentation enable true`).
+    # configuration turns it back on (`set documentation enable true`; the man pages need `set
+    # documentation man enable true` as well).
     environment.defaultPackages = lib.mkDefault [ ];
     documentation.enable = lib.mkDefault false;
     documentation.man.enable = lib.mkDefault false;

@@ -33,8 +33,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # The runner comes with tools TorqOS's builds never use; the VM tests need the room.
+      # The installer's check alone holds the image three times (qcow2, raw, compressed) and an ISO.
       - name: Make room
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/share/powershell /usr/local/lib/node_modules
+          sudo docker image prune --all --force >/dev/null || true
+          df -h / /mnt; free -m
 
       # The VM tests run their machines under KVM; the runner has it, for its own group only.
       - name: KVM for the VM tests
@@ -58,9 +62,18 @@ jobs:
             system-features = nixos-test benchmark big-parallel kvm
             max-jobs = 1
 
+      # With what the runner has left, each minute, in the same log (`room:` lines): a run that dies
+      # with "The operation was canceled" then says whether the disk or the memory ran out.
       - name: nix flake check
         if: inputs.check == ''
-        run: nix flake check -L --keep-going
+        run: |
+          room() {
+            while sleep 60; do
+              echo "room: $(date -u +%H:%M) disk $(df -h --output=avail / | tail -1) free, memory $(free -m | awk '/Mem/ {print $7}') MB available"
+            done
+          }
+          room &
+          nix flake check -L --keep-going
 
       - name: One check
         if: inputs.check != ''

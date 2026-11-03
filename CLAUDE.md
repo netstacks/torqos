@@ -158,21 +158,21 @@ broker first.
 
 ## Current status (read this first) — 2026-11-03
 
-- **Handoff (2026-11-03, `main` at the merge of `installer`, `theme` and `user-docs`):** the ISO
-  installer (ADR-031) is on `main`, twice reviewed in fresh sessions (the second review, of
-  1b18763, found nothing blocking), `tests/installer.nix` green, 241 cli tests, clippy clean. The
-  terminal branding and the public documentation site (`user-docs/`) are on `main` too. `slim`
-  (ADR-032/033, worktree `~/torq-slim`) is rebased onto `main` and reviewed in a fresh session
-  (no defects; its three fixes made, its loose ends KNOWN-GAPS 6zd); size 1228 MB of 1280.
-  **Left:** `main` fast-forwarded to `slim` once trust-loop is green; then torq5 takes `main` by
-  one ledgered switch (`show | compare` first). Small installer
-  follow-ups from the second review, none blocking, for the next installer session: the ISO
-  should ignore logind's power, reboot, suspend and lid keys (the one remaining way a person
-  stops a write through systemd, and it closes the read-back/detect window of KNOWN-GAPS 6zc);
-  `put` could zero the disk's tail together with its head; both go in KNOWN-GAPS 6zc.
+- **Handoff (2026-11-03, end of the day; true once `followups` is merged):** everything of the day is on `main`: the ISO
+  installer (ADR-031, twice reviewed in fresh sessions), the two-faces docs (ADR-034–039,
+  DRIVING.md), the terminal branding, the public documentation site (`user-docs/`), the
+  skeleton (ADR-032; `slim` rebased, reviewed, merged; size 1228 MB of 1280), and the reviews'
+  follow-ups (the ISO ignores the power, reboot, suspend and hibernate keys and the lid, and the
+  installer zeroes the disk's end with its start — KNOWN-GAPS 6zc; the skeleton's loose ends
+  closed — 6zd). Tests: broker 118, torqcli 241; installer, trust-loop and image VM tests green.
+  torq5 took `main` by one ledgered switch (its first through `torq-switch`, ADR-032). CI runs
+  one derivation at a time (`max-jobs = 1`) after the runner died twice running VM tests side by
+  side; it died once more after that, and now logs its disk and memory each minute (`room:`
+  lines) so the next failure names its cause. **Next** (ROADMAP M2): the EFI-partition VM test, then Lanzaboote (ADR-033); ADR-039's
+  source statement and unfree check; then the M2 audit and `v0.2.0`.
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
   aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is
-  written for this host. Tests here: **broker 117, torqcli 241** (`cargo test` in `nix develop`,
+  written for this host. Tests here: **broker 118, torqcli 241** (`cargo test` in `nix develop`,
   also run in the Nix build sandbox).
 - **M2 is essentially done** — images (qcow2 + ESXi VMDK, both arches), first-boot setup,
   customer-safe defaults, signed releases (ADR-028; v0.1.0 and v0.1.1 out), the test/bump/release

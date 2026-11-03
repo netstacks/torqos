@@ -223,7 +223,7 @@ impl Status {
             if self.running_system.as_ref() != Some(want) {
                 p.push(format!(
                     "running system is {}, not the last ledgered build {want}: it was switched outside the \
-                     broker (e.g. nixos-rebuild against another configuration, or an old boot entry)",
+                     broker (e.g. another configuration built and switched to by hand, or an old boot entry)",
                     self.running_system.as_deref().unwrap_or("(unknown)")
                 ));
             }
@@ -281,7 +281,8 @@ impl Lock {
     }
 
     /// The lock as a child's stdin, so the rebuild's whole process tree holds it too. Killing the
-    /// broker does not stop `nixos-rebuild`, which may still switch the system; the next operation
+    /// broker does not stop the build or the switch (`torq-switch`, its own unit), which may still
+    /// switch the system; the next operation
     /// must wait for it rather than race it. A dup shares the open file description, which is what
     /// flock locks belong to, so the lock lasts until the last holder exits. The rebuild
     /// therefore has no terminal: anything that prompts (nix flake config, sudo, ssh host keys)
