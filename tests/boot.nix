@@ -69,12 +69,20 @@ pkgs.testers.runNixOSTest {
         return machine.succeed("readlink -f /run/booted-system").strip()
     def which():
         return machine.succeed("cat /etc/torq-test/which").strip()
-    def entries():
-        return sorted(machine.succeed("ls /boot/loader/entries").split())
-    def default_entry():
-        # What the firmware's boot menu starts unless told otherwise.
-        return machine.succeed("bootctl status 2>/dev/null | sed -n 's/^ *Default Entry: *//p; s/^ *Current Default: *//p' | head -1").strip() \
-            or machine.succeed("sed -n 's/^default //p' /boot/loader/loader.conf").strip()
+    # The boot menu as systemd-boot sees it (`bootctl list`), whichever writer made it: NixOS's
+    # (`loader/entries/nixos-generation-N.conf`) or Lanzaboote's (`EFI/Linux/nixos-generation-N-….efi`).
+    def menu():
+        return json.loads(machine.succeed("bootctl list --json=short 2>/dev/null"))
+    def generation(e):
+        # A generation's own entry (not a specialisation's): its number, else None.
+        m = re.match(r"nixos-generation-(\d+)(?:-[0-9a-z]+)?\.(?:conf|efi)$", e["id"])
+        return int(m.group(1)) if m and "specialisation" not in e["id"] else None
+    def generations():
+        return sorted(g for g in map(generation, menu()) if g is not None)
+    def entry(n):
+        return next(e["id"] for e in menu() if generation(e) == n)
+    def default_generation():
+        return next((generation(e) for e in menu() if e.get("isDefault")), None)
     def restart(crash=False):
         if crash:
             machine.crash()
@@ -82,6 +90,8 @@ pkgs.testers.runNixOSTest {
             machine.shutdown()
         machine.start()
         machine.wait_for_unit("multi-user.target")
+        # The boot-time rollback check done (it holds the broker's lock while it runs).
+        machine.wait_until_succeeds("test \"$(systemctl show -P SubState torq-confirm-boot)\" = exited", timeout=60)
 
     first = booted()
     nxt = machine.succeed(f"readlink -f {first}/specialisation/next").strip()
@@ -95,43 +105,41 @@ pkgs.testers.runNixOSTest {
         assert re.search(r"Product: systemd-boot", out), out
         assert which() == "first", which()
         assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == first
-        assert "nixos-generation-1.conf" in entries(), entries()
+        assert generations() == [1], menu()
         # A boot entry's kernel command line cannot be changed at the menu (modules/security.nix):
         # init=/bin/sh there would be a root shell without a password.
         loader = machine.succeed("cat /boot/loader/loader.conf")
         assert re.search(r"^editor\s+(0|no|false)\s*$", loader, re.M), loader
 
     with subtest("a commit is a new boot entry, the default, and what the machine starts"):
-        before = entries()
         p = broker("propose --diff /etc/torq-test/night-light.diff --reason 'Night light'")["seq"]
         a = broker(f"apply {p} --approved-by tester")
         assert a["kind"] == "applied", a
         assert which() == "next", which()
         assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == nxt
-        assert "nixos-generation-2.conf" in entries() and "nixos-generation-1.conf" in entries(), entries()
-        assert len(entries()) > len(before), (before, entries())
-        assert "nixos-generation-2" in default_entry(), default_entry()
+        assert generations() == [1, 2], menu()
+        assert default_generation() == 2, menu()
         restart()
         assert booted() == nxt and which() == "next", (booted(), which())
         machine.succeed("torq-broker verify")
 
     with subtest("an older entry chosen at the menu starts the older system, once"):
         # What choosing it in the boot menu does: the firmware's one-shot entry for the next start.
-        machine.succeed("bootctl set-oneshot nixos-generation-1.conf")
+        machine.succeed(f"bootctl set-oneshot {entry(1)}")
         restart()
         assert booted() == first and which() == "first", (booted(), which())
         # Chosen once: the default is still the newest, and the next start is it again.
-        assert "nixos-generation-2" in default_entry(), default_entry()
+        assert default_generation() == 2, menu()
         restart()
         assert booted() == nxt and which() == "next", (booted(), which())
 
     with subtest("a commit confirmed that a power cut interrupts is rolled back: the machine starts the last confirmed system"):
-        entries_before, default_before = entries(), default_entry()
+
         p = broker("propose --diff /etc/torq-test/night-light-off.diff --reason 'Night light off'")["seq"]
         a = broker(f"apply {p} --approved-by tester --confirm 30")
         assert which() == "confirm", which()
         # Not the boot default, and not a boot entry, until it is confirmed.
-        assert entries() == entries_before and default_entry() == default_before, (entries(), default_entry())
+        assert generations() == [1, 2] and default_generation() == 2, menu()
         restart(crash=True)
         assert booted() == nxt and which() == "next", (booted(), which())
         machine.wait_until_succeeds("tail -n1 /var/lib/torq/state/ledger.jsonl | grep -q rolled_back", timeout=120)
