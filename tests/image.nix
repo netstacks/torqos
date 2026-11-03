@@ -191,6 +191,12 @@ pkgs.testers.runNixOSTest {
         machine.succeed("jq -e '.user == \"alice\"' /var/lib/torq/config/nixos/torq.json")
         # Its TorqOS: the image's own, in the store.
         machine.succeed("grep -q 'torq.url = \"path:/nix/store/' /var/lib/torq/config/flake.nix")
+        # An SSH login at a terminal is greeted with the mark and what the machine is
+        # (modules/branding.nix); one without a terminal (scp, `ssh host command`) is not.
+        greeted = machine.succeed("su - alice -c \"script -qec 'env SSH_CONNECTION=\\\"10.0.2.2 1 10.0.2.15 22\\\" zsh -lic true' /dev/null\"")
+        assert "osydhhdhhdhys" in greeted and "TorqOS" in greeted and "Generation" in greeted, greeted
+        quiet = machine.succeed("su - alice -c \"env SSH_CONNECTION='10.0.2.2 1 10.0.2.15 22' zsh -lc 'echo done'\" < /dev/null")
+        assert quiet.strip() == "done", quiet
 
     def as_alice(cmd, ok=True):
         run = machine.succeed if ok else machine.fail
