@@ -559,7 +559,33 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   with "command not found" instead of the `/etc/nixos` guard's message; the guard stays for `nix`
   itself. Tests that read JSON in their VMs bring their own jq.
 
-<!-- ADR-033 (the boot loader) is on the `slim` branch. -->
+## ADR-033 — Python leaves with systemd-boot's installer (proposed: needs the owner's choice)
+- **Status:** proposed, 2026-11-03. Not built: it decides how Secure Boot will come.
+- **Context:** Python (134 MB, a tenth of a new machine's system) is there for one thing:
+  systemd-boot's installer, NixOS's `systemd-boot-builder.py` (452 lines), which writes the boot
+  menu at each switch — the kernels and initrds onto the EFI partition, one entry per generation
+  and specialisation, `loader.conf` (default, timeout, editor), systemd-boot itself updated with
+  `bootctl`, old entries removed past `configurationLimit`. NixOS takes any other installer through
+  `boot.loader.external.installHook`, reading each generation's bootspec (`boot.json`).
+  docs/SECURITY-MODEL.md already chose Lanzaboote for owner-key Secure Boot (`torq.security.
+  secureBoot`, a TODO), and Lanzaboote's installer (`lzbt`, Rust) is itself such a replacement.
+- **Options:**
+  1. **Lanzaboote now, Secure Boot later (recommended).** Its installer replaces the Python one
+     (systemd-boot stays the boot menu, booting signed unified kernel images); setup generates
+     the machine's own keys (`autoGenerateKeys`), kept outside the config repo like passwords; the
+     owner enrolls them in the firmware when Secure Boot comes (later, ROADMAP) — the same layout
+     then, nothing to migrate twice. Costs: an input from outside nixpkgs (nix-community, tracking
+     nixos-unstable: pinned to TorqOS's nixpkgs with `follows`), built from source on each machine
+     (Rust, minutes) unless TorqOS's releases carry it prebuilt; keys that protect nothing until
+     enrolled; a change of boot-entry format on machines already installed (one switch, tested).
+  2. **TorqOS's own writer.** A small Rust program (`torq-boot`) doing what the Python one does for
+     TorqOS's case (one profile, no XBOOTLDR, no initrd secrets or extra files), same file names
+     and layout. Smallest and fully TorqOS's — and replaced by Lanzaboote when Secure Boot comes.
+  3. **Keep Python.** 134 MB, no work, no risk.
+- **Either way:** a VM test that boots from a real EFI partition (NixOS's `useBootLoader`,
+  `useEFIBoot`): the entries after a switch, the default, a rollback by choosing an older entry, a
+  `commit confirmed` rolled back by a reboot, and the editor off; the image and ISO tests boot
+  through it too. The size budget comes down by what it saves.
 
 ## ADR-034 — One base, two faces: the sysadmin's server as code, and a person's machine an AI can drive
 - **Context:** ADR-019 narrowed TorqOS to a thin, CLI-only OS and deferred the desktop and the AI,
