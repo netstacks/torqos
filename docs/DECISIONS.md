@@ -477,12 +477,18 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      earlier NixOS, another ESP), which the installed system, finding its file systems by label,
      could start from or grow instead; opens the chosen disk exclusively and checks it is still the
      disk that was chosen (the kernel's `diskseq`, device number and size: a disk swapped for
-     another under the same name is refused), then writes the image to the whole disk and reads it
-     back to check every byte; a failure once writing began — writing, reading back, or detecting
-     the hardware below — clears the disk's start, the image's backup partition table and the
-     disk's end, so it never holds half a system. No key on the console stops it mid-write (the
-     terminal's signal keys are off). Disks with sectors larger than 512 bytes are not offered: the
-     image's partition table is in 512-byte sectors;
+     another under the same name is refused, and so is a later opening by name — to read back,
+     find the partitions, mount, clear — of another), then writes the image to the whole disk and
+     reads it back to check every byte. The image's first MiB, its partition table, is written
+     last: the disk's start is zeroed first and everything else written and synced before it, so
+     whatever stops the write — a power cut, a reset, the process killed — the disk has no
+     partition table, and no half-written system to start from. A failure once writing began —
+     writing, reading back, or detecting the hardware below — clears the disk's partition tables
+     (its start, the image's backup, the disk's end). No key on the console stops it mid-write:
+     the terminal's signal keys are off (or nothing is offered), and Ctrl-Alt-Del starts nothing
+     on the installer. If the labels above cannot be looked for (blkid failing), nothing is
+     written. Disks with sectors larger than 512 bytes are not offered: the image's partition
+     table is in 512-byte sectors;
   5. detects this machine's hardware (`nixos-generate-config --show-hardware-config
      --no-filesystems`, on the ISO only — installed machines have no installer tools, 37bed79) and
      writes it, with the image's file systems, into the new disk's root as

@@ -135,7 +135,8 @@ pkgs.testers.runNixOSTest {
         on_console(installer, "Type its name, vda")
         answer(installer, "sda")
         on_console(installer, "Not confirmed: nothing was written.")
-        installer.succeed("cmp -n 1048576 /dev/vda /dev/zero")
+        # Not a byte of the disk: written and cleared again would leave its start zeros, not the rest.
+        installer.succeed("cmp -n $(blockdev --getsize64 /dev/vda) /dev/vda /dev/zero", timeout=600)
 
     with subtest("the right name writes the image, reads it back and leaves the detected hardware"):
         on_console(installer, "Starting over.")
@@ -143,7 +144,17 @@ pkgs.testers.runNixOSTest {
         # The question asked again, not the first asking still on the screen: it is the last row.
         retry(lambda _: "Type its name, vda" in [r for r in rows(installer) if r.strip()][-1], timeout_seconds=60)
         answer(installer, "vda")
+        # Mid-write, the disk has no partition table: the image's first MiB is written last, so
+        # stopped now (a power cut) the disk is not a half-written system that starts.
+        installer.wait_until_succeeds("grep -aqF 'Writing TorqOS to vda' /dev/vcs1", timeout=600)
+        installer.fail("grep -aqF 'Checking vda' /dev/vcs1")
+        installer.succeed("cmp -n 1048576 /dev/vda /dev/zero")
+        # And no key restarts the machine mid-write: Ctrl-Alt-Del, once or seven times quickly.
+        assert installer.succeed("systemctl show -P LoadState ctrl-alt-del.target").strip() == "masked"
+        for _ in range(8):
+            installer.send_key("ctrl-alt-delete")
         on_console(installer, "TorqOS is on vda.", timeout=1200)
+        installer.succeed("systemctl is-active torq-install")
         # The installer read the whole image back from the disk before it mounted the root to leave
         # the hardware file there (which changes the root): what comes before the root, the
         # partition tables and the boot partition, is still the image's byte for byte.

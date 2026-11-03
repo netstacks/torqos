@@ -162,7 +162,7 @@ broker first.
   green** (55a4a18: the test's own mount point was missing on the ISO; the installer was fine).
   235 cli tests pass, clippy clean. **Left:** (3) a fresh-session review of the diff
   (docs/DRIVING.md: it erases disks), (4) merge to `main`, (5) rebase `slim` (ADR-032/033) onto it
-  and do the same. Open installer limits are KNOWN-GAPS 6n. The docs of ADR-034–039 (the two
+  and do the same. Open installer limits are KNOWN-GAPS 6zc. The docs of ADR-034–039 (the two
   faces, M3–M5) are in this branch too and need no further work.
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
   aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is

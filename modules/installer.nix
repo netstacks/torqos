@@ -63,6 +63,13 @@ in
     users.allowNoPasswordLogin = true;
     boot.initrd.systemd.emergencyAccess = lib.mkForce false;
 
+    # No key restarts the machine mid-write: Ctrl-Alt-Del starts nothing (its target masked), and
+    # pressed seven times in two seconds, nothing either (systemd's burst action is a forced reboot).
+    # What else can stop a write (a power cut, a reset button) leaves no partition table: the
+    # installer writes the image's last (cli/src/install.rs `put`).
+    systemd.ctrlAltDelUnit = "/dev/null";
+    systemd.settings.Manager.CtrlAltDelBurstAction = "none";
+
     systemd.services.torq-install = {
       description = "TorqOS installer";
       wantedBy = [ "multi-user.target" ];

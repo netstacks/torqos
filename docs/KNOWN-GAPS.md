@@ -336,7 +336,7 @@ Its §5 lists claims without a test.
    all: like system.nix always was, they can set anything, the broker's settings included. A person
    approves each one as its raw diff; an agent proposing one is for the same M3 allow-list (a
    config file is a whole module, so the allow-list will have to refuse them to agents outright).
-6n. **The ISO installer refuses a machine with another NixOS disk.** The image finds its file
+6zc. **The ISO installer refuses a machine with another NixOS disk.** The image finds its file
    systems by label (`nixos`, `ESP`), the same on every TorqOS disk and NixOS's defaults, so a
    second disk carrying either could be what the installed machine starts from or grows. `torq
    install` refuses until that disk is disconnected or cleared (ADR-031). Unique labels or
@@ -344,3 +344,12 @@ Its §5 lists claims without a test.
    driver (a Broadcom wifi card's `broadcom_sta`) gets it named in the detected hardware file,
    which TorqOS, allowing no unfree packages, then fails to evaluate at first-boot setup; untested
    on such hardware. (Found by review of the installer, 2026-11-03.)
+   Smaller, from the second review (2026-11-03), not fixed: a stick blkid cannot probe (copied to
+   RAM, a read error) is offered, since only its label says it is the installer's; the hardware is
+   detected after the write, so a detection failure costs the disk's contents (detecting first
+   would wipe nothing); disk model strings are printed as the disk reports them (an escape
+   sequence in a USB disk's INQUIRY string could redraw the list); a cciss disk's `cciss!c0d0`
+   name is not mapped to its `/dev/cciss/c0d0`. And the installer does not ignore SIGINT, SIGQUIT
+   or SIGTERM itself (Rust has no safe way without a new crate): with the console's signal keys
+   off only root, or systemd stopping it at shutdown, sends one, and a write stopped by one leaves
+   no partition table (ADR-031 step 4).
