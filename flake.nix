@@ -113,6 +113,63 @@
         accounts = import ./tests/accounts.nix { inherit pkgs self; };
         ssh = import ./tests/ssh.nix { inherit pkgs self; };
         image = import ./tests/image.nix { inherit pkgs self; };
+        # Nothing nixpkgs marks unfree in what TorqOS distributes (ADR-039), for every platform it
+        # releases (evaluation only, so x86_64's CI checks aarch64's too). nixpkgs refuses to
+        # evaluate an unfree package unless its configuration lets it through, so the check is
+        # that nothing does: none of nixpkgs' settings that let one through, in the image and the
+        # ISO or any specialisation of them, no package set from outside (`nixpkgs.pkgs`), and no
+        # second nixpkgs imported in TorqOS's modules (which would have settings of its own).
+        # What it cannot see is a package with no licence check at all (a vendor's file fetched
+        # as it is); redistributable firmware nixpkgs counts as free (`enableRedistributableFirmware`).
+        # And it checks itself: each way of letting one through, planted in the image, is caught.
+        free =
+          let
+            # What a configuration (`config`, evaluated) lets through that nixpkgs marks unfree.
+            allows = config:
+              let n = config.nixpkgs.config; u = config.torq.unfree; in
+              lib.optional (n.allowUnfree or false) "nixpkgs.config.allowUnfree"
+              ++ lib.optional (n ? allowUnfreePredicate) "an allowUnfreePredicate (torq.unfree: ${if u.all then "all" else if u.packages == [ ] then "none; set elsewhere" else lib.concatStringsSep ", " u.packages})"
+              ++ lib.optional ((n.allowUnfreePackages or [ ]) != [ ]) "nixpkgs.config.allowUnfreePackages"
+              ++ lib.optional ((n.allowlistedLicenses or [ ]) != [ ] || (n.whitelistedLicenses or [ ]) != [ ]) "nixpkgs.config.allowlistedLicenses"
+              ++ lib.optional (n ? handleEvalIssue) "nixpkgs.config.handleEvalIssue"
+              ++ lib.concatLists (lib.mapAttrsToList (name: sp: map (a: "its specialisation ${name}: ${a}") (allows sp.configuration)) config.specialisation);
+            ofSystem = c: allows c.config ++ lib.optional c.options.nixpkgs.pkgs.isDefined "a package set from outside (nixpkgs.pkgs)";
+            shipped = lib.concatMap (sys: [
+              { what = "the image (${sys})"; c = self.nixosConfigurations."image-${sys}"; }
+              { what = "the ISO installer (${sys})"; c = self.nixosConfigurations."installer-${sys}"; }
+            ]) linuxSystems;
+            found = lib.concatMap ({ what, c }: map (a: "${what} lets through ${a}") (ofSystem c)) shipped;
+            image = self.nixosConfigurations."image-${pkgs.stdenv.hostPlatform.system}";
+            planted = map (m: image.extendModules { modules = [ m ]; }) [
+              { torq.unfree.packages = [ "claude-code" ]; }
+              { torq.unfree.all = true; }
+              { nixpkgs.config.allowUnfree = true; }
+              { nixpkgs.config.allowUnfreePackages = [ "claude-code" ]; }
+              { nixpkgs.config.allowlistedLicenses = [ lib.licenses.unfree ]; }
+              { nixpkgs.config.handleEvalIssue = _: _: true; }
+              { specialisation.planted.configuration.torq.unfree.packages = [ "claude-code" ]; }
+              { nixpkgs.pkgs = pkgs; }
+            ];
+            missed = lib.filter (c: ofSystem c == [ ]) planted;
+          in
+          assert lib.assertMsg (found == [ ]) "Unfree software could reach what TorqOS distributes (ADR-039): ${lib.concatStringsSep "; " found}";
+          assert lib.assertMsg (missed == [ ]) "The unfree check misses ${toString (lib.length missed)} of the ways planted in the image";
+          pkgs.runCommand "torq-free" { } ''
+            # No second nixpkgs in TorqOS's own Nix (modules, hosts, its two packages): one imported
+            # has settings of its own, out of the check above. So nixpkgs' tree is not reached at all
+            # (`pkgs.path`, `<nixpkgs>`, NixOS's modules' parent), however it is spelled. And no
+            # licence set but TorqOS's own packages': a package relabelled free passes nixpkgs' check.
+            src="${./modules} ${./hosts} ${./broker/package.nix} ${./cli/package.nix}"
+            if grep -rnE 'pkgs\.path|<nixpkgs>|import[[:space:]]*\(?[[:space:]]*(inputs\.)?nixpkgs([[:space:]]|\))|modulesPath[[:space:]]*\+[[:space:]]*"/\.\.|NIXPKGS_ALLOW' $src; then
+              echo "nixpkgs' tree is reached above: a nixpkgs of its own would be out of the check (ADR-039)."
+              exit 1
+            fi
+            if grep -rnE '(^|[^.[:alnum:]])license[[:space:]]*=' $src | grep -vE 'package\.nix:[0-9]+:[[:space:]]*license = lib\.licenses\.asl20;$'; then
+              echo "A licence is set above: a package relabelled is out of nixpkgs' check (ADR-039)."
+              exit 1
+            fi
+            echo "Nothing lets an unfree package into the image or the ISO, ${lib.concatStringsSep " or " linuxSystems} (ADR-039); each of ${toString (lib.length planted)} ways planted is caught." > $out
+          '';
       } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
         # The ISO installer (ADR-031): installed and booted on x86_64 only; aarch64's ISO is built, not run.
         installer = import ./tests/installer.nix { inherit pkgs self; };
