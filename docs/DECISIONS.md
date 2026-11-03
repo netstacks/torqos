@@ -562,8 +562,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   itself. Tests that read JSON in their VMs bring their own jq.
 
 ## ADR-033 — Python leaves with systemd-boot's installer: Lanzaboote now, Secure Boot later
-- **Status:** decided, 2026-11-03 (the owner: option 1). Not yet built; the VM test below comes
-  first. It decides how Secure Boot will come: Lanzaboote's layout, once.
+- **Status:** decided, 2026-11-03 (the owner: option 1); **deferred** the same day (the owner),
+  because its premise was false — see "Amended" at the end. The VM test it asked for first is
+  built and stays (`tests/boot.nix`); Lanzaboote comes with Secure Boot itself.
 - **Context:** Python (134 MB, a tenth of a new machine's system) is there for one thing:
   systemd-boot's installer, NixOS's `systemd-boot-builder.py` (452 lines), which writes the boot
   menu at each switch — the kernels and initrds onto the EFI partition, one entry per generation
@@ -602,7 +603,23 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   switch; `torq5` first). Each machine builds Lanzaboote itself until releases carry it prebuilt
   (ADR-039's cache). The size budget comes down by what Python saved. A second reviewer on the
   diff (docs/DRIVING.md): a bootloader bug leaves a machine that does not start.
-
+- **Amended (2026-11-03): deferred.** Built on a branch (`lanzaboote`, kept), it showed the
+  premise false: Python is not only the boot writer's — `growpart` (cloud-utils, the root grown
+  at the first boot, `boot.growPartition`) needs it too, so Lanzaboote saves none of the 134 MB,
+  and adds sbctl and lzbt (1228 → 1277 MB of the 1280 budget). Its fresh reviews found what
+  moving every machine would cost now: an installed machine's EFI partition (torq5's: 249 MiB,
+  122 MB free) cannot hold Lanzaboote's copies of every generation's kernel and initrd beside
+  NixOS's during the switch that moves it; the clean-up of the old writer's entries, as built,
+  could remove the only ones that start after a way back to NixOS's writer (a rollback past the
+  move); Lanzaboote itself does not test aarch64; each machine downloads a Rust toolchain to
+  build its stub. With no saving to set against that, the owner deferred it: Lanzaboote comes
+  with Secure Boot (SECURITY-MODEL, later), when keys are enrolled and it is worth its cost, and
+  the branch's lessons go with it (a free-space check before the move; a clean-up that removes an
+  entry only when its files are gone; x86_64 first). Python leaves when the root is grown by
+  systemd-repart instead of growpart — its own item, and then the boot writer is the only thing
+  left needing it. Until then the menu is NixOS's writer's, and `tests/boot.nix` (the check
+  `boot`) holds it to what this ADR asked of any writer: the entries after a switch, the default,
+  an older entry chosen at the menu, a commit confirmed rolled back by a power cut, the editor off.
 ## ADR-034 — One base, two faces: the sysadmin's server as code, and a person's machine an AI can drive
 - **Context:** ADR-019 narrowed TorqOS to a thin, CLI-only OS and deferred the desktop and the AI,
   so the configuration layer could be built first. It is built: the trust loop (M1), torqcli

@@ -113,8 +113,8 @@ cache; the machine builds TorqOS's few small pieces itself.
 The ISO installer (ADR-031) puts that same image on real hardware: `torq install` on its console
 writes it to the disk a person names and leaves the detected hardware for first-boot setup.
 **Finishing M2: a smaller TorqOS** (ADR-032, on the `slim` branch: no `nixos-rebuild` or NixOS's
-other tools on an installed machine), then the boot loader (ADR-033, decided: Lanzaboote — the
-EFI-partition VM test first). ADR-039's source statement and unfree check are done
+other tools on an installed machine), the EFI-partition test (ADR-033: Lanzaboote itself
+deferred to Secure Boot), and ADR-039's source statement and unfree check
 (`checks.<system>.free`).
 
 **Then M3 — trust** (ADR-035, ADR-036): the broker as a socket service with identity from

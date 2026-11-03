@@ -105,13 +105,13 @@ before you go on. A ⏹ with *adversarial* means both kinds.
       trust-loop and image tests green with the `nix`-only switch.
       **⏹ review:** does the broker's new switch path race `nixos-rebuild`'s unit as the old one did?
 - [x] Decide ADR-033: Lanzaboote now, Secure Boot later (2026-11-03).
-- [ ] The EFI-partition VM test **first**, against today's Python writer: entries after a switch,
+- [x] The EFI-partition VM test **first**, against today's Python writer: entries after a switch,
       rollback by choosing an older entry, a `commit confirmed` rolled back by a reboot, the editor
-      off. It must pass before Lanzaboote is touched — it is what proves the swap changed nothing.
-- [ ] Lanzaboote (ADR-033): the input, the module, keys at setup outside the repo, the same test
-      green, the image and ISO tests booting through it; then migrate `torq5` by one ledgered
-      switch. **⏹ adversarial:** a bootloader bug leaves a machine that does not start; this is the
-      one place to spend a second reviewer. Also: can the tree or a config file reach the keys?
+      off. *(tests/boot.nix, check `boot`, 2026-11-03; mutation-checked with the editor on.)*
+- [~] Lanzaboote (ADR-033): built on branch `lanzaboote`, then **deferred** (2026-11-03, the owner):
+      Python stays for growpart anyway, so it saved nothing, and its reviews found the move unsafe
+      as built (a full EFI partition, a clean-up that can remove working entries). It comes with
+      Secure Boot (M4 or later); the reviews' findings are in ADR-033's amendment.
 - [x] ADR-039 (2026-11-03, `checks.<system>.free`): the source statement in `release.yml`; a CI check that the image and ISO hold
       nothing nixpkgs marks unfree. *Test:* the check fails when `claude-code` is put in the image on purpose.
 - [ ] **⏹ audit** — end of M2. Then a release (`v0.2.0`) from a machine tracking `stable`.

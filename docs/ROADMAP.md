@@ -140,8 +140,12 @@ first.
       and switching with `nix` itself, a size budget CI enforces.
       *(checks.x86_64-linux.size, 2026-11-03: 1228 MB of 1280; the seven tools absent and the
       `nix`-only switch in trust-loop.nix; the image and installer tests boot through it.)*
-- [ ] **The boot loader without Python** (ADR-033, decided 2026-11-03: Lanzaboote now, Secure Boot
-      later — the EFI-partition VM test first, on both writers; `torq5` migrates first).
+- [x] **The EFI-partition test** (ADR-033): a machine's boot menu held to what any writer must do.
+      *(tests/boot.nix, 2026-11-03: entries after a switch, the default, an older entry chosen at
+      the menu, a commit confirmed rolled back by a power cut, the editor off.)*
+- [ ] **Python out** (ADR-032/033): the root grown by systemd-repart instead of growpart; then the
+      boot writer is the last thing needing Python. Lanzaboote is deferred to Secure Boot (ADR-033,
+      amended 2026-11-03), branch `lanzaboote` kept.
 - [x] **Upstreams** (ADR-039): a source statement on each release; CI fails an image or ISO that
       holds anything nixpkgs marks unfree (redistributable firmware, which it counts as free, is on
       the ISO). *(checks.<system>.free, 2026-11-03: nothing lets an unfree package into either, on
@@ -214,7 +218,7 @@ acceptance tests, each a VM test.
 ## Later (not planned now): boot security, and limits on root
 
 - Owner-rooted boot security (own Secure Boot keys, TPM2 + PIN; SECURITY-MODEL.md), tested in
-  emulation first (QEMU + OVMF + swtpm). ADR-033's Lanzaboote path lays the layout for it.
+  emulation first (QEMU + OVMF + swtpm). Lanzaboote comes with it (ADR-033, deferred to here; branch `lanzaboote`).
 - Strict mode without break-glass: no root shell at all, once every task an owner needs is a
   torqcli command (ADR-035).
 - A shared base configuration with per-host overlays, for fleets (ADR-036).
