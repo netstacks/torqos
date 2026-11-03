@@ -152,9 +152,10 @@ pkgs.testers.runNixOSTest {
             " && test $(( $(cat /sys/class/block/vda2/start) + $(cat /sys/class/block/vda2/size) )) -le $(( "
             + str(image_bytes) + " / 512 ))"
         )
-        installer.succeed("mount -o ro /dev/vda2 /mnt")
-        hw = installer.succeed("cat /mnt/var/lib/torq/install/hardware-configuration.nix")
-        installer.succeed("umount /mnt")
+        # The ISO has no /mnt: a mount point of the test's own.
+        installer.succeed("mkdir -p /tmp/root && mount -o ro /dev/vda2 /tmp/root")
+        hw = installer.succeed("cat /tmp/root/var/lib/torq/install/hardware-configuration.nix")
+        installer.succeed("umount /tmp/root")
         assert "qemu-guest.nix" in hw and "by-label/nixos" in hw, hw
         installer.shutdown()
 
