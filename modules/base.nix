@@ -14,8 +14,9 @@ in
   config = {
     assertions = [
       {
-        # Every configured machine has an owner; only the image, before setup, has none.
-        assertion = cfg.user != null && cfg.user != "CHANGE-ME" || cfg.user == null && cfg.setup.enable;
+        # Every configured machine has an owner; only the image, before setup, and the installer
+        # (ADR-031), which installs the image, have none.
+        assertion = cfg.user != null && cfg.user != "CHANGE-ME" || cfg.user == null && (cfg.setup.enable || cfg.installer.enable);
         message = "Set the owner's login name: `torq user <name>` (nixos/torq.json in the config repo).";
       }
       {

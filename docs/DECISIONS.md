@@ -451,3 +451,58 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   working tree, uncommitted edits included (KNOWN-GAPS, "Dev mode"), so what the ledger records on
   the dev machine is reversible but not always reproducible from the repository. `docs/DEV-SETUP.md` is written for this
   host; the Mac/UTM instructions are in git history.
+
+## ADR-031 — The ISO installer writes the image, and detects the hardware
+- **Context:** M2's last piece is TorqOS on real hardware: an ISO to boot from a USB stick that
+  puts TorqOS on a disk. TorqOS already has one install artifact, tested end to end (the image,
+  `tests/image.nix`): a disk that grows to fill whatever it is written to and runs first-boot setup.
+  What a real machine adds is a disk to choose, and hardware a VM does not have — network cards'
+  firmware, CPU microcode, storage drivers at boot — which the image's `hardware-configuration.nix`
+  (a VM's: `qemu-guest.nix`) does not name.
+- **Decision:** The ISO is a small TorqOS live system whose console runs `torq install` and nothing
+  else: nobody can log in, nothing listens — no network, and nothing on the machine's disks
+  started (no LVM, no RAID). It carries the image itself — the qcow2 CI builds and tests, converted
+  to raw by `qemu-img` and compressed, so every install, VM or metal, is the same disk bytes.
+  `torq install`:
+  1. checks its own copy of the image (its SHA-256) before offering any disk: a damaged stick or
+     download is found with nothing written;
+  2. lists the whole disks it could install to (`/sys/block`): not loop, RAM, optical,
+     device-mapper or read-only devices, an eMMC's boot areas, an NVMe disk's hidden paths, or a
+     disk anything is built on (an old LVM volume group, a RAID array), and **never the installer's
+     own medium** — by what is mounted, and by its volume label, so also when the ISO was copied to
+     RAM; each with its size, model and how it is attached, and what is on it now;
+  3. asks for one, and to type that disk's name again to confirm that everything on it is erased —
+     nothing is written before that;
+  4. refuses while another disk has a file system labelled as the image's are (`nixos`, `ESP`: an
+     earlier NixOS, another ESP), which the installed system, finding its file systems by label,
+     could start from or grow instead; opens the chosen disk exclusively and checks it is still the
+     disk that was chosen (the kernel's `diskseq`, device number and size: a disk swapped for
+     another under the same name is refused), then writes the image to the whole disk and reads it
+     back to check every byte; a failure once writing began — writing, reading back, or detecting
+     the hardware below — clears the disk's start, the image's backup partition table and the
+     disk's end, so it never holds half a system. No key on the console stops it mid-write (the
+     terminal's signal keys are off). Disks with sectors larger than 512 bytes are not offered: the
+     image's partition table is in 512-byte sectors;
+  5. detects this machine's hardware (`nixos-generate-config --show-hardware-config
+     --no-filesystems`, on the ISO only — installed machines have no installer tools, 37bed79) and
+     writes it, with the image's file systems, into the new disk's root as
+     `/var/lib/torq/install/hardware-configuration.nix`;
+  6. says to remove the installer and restart.
+  On the first boot from the disk the root partition grows to fill it (`boot.growPartition`, as now)
+  and first-boot setup runs unchanged, except that it takes the detected hardware file over the
+  image's generic one: change #1 records it in the config repo like any machine's.
+- **Not now:** installing beside another system or to a partition (whole disks only), disk
+  encryption, BIOS boot (UEFI only, as the image), Secure Boot (later, ROADMAP). Both architectures'
+  ISOs are built by CI; only x86_64 is installed and booted in a VM test here (ADR-030).
+- **Consequences:** One install path to keep correct, not two: what the ISO installs is what the
+  image tests already boot. A VM installed from the ISO gets a detected hardware file instead of the
+  image's — the same drivers or more. The ISO is larger than the image by its live system and the
+  firmware of any machine it may start on (about 1.9 GiB, near GitHub's 2 GiB a release file:
+  release.yml refuses one past it, by name). Hardware
+  detection is what NixOS's own installer does, so it is as good as NixOS's on any machine;
+  firmware a machine needs that NixOS does not detect is a setting to add afterwards
+  (`set hardware enableRedistributableFirmware true`). "Nobody can log in" is over the console and
+  the network: someone at the machine can edit the boot menu's kernel command line and start a
+  shell on the installer — as on any machine whose boot they control, and the installer holds
+  nothing (Secure Boot and a locked menu: later, ROADMAP).
+

@@ -3,10 +3,11 @@
 # netstacks/torqos-releases:
 #   - the tagged source as one commit there, signed with the release key, tagged, and `stable`
 #     moved to it (never for a pre-release, `v1.2.0-rc1`): what machines update to;
-#   - a GitHub Release with the images (the VMDK gzipped: a release file is at most 2 GiB),
+#   - a GitHub Release with the images and the ISO installer (the VMDK gzipped: a release file is at
+#     most 2 GiB),
 #     SHA256SUMS, its signature, and the key to check it with.
-# Secrets: TORQOS_RELEASE_KEY (the release key's private half), TORQOS_RELEASES_TOKEN (a token
-# that may write to netstacks/torqos-releases only).
+# Secrets: TORQOS_RELEASE_KEY (the release key's private half), TORQOS_RELEASES_TOKEN (a person's
+# token for netstacks/torqos-releases, allowed this repository too for the weekly bump: ADR-028).
 name: release
 
 on:
@@ -51,8 +52,11 @@ jobs:
         run: |
           cd files
           for f in *.vmdk; do gzip -9n "$f"; done
+          # A release file is at most 2 GiB (GitHub): said here, by name, not as a failed upload. The
+          # ISO (about 1.9 GiB, ADR-031) is the one near it.
+          for f in *; do s=$(stat -c %s "$f"); if [ "$s" -ge 2147483648 ]; then echo "::error::$f is $s bytes: a release file is at most 2 GiB"; exit 1; fi; done
           rm -f SHA256SUMS
-          sha256sum *.qcow2 *.vmdk.gz > SHA256SUMS
+          sha256sum *.qcow2 *.vmdk.gz *.iso > SHA256SUMS
           ssh-keygen -Y sign -q -f "$RUNNER_TEMP/release-key" -n file SHA256SUMS
           cp ../release/allowed_signers .
           ssh-keygen -Y verify -f allowed_signers -I torqos-release -n file -s SHA256SUMS.sig < SHA256SUMS
@@ -90,6 +94,7 @@ jobs:
           **Images** (how to run them: docs/INSTALL.md, "Running it"):
           - \`torqos-<arch>.qcow2\`: UTM, QEMU, Proxmox, as it is.
           - \`torqos-<arch>.vmdk.gz\`: VMware ESXi; \`gunzip\` it first.
+          - \`torqos-<arch>.iso\`: the installer, for a real machine's disk: write it to a USB stick as it is (docs/INSTALL.md).
 
           **Check a download** (OpenSSH, nothing to install):
           \`\`\`

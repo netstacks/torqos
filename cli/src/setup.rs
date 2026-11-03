@@ -26,7 +26,7 @@ const JOURNALCTL: &str = "/run/current-system/sw/bin/journalctl";
 const BROKER_UNIT: &str = "torq-setup-broker";
 const WELCOME: &str = "Welcome to TorqOS. This machine has no configuration yet: a few questions set it up.";
 /// TorqOS's wordmark, shown over the welcome (modules/branding.nix).
-const BANNER: &str = "/etc/torq/banner";
+pub(crate) const BANNER: &str = "/etc/torq/banner";
 
 /// How the owner logs in from other machines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,10 +103,17 @@ pub fn valid_key(k: &str) -> Result<String> {
     Ok(k.to_string())
 }
 
+/// This machine's hardware file: the one the installer detected (`detected`, ADR-031), when TorqOS
+/// was installed from the ISO; otherwise the image's own, a virtual machine's (`image`).
+pub fn hardware_file(image: &Path, detected: &Path) -> PathBuf {
+    if detected.is_file() { detected.to_path_buf() } else { image.join("hardware-configuration.nix") }
+}
+
 /// The config repo's files for `a`: TorqOS's template (`template`: its templates/config) with the
-/// answers, the image's lock and hardware file (`image`), TorqOS from `source` (a store path), for
+/// answers, the image's lock (`image`), this machine's hardware file (`hardware`: `hardware_file`),
+/// TorqOS from `source` (a store path), for
 /// `system` ("aarch64-linux"). `flake.nix` comes last: setup runs only while it is missing.
-pub fn files(a: &Answers, template: &Path, image: &Path, source: &str, system: &str) -> Result<Vec<(String, Vec<u8>)>> {
+pub fn files(a: &Answers, template: &Path, image: &Path, hardware: &Path, source: &str, system: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let read = |p: PathBuf| std::fs::read(&p).with_context(|| format!("reading {}", p.display()));
     let flake = String::from_utf8(read(template.join("flake.nix"))?).context("flake.nix: not text")?;
     let platform = "system = \"aarch64-linux\";";
@@ -119,7 +126,7 @@ pub fn files(a: &Answers, template: &Path, image: &Path, source: &str, system: &
     let mut out: Vec<(String, Vec<u8>)> = vec![
         ("flake.lock".into(), read(image.join("flake.lock"))?),
         ("config-files.json".into(), read(template.join("config-files.json"))?),
-        ("hardware-configuration.nix".into(), read(image.join("hardware-configuration.nix"))?),
+        ("hardware-configuration.nix".into(), read(hardware.to_path_buf())?),
         ("nixos/boot.json".into(), read(template.join("nixos/boot.json"))?),
         ("nixos/torq.json".into(), pretty(torq)),
         ("system/host.json".into(), pretty(json!({ "host-name": a.host, "time-zone": a.zone }))),
@@ -237,7 +244,8 @@ fn apply(a: &Answers) -> Result<()> {
         "x86_64" => "x86_64-linux",
         other => bail!("TorqOS is not built for {other}"),
     };
-    let files = files(a, &source.join("templates/config"), image, &source.to_string_lossy(), system)?;
+    let hardware = hardware_file(image, &Path::new("/").join(crate::install::DETECTED));
+    let files = files(a, &source.join("templates/config"), image, &hardware, &source.to_string_lossy(), system)?;
     // The password first, outside the repo, readable by the system only: a new file (whatever was
     // there before, a link included, is gone first).
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(PASSWORDS)?;
@@ -270,7 +278,7 @@ fn apply(a: &Answers) -> Result<()> {
 }
 
 /// Ask until `check` takes the answer, saying why it did not.
-fn until<T>(mut ask: impl FnMut() -> Result<String>, check: impl Fn(&str) -> Result<T>) -> Result<T> {
+pub(crate) fn until<T>(mut ask: impl FnMut() -> Result<String>, check: impl Fn(&str) -> Result<T>) -> Result<T> {
     loop {
         match check(&ask()?) {
             Ok(v) => return Ok(v),
@@ -281,7 +289,13 @@ fn until<T>(mut ask: impl FnMut() -> Result<String>, check: impl Fn(&str) -> Res
 
 /// One answer, `default` if none is typed.
 fn line(question: &str, default: &str) -> Result<String> {
-    asked(&if default.is_empty() { format!("{question}: ") } else { format!("{question} [{default}]: ") })?;
+    line_under(&welcome, question, default)
+}
+
+/// One answer under `heading` (shown again if the console is taken over: `asked`), `default` if
+/// none is typed.
+pub(crate) fn line_under(heading: &dyn Fn() -> String, question: &str, default: &str) -> Result<String> {
+    asked(heading, &if default.is_empty() { format!("{question}: ") } else { format!("{question} [{default}]: ") })?;
     let mut s = String::new();
     if std::io::stdin().lock().read_line(&mut s)? == 0 {
         bail!("the console closed");
@@ -293,7 +307,7 @@ fn line(question: &str, default: &str) -> Result<String> {
 /// A secret, not shown as it is typed.
 fn secret(question: &str) -> Result<String> {
     let _hidden = crate::shell::Echo::set(false);
-    asked(&format!("{question}: "))?;
+    asked(&welcome, &format!("{question}: "))?;
     let mut s = String::new();
     if std::io::stdin().lock().read_line(&mut s)? == 0 {
         bail!("the console closed");
@@ -314,10 +328,10 @@ fn welcome() -> String {
 /// standard VGA, seconds into setup; a GPU's on real hardware) takes the console over, and what was on
 /// the screen may be lost — the question with it, leaving a screen that asks nothing. Such a console
 /// changes size (VGA text's 80x25 to the framebuffer's), so while waiting a size change means the
-/// question is shown again, with the welcome. (Not timed to the driver: nothing tells whether one is
+/// question is shown again, under `heading`. (Not timed to the driver: nothing tells whether one is
 /// coming, or when.) A console hands over one line a read, so nothing typed sits unread in stdin's
 /// buffer while this waits on the terminal itself.
-fn asked(prompt: &str) -> Result<()> {
+fn asked(heading: &dyn Fn() -> String, prompt: &str) -> Result<()> {
     use rustix::event::{poll, PollFd, PollFlags, Timespec};
     let stdin = std::io::stdin();
     let size = || rustix::termios::tcgetwinsize(&stdin).ok().map(|w| (w.ws_row, w.ws_col));
@@ -332,7 +346,7 @@ fn asked(prompt: &str) -> Result<()> {
         let now = size();
         if now != was {
             was = now;
-            print!("\n{}\n\n{prompt}", welcome());
+            print!("\n{}\n\n{prompt}", heading());
             std::io::stdout().flush()?;
         }
     }
@@ -392,7 +406,7 @@ mod tests {
         std::fs::write(image.path().join("hardware-configuration.nix"), "{ ... }: { }\n").unwrap();
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtorq alice@laptop";
         let src = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source";
-        let f = files(&answers(Remote::Both, Some(key)), &template, image.path(), src, "x86_64-linux").unwrap();
+        let f = files(&answers(Remote::Both, Some(key)), &template, image.path(), &image.path().join("hardware-configuration.nix"), src, "x86_64-linux").unwrap();
         let get = |name: &str| String::from_utf8(f.iter().find(|(p, _)| p == name).unwrap_or_else(|| panic!("{name}")).1.clone()).unwrap();
         assert_eq!(f.last().unwrap().0, "flake.nix", "written last: setup runs while it is missing");
         let flake = get("flake.nix");
@@ -407,10 +421,26 @@ mod tests {
         assert_eq!(get("flake.lock"), "{\"lock\":1}\n");
         assert!(f.iter().all(|(_, b)| !String::from_utf8_lossy(b).contains("$6$")), "the password is never in the repo");
         // No remote login: no SSH at all; a key only: no passwords over SSH.
-        let none = files(&answers(Remote::No, None), &template, image.path(), "/nix/store/abc-source", "aarch64-linux").unwrap();
+        let none = files(&answers(Remote::No, None), &template, image.path(), &image.path().join("hardware-configuration.nix"), "/nix/store/abc-source", "aarch64-linux").unwrap();
         assert!(none.iter().all(|(p, _)| p != "nixos/services.json" && p != "nixos/users.json"));
-        let keyed = files(&answers(Remote::Key, Some(key)), &template, image.path(), "/nix/store/abc-source", "aarch64-linux").unwrap();
+        let keyed = files(&answers(Remote::Key, Some(key)), &template, image.path(), &image.path().join("hardware-configuration.nix"), "/nix/store/abc-source", "aarch64-linux").unwrap();
         let services = &keyed.iter().find(|(p, _)| p == "nixos/services.json").unwrap().1;
         assert_eq!(serde_json::from_slice::<serde_json::Value>(services).unwrap(), json!({ "openssh": { "enable": true } }), "keys only: NixOS's SSH, as TorqOS sets it up");
+    }
+
+    /// Installed from the ISO, the machine's own hardware (what the installer detected) is the one
+    /// in its config repo; installed from the image, the image's (ADR-031).
+    #[test]
+    fn the_detected_hardware_over_the_images() {
+        let image = tempfile::tempdir().unwrap();
+        std::fs::write(image.path().join("hardware-configuration.nix"), "# the image's\n").unwrap();
+        let detected = image.path().join("install/hardware-configuration.nix");
+        assert_eq!(hardware_file(image.path(), &detected), image.path().join("hardware-configuration.nix"), "none detected: the image's");
+        std::fs::create_dir_all(detected.parent().unwrap()).unwrap();
+        std::fs::write(&detected, "# detected\n").unwrap();
+        assert_eq!(hardware_file(image.path(), &detected), detected, "detected: that one");
+        std::fs::remove_file(&detected).unwrap();
+        std::fs::create_dir(&detected).unwrap();
+        assert_eq!(hardware_file(image.path(), &detected), image.path().join("hardware-configuration.nix"), "only a file counts");
     }
 }

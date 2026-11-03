@@ -26,6 +26,11 @@
           mkdir $out
           qemu-img convert ${args} ${whole}/*.qcow2 $out/torqos-${system}.${ext}
         '';
+      # The image as the ISO installer carries it (ADR-031, hosts/installer/payload.nix).
+      payload = pkgs: import ./hosts/installer/payload.nix {
+        inherit pkgs;
+        image = self.nixosConfigurations."image-${pkgs.stdenv.hostPlatform.system}".config.system.build.images.qemu-efi;
+      };
     in
     {
       # ── Packages ─────────────────────────────────────────────────────────────
@@ -41,6 +46,10 @@
         # (a sparse VMDK, which `vmkfstools -i` makes the host's own disk).
         image = imageAs pkgs "qcow2" "-c -O qcow2";
         image-vmdk = imageAs pkgs "vmdk" "-O vmdk -o adapter_type=lsilogic";
+        # The ISO installer (ADR-031): `nix build .#iso`, for a USB stick or disc; it installs the image
+        # above on a real machine's disk, with that machine's hardware.
+        iso = let iso = self.nixosConfigurations."installer-${pkgs.stdenv.hostPlatform.system}".config.system.build.isoImage; in
+          pkgs.runCommand "torqos-iso-${pkgs.stdenv.hostPlatform.system}" { } "mkdir $out; ln -s ${iso}/iso/*.iso $out/";
       }));
 
       # ── The distribution, as one NixOS module ────────────────────────────────
@@ -81,6 +90,13 @@
         self.lib.mkSystem {
           system = lib.removePrefix "image-" name;
           modules = [ ./hosts/image { torq.setup.source = self.sourceInfo; } ];
+        })
+      # The installer's own system (ADR-031), carrying the image of the same platform.
+      // lib.genAttrs (map (s: "installer-${s}") linuxSystems) (name:
+        let system = lib.removePrefix "installer-" name; in
+        self.lib.mkSystem {
+          inherit system;
+          modules = [ ./hosts/installer { torq.installer.payload = payload nixpkgs.legacyPackages.${system}; } ];
         });
 
       # ── Template for the per-machine config repo the broker manages ─────────
@@ -97,6 +113,9 @@
         accounts = import ./tests/accounts.nix { inherit pkgs self; };
         ssh = import ./tests/ssh.nix { inherit pkgs self; };
         image = import ./tests/image.nix { inherit pkgs self; };
+      } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+        # The ISO installer (ADR-031): installed and booted on x86_64 only; aarch64's ISO is built, not run.
+        installer = import ./tests/installer.nix { inherit pkgs self; };
       });
 
       # ── Dev shell (works on the Mac too) ─────────────────────────────────────

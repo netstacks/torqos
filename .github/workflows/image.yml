@@ -1,7 +1,8 @@
 # The TorqOS images (docs/INSTALL.md), x86_64 and aarch64, each built on a runner of its own
-# architecture: the qcow2 (UTM, QEMU, Proxmox) and the VMDK (VMware ESXi), kept as the run's
-# artifacts with their checksums. Run by hand (Actions → image → Run workflow, or `gh workflow run
-# image.yml`), and as a step of every release (release.yml).
+# architecture: the qcow2 (UTM, QEMU, Proxmox), the VMDK (VMware ESXi) and the ISO installer (real
+# hardware, ADR-031), kept as the run's artifacts with their checksums. Run by hand (Actions →
+# image → Run workflow, or `gh workflow run image.yml`), and as a step of every release
+# (release.yml).
 name: image
 
 on:
@@ -35,8 +36,8 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       # NixOS makes the disk in a small VM, a build that asks for `kvm`. The arm64 runner has no KVM:
-      # its VM falls back to emulation (QEMU's accel=kvm:tcg), slower but the same disk, as on the
-      # aarch64 machine TorqOS is developed on. The x86_64 runner has KVM.
+      # its VM falls back to emulation (QEMU's accel=kvm:tcg), slower but the same disk. The x86_64
+      # runner has KVM.
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
@@ -46,8 +47,9 @@ jobs:
         run: |
           nix build -L .#packages.${{ matrix.system }}.image --out-link qcow2
           nix build -L .#packages.${{ matrix.system }}.image-vmdk --out-link vmdk
+          nix build -L .#packages.${{ matrix.system }}.iso --out-link iso
           mkdir out
-          cp -L qcow2/*.qcow2 vmdk/*.vmdk out/
+          cp -L qcow2/*.qcow2 vmdk/*.vmdk iso/*.iso out/
           cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
 
       - uses: actions/upload-artifact@v4
