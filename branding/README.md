@@ -37,7 +37,7 @@ lockup (mark beside wordmark) is the default; the stacked lockup is for square s
 | [`svg/wordmark/`](svg/wordmark) | "TorqOS" alone: for dark, for light, black, white |
 | [`svg/app-icon/`](svg/app-icon) | The rounded-square app icon: graphite, torque, and a small-size variant |
 | [`icons/hicolor/`](icons/hicolor) | The freedesktop icon theme layout: `torqos` (16–512 px and scalable), `distributor-logo-torqos` and its symbolic variant |
-| [`terminal/`](terminal) | The logo and wordmark as text (ANSI colour and plain), and a fastfetch configuration |
+| [`terminal/`](terminal) | The mark, the wordmark and the lockup as text (ANSI colour and plain; the mark in half blocks, drawn from its SVG by [`tools/text-logos.py`](tools/text-logos.py)), and a fastfetch configuration |
 | [`favicon/`](favicon) | `favicon.ico` (16, 32, 48), `favicon.svg` (follows light and dark mode), touch and web-app icons |
 | [`palette/`](palette) | The colours, as [`colors.json`](palette/colors.json) and [`colors.md`](palette/colors.md) |
 | [`fonts/`](fonts) | The licence of Space Grotesk, the wordmark's typeface |
@@ -61,7 +61,9 @@ example `rsvg-convert -w 1024 svg/app-icon/torqos-icon.svg -o torqos-icon-1024.p
 | ![](https://img.shields.io/badge/-%20%20%20%20-5B6270) | Slate | `#5B6270` | Muted interface elements |
 | ![](https://img.shields.io/badge/-%20%20%20%20-7EE2A8) | Signal green | `#7EE2A8` | "OK" states: verified, secure |
 
-In a terminal, Torque is 256-colour `38;5;208` and the foreground bright white `97`. A Linux text
+In a terminal, Torque is 256-colour `38;5;208` and the foreground bright white `97` (or `255`); Steel
+is `246`, Slate `241` and Signal green `115`. The prompt uses the exact colours where the terminal
+says it shows 24-bit colour (`COLORTERM`). A Linux text
 console has sixteen colours and shows the nearest one.
 
 ## Type
@@ -86,15 +88,16 @@ using the logo needs neither font installed.
 
 ## In TorqOS
 
-TorqOS uses these files directly (`modules/branding.nix`); the shell's prompt and colours are its own
-and unchanged.
+TorqOS uses these files directly (`modules/branding.nix`), and the palette in its shell (`modules/shell.nix`):
+the prompt, the command line's highlighting and suggestions, and fzf.
 
 | Where | What |
 |---|---|
 | `/etc/os-release`, `/etc/lsb-release` | `NAME=TorqOS`, `ID=torqos`, `ID_LIKE=nixos`, the version, `LOGO=distributor-logo-torqos`, `ANSI_COLOR="38;5;208"` |
 | The boot menu and boot messages | Entries and lines name TorqOS |
-| The console before login (`/etc/issue`) | The wordmark, the version, the host name and terminal |
-| First-boot setup | The wordmark over the welcome |
+| The console before login (`/etc/issue`) | The lockup (mark and wordmark), the version, the host name and terminal |
+| First-boot setup, the ISO installer | The lockup over the welcome |
+| The shell | The prompt in Torque, Foreground, Steel and Slate; commands that exist in Signal green |
 | fastfetch | `/etc/xdg/fastfetch/config.jsonc`, with the logo, for whoever installs fastfetch |
 | A desktop, when enabled | The icons, installed in `share/icons/hicolor` |
 
@@ -108,7 +111,8 @@ and unchanged.
   ```
 - **A Linux desktop.** Install `icons/hicolor/` into `share/icons/hicolor/` (on NixOS, from a
   package, as `package.nix` does), then refresh the icon cache.
-- **A terminal.** `cat terminal/torqos-logo-ansi.txt` or `terminal/torqos-wordmark-ansi.txt`; the
+- **A terminal.** `cat terminal/torqos-lockup-ansi.txt`, `terminal/torqos-logo-ansi.txt` or
+  `terminal/torqos-wordmark-ansi.txt`; the
   plain files have no colour codes.
 
 ## Licence and trademark

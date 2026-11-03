@@ -1,24 +1,14 @@
-                   ::/++:::
-             :oyhddhhddhhddhdh:
-          ohddhhddhhddhhddhhdy
-       :ydhddhhddhhddhhddhhdd
-     :hdhhddhhddhs+:::  ::+o:
-    oddhhddhds/                      hdhs:
-   yddhhdddo                        odhhdddy+
-  yddhhddh                         :dhhddhhddho
- oddhhddy      oO                  dhhddhhdd
- ddhhddh      oNNN0               oyoodhhddhs
-+dhhddh+       :MNNN0                 hhddhhd
-ohhddhh:         :MNNN0               oddhhdd:
-ohddhhd:         :MNNN0               odhhddh:
-+ddhhdd+       :MNNN0                 hhhddhd
- dhhddhh      oNNN0   MNNNNNNNNO     /hhddhhs
- ohddhhdy      oO      OOOOOOOo     :dhddhhd
-  ydhhddhh                         +dhddhhd+
-   yhddhhddo                     :yhhddhhd+
-    odhhddhhds/                ohdhhddhhh:
-     :hddhhddhhdhs+:::  ::+oshhddhhddhdo
-       :ydddhhddhhddhhddhhddhhddhhdddo
-          ohdddhhddhhddhhddhhddhhds/
-             :oyhdhhddhhddhhdhs+:
-                   ::/++:::
+       ▄▄▄███████▄
+    ▄▄███████████
+   ▄█████▀▀    ▀▀     ▄
+  ████▀              ▄███▄▄
+ ████▀               █████▀▀
+████▀   ▀██▄        ▀▀████▄
+████      ▀██          ████
+████      ▄██          ████
+████▄   ▄██▀ █████▄   ████▀
+ ████▄               ▄████
+  ████▄            ▄█████
+   ▀█████▄▄    ▄▄▄█████▀
+    ▀▀███████████████▀
+       ▀▀▀███████▀▀

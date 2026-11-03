@@ -1,24 +1,14 @@
-                   $1::/++:::
-             $1:oyhddhhddhhddhdh:
-          $1ohddhhddhhddhhddhhdy
-       $1:ydhddhhddhhddhhddhhdd
-     $1:hdhhddhhddhs+:::  ::+o:
-    $1oddhhddhds/                      hdhs:
-   $1yddhhdddo                        odhhdddy+
-  $1yddhhddh                         :dhhddhhddho
- $1oddhhddy      $2oO                  $1dhhddhhdd
- $1ddhhddh      $2oNNN0               $1oyoodhhddhs
-$1+dhhddh+       $2:MNNN0                 $1hhddhhd
-$1ohhddhh:         $2:MNNN0               $1oddhhdd:
-$1ohddhhd:         $2:MNNN0               $1odhhddh:
-$1+ddhhdd+       $2:MNNN0                 $1hhhddhd
- $1dhhddhh      $2oNNN0   MNNNNNNNNO     $1/hhddhhs
- $1ohddhhdy      $2oO      OOOOOOOo     $1:dhddhhd
-  $1ydhhddhh                         +dhddhhd+
-   $1yhddhhddo                     :yhhddhhd+
-    $1odhhddhhds/                ohdhhddhhh:
-     $1:hddhhddhhdhs+:::  ::+oshhddhhddhdo
-       $1:ydddhhddhhddhhddhhddhhddhhdddo
-          $1ohdddhhddhhddhhddhhddhhds/
-             $1:oyhdhhddhhddhhdhs+:
-                   $1::/++:::
+       $1▄▄▄███████▄
+    $1▄▄███████████
+   $1▄█████▀▀    ▀▀     ▄
+  $1████▀              ▄███▄▄
+ $1████▀               █████▀▀
+$1████▀   $2▀██▄        $1▀▀████▄
+$1████      $2▀██          $1████
+$1████      $2▄██          $1████
+$1████▄   $2▄██▀ █████▄   $1████▀
+ $1████▄               ▄████
+  $1████▄            ▄█████
+   $1▀█████▄▄    ▄▄▄█████▀
+    $1▀▀███████████████▀
+       $1▀▀▀███████▀▀
