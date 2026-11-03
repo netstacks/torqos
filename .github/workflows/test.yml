@@ -49,10 +49,14 @@ jobs:
       - name: User namespaces as on NixOS
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
+      # One derivation at a time: the VM tests each hold several machines in memory, and a runner
+      # running two or three of them beside the image build dies with "The operation was canceled"
+      # (2026-11-03, twice). Slower, and it finishes. The cores stay all one build's.
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
+            max-jobs = 1
 
       - name: nix flake check
         if: inputs.check == ''
