@@ -559,8 +559,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   with "command not found" instead of the `/etc/nixos` guard's message; the guard stays for `nix`
   itself. Tests that read JSON in their VMs bring their own jq.
 
-## ADR-033 — Python leaves with systemd-boot's installer (proposed: needs the owner's choice)
-- **Status:** proposed, 2026-11-03. Not built: it decides how Secure Boot will come.
+## ADR-033 — Python leaves with systemd-boot's installer: Lanzaboote now, Secure Boot later
+- **Status:** decided, 2026-11-03 (the owner: option 1). Not yet built; the VM test below comes
+  first. It decides how Secure Boot will come: Lanzaboote's layout, once.
 - **Context:** Python (134 MB, a tenth of a new machine's system) is there for one thing:
   systemd-boot's installer, NixOS's `systemd-boot-builder.py` (452 lines), which writes the boot
   menu at each switch — the kernels and initrds onto the EFI partition, one entry per generation
@@ -569,8 +570,15 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   `boot.loader.external.installHook`, reading each generation's bootspec (`boot.json`).
   docs/SECURITY-MODEL.md already chose Lanzaboote for owner-key Secure Boot (`torq.security.
   secureBoot`, a TODO), and Lanzaboote's installer (`lzbt`, Rust) is itself such a replacement.
-- **Options:**
-  1. **Lanzaboote now, Secure Boot later (recommended).** Its installer replaces the Python one
+- **Decision:** option 1. Lanzaboote (nix-community, Rust) is the boot-entry writer: its `lzbt`
+  replaces the Python installer at every switch, bundling each generation into a signed unified
+  kernel image under systemd-boot. The keys are the machine's own, made at setup and kept outside
+  the config repo; they protect nothing until the owner enrolls them in the firmware, which is the
+  Secure Boot work of later (SECURITY-MODEL, ROADMAP) — and then nothing migrates twice. Not option
+  2, because bootloader code is the last place to write TorqOS's own and then throw it away; not
+  option 3, because the 134 MB buys nothing a machine that will have Secure Boot needs.
+- **Options weighed:**
+  1. **Lanzaboote now, Secure Boot later (chosen).** Its installer replaces the Python one
      (systemd-boot stays the boot menu, booting signed unified kernel images); setup generates
      the machine's own keys (`autoGenerateKeys`), kept outside the config repo like passwords; the
      owner enrolls them in the firmware when Secure Boot comes (later, ROADMAP) — the same layout
@@ -582,10 +590,16 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      TorqOS's case (one profile, no XBOOTLDR, no initrd secrets or extra files), same file names
      and layout. Smallest and fully TorqOS's — and replaced by Lanzaboote when Secure Boot comes.
   3. **Keep Python.** 134 MB, no work, no risk.
-- **Either way:** a VM test that boots from a real EFI partition (NixOS's `useBootLoader`,
-  `useEFIBoot`): the entries after a switch, the default, a rollback by choosing an older entry, a
-  `commit confirmed` rolled back by a reboot, and the editor off; the image and ISO tests boot
-  through it too. The size budget comes down by what it saves.
+- **Consequences:** a VM test that boots from a real EFI partition (NixOS's `useBootLoader`,
+  `useEFIBoot`) is written **before** the switch and must pass on both writers: the entries after
+  a switch, the default, a rollback by choosing an older entry, a `commit confirmed` rolled back by
+  a reboot, and the editor off; the image and ISO tests boot through it too. Then the input
+  (`lanzaboote`, `follows` TorqOS's nixpkgs; pinned by the weekly bump like nixpkgs), the module in
+  `modules/security.nix` (`boot.lanzaboote.enable`, keys generated at setup into
+  `/var/lib/torq/secureboot`, fenced from the tree), and the migration of installed machines (one
+  switch; `torq5` first). Each machine builds Lanzaboote itself until releases carry it prebuilt
+  (ADR-039's cache). The size budget comes down by what Python saved. A second reviewer on the
+  diff (docs/DRIVING.md): a bootloader bug leaves a machine that does not start.
 
 ## ADR-034 — One base, two faces: the sysadmin's server as code, and a person's machine an AI can drive
 - **Context:** ADR-019 narrowed TorqOS to a thin, CLI-only OS and deferred the desktop and the AI,
