@@ -28,3 +28,22 @@ already made.
 Read `CLAUDE.md` (how the project works and its rules) and `docs/DECISIONS.md`. In short: no
 `unsafe` and no dead code (the compiler forbids them); every security or reversibility claim has a
 test that would fail if it broke; `docs/` changes with the behaviour it describes.
+
+## Releasing (maintainers)
+
+A release is a tag on `main`; `.github/workflows/release.yml` does the rest (ADR-028): it checks the
+tag is the source's version, runs every test, builds the images and the ISO for both architectures,
+and only then publishes the source to `netstacks/torqos-releases` (signed, tagged, `stable` moved)
+and a GitHub Release with the files and their signed checksums.
+
+```sh
+scripts/bump-version 0.2.0 --commit       # the version machines will report, everywhere it is written
+git push origin main                      # and wait for CI to be green on it
+git tag -a v0.2.0 -m "TorqOS v0.2.0"
+git push origin v0.2.0
+```
+
+A tag with a hyphen (`v0.2.0-rc1`) is a pre-release: everything runs and is published, but `stable`
+does not move, so no machine updates to it. It needs no bump: `-rc1` is the tag's, not the source's.
+A tag that is not the source's version is refused before anything runs. A release that fails is not
+retagged: fix it and tag the next patch version.

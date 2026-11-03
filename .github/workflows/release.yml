@@ -18,10 +18,32 @@ permissions:
   contents: read
 
 jobs:
+  # The tag is the version the source says (cli/Cargo.toml, set by scripts/bump-version), or a
+  # pre-release of it (v0.2.0-rc1): a machine reports that version, so a tag that differs would
+  # publish machines saying something else. First, before an hour of tests.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is the source's version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          src=$(awk '/^\[/{p = ($0 == "[package]")} p && /^version *=/ {gsub(/[" ]/, ""); sub(/^version=/, ""); print; exit}' cli/Cargo.toml)
+          broker=$(awk '/^\[/{p = ($0 == "[package]")} p && /^version *=/ {gsub(/[" ]/, ""); sub(/^version=/, ""); print; exit}' broker/Cargo.toml)
+          want="${TAG#v}"; want="${want%%-*}"
+          if [ "$src" != "$want" ] || [ "$broker" != "$want" ]; then
+            echo "::error::$TAG is not this source's version (cli $src, broker $broker): run scripts/bump-version $want, commit, and tag that commit"
+            exit 1
+          fi
+          echo "$TAG: TorqOS $src"
+
   test:
+    needs: version
     uses: ./.github/workflows/test.yml
 
   image:
+    needs: version
     uses: ./.github/workflows/image.yml
 
   publish:
