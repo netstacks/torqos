@@ -157,7 +157,7 @@ broker first.
 
 ## Current status (read this first) — 2026-11-03
 
-- **Handoff (2026-11-03, end of the day):** everything of the day is on `main`: the ISO
+- **Handoff (2026-11-03, end of the day; true once `followups` is merged):** everything of the day is on `main`: the ISO
   installer (ADR-031, twice reviewed in fresh sessions), the two-faces docs (ADR-034–039,
   DRIVING.md), the terminal branding, the public documentation site (`user-docs/`), the
   skeleton (ADR-032; `slim` rebased, reviewed, merged; size 1228 MB of 1280), and the reviews'
@@ -166,7 +166,8 @@ broker first.
   closed — 6zd). Tests: broker 118, torqcli 241; installer, trust-loop and image VM tests green.
   torq5 took `main` by one ledgered switch (its first through `torq-switch`, ADR-032). CI runs
   one derivation at a time (`max-jobs = 1`) after the runner died twice running VM tests side by
-  side. **Next** (ROADMAP M2): the EFI-partition VM test, then Lanzaboote (ADR-033); ADR-039's
+  side; it died once more after that, and now logs its disk and memory each minute (`room:`
+  lines) so the next failure names its cause. **Next** (ROADMAP M2): the EFI-partition VM test, then Lanzaboote (ADR-033); ADR-039's
   source statement and unfree check; then the M2 audit and `v0.2.0`.
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
   aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is

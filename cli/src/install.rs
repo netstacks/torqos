@@ -579,8 +579,10 @@ fn put(
     let head_len = HEAD.min(bytes) as usize;
     out.seek(SeekFrom::Start(0))?;
     out.write_all(&vec![0u8; head_len])?;
-    if disk > bytes {
-        let at = bytes.max(disk - TAIL);
+    // The disk's last TAIL, whether past the image or its own end (a disk exactly the image's size):
+    // what of it is the image's, the image writes again as it comes.
+    let at = disk.saturating_sub(TAIL).max(head_len as u64);
+    if disk > at {
         out.seek(SeekFrom::Start(at))?;
         out.write_all(&vec![0u8; (disk - at) as usize]).context("clearing the disk's end")?;
     }
@@ -813,6 +815,21 @@ mod tests {
             }
             assert!(got[img.len()..(disk - TAIL) as usize].iter().all(|&x| x == 0xa5), "between, left");
         }
+        // A disk exactly the image's size: its old backup table, at its end, is gone before the
+        // image reaches it.
+        let disk = img.len() as u64;
+        for upto in [0, 10, HEAD as usize + 1, img.len() - TAIL as usize - 1] {
+            std::fs::write(&p, vec![0xa5u8; disk as usize]).unwrap();
+            let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
+            assert!(put(&mut f, disk, disk, source(&img, 65_536, upto, Err(anyhow::anyhow!(DAMAGED))), |_| {}).is_err());
+            let got = std::fs::read(&p).unwrap();
+            assert!(got[..HEAD as usize].iter().all(|&x| x == 0) && got[(disk - TAIL) as usize..].iter().all(|&x| x == 0), "stopped at {upto}");
+        }
+        // And written whole, it is the image.
+        std::fs::write(&p, vec![0xa5u8; disk as usize]).unwrap();
+        let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
+        put(&mut f, disk, disk, source(&img, 65_536, img.len(), Ok(())), |_| {}).unwrap();
+        assert!(std::fs::read(&p).unwrap() == img);
     }
 
     /// The installer's own copy is checked in the failing direction too: a byte changed, one too

@@ -27,10 +27,10 @@ in
       default = "torq";
       description = ''
         The `nixosConfigurations.<name>` in the config repo that this machine is built from; the
-        template's flake always exposes `torq`. The broker rebuilds `--flake <repo>#<name>`
-        explicitly, and the name is fixed rather than the host name: without a name, nixos-rebuild
-        picks one by the *running* host name, and if the name followed the host name, changing the
-        host name would leave the next rebuild looking for a configuration that does not exist.
+        template's flake always exposes `torq`. The broker builds `<repo>#nixosConfigurations.<name>`
+        explicitly, and the name is fixed rather than the host name: if it followed the host name,
+        changing the host name would leave the next build looking for a configuration that does not
+        exist.
       '';
     };
     rebuildCommand = lib.mkOption {

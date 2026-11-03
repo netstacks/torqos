@@ -361,10 +361,9 @@ Its §5 lists claims without a test.
    nixos-rebuild's unit (`apply_and_revert_wait_for_the_brokers_own_switch_unit`); the switch's
    `-E LOCALE_ARCHIVE` is gone (the broker's environment never had one to pass); the boot menu's
    editor lock is checked on the disk the installer writes (`editor 0` in its `loader.conf`,
-   tests/installer.nix) until the EFI-partition test (ADR-033); the image test checks curl, htop
-   and man are not there; the wording naming `nixos-rebuild` as what the broker runs is gone from
+   tests/installer.nix) until the EFI-partition test (ADR-033); the image test checks htop and
+   man are not there (curl is one of NixOS's core packages, and stays: ADR-032); the wording naming `nixos-rebuild` as what the broker runs is gone from
    `user-docs/`, modules/broker.nix and broker/src/lib.rs; modules/base.nix says man pages need
-   `documentation man enable true` as well. Still open: nothing of the list. A VM assertion that
-   a `torq-switch` unit started by hand (`systemd-run --unit=torq-switch sleep 60`) makes the
-   broker refuse would prove it on a real systemd; the fake `systemctl` proves the check, not
-   the unit name's reach.
+   `documentation man enable true` as well; and trust-loop starts a real `torq-switch` unit by
+   hand and checks the broker applies nothing until it stops. Still open: no test would notice
+   `-E LOCALE_ARCHIVE` put back (harmless: it passes nothing).

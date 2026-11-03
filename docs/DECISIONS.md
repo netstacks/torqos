@@ -488,7 +488,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      No key stops it mid-write: the terminal's signal keys are off (or nothing is offered),
      Ctrl-Alt-Del starts nothing on the installer, and the power, reboot, suspend and hibernate
      keys and the lid do nothing (logind ignores them: it would otherwise stop the installer
-     between the write and the hardware file, leaving a system without one). If the labels above
+     between the write and the hardware file, leaving a system without one) — for the installer's
+     whole life, so the power button does not turn it off at the disk menu either: holding it
+     down (the firmware's, not logind's) or answering the installer does. If the labels above
      cannot be looked for (blkid failing), nothing is
      written. Disks with sectors larger than 512 bytes are not offered: the image's partition
      table is in 512-byte sectors;

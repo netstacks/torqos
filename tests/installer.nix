@@ -155,8 +155,12 @@ pkgs.testers.runNixOSTest {
         assert installer.succeed("systemctl show -P LoadState ctrl-alt-del.target").strip() == "masked"
         for _ in range(8):
             installer.send_key("ctrl-alt-delete")
-        assert installer.succeed("grep -c '^Handle\\(PowerKey\\|RebootKey\\|SuspendKey\\|HibernateKey\\|LidSwitch\\)=ignore$' /etc/systemd/logind.conf").strip() == "5"
+        # Every key and the lid, pressed or held (modules/installer.nix): eleven, all ignored.
+        assert installer.succeed("grep -c '^Handle' /etc/systemd/logind.conf").strip() == "11"
+        assert installer.succeed("grep -c '^Handle[A-Za-z]*=ignore$' /etc/systemd/logind.conf").strip() == "11"
         installer.send_monitor_command("system_powerdown")
+        # The press reached logind, which ignored it: not a key that never arrived.
+        installer.wait_until_succeeds("journalctl -b -u systemd-logind | grep -q 'Power key pressed'", timeout=60)
         on_console(installer, "TorqOS is on vda.", timeout=1200)
         installer.succeed("systemctl is-active torq-install")
         installer.succeed("test \"$(systemctl is-system-running || true)\" != stopping")
