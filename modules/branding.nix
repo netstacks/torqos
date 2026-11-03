@@ -19,7 +19,7 @@ let
   # mark beside the wordmark (branding/README.md), in half blocks the console's font has.
   lockup = lib.replaceStrings [ "\\" ] [ "\\\\" ] (builtins.readFile ../branding/terminal/torqos-lockup-ansi.txt);
   # fastfetch's configuration, its logo found where TorqOS installs it (the file names a person's).
-  fastfetchLogo = "~/.config/fastfetch/torqos-logo-fastfetch.txt";
+  fastfetchLogo = "~/.config/fastfetch/torqos-logo-ascii-fastfetch.txt";
   fastfetch = builtins.readFile ../branding/terminal/fastfetch-config.jsonc;
 in
 {
@@ -30,7 +30,13 @@ in
     description = "TorqOS's icons, terminal logos and fastfetch configuration (branding/).";
   };
 
-  config = {
+  options.torq.shell.sshGreeting = lib.mkOption {
+    type = lib.types.bool;
+    default = true;
+    description = "Greet an SSH login with TorqOS's mark and what this machine is (fastfetch, branding/terminal/fastfetch-config.jsonc). Only an interactive login at a terminal, never `scp` or `ssh host command`; `~/.hushlogin` turns it off for one person.";
+  };
+
+  config = lib.mkMerge [ {
     system.nixos = {
       distroName = "TorqOS";
       distroId = "torqos";
@@ -74,6 +80,20 @@ in
     # fastfetch, for whoever installs it: TorqOS's logo and what this machine is.
     environment.etc."xdg/fastfetch/config.jsonc".text =
       assert lib.assertMsg (lib.hasInfix fastfetchLogo fastfetch) "branding/terminal/fastfetch-config.jsonc no longer names ${fastfetchLogo}";
-      lib.replaceStrings [ fastfetchLogo ] [ "${share}/torqos-logo-fastfetch.txt" ] fastfetch;
-  };
+      lib.replaceStrings [ fastfetchLogo ] [ "${share}/torqos-logo-ascii-fastfetch.txt" ] fastfetch;
+  } (lib.mkIf config.torq.shell.sshGreeting (
+    let
+      # fastfetch without its optional libraries (13 MB, not 190): what the greeting shows needs none.
+      fastfetch = lib.getExe pkgs.fastfetch.minimal;
+      greet = ''
+        if [ -n "$SSH_CONNECTION" ] && [ -t 0 ] && [ -t 1 ] && [ ! -e "$HOME/.hushlogin" ]; then
+          ${fastfetch} --config /etc/xdg/fastfetch/config.jsonc 2>/dev/null
+        fi
+      '';
+    in
+    {
+      # The login shell's own start (zsh's zprofile, bash's profile): once per login, not per shell.
+      programs.zsh.loginShellInit = greet;
+      programs.bash.loginShellInit = greet;
+    })) ];
 }
