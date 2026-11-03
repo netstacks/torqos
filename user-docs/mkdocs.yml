@@ -6,6 +6,7 @@ site_name: TorqOS Documentation
 site_description: Install, configure and run TorqOS, the operating system that is its configuration.
 docs_dir: pages
 site_dir: site
+site_url: https://docs.torqos.org/
 repo_url: https://github.com/netstacks/torqos-releases
 repo_name: torqos-releases
 edit_uri: ""
@@ -40,6 +41,16 @@ theme:
     - content.code.copy
     - content.tabs.link
     - toc.follow
+
+extra:
+  generator: false
+  social:
+    - icon: material/web
+      link: https://torqos.org
+      name: torqos.org
+    - icon: fontawesome/brands/github
+      link: https://github.com/netstacks/torqos-releases
+      name: TorqOS releases on GitHub
 
 extra_css:
   - stylesheets/torqos.css
@@ -78,3 +89,4 @@ nav:
       - Commands: reference/commands.md
       - Security defaults: reference/security.md
       - Troubleshooting: reference/troubleshooting.md
+  - torqos.org ↗: https://torqos.org
