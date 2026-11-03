@@ -802,7 +802,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     The sources themselves are upstream's, fetched by those hashes: a mirror of them is for when
     TorqOS has users (below), and until then the GPL's "corresponding source" rests on them.
   - **Nothing unfree in an image or the ISO**, checked by CI: `torq.unfree` is off in `hosts/image`
-    and `hosts/installer`, and a check fails if the closure holds a package nixpkgs marks unfree.
+    and `hosts/installer`, and a check fails if anything would let a package nixpkgs marks unfree
+    into them (what it covers and cannot see: Consequences).
     Dev mode's Claude Code never ships. On a person's machine, what *their* configuration fetches
     from a vendor is their download, not TorqOS's distribution: the image is TorqOS's to answer
     for; the configuration is the owner's. Firmware stays `enableRedistributableFirmware`'s set —
@@ -825,7 +826,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   image from them), and `checks.<system>.free` — nothing lets an unfree package into the image or
   the ISO, on both platforms: none of nixpkgs' settings that would (`torq.unfree`, `allowUnfree`,
   `allowUnfreePackages`, `allowlistedLicenses`, `handleEvalIssue`), in them or a specialisation
-  of them; no package set from outside; no second nixpkgs imported in TorqOS's modules. nixpkgs
+  of them; no package set from outside; no second nixpkgs reached in TorqOS's own Nix
+  (`pkgs.path`, `<nixpkgs>`, NixOS's modules' parent, however spelled), and no licence set but
+  its own packages' (a package relabelled free would pass nixpkgs' check). nixpkgs
   refuses an unfree package otherwise, so that is the closure's licence check, as far as nixpkgs'
   licences go: a package with no licence check (a vendor's file fetched as it is) it cannot see,
   and redistributable firmware nixpkgs counts as free, which the ISO carries (linux-firmware and

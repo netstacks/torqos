@@ -155,10 +155,17 @@
           assert lib.assertMsg (found == [ ]) "Unfree software could reach what TorqOS distributes (ADR-039): ${lib.concatStringsSep "; " found}";
           assert lib.assertMsg (missed == [ ]) "The unfree check misses ${toString (lib.length missed)} of the ways planted in the image";
           pkgs.runCommand "torq-free" { } ''
-            # No second nixpkgs imported in TorqOS's own modules and hosts: its settings would be
-            # out of the check above.
-            if grep -rnE 'import[[:space:]]*\(?[[:space:]]*(pkgs\.path|<nixpkgs>|inputs\.nixpkgs|nixpkgs[[:space:]])|NIXPKGS_ALLOW' ${./modules} ${./hosts}; then
-              echo "A nixpkgs of its own is imported above: its unfree settings are out of the check (ADR-039)."
+            # No second nixpkgs in TorqOS's own Nix (modules, hosts, its two packages): one imported
+            # has settings of its own, out of the check above. So nixpkgs' tree is not reached at all
+            # (`pkgs.path`, `<nixpkgs>`, NixOS's modules' parent), however it is spelled. And no
+            # licence set but TorqOS's own packages': a package relabelled free passes nixpkgs' check.
+            src="${./modules} ${./hosts} ${./broker/package.nix} ${./cli/package.nix}"
+            if grep -rnE 'pkgs\.path|<nixpkgs>|import[[:space:]]*\(?[[:space:]]*(inputs\.)?nixpkgs([[:space:]]|\))|modulesPath[[:space:]]*\+[[:space:]]*"/\.\.|NIXPKGS_ALLOW' $src; then
+              echo "nixpkgs' tree is reached above: a nixpkgs of its own would be out of the check (ADR-039)."
+              exit 1
+            fi
+            if grep -rnE '(^|[^.[:alnum:]])license[[:space:]]*=' $src | grep -vE 'package\.nix:[0-9]+:[[:space:]]*license = lib\.licenses\.asl20;$'; then
+              echo "A licence is set above: a package relabelled is out of nixpkgs' check (ADR-039)."
               exit 1
             fi
             echo "Nothing lets an unfree package into the image or the ISO, ${lib.concatStringsSep " or " linuxSystems} (ADR-039); each of ${toString (lib.length planted)} ways planted is caught." > $out
