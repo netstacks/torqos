@@ -111,7 +111,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    changed before `confirm`). `--confirm` builds the config again even if `commit check` just built
    it (cached by nix, but evaluated twice). "Boot default" is the system profile, not the boot
    loader's entry: a profile set while the boot-loader install failed counts as restored. The
-   activation is not run under `systemd-run` as `nixos-rebuild` does: a change that kills the
+   activation is not run under `systemd-run` as the broker's plain switch is (`torq-switch`): a change that kills the
    user's session kills the broker mid-switch (recovered by reconcile, but noisy).
 6c. **`request system update` trusts the user's fetch:** `nix flake update` runs as the user, so their
    environment (proxy, CA, `NIX_CONFIG`) shapes the narHash written to the lock, and root builds

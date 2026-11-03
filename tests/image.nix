@@ -89,6 +89,9 @@ pkgs.testers.runNixOSTest {
 
   nodes.machine = { lib, ... }: {
     imports = [ self.nixosModules.default ];
+    # jq, to read the configuration's JSON (not on a TorqOS machine itself: ADR-032); the
+    # specialisation setup switches to inherits it.
+    environment.systemPackages = [ pkgs.jq ];
     # The image: setup on its console, its own TorqOS as the source a new machine starts from.
     torq.setup.enable = true;
     torq.setup.source = self.sourceInfo;

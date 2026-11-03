@@ -72,8 +72,8 @@ person approves, and anything it did can be undone. The second face is being bui
   `request system revert #85` undoes one recorded change; the boot menu keeps every generation.
 - **A tamper-evident history.** The broker records each proposal and change in a hash-chained
   ledger: who asked, who approved, what changed and the system it produced.
-- **One writer.** Only the broker writes the configuration repository. A stray `nixos-rebuild`
-  against `/etc/nixos` is refused, and a machine that drifts from its ledger says so.
+- **One writer.** Only the broker writes the configuration repository. NixOS's `nixos-rebuild` is not
+  on the machine, building `/etc/nixos` is refused, and a machine that drifts from its ledger says so.
 - **Secure by default.** Nothing listens on the network until you ask for it. Root is locked. SSH,
   once on, is keys only unless passwords are allowed, the owner only, never root, with password
   guessing blocked.

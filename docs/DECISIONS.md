@@ -512,7 +512,54 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   shell on the installer — as on any machine whose boot they control, and the installer holds
   nothing (Secure Boot and a locked menu: later, ROADMAP).
 
-<!-- ADR-032 (the skeleton) and ADR-033 (the boot loader, proposed) are on the `slim` branch. -->
+## ADR-032 — TorqOS is a skeleton: NixOS's tools gone, the base only what TorqOS runs, on a budget
+- **Context:** What TorqOS is: a CLI skeleton you install, boot, and give a configuration that
+  builds the actual system — configurations people pass around for every kind of machine. Whatever
+  that does not need should not be on the machine. A new machine's own system (the image's) was
+  1294 MB in 613 store paths, with 787 commands on its PATH, much of it NixOS's defaults and
+  plumbing rather than anything TorqOS runs: `nixos-rebuild` and NixOS's other tools for changing a
+  machine, the man pages and their tools, full git with its manuals, Perl and Python for NixOS's
+  own scripts, systemd's container-image importer with GnuPG and LDAP, and curl, htop and jq for
+  the shell.
+- **Decision:**
+  1. **No NixOS tools for changing a machine.** `nixos-rebuild`, `nixos-option`, `nixos-version`,
+     `nixos-install`, `nixos-enter`, `nixos-generate-config` and `nixos-build-vms` are not on a
+     TorqOS machine (the ISO installer keeps `nixos-generate-config`, on the ISO only, ADR-031).
+     The broker no longer uses `nixos-rebuild`: it does what `nixos-rebuild switch` did — `nix
+     build` the commit, `nix-env --set` the system profile, `switch-to-configuration switch` in a
+     transient unit of its own (`torq-switch`, so the switch outlives whatever started it) — as its
+     `commit confirmed` path already did. It still counts a switch in `nixos-rebuild`'s unit as
+     one it must not race (a system from before this).
+  2. **The base is what TorqOS itself runs.** git (the minimal build: the config repo's, read by
+     torqcli) and nano (`file edit`'s editor); no documentation, no systemd-importd; curl, htop and
+     jq are packages a configuration adds. A configuration turns any of it back on.
+  3. **A budget.** `checks.x86_64-linux.size` fails when a new machine's system grows past its
+     budget (1280 MB): lowered as TorqOS sheds more, never raised to make a change fit without
+     saying why here.
+- **Kept, on purpose:** Perl (~58 MB), which NixOS's account script needs. NixOS's userborn (Rust)
+  would replace it, but does not fit TorqOS's accounts: a person's `hashedPasswordFile` that does
+  not exist is an error that fails userborn's whole run (userborn 2026-10 `main.rs`, `password.rs`),
+  where NixOS's script locks that one account — and in TorqOS a person without a password file is
+  ordinary (SSH keys only; an account just declared; "a file removed is a password removed",
+  modules/accounts.nix). A machine would boot with its accounts unmanaged. It also makes
+  `/etc/shadow` read-only, which the broker's `chpasswd` writes. Revisit if userborn locks a missing
+  file's account instead.
+- **Not this step:** Python (134 MB), which only systemd-boot's boot-entry writer needs: a small
+  Rust one of TorqOS's own, with its own ADR and tests, since a bootloader bug leaves a machine that
+  does not start. The nixpkgs tree (207 MB), which evaluates every configuration, setup's offline
+  included: kept, unless setup may need the network.
+- **Floor:** a machine that builds itself from a configuration keeps the kernel and its modules,
+  systemd, glibc, Nix and the nixpkgs tree. Trimming the kernel would mean every machine compiling
+  its own, with nothing from NixOS's cache (ADR-023); overriding big packages (systemd without its
+  importer, say) the same: options only.
+- **Consequences:** 1294 MB → 1228 MB and 613 → 516 store paths for a new machine (x86_64,
+  2026-11-03), Python still to go. Root can still build and switch with `nix`
+  and `switch-to-configuration` by hand: removing the tools removes the easy way around the broker,
+  not every way (limits on root: later, ROADMAP). Habits from NixOS (`nixos-rebuild switch`) fail
+  with "command not found" instead of the `/etc/nixos` guard's message; the guard stays for `nix`
+  itself. Tests that read JSON in their VMs bring their own jq.
+
+<!-- ADR-033 (the boot loader) is on the `slim` branch. -->
 
 ## ADR-034 — One base, two faces: the sysadmin's server as code, and a person's machine an AI can drive
 - **Context:** ADR-019 narrowed TorqOS to a thin, CLI-only OS and deferred the desktop and the AI,

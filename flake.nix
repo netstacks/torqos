@@ -116,6 +116,24 @@
       } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
         # The ISO installer (ADR-031): installed and booted on x86_64 only; aarch64's ISO is built, not run.
         installer = import ./tests/installer.nix { inherit pkgs self; };
+        # Thin, kept so (ADR-032): a new machine's own system — the image's, what everyone installs —
+        # stays within its budget. Lowered as TorqOS sheds what it does not need, never raised to
+        # make a change fit without saying why in docs/DECISIONS.md. x86_64's; aarch64's is CI's.
+        size =
+          let
+            budget = 1280;
+            top = self.nixosConfigurations.image-x86_64-linux.config.system.build.toplevel;
+            info = pkgs.closureInfo { rootPaths = [ top ]; };
+          in
+          pkgs.runCommand "torq-size" { } ''
+            mb=$(( $(cat ${info}/total-nar-size) / 1000000 ))
+            echo "A new TorqOS machine's system: $mb MB, $(wc -l < ${info}/store-paths) store paths (budget: ${toString budget} MB)."
+            if [ "$mb" -gt ${toString budget} ]; then
+              echo "Over its budget by $(( mb - ${toString budget} )) MB. What grew: nix path-info -rsS on it, nix why-depends (ADR-032)."
+              exit 1
+            fi
+            echo "$mb" > $out
+          '';
       });
 
       # ── Dev shell (works on the Mac too) ─────────────────────────────────────

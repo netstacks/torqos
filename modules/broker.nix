@@ -35,9 +35,16 @@ in
     };
     rebuildCommand = lib.mkOption {
       type = lib.types.str;
+      # What `nixos-rebuild switch` did, without it (ADR-032; the same as broker/src/config.rs
+      # REBUILD): build the commit, make it the system profile, switch to it in a unit of its own.
       # --no-update-lock-file: a flake.lock that does not match flake.nix fails, never re-locked as root.
-      default = "nixos-rebuild switch --no-update-lock-file --flake {flake}#${cfg.configName}";
-      defaultText = lib.literalExpression ''"nixos-rebuild switch --no-update-lock-file --flake {flake}#''${config.torq.broker.configName}"'';
+      default = lib.concatStrings [
+        "d=$(mktemp -d) && trap 'rm -rf \"$d\"' EXIT"
+        " && sys=$(nix build --no-update-lock-file --out-link \"$d/system\" --print-out-paths {flake}#nixosConfigurations.${cfg.configName}.config.system.build.toplevel)"
+        " && nix-env -p /nix/var/nix/profiles/system --set \"$sys\""
+        " && systemd-run --collect --no-ask-password --pipe --quiet --service-type=exec --unit=torq-switch -E LOCALE_ARCHIVE --wait \"$sys/bin/switch-to-configuration\" switch"
+      ];
+      defaultText = lib.literalMD "build the commit, `nix-env --set` the system profile, `switch-to-configuration switch` in the transient unit `torq-switch` (broker/src/config.rs `REBUILD`)";
       description = ''
         What the broker runs after each commit: `{flake}` is the config repo at the commit just made
         (`git+file://…?rev=…`: that commit, never the working tree), `{repo}` its path.
@@ -166,12 +173,11 @@ in
         currentSystem = "/run/current-system";
         systemProfile = "/nix/var/nix/profiles/system";
         # The tools undo depends on, by store path first: a reviewed but mistaken change that drops
-        # git or nixos-rebuild from the system must not leave `revert` unable to run them. The
+        # git or nix from the system must not leave `revert` unable to run them. The
         # running system's tools come after, for anything else.
         path = lib.makeBinPath [
-          config.system.build.nixos-rebuild
           config.nix.package
-          pkgs.git
+          pkgs.gitMinimal
           pkgs.coreutils
           pkgs.bash
           config.systemd.package
@@ -193,7 +199,7 @@ in
           torq-broker changes it, so that every change is ledgered and can be undone:
             torqcli                     (configure; set …; commit — software, services, settings)
             sudo torq-broker propose --diff change.diff --reason "..."   (anything else)
-          Do not build /etc/nixos or any other configuration with nixos-rebuild: it would replace
+          Do not build /etc/nixos or any other configuration yourself: it would replace
           this whole system with a stock NixOS one, outside the ledger.
         '';
         # Real files, not the usual symlinks into /etc/static: nix copies a flake's directory to

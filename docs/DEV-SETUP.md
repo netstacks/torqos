@@ -149,9 +149,10 @@ sudo torq-broker status        # is the machine as the ledger says?
 sudo torq-broker log && sudo torq-broker verify
 ```
 
-Do **not** run `nixos-rebuild` against `/etc/nixos`: on TorqOS those files are stubs that refuse to
-build (`torq.broker.guardEtcNixos`), because building them would replace the whole system outside
-the ledger. Never build any configuration other than the broker's.
+There is no `nixos-rebuild` on TorqOS (ADR-032): the broker builds and switches with `nix` itself.
+Do not build `/etc/nixos` with `nix` either: on TorqOS those files are stubs that refuse to build
+(`torq.broker.guardEtcNixos`), because building them would replace the whole system outside the
+ledger. Never build any configuration other than the broker's.
 
 ### torqcli
 

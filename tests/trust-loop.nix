@@ -6,8 +6,9 @@ pkgs.testers.runNixOSTest {
   name = "torq-trust-loop";
 
   nodes.machine = { options, pkgs, ... }: {
-    # A terminal to drive torqcli's line editor in.
-    environment.systemPackages = [ pkgs.tmux ];
+    # A terminal to drive torqcli's line editor in; jq, to read the broker's JSON (no longer on a
+    # TorqOS machine itself: ADR-032).
+    environment.systemPackages = [ pkgs.tmux pkgs.jq ];
     imports = [ self.nixosModules.default ];
     torq.user = "dev";
     torq.desktop.enable = false;
@@ -58,7 +59,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    import json
+    import json, shlex
     machine.wait_for_unit("multi-user.target")
     repo = "/var/lib/torq/config"
     # The boot-time drift check ran (a unit that never ran also reports Result=success, so check
@@ -68,12 +69,15 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test ! -e /run/torq/drift")
     # The broker builds the fixed configuration `torq`, not one named after the host (this host is
     # "machine"): changing the host name must never leave rebuilds looking for a missing config.
-    machine.succeed("grep -qx 'nixos-rebuild switch --no-update-lock-file --flake {flake}#torq' /etc/torq-test/default-rebuild")
+    # Without nixos-rebuild (ADR-032): nix builds the commit, the profile is set, the switch runs in
+    # the broker's own unit.
+    machine.succeed("grep -qF -- '--print-out-paths {flake}#nixosConfigurations.torq.config.system.build.toplevel' /etc/torq-test/default-rebuild")
+    machine.succeed("grep -qF -- '--unit=torq-switch' /etc/torq-test/default-rebuild && ! grep -q nixos-rebuild /etc/torq-test/default-rebuild")
     # The build of a commit confirmed builds the commit too.
     machine.succeed("grep -q -- '--print-out-paths {flake}#nixosConfigurations.torq' /etc/torq-test/default-build")
     machine.succeed("jq -e '.rebuild == \"true\" and .repo == \"/var/lib/torq/config\"' /etc/torq/broker.json")
     # Undo's tools come from fixed store paths, not only from the (changeable) running system.
-    machine.succeed("jq -r .path /etc/torq/broker.json | tr : '\\n' | head -1 | grep -q '^/nix/store/.*nixos-rebuild'")
+    machine.succeed("jq -r .path /etc/torq/broker.json | tr : '\\n' | head -1 | grep -q '^/nix/store/.*-nix-'")
 
     machine.succeed(f"mkdir -p {repo} && cp /etc/torq-test/desktop.nix {repo}/ && touch {repo}/flake.nix")
     machine.succeed("torq-broker init")
@@ -327,7 +331,7 @@ pkgs.testers.runNixOSTest {
         as_dev("tmux kill-session -t f")
         machine.succeed("test ! -e /var/lib/torq/config/custom")  # nothing committed
 
-    with subtest("a stray nixos-rebuild cannot switch away from the ledgered config"):
+    with subtest("a stray build of /etc/nixos cannot switch away from the ledgered config"):
         # The owner's files are moved aside, never overwritten or opened: a config that merely
         # mentions the option, and a symlink to a FIFO (reading it would hang activation at boot).
         machine.succeed("rm -f /etc/nixos/configuration.nix /etc/nixos/flake.nix /etc/nixos/*.pre-torq*")
@@ -341,16 +345,14 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test -f /etc/nixos/flake.nix -a ! -L /etc/nixos/flake.nix")
         machine.succeed("test -f /etc/nixos/configuration.nix -a ! -L /etc/nixos/configuration.nix")
         machine.fail("ls /etc/nixos/*.pre-torq.*")
-        # Building /etc/nixos refuses, every common way, with the message pointing at the broker.
-        # (With flake.nix present nixos-rebuild uses it even when given -I, so --no-flake is what
-        # reaches the configuration.nix stub.)
+        # NixOS's own rebuild tool is not on the machine (ADR-032): nothing to run it with.
+        for tool in ["nixos-rebuild", "nixos-option", "nixos-version", "nixos-install"]:
+            machine.fail(f"command -v {tool}")
+        # Building /etc/nixos with nix itself refuses, with the message pointing at the broker.
         for cmd in [
-            "nixos-rebuild dry-build -I nixos-config=/etc/nixos/configuration.nix",  # what went wrong
-            # The VM has no channels; the machine this happened on did, so supply nixpkgs.
-            "nixos-rebuild dry-build --no-flake -I nixpkgs=${pkgs.path} -I nixos-config=/etc/nixos/configuration.nix",
-            "nixos-rebuild dry-build",
             "nix --extra-experimental-features 'nix-command flakes' eval "
             "path:/etc/nixos#nixosConfigurations.machine.config.system.build.toplevel",
+            "nix-instantiate --eval -E 'import /etc/nixos/configuration.nix'",
         ]:
             out = machine.fail(cmd + " 2>&1")
             assert "managed by TorqOS" in out, f"{cmd}: {out}"
@@ -461,6 +463,28 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("hostname").strip() == "machine"
         machine.succeed("/run/booted-system/specialisation/renamed/bin/switch-to-configuration test")
         assert machine.succeed("hostname").strip() == "renamed", machine.succeed("hostname")
+        machine.succeed("/run/booted-system/bin/switch-to-configuration test")
+        assert machine.succeed("hostname").strip() == "machine"
+
+    with subtest("the broker's own switch, without nixos-rebuild: built, the profile set, switched in its unit"):
+        # The real default rebuild command (ADR-032), run as the broker runs it. Only `nix build` is a
+        # stand-in, which "builds" the renamed specialisation (the VM cannot build systems) and prints
+        # its path as nix build does: the profile, the transient unit and the switch are the real ones.
+        renamed = machine.succeed("readlink -f /run/booted-system/specialisation/renamed").strip()
+        machine.succeed(f"mkdir -p /tmp/fake-nix && printf '#!/bin/sh\\necho {renamed}\\n' > /tmp/fake-nix/nix && chmod +x /tmp/fake-nix/nix")
+        cmd = machine.succeed("cat /etc/torq-test/default-rebuild").strip().replace("{flake}", "'git+file:///var/lib/torq/config?rev=0'")
+        before = machine.succeed("ls /tmp").split()
+        machine.succeed("PATH=/tmp/fake-nix:$PATH sh -c " + shlex.quote(cmd))
+        assert machine.succeed("hostname").strip() == "renamed", machine.succeed("hostname")
+        # The boot default is the new system, and the switch ran in the broker's own unit.
+        assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == renamed
+        machine.succeed("journalctl -b --no-pager | grep -q 'torq-switch.service'")
+        # Its build link (a GC root while it builds) is gone with its folder.
+        assert machine.succeed("ls /tmp").split() == before, machine.succeed("ls /tmp")
+        # A failed build switches nothing.
+        machine.succeed("printf '#!/bin/sh\\nexit 1\\n' > /tmp/fake-nix/nix")
+        machine.fail("PATH=/tmp/fake-nix:$PATH sh -c " + shlex.quote(cmd))
+        assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == renamed
         machine.succeed("/run/booted-system/bin/switch-to-configuration test")
         assert machine.succeed("hostname").strip() == "machine"
   '';

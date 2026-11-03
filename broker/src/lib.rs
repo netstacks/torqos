@@ -388,15 +388,15 @@ fn ledgered_commit(entries: &[Entry]) -> Option<String> {
         .find_map(|e| e.body.data.get("commit").and_then(|v| v.as_str()).map(String::from))
 }
 
-/// nixos-rebuild runs the switch in this transient unit (`systemd-run --pipe`). A broker rebuild's
-/// switch inherits the lock through stdin, but a manual `nixos-rebuild` outside the broker does not.
-const SWITCH_UNIT: &str = "nixos-rebuild-switch-to-configuration.service";
+/// The broker runs each switch in a transient unit of its own (`systemd-run --pipe`, config.rs
+/// REBUILD), which inherits the broker's lock through stdin. A switch running in it, or in the one
+/// `nixos-rebuild` used (a system from before ADR-032, or one started by hand), is a switch the
+/// broker must not race. The first is the one messages name.
+const SWITCH_UNITS: [&str; 2] = ["torq-switch.service", "nixos-rebuild-switch-to-configuration.service"];
+const SWITCH_UNIT: &str = SWITCH_UNITS[0];
 
 fn switch_running() -> bool {
-    config::command("systemctl")
-        .args(["is-active", "--quiet", SWITCH_UNIT])
-        .status()
-        .is_ok_and(|s| s.success())
+    SWITCH_UNITS.iter().any(|u| config::command("systemctl").args(["is-active", "--quiet", u]).status().is_ok_and(|s| s.success()))
 }
 
 impl Broker {
