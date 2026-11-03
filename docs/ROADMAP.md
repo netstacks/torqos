@@ -136,10 +136,12 @@ first.
       *(tests/image.nix, 2026-11-02: boot to setup, setup on the console, change #1, the update to a
       signed release and the refusal of a forged one; commits and rollbacks in trust-loop.nix. The
       builds are prebuilt, as a VM test cannot build systems.)*
-- [ ] **The skeleton** (ADR-032, on the `slim` branch): NixOS's tools for changing a machine gone,
-      the broker building and switching with `nix` itself, a size budget CI enforces. Then the boot
-      loader without Python (ADR-033, decided 2026-11-03: Lanzaboote now, Secure Boot later — the
-      EFI-partition VM test first, on both writers; `torq5` migrates first).
+- [x] **The skeleton** (ADR-032): NixOS's tools for changing a machine gone, the broker building
+      and switching with `nix` itself, a size budget CI enforces.
+      *(checks.x86_64-linux.size, 2026-11-03: 1228 MB of 1280; the seven tools absent and the
+      `nix`-only switch in trust-loop.nix; the image and installer tests boot through it.)*
+- [ ] **The boot loader without Python** (ADR-033, decided 2026-11-03: Lanzaboote now, Secure Boot
+      later — the EFI-partition VM test first, on both writers; `torq5` migrates first).
 - [ ] **Upstreams** (ADR-039): a source statement on each release; CI fails an image or ISO that
       holds anything unfree.
 - [ ] **Designs settled** (audits of 2026-10-31; KNOWN-GAPS 6r): where first-boot passwords

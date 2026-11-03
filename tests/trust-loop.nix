@@ -345,8 +345,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test -f /etc/nixos/flake.nix -a ! -L /etc/nixos/flake.nix")
         machine.succeed("test -f /etc/nixos/configuration.nix -a ! -L /etc/nixos/configuration.nix")
         machine.fail("ls /etc/nixos/*.pre-torq.*")
-        # NixOS's own rebuild tool is not on the machine (ADR-032): nothing to run it with.
-        for tool in ["nixos-rebuild", "nixos-option", "nixos-version", "nixos-install"]:
+        # NixOS's tools for changing a machine are not on it (ADR-032): every one the ADR names.
+        for tool in ["nixos-rebuild", "nixos-option", "nixos-version", "nixos-install", "nixos-enter", "nixos-generate-config", "nixos-build-vms"]:
             machine.fail(f"command -v {tool}")
         # Building /etc/nixos with nix itself refuses, with the message pointing at the broker.
         for cmd in [

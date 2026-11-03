@@ -353,3 +353,14 @@ Its §5 lists claims without a test.
    or SIGTERM itself (Rust has no safe way without a new crate): with the console's signal keys
    off only root, or systemd stopping it at shutdown, sends one, and a write stopped by one leaves
    no partition table (ADR-031 step 4).
+
+6zd. **The skeleton's loose ends** (review of `slim`, ADR-032, 2026-11-03; none a defect). No test
+   fakes an active `torq-switch.service` to prove the broker refuses to race it: dropping that name
+   from `SWITCH_UNITS` (broker/src/lib.rs) passes every test. The switch's `-E LOCALE_ARCHIVE`
+   (broker/src/config.rs `REBUILD`) passes nothing under the broker, whose environment has none,
+   and should go. The boot menu's editor lock (`editor` off in `loader.conf`) is untested until
+   the EFI-partition test (ADR-033); meanwhile a grep of the installed ESP's `loader.conf` in
+   tests/installer.nix would cover it. Wording still naming `nixos-rebuild` as what the broker
+   runs: two pages of `user-docs/`, modules/broker.nix, broker/src/lib.rs. modules/base.nix says
+   `documentation enable true` brings documentation back; man pages need `documentation man
+   enable true` as well.

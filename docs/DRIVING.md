@@ -101,7 +101,7 @@ Each item: what to build, the test that must exist, and **⏹** where a fresh se
 before you go on. A ⏹ with *adversarial* means both kinds.
 
 ### M2 — finish (ADR-032, ADR-033, ADR-039)
-- [ ] Merge `slim` after the installer lands. *Test:* `checks.x86_64-linux.size` under budget;
+- [x] Merge `slim` after the installer lands (2026-11-03; reviewed: no race, three fixes made). *Test:* `checks.x86_64-linux.size` under budget;
       trust-loop and image tests green with the `nix`-only switch.
       **⏹ review:** does the broker's new switch path race `nixos-rebuild`'s unit as the old one did?
 - [x] Decide ADR-033: Lanzaboote now, Secure Boot later (2026-11-03).
