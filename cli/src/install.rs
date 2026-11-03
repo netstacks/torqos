@@ -564,8 +564,9 @@ fn write(image: &Path, bytes: u64, sha: &str, d: &Disk) -> Result<()> {
 
 /// The image to `out`, a disk `disk` bytes long, from `src` (which passes each piece of the
 /// image's `bytes` to the function it is given, and fails if they are not the image): the disk's
-/// first `HEAD` zeroed first and the image's own written last, after everything else is on the
-/// disk; past the image, the disk's last `TAIL` zeroed. `progress` is how much has come.
+/// first `HEAD` and, past the image, its last `TAIL` zeroed first — an earlier partition table and
+/// its backup at the disk's end — and the image's own first `HEAD` written last, after everything
+/// else is on the disk. `progress` is how much has come.
 fn put(
     out: &mut std::fs::File,
     bytes: u64,
@@ -573,10 +574,16 @@ fn put(
     src: impl FnOnce(Each) -> Result<()>,
     mut progress: impl FnMut(u64),
 ) -> Result<()> {
-    // An earlier partition table goes first: what follows is not a disk anything starts from.
+    // An earlier partition table goes first, its backup at the disk's end with it: what follows is
+    // not a disk anything starts from, whichever end a firmware reads.
     let head_len = HEAD.min(bytes) as usize;
     out.seek(SeekFrom::Start(0))?;
     out.write_all(&vec![0u8; head_len])?;
+    if disk > bytes {
+        let at = bytes.max(disk - TAIL);
+        out.seek(SeekFrom::Start(at))?;
+        out.write_all(&vec![0u8; (disk - at) as usize]).context("clearing the disk's end")?;
+    }
     out.sync_all()?;
     let mut head = Vec::with_capacity(head_len);
     out.seek(SeekFrom::Start(head_len as u64))?;
@@ -588,12 +595,6 @@ fn put(
         progress(n);
         Ok(())
     })?;
-    // Past the image, to the disk's end or the last TAIL of it.
-    if disk > bytes {
-        let at = bytes.max(disk - TAIL);
-        out.seek(SeekFrom::Start(at))?;
-        out.write_all(&vec![0u8; (disk - at) as usize]).context("clearing the disk's end")?;
-    }
     out.sync_all()?;
     if head.len() != head_len {
         bail!("the image's start did not come whole");
@@ -791,22 +792,26 @@ mod tests {
 
     /// Stopped at any point before the end — the image found damaged, the source cut off, the
     /// process gone — the disk has no partition table: its first MiB, where the image's is, is
-    /// zeros (an earlier one is gone too), though the rest of the image may be there.
+    /// zeros (an earlier one is gone too), and so is its last MiB (an earlier backup table),
+    /// though the rest of the image may be there.
     #[test]
     fn a_stopped_write_leaves_no_partition_table() {
         let t = tempfile::tempdir().unwrap();
         let p = t.path().join("disk");
         let (img, _) = image(3 * HEAD as usize + 12_345);
-        for upto in [10, HEAD as usize - 1, HEAD as usize + 1, img.len() - 1, img.len()] {
-            std::fs::write(&p, vec![0xa5u8; 4 * HEAD as usize]).unwrap();
+        let disk = 6 * TAIL;
+        for upto in [0, 10, HEAD as usize - 1, HEAD as usize + 1, img.len() - 1, img.len()] {
+            std::fs::write(&p, vec![0xa5u8; disk as usize]).unwrap();
             let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
-            let r = put(&mut f, img.len() as u64, 4 * HEAD, source(&img, 65_536, upto, Err(anyhow::anyhow!(DAMAGED))), |_| {});
+            let r = put(&mut f, img.len() as u64, disk, source(&img, 65_536, upto, Err(anyhow::anyhow!(DAMAGED))), |_| {});
             assert!(r.is_err(), "{upto}");
             let got = std::fs::read(&p).unwrap();
             assert!(got[..HEAD as usize].iter().all(|&x| x == 0), "no partition table, stopped at {upto}");
+            assert!(got[(disk - TAIL) as usize..].iter().all(|&x| x == 0), "no backup table at the end, stopped at {upto}");
             if upto > HEAD as usize {
                 assert!(got[HEAD as usize..upto] == img[HEAD as usize..upto], "the rest as far as it came");
             }
+            assert!(got[img.len()..(disk - TAIL) as usize].iter().all(|&x| x == 0xa5), "between, left");
         }
     }
 

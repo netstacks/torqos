@@ -26,7 +26,7 @@ confirmation, and notes such as SSH accepting passwords.
 
 ## Changes made outside TorqOS
 
-Only TorqOS writes the configuration. A stray `nixos-rebuild` against `/etc/nixos` is refused. If
+Only TorqOS writes the configuration. A stray build of `/etc/nixos` (where stock NixOS keeps its configuration) is refused. If
 someone changes the machine another way (with `sudo`, say), the alarms say so. To put the machine
 back to its last recorded state:
 

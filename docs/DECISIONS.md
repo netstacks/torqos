@@ -480,13 +480,16 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      another under the same name is refused, and so is a later opening by name — to read back,
      find the partitions, mount, clear — of another), then writes the image to the whole disk and
      reads it back to check every byte. The image's first MiB, its partition table, is written
-     last: the disk's start is zeroed first and everything else written and synced before it, so
-     whatever stops the write — a power cut, a reset, the process killed — the disk has no
-     partition table, and no half-written system to start from. A failure once writing began —
-     writing, reading back, or detecting the hardware below — clears the disk's partition tables
-     (its start, the image's backup, the disk's end). No key on the console stops it mid-write:
-     the terminal's signal keys are off (or nothing is offered), and Ctrl-Alt-Del starts nothing
-     on the installer. If the labels above cannot be looked for (blkid failing), nothing is
+     last: the disk's start and end (an earlier table and its backup) are zeroed first and
+     everything else written and synced before it, so whatever stops the write — a power cut, a
+     reset, the process killed — the disk has no partition table, and no half-written system to
+     start from. A failure once writing began — writing, reading back, or detecting the hardware
+     below — clears the disk's partition tables (its start, the image's backup, the disk's end).
+     No key stops it mid-write: the terminal's signal keys are off (or nothing is offered),
+     Ctrl-Alt-Del starts nothing on the installer, and the power, reboot, suspend and hibernate
+     keys and the lid do nothing (logind ignores them: it would otherwise stop the installer
+     between the write and the hardware file, leaving a system without one). If the labels above
+     cannot be looked for (blkid failing), nothing is
      written. Disks with sectors larger than 512 bytes are not offered: the image's partition
      table is in 512-byte sectors;
   5. detects this machine's hardware (`nixos-generate-config --show-hardware-config
@@ -531,8 +534,10 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      `commit confirmed` path already did. It still counts a switch in `nixos-rebuild`'s unit as
      one it must not race (a system from before this).
   2. **The base is what TorqOS itself runs.** git (the minimal build: the config repo's, read by
-     torqcli) and nano (`file edit`'s editor); no documentation, no systemd-importd; curl, htop and
-     jq are packages a configuration adds. A configuration turns any of it back on.
+     torqcli) and nano (`file edit`'s editor); no documentation, no systemd-importd; htop and jq
+     are packages a configuration adds. A configuration turns any of it back on. (curl stays on
+     the path: it is one of NixOS's core packages, assembled from several modules, and taking
+     one out of that list would mean restating all of NixOS's.)
   3. **A budget.** `checks.x86_64-linux.size` fails when a new machine's system grows past its
      budget (1280 MB): lowered as TorqOS sheds more, never raised to make a change fit without
      saying why here.

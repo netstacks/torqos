@@ -149,12 +149,17 @@ pkgs.testers.runNixOSTest {
         installer.wait_until_succeeds("grep -aqF 'Writing TorqOS to vda' /dev/vcs1", timeout=600)
         installer.fail("grep -aqF 'Checking vda' /dev/vcs1")
         installer.succeed("cmp -n 1048576 /dev/vda /dev/zero")
-        # And no key restarts the machine mid-write: Ctrl-Alt-Del, once or seven times quickly.
+        # And no key stops the machine mid-write: Ctrl-Alt-Del, once or seven times quickly; the
+        # power key (the ACPI button QEMU's monitor presses), which logind would answer with a
+        # poweroff that stops the installer.
         assert installer.succeed("systemctl show -P LoadState ctrl-alt-del.target").strip() == "masked"
         for _ in range(8):
             installer.send_key("ctrl-alt-delete")
+        assert installer.succeed("grep -c '^Handle\\(PowerKey\\|RebootKey\\|SuspendKey\\|HibernateKey\\|LidSwitch\\)=ignore$' /etc/systemd/logind.conf").strip() == "5"
+        installer.send_monitor_command("system_powerdown")
         on_console(installer, "TorqOS is on vda.", timeout=1200)
         installer.succeed("systemctl is-active torq-install")
+        installer.succeed("test \"$(systemctl is-system-running || true)\" != stopping")
         # The installer read the whole image back from the disk before it mounted the root to leave
         # the hardware file there (which changes the root): what comes before the root, the
         # partition tables and the boot partition, is still the image's byte for byte.
@@ -168,6 +173,12 @@ pkgs.testers.runNixOSTest {
         hw = installer.succeed("cat /tmp/root/var/lib/torq/install/hardware-configuration.nix")
         installer.succeed("umount /tmp/root")
         assert "qemu-guest.nix" in hw and "by-label/nixos" in hw, hw
+        # The boot menu the disk starts with cannot have its entries edited (modules/security.nix;
+        # a kernel command line typed at boot is a root shell): systemd-boot's `editor 0`. Until
+        # the EFI-partition test (ADR-033) checks the menu itself.
+        installer.succeed("mkdir -p /tmp/esp && mount -o ro /dev/vda1 /tmp/esp")
+        installer.succeed("grep -qx 'editor 0' /tmp/esp/loader/loader.conf")
+        installer.succeed("umount /tmp/esp")
         installer.shutdown()
 
     installed = machine("installed", target(0))

@@ -223,7 +223,7 @@ impl Status {
             if self.running_system.as_ref() != Some(want) {
                 p.push(format!(
                     "running system is {}, not the last ledgered build {want}: it was switched outside the \
-                     broker (e.g. nixos-rebuild against another configuration, or an old boot entry)",
+                     broker (e.g. another configuration built and switched to by hand, or an old boot entry)",
                     self.running_system.as_deref().unwrap_or("(unknown)")
                 ));
             }

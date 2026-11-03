@@ -1969,24 +1969,37 @@ fn a_rollback_is_restored_only_if_the_next_boot_is_known() {
 
 /// From the audit: apply and revert did not check for an outside switch running (repair and
 /// reconcile did); one interleaving could have its system recorded as the broker's commit's.
-#[test]
-fn apply_and_revert_wait_for_an_outside_switch() {
+/// `unit` is the switch unit a systemctl of the test's says is active.
+fn apply_and_revert_wait_for_a_switch_in(unit: &str) {
     let (dir, b) = setup("true");
     let fake = dir.path().join("fake-bin");
     fs::create_dir(&fake).unwrap();
     // A systemctl that says the switch unit is active.
-    fs::write(fake.join("systemctl"), "#!/bin/sh\n[ \"$1 $3\" = \"is-active nixos-rebuild-switch-to-configuration.service\" ]\n").unwrap();
+    fs::write(fake.join("systemctl"), format!("#!/bin/sh\n[ \"$1 $3\" = \"is-active {unit}\" ]\n")).unwrap();
     fs::set_permissions(fake.join("systemctl"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap());
     let d = write_diff(dir.path(), "theme.diff", THEME);
     let p = b.propose(&d, "x", Actor::User, false).unwrap();
     let head = b.repo.head().unwrap();
     let out = run_cli_env(dir.path(), &[("PATH", &path)], &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]);
-    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{out:?}");
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{unit}: {out:?}");
     assert_eq!(b.repo.head().unwrap(), head, "nothing committed");
     let a = b.apply(p.body.seq, "casey", false).unwrap();
     let out = run_cli_env(dir.path(), &[("PATH", &path)], &["revert", &a.body.seq.to_string(), "--approved-by", "casey"]);
-    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{out:?}");
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("running outside the broker"), "{unit}: {out:?}");
+}
+
+/// A switch by hand with nixos-rebuild (a stock NixOS habit; the tool is not on a TorqOS machine,
+/// but can be brought).
+#[test]
+fn apply_and_revert_wait_for_an_outside_switch() {
+    apply_and_revert_wait_for_a_switch_in("nixos-rebuild-switch-to-configuration.service");
+}
+
+/// The broker's own switch unit (ADR-032), left running by a broker that died, or run by hand.
+#[test]
+fn apply_and_revert_wait_for_the_brokers_own_switch_unit() {
+    apply_and_revert_wait_for_a_switch_in("torq-switch.service");
 }
 
 /// From the audit: a commit git had made when what followed it failed (its sync, here) was reset

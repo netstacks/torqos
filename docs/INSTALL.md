@@ -94,9 +94,9 @@ Firmware a machine needs that NixOS did not detect is one setting afterwards:
 
 Only what a TorqOS machine needs: Linux and systemd; Nix, git and nixpkgs's source, with which the
 machine builds itself from its configuration (ADR-019); TorqOS (torqcli, the broker, the shell); and
-nano, `file edit`'s editor. git is its minimal build; there are no man pages or other manuals, no
-curl, htop or jq (a configuration adds any of them: `set environment systemPackages [ curl ]`), and
-no NixOS tools for changing a machine — the broker builds and switches (ADR-032). No
+nano, `file edit`'s editor, with NixOS's core commands (coreutils, curl, ssh and the like). git is
+its minimal build; there are no man pages or other manuals, no htop or jq (a configuration adds
+them: `set environment systemPackages [ htop ]`), and no NixOS tools for changing a machine — the broker builds and switches (ADR-032). No
 NetworkManager (systemd-networkd, DHCP on wired interfaces). About 1.2 GB installed; the download
 is compressed.
 
