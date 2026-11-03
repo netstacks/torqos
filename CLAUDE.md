@@ -157,13 +157,16 @@ broker first.
 
 ## Current status (read this first) — 2026-11-03
 
-- **Handoff (2026-11-03, branch `installer`, not on `main`):** the ISO installer (ADR-031) is
-  code-complete and reviewed, with its review's eight fixes in, and **`tests/installer.nix` is
-  green** (55a4a18: the test's own mount point was missing on the ISO; the installer was fine).
-  235 cli tests pass, clippy clean. **Left:** (3) a fresh-session review of the diff
-  (docs/DRIVING.md: it erases disks), (4) merge to `main`, (5) rebase `slim` (ADR-032/033) onto it
-  and do the same. Open installer limits are KNOWN-GAPS 6zc. The docs of ADR-034–039 (the two
-  faces, M3–M5) are in this branch too and need no further work.
+- **Handoff (2026-11-03, `main` at the merge of `installer`, `theme` and `user-docs`):** the ISO
+  installer (ADR-031) is on `main`, twice reviewed in fresh sessions (the second review, of
+  1b18763, found nothing blocking), `tests/installer.nix` green, 241 cli tests, clippy clean. The
+  terminal branding and the public documentation site (`user-docs/`) are on `main` too. **Left:**
+  rebase `slim` (ADR-032/033, worktree `~/torq-slim`) onto `main` and take it through the same
+  loop; then torq5 takes `main` by one ledgered switch (`show | compare` first). Small installer
+  follow-ups from the second review, none blocking, for the next installer session: the ISO
+  should ignore logind's power, reboot, suspend and lid keys (the one remaining way a person
+  stops a write through systemd, and it closes the read-back/detect window of KNOWN-GAPS 6zc);
+  `put` could zero the disk's tail together with its head; both go in KNOWN-GAPS 6zc.
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
   aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is
   written for this host. Tests here: **broker 117, torqcli 233** (`cargo test` in `nix develop`,
