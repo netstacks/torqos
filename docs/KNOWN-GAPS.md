@@ -355,6 +355,11 @@ Its §5 lists claims without a test.
    2026-11-03: before, the power key was a poweroff that stopped the installer between the write
    and the hardware file, leaving a system without one), only root sends one — nobody logs in to
    the installer — and a write stopped by one leaves no partition table (ADR-031 step 4).
+   One window remains (review of 5f99d05): on a disk exactly the image's size, the image's own
+   backup partition table lands at the disk's last sector near the end of the stream, so a power
+   cut in the seconds before the first MiB is written leaves a disk a firmware could restore the
+   table from — holding everything the image has, but not yet read back. Holding back the image's
+   last MiB too, written with its first, would close it.
 
 6zd. **The skeleton's loose ends** (review of `slim`, ADR-032, 2026-11-03; none a defect) —
    closed the same day: a broker test fakes an active `torq-switch.service` as one fakes
