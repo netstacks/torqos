@@ -281,7 +281,16 @@ Its §5 lists claims without a test.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
 
-## UTM VM quirks (not TorqOS bugs)
+## Dev host quirks (not TorqOS bugs)
+- **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test
+  falls back to QEMU's TCG emulation (the trust loop goes from seconds to minutes). VM → Edit →
+  CPU → "Expose hardware assisted virtualization to the guest OS", with the VM powered off.
+  Check with `ls /dev/kvm` and `grep -o vmx /proc/cpuinfo`.
+- **No aarch64 machine of its own** since the Mac VM was retired (ADR-030): an arm64-only failure
+  cannot be reproduced by hand, only through CI's arm64 runners. If one appears and resists
+  iterating through pushes, borrow an arm64 machine rather than guessing.
+
+### UTM on a Mac (historical: that VM was the dev host until 2026-11-03, ADR-030)
 - niri needs 3D: UTM display card must be `virtio-gpu-gl-pci` with GPU acceleration on
   (renderer ANGLE/Metal). Without it: black screen, "software EGL renderers are skipped".
 - Firefox's GPU WebRender drops most text on virgl. Workaround: `LIBGL_ALWAYS_SOFTWARE=1 firefox`.
@@ -295,6 +304,12 @@ Its §5 lists claims without a test.
   `modules/dev.nix` pins the version by overriding nixpkgs' release manifest with
   `modules/claude-code-manifest.json`. To update, fetch a newer manifest (the commands are in
   `dev.nix`) and ship it through the broker. Running sessions keep their old code until relaunched.
+- **A `path:` TorqOS source builds the working tree, not a commit.** `nix` copies the directory
+  as it is on disk for a `path:` flake input; it does not read git. So on a dev machine with
+  `system software torq source path:/home/viper/torq`, uncommitted edits in the checkout are built
+  and ledgered like any other change: recorded, attributable and reversible, but not reproducible
+  from the repository — the ledger names a store path nobody else can rebuild. `git status` before
+  shipping. (Found on torq5, 2026-11-03, while writing ADR-030's setup.)
 6l. **`show system alarms` has no exit code of its own.** `torq status` exited 1 when the machine was
    not as its ledger says and 75 while a change was being made; `torqcli show system alarms` says it
    in words and exits 0. Scripts and monitoring use `sudo torq-broker --json status` (its `ok`,

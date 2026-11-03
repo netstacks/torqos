@@ -1,9 +1,9 @@
 # Roadmap
 
-## Virtual machines (the dev VM on an M4 Mac; NixOS VM tests)
+## Virtual machines (the dev host `torq5`, x86_64 on ESXi since ADR-030; NixOS VM tests)
 
 ### M1 — The trust loop  ✓ done
-In an ARM NixOS VM (UTM on the M4 Mac):
+Done in the aarch64 UTM VM on the M4 Mac, which was the dev host at the time (retired, ADR-030):
 
 - [x] `broker/Cargo.lock` generated; `cargo test` green.
 - [x] UTM VM switches to `/var/lib/torq/config#torq-utm` (from `templates/config`).
@@ -108,12 +108,13 @@ first.
       installed that is not needed. *(2026-11-02: tests/ssh.nix checks SSH's protections, and found
       the guessing protection blind (KNOWN-GAPS 6za, fixed); fonts, icons, NixOS's installer tools
       and bcache's left out of a machine without a screen, ~45 MB.)*
-- [ ] **Releases** (`v0.1.0`, …) at one URL machines fetch from; `request system update` moves to
+- [x] **Releases** (`v0.1.0`, …) at one URL machines fetch from; `request system update` moves to
       the newest one. *Built (2026-11-02, ADR-028): signed commits in the public
       `netstacks/torqos-releases`, `stable` moved forward to each tested release; machines take it
       as git and check each commit's signature before loading it; an image machine's first update
-      moves it there. v0.1.0 out (2026-11-02), checked from outside; done once a machine has
-      updated to it.*
+      moves it there. v0.1.0 out (2026-11-02), checked from outside. Done: `torq5`, installed from
+      the image, had its first update move its source from the image's own store path to
+      `git+…/torqos-releases?ref=stable` as one ledgered change, and runs a release.*
 - [ ] **CI (GitHub Actions):** *test* on every push and pull request (`nix flake check`: tree
       checks and the VM tests, with KVM); *(the `test` workflow, 2026-11-02, with the DCO
       sign-off check on pull requests)* *nixpkgs bump* weekly, as a pull request the tests run

@@ -426,3 +426,28 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   os-release is the TorqOS release a machine runs, so a machine updated to a release says so. The
   repository's files are Apache-2.0; the name and logo are not licensed as trademarks
   (branding/README.md).
+
+## ADR-030 — Development moves to an x86_64 ESXi host; aarch64 is CI's
+- **Context:** TorqOS was built in an aarch64 UTM VM on an M4 Mac (ADR-006's "dev on M4 Mac").
+  That machine had no `/dev/kvm`, so every NixOS VM test ran under QEMU's TCG emulation (the trust
+  loop ~2.5 min), it was limited to 8 GB and a 64 GB disk, it paused whenever the Mac slept — and
+  the Mac is company property, which is the wrong place for the project to live. `torq5`, an
+  x86_64 VM on a VMware ESXi server, was installed from the v0.1.0 release image on 2026-11-02 and
+  has since been given 8 vCPU, 64 GB of memory, a 1 TB disk and nested virtualisation.
+- **Decision:** `torq5` is the development machine for everything day to day: the broker and
+  torqcli crates, `nix flake check`, the VM tests (now with KVM) and the images. The Mac VM is
+  retired, not kept as a second host. **aarch64 is covered only by CI**, on GitHub's arm64 runners,
+  which already build both architectures' images on every release and run the tests on every push.
+  The dev machine is itself a normal release install, so every change to it goes through its own
+  broker and ledger — with two deliberate exceptions, both one ledgered commit and both reversible:
+  `torq dev enable true` (ADR-009) and `system software torq source path:/home/viper/torq`, which
+  points the machine at the checkout instead of the signed releases repo. `modules/dev.nix` asserts
+  that the second requires the first, so a machine cannot quietly build from a writable folder.
+- **Consequences:** VM tests run at native speed, and the disk is no longer a reason to avoid
+  building images locally. An arm64-only failure has no local reproduction: it has to be chased
+  through CI, or on a borrowed arm64 machine (KNOWN-GAPS, "Dev host quirks"). While its source is a
+  path, `torq5` is not testing the release path that real machines take, so a release must still be
+  checked from a machine that tracks `stable` (ADR-028). A `path:` input also builds the checkout's
+  working tree, uncommitted edits included (KNOWN-GAPS, "Dev mode"), so what the ledger records on
+  the dev machine is reversible but not always reproducible from the repository. `docs/DEV-SETUP.md` is written for this
+  host; the Mac/UTM instructions are in git history.
