@@ -113,7 +113,7 @@ before you go on. A ⏹ with *adversarial* means both kinds.
       switch. **⏹ adversarial:** a bootloader bug leaves a machine that does not start; this is the
       one place to spend a second reviewer. Also: can the tree or a config file reach the keys?
 - [x] ADR-039 (2026-11-03, `checks.<system>.free`): the source statement in `release.yml`; a CI check that the image and ISO hold
-      nothing unfree. *Test:* the check fails when `claude-code` is put in the image on purpose.
+      nothing nixpkgs marks unfree. *Test:* the check fails when `claude-code` is put in the image on purpose.
 - [ ] **⏹ audit** — end of M2. Then a release (`v0.2.0`) from a machine tracking `stable`.
 
 ### M3 — trust (ADR-035, ADR-036)

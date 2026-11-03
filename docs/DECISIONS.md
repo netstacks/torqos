@@ -797,9 +797,10 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   not legal advice.
 - **Decision:**
   - **A source statement on every release** (release.yml): the tag, the nixpkgs commit, that
-    `nix build` of them reproduces the image, and that every package's source is referenced there.
-    That is the GPL's corresponding source, satisfied more exactly than most distributions manage,
-    because `flake.lock` pins all of it.
+    `nix build` of them builds the same system from the same sources (not the same bytes: an image
+    carries its own copy of its source), and that every package's source is pinned there by hash.
+    The sources themselves are upstream's, fetched by those hashes: a mirror of them is for when
+    TorqOS has users (below), and until then the GPL's "corresponding source" rests on them.
   - **Nothing unfree in an image or the ISO**, checked by CI: `torq.unfree` is off in `hosts/image`
     and `hosts/installer`, and a check fails if the closure holds a package nixpkgs marks unfree.
     Dev mode's Claude Code never ships. On a person's machine, what *their* configuration fetches
@@ -821,7 +822,13 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** One paragraph in release.yml and one CI check now; the mirrors when there is
   anyone to serve. ADR-023 gains the footnote. KNOWN-GAPS lists the bet. Built 2026-11-03: the
   release notes' **Source** paragraph (the tag, the nixpkgs commit, the command that builds the
-  image from them), and `checks.<system>.free` — the image's and the ISO's configurations allow
-  no unfree package (no `torq.unfree`, no `nixpkgs.config.allowUnfree`), which is exact because
-  nixpkgs will not evaluate an unfree package unless allowed; it checks itself against the image
-  with Claude Code allowed.
+  image from them), and `checks.<system>.free` — nothing lets an unfree package into the image or
+  the ISO, on both platforms: none of nixpkgs' settings that would (`torq.unfree`, `allowUnfree`,
+  `allowUnfreePackages`, `allowlistedLicenses`, `handleEvalIssue`), in them or a specialisation
+  of them; no package set from outside; no second nixpkgs imported in TorqOS's modules. nixpkgs
+  refuses an unfree package otherwise, so that is the closure's licence check, as far as nixpkgs'
+  licences go: a package with no licence check (a vendor's file fetched as it is) it cannot see,
+  and redistributable firmware nixpkgs counts as free, which the ISO carries (linux-firmware and
+  others, `enableRedistributableFirmware`) and the image does not. It checks itself: each of the
+  eight ways planted in the image is caught. (Review of 2026-11-03: the first version checked only
+  `torq.unfree`.)

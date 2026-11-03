@@ -88,10 +88,10 @@ jobs:
           GH_TOKEN: ${{ secrets.TORQOS_RELEASES_TOKEN }}
         run: |
           fingerprint=$(ssh-keygen -lf <(cut -d' ' -f3,4 release/allowed_signers) | cut -d' ' -f2)
-          # The source statement (ADR-039): flake.lock pins every input, so the tag and the nixpkgs
-          # commit name the source of every package in the images.
-          nixpkgs=$(jq -r .nodes.nixpkgs.locked.rev flake.lock)
-          test -n "$nixpkgs" && test "$nixpkgs" != null
+          # The source statement (ADR-039): flake.lock pins every input, so the tag and the commits
+          # it names are the source of every package in the images. nixpkgs is the root's input of
+          # that name, whatever the lock calls its node.
+          nixpkgs=$(jq -er '.nodes[.nodes.root.inputs.nixpkgs].locked.rev' flake.lock)
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           TorqOS $TAG.
 
@@ -111,12 +111,14 @@ jobs:
           release was signed with the key it was installed with.
 
           **Source.** These images are built from the tag \`$TAG\` of
-          [netstacks/torqos-releases](https://github.com/netstacks/torqos-releases/tree/$TAG) and
-          nixpkgs commit [\`$nixpkgs\`](https://github.com/NixOS/nixpkgs/tree/$nixpkgs), both pinned
-          by its \`flake.lock\`. \`nix build "git+https://github.com/netstacks/torqos-releases?ref=refs/tags/$TAG#image"\`
-          builds the image again from them, and every package's source is referenced there, by
-          hash: the corresponding source of the GPL'd software in it (the kernel, git, bash,
-          coreutils and the rest). TorqOS is a NixOS derivative, not NixOS (docs/DECISIONS.md, ADR-039).
+          [netstacks/torqos-releases](https://github.com/netstacks/torqos-releases/tree/$TAG), with
+          nixpkgs at commit [\`$nixpkgs\`](https://github.com/NixOS/nixpkgs/tree/$nixpkgs) and every
+          other input at the commit its \`flake.lock\` pins. Every package's source, the GPL'd ones
+          among them (the kernel, git, bash, coreutils and the rest), is pinned there by hash, in
+          nixpkgs. \`nix --extra-experimental-features 'nix-command flakes' build "git+https://github.com/netstacks/torqos-releases?ref=refs/tags/$TAG#image"\`
+          builds the same system from the same sources (\`#image-vmdk\`, \`#iso\` the others); not the
+          same bytes, since an image carries its own copy of its source, and the releases'
+          copy has no CI files. TorqOS is a NixOS derivative, not NixOS (docs/DECISIONS.md, ADR-029).
           EOF
           pre=()
           case "$TAG" in *-*) pre=(--prerelease) ;; esac
