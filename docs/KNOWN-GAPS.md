@@ -372,3 +372,11 @@ Its §5 lists claims without a test.
    `documentation man enable true` as well; and trust-loop starts a real `torq-switch` unit by
    hand and checks the broker applies nothing until it stops. Still open: no test would notice
    `-E LOCALE_ARCHIVE` put back (harmless: it passes nothing).
+
+6ze. **The fence's loose ends** (reviews of 2026-11-03). torqcli's own check (cli/src/nixos.rs
+   `fenced`) knows the fence's patterns but not where an /etc file lands, a `..`, or that
+   `specialisation` is refused: such a setting is refused at the commit, when the system is
+   evaluated, with the module's message, not when it is typed. An /etc entry whose `source` is a
+   glob is linked under its files' own names, not its target, and is not checked for where those
+   land (no way to make one land in /etc/torq from the tree was found). The unit fence covers
+   `torq-*` services, timers and units, not sockets or paths (the broker has none yet).

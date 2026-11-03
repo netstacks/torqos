@@ -39,6 +39,10 @@
       "branding"
     ],
     [
+      "torq",
+      "installer"
+    ],
+    [
       "nixpkgs"
     ],
     [
