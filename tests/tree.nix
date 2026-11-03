@@ -132,6 +132,12 @@ let
         "torq: dev's group builders does not exist, so dev is not in it: turn on what brings it, or declare it (`set users groups builders gid <number>`)."
       ]) "groups-missing: not warned as expected: ${toString (configOf "groups-missing").warnings}"
     ++ lib.concatMap (case: lib.optional (lib.any (lib.hasInfix "group") (configOf case).warnings) "${case}: warned of a group that exists") [ "groups-docker" "template" ]
+    # A service's own /etc files land where the evaluated system says, not where the tree spells
+    # them: a pppd peer or an editor's runtime file climbing into /etc/torq is refused
+    # (modules/security.nix; audit of 2026-11-03).
+    ++ lib.concatMap (case: lib.optional (!(lib.any (lib.hasInfix "land outside their place") (torqFailures (configOf case))))
+      "${case}: an /etc file landing in /etc/torq was not refused") [ "etc-astray-pppd" "etc-astray-neovim" ]
+    ++ lib.optional (lib.any (lib.hasInfix "land outside their place") (torqFailures (configOf "nixos-good"))) "nixos-good: refused as an /etc file astray"
     # TorqOS from a folder (path:) only in dev mode, by the configuration's own lock (modules/dev.nix).
     ++ lib.optional (!(lib.any (lib.hasInfix "comes from a folder") (torqFailures (configOf "dev-folder-off")))) "dev-folder-off: TorqOS from a folder without dev mode was not refused"
     ++ lib.concatMap (case: lib.optional (lib.any (lib.hasInfix "comes from a folder") (torqFailures (configOf case))) "${case}: refused, but may come from there") [ "dev-folder-on" "dev-store" ]
