@@ -158,16 +158,12 @@ broker first.
 ## Current status (read this first) — 2026-11-03
 
 - **Handoff (2026-11-03, branch `installer`, not on `main`):** the ISO installer (ADR-031) is
-  code-complete and reviewed, with its review's eight fixes in, but **`tests/installer.nix` is not
-  green**: its third subtest fails at the *test's* `mount -o ro /dev/vda2 /mnt` (exit 32) right
-  after the installer's own write, read-back and hardware detection succeeded — the kernel logs the
-  ext4 mount, then an unmount 10 ms later. The first two subtests pass. Nothing else known broken:
-  235 cli tests pass, clippy clean. **To finish:** (1) find why that mount fails on the ISO (the
-  test's mount point, or the installer's lazy unmount: `cli/src/install.rs` `detect`), (2) a green
-  `nix build .#checks.x86_64-linux.installer` (~30 min, rebuilds the image), (3) a fresh-session
-  review of the diff (docs/DRIVING.md: it erases disks), (4) merge to `main`, (5) rebase `slim`
-  (ADR-032/033) onto it and do the same. Open installer limits are KNOWN-GAPS 6n. The docs of
-  ADR-034–039 (the two faces, M3–M5) are in this branch too and need no further work.
+  code-complete and reviewed, with its review's eight fixes in, and **`tests/installer.nix` is
+  green** (55a4a18: the test's own mount point was missing on the ISO; the installer was fine).
+  235 cli tests pass, clippy clean. **Left:** (3) a fresh-session review of the diff
+  (docs/DRIVING.md: it erases disks), (4) merge to `main`, (5) rebase `slim` (ADR-032/033) onto it
+  and do the same. Open installer limits are KNOWN-GAPS 6n. The docs of ADR-034–039 (the two
+  faces, M3–M5) are in this branch too and need no further work.
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
   aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is
   written for this host. Tests here: **broker 117, torqcli 233** (`cargo test` in `nix develop`,
