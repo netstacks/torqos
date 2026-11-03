@@ -142,8 +142,9 @@ first.
       `nix`-only switch in trust-loop.nix; the image and installer tests boot through it.)*
 - [ ] **The boot loader without Python** (ADR-033, decided 2026-11-03: Lanzaboote now, Secure Boot
       later — the EFI-partition VM test first, on both writers; `torq5` migrates first).
-- [ ] **Upstreams** (ADR-039): a source statement on each release; CI fails an image or ISO that
-      holds anything unfree.
+- [x] **Upstreams** (ADR-039): a source statement on each release; CI fails an image or ISO that
+      holds anything unfree. *(checks.<system>.free, 2026-11-03: the image and the ISO allow no
+      unfree package, and claude-code planted in the image is caught; release.yml's notes.)*
 - [ ] **Designs settled** (audits of 2026-10-31; KNOWN-GAPS 6r): where first-boot passwords
       live, since the config repo is readable by every user (decided, SECURITY-MODEL: outside the
       repo); checksums or signatures for the qcow2 and ISO themselves (done, ADR-028). (Decided,

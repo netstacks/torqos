@@ -303,6 +303,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** Nothing for the project to host but release files. An update takes a few
   minutes more than a pure download. A cache of TorqOS's own pieces can be added later without
   changing machines' design (a public key in their configuration), if that ever matters.
+  (ADR-039: NixOS's cache is a service TorqOS depends on without an agreement; a caching proxy in
+  front of it, where TorqOS's own pieces would be prebuilt, is the plan once there are users.)
 
 ## ADR-024 — The store survives a power cut
 - **Context:** Cutting the power during first-boot setup's build (M2) left the Nix store broken: Nix
@@ -817,4 +819,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     get prebuilt, the footnote ADR-023 allowed for), a source mirror. And send fixes upstream:
     projects do not cut off the people who help.
 - **Consequences:** One paragraph in release.yml and one CI check now; the mirrors when there is
-  anyone to serve. ADR-023 gains the footnote. KNOWN-GAPS lists the bet.
+  anyone to serve. ADR-023 gains the footnote. KNOWN-GAPS lists the bet. Built 2026-11-03: the
+  release notes' **Source** paragraph (the tag, the nixpkgs commit, the command that builds the
+  image from them), and `checks.<system>.free` — the image's and the ISO's configurations allow
+  no unfree package (no `torq.unfree`, no `nixpkgs.config.allowUnfree`), which is exact because
+  nixpkgs will not evaluate an unfree package unless allowed; it checks itself against the image
+  with Claude Code allowed.

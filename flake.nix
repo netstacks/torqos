@@ -113,6 +113,29 @@
         accounts = import ./tests/accounts.nix { inherit pkgs self; };
         ssh = import ./tests/ssh.nix { inherit pkgs self; };
         image = import ./tests/image.nix { inherit pkgs self; };
+        # Nothing unfree in what TorqOS distributes (ADR-039): the image and the ISO allow no unfree
+        # package, so nixpkgs, which refuses to evaluate one unless allowed, put none in them.
+        # Checked against itself too: the image with dev mode's Claude Code allowed must be caught.
+        free =
+          let
+            sys = pkgs.stdenv.hostPlatform.system;
+            # What a configuration allows that nixpkgs marks unfree: empty is nothing.
+            allows = c:
+              let n = c.config.nixpkgs.config; u = c.config.torq.unfree; in
+              lib.optional (n.allowUnfree or false) "sets nixpkgs.config.allowUnfree"
+              ++ lib.optional (n ? allowUnfreePredicate) "allows unfree packages (torq.unfree: ${if u.all then "all" else lib.concatStringsSep ", " u.packages})";
+            shipped = {
+              "the image" = self.nixosConfigurations."image-${sys}";
+              "the ISO installer" = self.nixosConfigurations."installer-${sys}";
+            };
+            found = lib.concatLists (lib.mapAttrsToList (what: c: map (a: "${what} ${a}") (allows c)) shipped);
+            planted = self.nixosConfigurations."image-${sys}".extendModules { modules = [ { torq.unfree.packages = [ "claude-code" ]; } ]; };
+          in
+          assert lib.assertMsg (found == [ ]) "Unfree software allowed in what TorqOS distributes (ADR-039): ${lib.concatStringsSep "; " found}";
+          assert lib.assertMsg (allows planted != [ ]) "The unfree check misses claude-code allowed in the image";
+          pkgs.runCommand "torq-free" { } ''
+            echo "The image and the ISO allow no unfree package (ADR-039); claude-code planted in the image is caught." > $out
+          '';
       } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
         # The ISO installer (ADR-031): installed and booted on x86_64 only; aarch64's ISO is built, not run.
         installer = import ./tests/installer.nix { inherit pkgs self; };
