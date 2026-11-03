@@ -34,6 +34,12 @@ any change can be undone with one command.
 TorqOS is deliberately small. It adds the configuration layer — the broker, the ledger and the
 shell — and leaves everything else to NixOS and nixpkgs.
 
+It has one base and two faces. For a sysadmin, a server defined in code, in git, rebuilt anywhere
+from its repository. For a person, a desktop or laptop — the same base with a desktop
+configuration on it — that an AI agent can be trusted to drive: the agent only proposes, the
+person approves, and anything it did can be undone. The second face is being built now
+(`docs/ROADMAP.md`, M3–M5).
+
 > **Status:** early releases (`v0.1.x`). The configuration layer is complete and in daily use; the
 > installable images, first-boot setup and signed releases are new. See
 > [Project status](#project-status).

@@ -275,7 +275,16 @@ Its §5 lists claims without a test.
    not active (`/sys/kernel/security/lsm` = `capability,landlock,yama,bpf,ima`). Module signing
    is not built into the kernel either, so "signed modules only" (SECURITY-MODEL.md) is not true.
 
-## Desktop (off since ADR-019; kept for later)
+## Upstreams (ADR-039)
+6u. **`cache.nixos.org` and `github.com/NixOS/nixpkgs` are a bet, not a right.** Every machine
+   fetches from the Foundation's cache (ADR-023) and `flake.lock` points at GitHub; neither has an
+   SLA, and the cache's cost is a recurring Foundation concern. The *code* cannot be withdrawn (MIT,
+   pinned, and the nixpkgs tree is inside every image); the services can change for everyone. If
+   the cache went away, Nix builds from source — slowly. Answer when there are users: a nixpkgs
+   mirror under `netstacks`, a caching proxy, a source mirror. Not yet: the release's source
+   statement and CI's unfree check (ROADMAP M2).
+
+## Desktop (off in the base; the torqos-desktop configuration's, ADR-034, M4)
 7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
    `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a TorqOS niri config.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
@@ -327,3 +336,11 @@ Its §5 lists claims without a test.
    all: like system.nix always was, they can set anything, the broker's settings included. A person
    approves each one as its raw diff; an agent proposing one is for the same M3 allow-list (a
    config file is a whole module, so the allow-list will have to refuse them to agents outright).
+6n. **The ISO installer refuses a machine with another NixOS disk.** The image finds its file
+   systems by label (`nixos`, `ESP`), the same on every TorqOS disk and NixOS's defaults, so a
+   second disk carrying either could be what the installed machine starts from or grows. `torq
+   install` refuses until that disk is disconnected or cleared (ADR-031). Unique labels or
+   partition UUIDs per install would lift this. Also: hardware NixOS detects as needing an unfree
+   driver (a Broadcom wifi card's `broadcom_sta`) gets it named in the detected hardware file,
+   which TorqOS, allowing no unfree packages, then fails to evaluate at first-boot setup; untested
+   on such hardware. (Found by review of the installer, 2026-11-03.)

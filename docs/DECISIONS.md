@@ -506,3 +506,222 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   shell on the installer — as on any machine whose boot they control, and the installer holds
   nothing (Secure Boot and a locked menu: later, ROADMAP).
 
+<!-- ADR-032 (the skeleton) and ADR-033 (the boot loader, proposed) are on the `slim` branch. -->
+
+## ADR-034 — One base, two faces: the sysadmin's server as code, and a person's machine an AI can drive
+- **Context:** ADR-019 narrowed TorqOS to a thin, CLI-only OS and deferred the desktop and the AI,
+  so the configuration layer could be built first. It is built: the trust loop (M1), torqcli
+  (M1.5), the image, setup, signed releases and the ISO (M2). But the reason TorqOS was started
+  was never a server. It was an operating system where an AI can be given deep, powerful access
+  *safely*: fix a driver, build an application a person asks for, watch a desktop while a program
+  is tried — with every change recorded and undoable. What was built is exactly the substrate that
+  needs: generations, one writer, the ledger, tiers, a typed tree over every setting, `commit
+  confirmed`. What it was being aimed at — an administrator typing torqcli — is one of its two
+  users, not the only one. The owner (2026-11-03) wants both: *a sysadmin's dream, servers defined
+  in code in git*, and *the laptop or desktop an AI drives*.
+- **Decision:** TorqOS has **one base and two faces.**
+  1. **The server:** a machine defined in code, in git, driven by `torqcli` and rebuilt from its
+     repository anywhere (ADR-036). Everything built so far; nothing taken away.
+  2. **The desktop or laptop:** the same base with a desktop *configuration* loaded on it, where
+     the person talks to an agent, the agent proposes, and the person approves. The desktop is a
+     configuration, not a product: a config repo (`torqos-desktop`: the compositor, a terminal, the
+     agent, a few applications) loaded onto the skeleton (ADR-032) like any configuration, with the
+     same gate, ledger and rollback. `modules/desktop.nix` becomes that configuration's modules.
+  What follows from that:
+  - **The AI layers move from "later" to next** after M2 (ROADMAP M5; AI-LAYER.md): doctor mode
+    (read, explain, propose nothing), then proposals, then session trust. They need the trust work
+    of ADR-035 first, because an agent needs an identity the kernel vouches for.
+  - **torqcli is the agent's interface first, the administrator's second.** ADR-025's single
+    sources — one typed grammar, `commit check`, every command saying what it did — are what an
+    agent drives. Its human polish (the walk of every `?`, usability reviews) stays, lower.
+  - **The thin base stays thin** (ADR-032): a small base serves both faces; a desktop adds its own
+    size as a configuration, not as the base.
+  - **Three scenarios are the acceptance tests** of the laptop face, each a VM test when built:
+    (a) *fix my wifi* — a system-tier proposal applied with `commit confirmed`, reverting itself if
+    the machine does not come back; (b) *build me an application* — written in the person's home
+    (free), installed through the tree at user tier (ADR-037), undone with `rollback`; (c) *watch
+    the desktop* — agent tooling over the compositor's screenshot and input protocols, needing the
+    person's session and nothing of the broker's.
+  ADR-019's **architecture stands; its scope is reversed.** Still out: laptop-*specific* design,
+  touch-first, reference hardware, a smoothness target. The desktop is a configuration, not
+  hardware work.
+- **Consequences:** VISION, ROADMAP, ARCHITECTURE, AI-LAYER, CLAUDE.md rewritten (2026-11-03).
+  ADR-035–039 record what the laptop face needs that the server face did not force: closing the
+  root gap, the config repo's remote, applications, data, upstreams. The skeleton and ISO work
+  continue unchanged — both faces want them. Nothing is deleted; the server face is the base the
+  laptop face is loaded on.
+
+## ADR-035 — Closing the root gap: the account, the door, and the record (proposed)
+- **Status:** proposed, 2026-11-03; the plan for M3. The order below is the build order.
+- **Context:** Root is root: no program can tell a person from an AI typing in a root shell, and
+  TorqOS's model already says so (SECURITY-MODEL, "Root, the owner, and an AI the owner runs").
+  Today every guarantee is *visibility*, not *enforcement*: the broker trusts `--actor` and
+  `--approved-by` as given (KNOWN-GAPS 4, 6a); the ledger is unkeyed and a root writer can rewrite
+  the chain (2); `sudo` is needed for daily work, so a root shell is ordinary and silent. The audit's
+  N8 and N9 are this: a tty check is not a person, and signing on the machine cannot keep root out.
+  The question to answer is not "is this a human?" — it is **"which account is this, and did it
+  come through a door that rings?"**
+- **Decision:** three levers, each enforceable.
+  1. **Identity is the account.** The broker becomes a service on a Unix socket and takes its
+     caller's identity from the kernel (`SO_PEERCRED`: uid, pid), never from a flag. The agent runs
+     as its own account (`torq-agent`), sandboxed, no sudo, no shell: whatever arrives from that uid
+     *is* the agent. Whatever arrives from the owner's uid is the owner — what they run in their
+     own terminal is theirs, as a browser extension is. `torqcli` needs no sudo. A system-tier
+     commit asks for the owner's **password** at the terminal (on a desktop: a dialog) — the one
+     thing a program in the owner's shell does not have; that is the human gate.
+  2. **Root rare, and loud.** With torqcli off sudo, the owner can go weeks without root. Then
+     **strict mode** (SECURITY-MODEL): sudoers allows TorqOS's own commands and one more, `torq
+     break-glass`, which writes a ledger entry *first* (who, when, the reason), anchors it (3), and
+     only then gives a shell. Root still exists; it cannot be reached quietly. The agent cannot press
+     it: wrong uid, no sudo, no password.
+  3. **The record lives where root cannot reach.** After each entry the ledger's head goes off the
+     machine — to the config repo's remote (ADR-036), as its own ref; with the remote refusing
+     force-pushes, it is append-only in practice. Root can rewrite local history; the anchor
+     disagrees, and `verify` says so. Signing entries on the machine is not the defence (N9): a key
+     on the box is a key root can read, a TPM key one root can use. What root changes on the machine
+     does not survive a rebuild from the configuration (the store is read-only; `request system
+     repair`), and data it deletes comes back from snapshots (ADR-038).
+- **Not:** preventing root. The only OS that does is one with no shell at all (Talos); strict mode
+  without break-glass is that, and stays an owner's option for later, once every task an owner
+  needs is a torqcli command.
+- **Consequences:** Closes KNOWN-GAPS 4 and 6a (identity), 2 (the anchor), restates N8. The
+  broker gains a socket service and loses `sudo` as its door; `torq-broker` under sudo stays for
+  dev mode and recovery. Measured boot (SECURITY-MODEL) and data snapshots come after, as planned.
+  What TorqOS can then say, truthfully: *the agent cannot get root; the owner can, but not
+  silently; and what root does here cannot rewrite the record elsewhere or outlive a rebuild.*
+
+## ADR-036 — The config repo's remote: the machine is a URL (proposed)
+- **Status:** proposed, 2026-11-03. Keeps ADR-004's default (local, never pushed) and adds the
+  remote as a setting; answers VISION's two "far future" questions.
+- **Context:** The config repo is the machine minus its data: `flake.nix`, `flake.lock`, the tree's
+  JSON, attached Nix files, `hardware-configuration.nix`, `users/<name>/*.json`. Secrets are kept
+  out *by construction* (modules/settings-fence.nix refuses every password form), not by care. So
+  the repo can leave the machine without exposing anything but what the machine runs: packages,
+  services, user names, public SSH keys, the host name — a private repo, then. The owner's idea:
+  point a new install at a repository and the machine rebuilds; and the same remote is the ledger's
+  anchor (ADR-035).
+- **Decision:**
+  - **Adopt at setup.** First-boot setup asks: *a fresh machine, or from a repository?* Given a URL
+    and a credential it clones, checks HEAD's signature against the owner's key (enrolled as
+    `release-signers` is, ADR-028: trust on first clone, pinned after), takes the repository's tree
+    and files but **this machine's hardware file** (the installer's detected one, ADR-031 — hardware
+    never travels, and `load override` keeps the local one too), asks for the owner's password
+    (it cannot come from the repo; SSH keys do, so a keys-only machine comes back whole), and
+    builds: change #1, as any setup.
+  - **Push after every applied change**, the ledger as its own ref (`refs/torq/ledger`). Branch
+    protection on the remote (no force-push) makes it append-only in practice. `verify` compares
+    the local head with the remote's; a difference is an alarm.
+  - **Pull is a proposal, never an apply.** A commit on the remote the machine does not have shows
+    in `show system remote`; `request system pull` loads it into the candidate; the person reads
+    `show | compare` and commits. Nothing from the remote is ever applied unasked — that would be
+    the bypass the whole design exists to prevent, and whoever held the credential would own every
+    machine.
+  - **The credential** lives in the broker's state directory: root-readable, which the model
+    allows; unreadable by the agent's account. A deploy key scoped to the one repository,
+    push-capable. Root with it can push junk commits (visible, reversible), not rewrite history.
+  - **One repository per machine.** Sharing between machines is `save` / `load` (S5), which exists.
+    A shared base with per-host overlays — where fleets end up — is a later ADR.
+  - The `torq` input must be the releases URL, never `path:` (a dev machine's source means nothing
+    elsewhere).
+- **Consequences:** *Your machine is a URL*: disk dies, new install, same URL, identical machine
+  minus data (ADR-038). Setup gains an online path (the default stays offline). New: `torq remote
+  …` settings, `request system pull`, the remote in `show system alarms`. ADR-004's "network is
+  download-only" becomes "download-only until the owner names a remote".
+
+## ADR-037 — Applications: a ladder, every rung declared (proposed)
+- **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small
+  design before the agent builds anything.
+- **Context:** A desktop needs Firefox and LibreOffice, a vendor's proprietary application, and what
+  the person or the agent builds. An installer that puts a binary somewhere and on PATH does not
+  work on NixOS (no `/lib`: the binary cannot find its libraries — KNOWN-GAPS, "Dev mode", `claude
+  update`) and goes unrecorded even when it does. "Applications" are three things: the application
+  (the tree's), its settings and data (the home's, never the tree's), and an application built here.
+- **Decision:** a ladder; the repository is the whole truth on every rung.
+  1. **nixpkgs, in the tree** — the default. `users <name> packages`, `environment systemPackages`;
+     pinned by `flake.lock`, byte-reproducible, rolled back with the system. Most of a desktop.
+  2. **Flatpak, declared in the tree** — the escape hatch, for what nixpkgs lacks, lags on, or a
+     vendor supports only there: `users <name> flatpaks [ com.spotify.Client ]`, reconciled at each
+     switch (a module like nix-flatpak's, exposed like any option), never `flatpak install` by hand.
+     The repository records the application and its remote, not its bytes — acceptable because a
+     Flatpak is a leaf nothing depends on, sandboxed, with its own rollback.
+  3. **Built here** — a package from a repository of the person's own: the source in their home
+     (free, the agent iterates there), a small `flake.nix` the agent writes, and the tree pointing
+     at it (`users <name> projects [ ./projects/foo ]`, or a git URL). User tier, so build, install,
+     test and undo need no approval and each is a ledger line. Today the tree takes nixpkgs names
+     only: this rung is the design to do.
+  **Never:** `curl | sh`, self-updaters, AppImage, Snap — refused where TorqOS can see them
+  (`set` of a path outside the repository already is), documented where it cannot.
+  Unfree software stays as it is: allowed by name (modules/unfree.nix), on the person's machine by
+  the person's choice; never in an image (ADR-039).
+- **Why not Flatpak for everything** (Silverblue's answer): it loses reproducibility for the thing
+  most worth reproducing, the agent cannot easily build one (a Nix package is twenty lines in the
+  language it already uses), and nothing is shared between applications on disk.
+- **Consequences:** the desktop configuration turns on `services.flatpak` and the portal for its
+  compositor; disk for runtimes; the agent builds Nix packages, not Flatpaks. The repository shows
+  every application on the machine, by rung.
+
+## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it (proposed)
+- **Status:** proposed, 2026-11-03. The snapshot decision belongs with the installer (ADR-031).
+- **Context:** The repository rebuilds the machine, not the person's life on it. A laptop's data is
+  five kinds: documents and media (catastrophic to lose); application settings (annoying);
+  secrets — SSH and GPG keys, saved passwords, tokens (serious, and never in the repository);
+  caches (nothing); and, on servers, service data in `/var/lib` (catastrophic). ADR-004's
+  "optional user-chosen encrypted backup" is this decision.
+- **Decision:**
+  - **Documents are a sync service's**, declared in the tree so a rebuilt machine comes back
+    syncing — `services syncthing` (NixOS's own, peer-to-peer, no cloud) or a mount of OneDrive or
+    the like (rclone). TorqOS does not build one: it is the honest stance of every OS that treats
+    the machine as disposable (ChromeOS, macOS with iCloud, Silverblue).
+  - **A declared backup.** NixOS's `services.restic.backups` as the tree's backup of `/home` and
+    `/var/lib` to any target (S3, a NAS, SFTP, a disk), encrypted; its key lives where passwords do,
+    outside the repository. `request system restore` on a rebuilt machine; setup's from-a-repository
+    path (ADR-036) offers it. A rebuild is then two steps, both ledgered: the repository, then the
+    restore.
+  - **Local snapshots.** On a snapshot-capable file system (btrfs, the installer's choice at
+    partition time), the broker snapshots `/home` and `/var/lib` before each commit, and `rollback`
+    offers the data too: the agent's migration of a database undone with the service. This is also
+    the root gap's "what a root process deletes" (ADR-035, ROADMAP).
+  - **Secrets never enter the repository** (the fence); a password manager is recommended for
+    application credentials; public keys are in the repository already, private ones in the
+    encrypted backup or regenerated and re-enrolled. There is no design without one secret in a
+    human's head — the backup passphrase — and TorqOS makes it exactly one.
+  - **Caches:** nothing.
+- **Consequences:** A laptop's whole state is three pointers — a repository URL, a backup location,
+  a sync account — and the machine comes back from them: system bit-for-bit, applications,
+  settings, data. To build: `request system restore`, the restore step in setup, the snapshot hook
+  in the broker, the installer's file-system choice. Everything else is NixOS options the tree
+  already has, plus telling people the honest thing.
+
+## ADR-039 — Upstreams: what TorqOS owes, and what it depends on
+- **Context:** TorqOS redistributes images made of other people's software: nixpkgs and NixOS's
+  modules (MIT), the kernel and git (GPLv2), bash and coreutils (GPLv3), systemd and glibc (LGPL),
+  redistributable firmware. It fetches from the NixOS Foundation's binary cache and GitHub
+  repository; a desktop's applications come from Flathub, an independent nonprofit. None of these
+  licences restrict what the software is used for — field-of-use limits are not open source — and
+  "a different use case" owes nothing. *Distributing binaries* does. This is a maintainer's map,
+  not legal advice.
+- **Decision:**
+  - **A source statement on every release** (release.yml): the tag, the nixpkgs commit, that
+    `nix build` of them reproduces the image, and that every package's source is referenced there.
+    That is the GPL's corresponding source, satisfied more exactly than most distributions manage,
+    because `flake.lock` pins all of it.
+  - **Nothing unfree in an image or the ISO**, checked by CI: `torq.unfree` is off in `hosts/image`
+    and `hosts/installer`, and a check fails if the closure holds a package nixpkgs marks unfree.
+    Dev mode's Claude Code never ships. On a person's machine, what *their* configuration fetches
+    from a vendor is their download, not TorqOS's distribution: the image is TorqOS's to answer
+    for; the configuration is the owner's. Firmware stays `enableRedistributableFirmware`'s set —
+    the word is the legal term.
+  - **Trademarks:** "a NixOS derivative" (ADR-029), never NixOS or its logo; nixpkgs' Firefox
+    unmodified (Mozilla's permission covers it), rebranded if ever changed.
+  - **Owner keys for Secure Boot** (SECURITY-MODEL) stay the plan: GPLv3's anti-tivoisation
+    permits exactly that and forbids project-held boot keys.
+  - **The dependencies are a bet, named.** The code cannot be withdrawn (MIT, pinned, and the
+    nixpkgs tree is inside every image). The *services* can change: `cache.nixos.org` (ADR-023's
+    bet) and `github.com/NixOS/nixpkgs` have no SLA, and the cache's cost is a recurring Foundation
+    concern; Flathub serves every desktop distribution and gates no client. If the cache went away
+    nothing breaks at once — Nix builds from source, slowly. When TorqOS has users: mirror nixpkgs
+    to `netstacks`, a caching proxy in front of the cache (which is also where TorqOS's own pieces
+    get prebuilt, the footnote ADR-023 allowed for), a source mirror. And send fixes upstream:
+    projects do not cut off the people who help.
+- **Consequences:** One paragraph in release.yml and one CI check now; the mirrors when there is
+  anyone to serve. ADR-023 gains the footnote. KNOWN-GAPS lists the bet.

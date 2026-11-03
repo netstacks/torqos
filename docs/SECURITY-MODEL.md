@@ -21,6 +21,12 @@ machine with UEFI and a TPM.
 
 ## Root, the owner, and an AI the owner runs
 
+The plan that closes this section's gaps is ADR-035, in three levers: *the account* (the broker on
+a socket, identity from `SO_PEERCRED`; the agent an account of its own; the owner's password the
+human gate), *the door* (strict mode, `torq break-glass`: a root shell only after a ledger entry),
+and *the record* (the ledger's head anchored off the machine, ADR-036). What it does not try: to
+tell a person from a program at a root shell — nothing can.
+
 - **The `root` account is locked** (no password: nobody logs in as root). **Root's powers** are
   borrowed through `sudo` by the owner, with the owner's own password; `sudo bash` borrows them for a
   whole shell. That is the owner's override, as on any Linux, and TorqOS does not try to forbid it:
