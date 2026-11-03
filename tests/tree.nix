@@ -74,6 +74,13 @@ let
     nixos-fence-etc-slash = c: c.environment.etc."/torq/broker.json".text;
     nixos-fence-etc-dot = c: c.environment.etc."./torq/broker.json".text;
     nixos-fence-etc-target = c: c.environment.etc.innocent.target;
+    # Where an /etc file lands, however spelled: a `..` is refused (audit of 2026-11-03).
+    nixos-fence-etc-dotdot = c: c.environment.etc."torq/broker.json".text;
+    nixos-fence-etc-target-dotdot = c: c.environment.etc.innocent.target;
+    # A specialisation is a second system, out of every rule: not the tree's (audit of 2026-11-03).
+    nixos-fence-specialisation = c: c.specialisation.x.configuration.torq.broker.rebuildCommand;
+    # The ISO installer's mode is never a machine's.
+    nixos-fence-installer = c: c.torq.installer.enable;
     # A setting TorqOS keeps in its own file is not also in nixos/ (one setting, one place).
     nixos-elsewhere = c: c.networking.hostName;
     nixos-elsewhere-packages = c: map (p: p.outPath or p) c.environment.systemPackages;
