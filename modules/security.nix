@@ -36,6 +36,10 @@ in
 
       networking.firewall.enable = true;
       security.sudo.execWheelOnly = true;
+      # No editing the boot menu's entries: with it, anyone at the console adds `init=/bin/sh` to
+      # one and starts a root shell, past the locked root account and the broker. (NixOS's default
+      # is on.) A person who needs it turns it on, as a setting, ledgered.
+      boot.loader.systemd-boot.editor = lib.mkDefault false;
       services.openssh.settings = {
         PermitRootLogin = "no";
       };
