@@ -861,8 +861,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   eight ways planted in the image is caught. (Review of 2026-11-03: the first version checked only
   `torq.unfree`.)
 
-## ADR-040 — The broker on a socket: who is asking is the kernel's answer (proposed)
-- **Status:** proposed, 2026-11-04; ADR-035's first lever, the first item of M3. Built on a branch,
+## ADR-040 — The broker on a socket: who is asking is the kernel's answer
+- **Status:** accepted, 2026-11-04 (the owner: both the password at system changes, dev mode included, and PAM in the broker); ADR-035's first lever, the first item of M3. Built on a branch,
   reviewed fresh (docs/DRIVING.md) before `main`.
 - **Context:** Today torqcli reaches the broker through `sudo torq-broker …` and tells it who is
   asking: `--actor`, `--approved-by $(id -un)`, `--tainted` (KNOWN-GAPS 4). Anything running as a
