@@ -209,8 +209,10 @@ pkgs.testers.runNixOSTest {
         assert "## commit " not in machine.succeed(dev_sh("torqcli show configuration")), "no internals unless asked"
         # Every NixOS setting of the system, TorqOS's too, generated with it for torqcli.
         # (Copied out as a file: at 4.8 MB, read through the shell's output it once came back cut.)
-        machine.copy_from_vm("/etc/torq/nixos-schema.json", "")
-        with open(os.path.join(machine.out_dir, "nixos-schema.json")) as f:
+        # (The file itself, not /etc's link to it: the copy keeps a link as a link.)
+        real = machine.succeed("readlink -f /etc/torq/nixos-schema.json").strip()
+        machine.copy_from_vm(real, "")
+        with open(os.path.join(machine.out_dir, os.path.basename(real))) as f:
             schema = json.load(f)
         # (Settings have a type; a section that takes any key of its own says what each key takes.)
         locs = {".".join(s["loc"]): s["type"] for s in schema["settings"] if "type" in s}
