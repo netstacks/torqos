@@ -860,3 +860,63 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   others, `enableRedistributableFirmware`) and the image does not. It checks itself: each of the
   eight ways planted in the image is caught. (Review of 2026-11-03: the first version checked only
   `torq.unfree`.)
+
+## ADR-040 — The broker on a socket: who is asking is the kernel's answer (proposed)
+- **Status:** proposed, 2026-11-04; ADR-035's first lever, the first item of M3. Built on a branch,
+  reviewed fresh (docs/DRIVING.md) before `main`.
+- **Context:** Today torqcli reaches the broker through `sudo torq-broker …` and tells it who is
+  asking: `--actor`, `--approved-by $(id -un)`, `--tainted` (KNOWN-GAPS 4). Anything running as a
+  wheel user can therefore commit as that user, and only wheel users can use torqcli at all; user
+  tier is not bound to the user it names (6a); the broker opens the `--diff` and `--hash-file`
+  paths it is given, as root (N16). The human gate for a system change is sudo's password — gone
+  in dev mode, and the same password that opens every other root door.
+- **Decision:**
+  1. **A socket, activated by systemd.** `torq-broker.socket` listens on `/run/torq/broker.sock`
+     (mode 0666: who may do what is decided inside, by uid, not by who can connect);
+     `torq-broker.service` runs as root with today's hardening, started on demand, one connection
+     at a time (the broker's lock already serialises changes). The protocol is one request per
+     connection, a length-limited JSON line, and the reply a stream of output lines and an exit
+     code — a build's progress shows as it happens, and a client that hangs up does not stop a
+     switch already started. A change's diff, a password hash, a reason travel **in the request**,
+     never as a path: the broker opens no file a caller names (closes N16).
+  2. **Identity from the kernel.** The broker reads `SO_PEERCRED` (uid, pid) and decides the actor
+     from the uid alone: the `torq-agent` account is the agent; any other non-root account is a
+     user, by name; there are no `--actor` or `--approved-by` on the socket. `--tainted` stays, but
+     only raises: a caller may mark its own proposal untrusted, never clear a mark the broker set.
+     torqcli runs without sudo and without `torq-broker` on its PATH.
+  3. **Who may do what** (the tier, `broker/src/policy.rs`, is the change's; the caller is the uid):
+     - *observe* (`log`, `verify`, `status`, `show`): any local account.
+     - *user tier*: a user's own `users/<name>/` only — a change to another's is system tier (6a).
+     - *system tier*: the owner (`torq.user`) and any account the configuration makes an
+       administrator; applying one asks that account's **password, checked by the broker through
+       PAM** (`security.pam.services.torq-approve`: pam_unix with faillock, so guessing is slowed and
+       logged). torqcli reads it from the terminal with echo off and sends it in the request; the
+       broker checks it, forgets it, and ledgers who approved. A script in the owner's shell has the
+       uid but not the password; that is the human gate ADR-035 asks for. No terminal, no system
+       change — as today.
+     - *the agent*: propose only; never apply, confirm, revert or reconcile; never a password
+       check (its uid has none). What it may propose is the next item (the allow-list, KNOWN-GAPS 6m).
+     - *forbidden*: refused for everyone, as now.
+  4. **sudo stays the recovery door, and says so.** `sudo torq-broker …` keeps working for dev mode
+     and recovery (a broken socket, a broken PAM), its entries ledgered as `via sudo` with the
+     invoking user sudo reports (`SUDO_UID`) — what root says about itself, marked as such. Strict
+     mode (ADR-035, later in M3) then limits sudoers to it and `torq break-glass`.
+  5. **Built from maintained parts.** systemd socket activation (no listener code of TorqOS's
+     own); PAM through a maintained Rust binding (its `unsafe` is the binding's, not TorqOS's
+     crates', as rustix's is — ADR-020); `SO_PEERCRED` through rustix. torqcli marks itself
+     non-dumpable while it holds a password, so another program of the same uid cannot read it out.
+- **Tested** (a VM test, `tests/socket.nix`, each would fail if its claim broke): a user commits
+  their own folder without sudo; the same user cannot change another user's folder, or the
+  system, without their password; a wrong password is refused and faillock counts it; `--actor`,
+  `--approved-by` or a file path in a request is refused; the agent account can propose and can do
+  nothing else; observe works for every account; a client killed mid-switch leaves the switch to
+  finish and the ledger consistent; `sudo torq-broker` still works and is ledgered `via sudo`.
+- **Not:** a daemon of TorqOS's own that listens on the network, ever; polkit (its agent and
+  rules engine are more than this needs on a server, and the desktop's dialog can talk to the same
+  socket, M4); signing requests (the uid is the kernel's word; a key would be root's to read, N9).
+- **Consequences:** Closes KNOWN-GAPS 4 (identity), 6a (user tier bound to its user), N16; the
+  system-tier gate becomes the owner's password even in dev mode (dev mode keeps passwordless
+  sudo, for building TorqOS, not for approving changes). The CLI's `sudo` handling
+  (`cli/src/main.rs` `BROKER`, the "sudo asks for your password" errors) goes. A2 comes next on the
+  same branch or the one after: with requests no longer root's own, the broker re-fetches each
+  changed input itself and checks its hash and signature.
