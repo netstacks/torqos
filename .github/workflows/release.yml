@@ -31,6 +31,10 @@ jobs:
         run: |
           src=$(awk '/^\[/{p = ($0 == "[package]")} p && /^version *=/ {gsub(/[" ]/, ""); sub(/^version=/, ""); print; exit}' cli/Cargo.toml)
           broker=$(awk '/^\[/{p = ($0 == "[package]")} p && /^version *=/ {gsub(/[" ]/, ""); sub(/^version=/, ""); print; exit}' broker/Cargo.toml)
+          # vX.Y.Z is a release; vX.Y.Z-<word> (rc1, beta.2) a pre-release; nothing else is a tag here.
+          if ! [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::$TAG is neither a release (v1.2.3) nor a pre-release (v1.2.3-rc1)"; exit 1
+          fi
           want="${TAG#v}"; want="${want%%-*}"
           if [ "$src" != "$want" ] || [ "$broker" != "$want" ]; then
             echo "::error::$TAG is not this source's version (cli $src, broker $broker): run scripts/bump-version $want, commit, and tag that commit"
@@ -90,16 +94,32 @@ jobs:
         run: |
           git clone -q "https://x-access-token:${TOKEN}@github.com/netstacks/torqos-releases.git" "$RUNNER_TEMP/releases"
           cd "$RUNNER_TEMP/releases"
+          # What was tested is what is signed: the tag still names the commit this run tested.
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse "$TAG^{commit}")" = "$GITHUB_SHA" \
+            || { echo "::error::$TAG was moved after this run began: tag the tested commit again"; exit 1; }
+          # A release moves `stable` only up, by version, not by git (audit A3): never to an older
+          # release or one machines already have. Checked before anything is published.
+          new="${TAG#v}"
+          case "$TAG" in
+            *-*) ;;
+            *)
+              if git fetch -q origin stable 2>/dev/null; then
+                old=$(git show FETCH_HEAD:cli/Cargo.toml | awk '/^\[/{p = ($0 == "[package]")} p && /^version *=/ {gsub(/[" ]/, ""); sub(/^version=/, ""); print; exit}')
+                if [ -n "$old" ] && { [ "$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -1)" != "$new" ] || [ "$old" = "$new" ]; }; then
+                  echo "::error::stable is TorqOS $old: $TAG is not newer, so it would move machines back (publish it as a pre-release, $TAG-1, if it must be out)"; exit 1
+                fi
+              fi ;;
+          esac
           git rm -rq --ignore-unmatch .
           # The tagged source, without this repository's workflows (they are for building, here).
-          git -C "$GITHUB_WORKSPACE" archive "$TAG" | tar -x --exclude=.github
+          git -C "$GITHUB_WORKSPACE" archive "$GITHUB_SHA" | tar -x --exclude=.github
           git add -A
           sign=(-c user.name="TorqOS release" -c user.email="release@torqos.invalid" -c gpg.format=ssh -c user.signingkey="$RUNNER_TEMP/release-key")
           git "${sign[@]}" commit -q -S -m "TorqOS $TAG"
           git "${sign[@]}" tag -s "$TAG" -m "TorqOS $TAG"
           git -c gpg.ssh.allowedSignersFile="$GITHUB_WORKSPACE/release/allowed_signers" -c gpg.format=ssh verify-commit HEAD
           git push -q origin HEAD:main "refs/tags/$TAG"
-          # `stable` only moves forward (no force): a release is never replaced by an older one.
+          # `stable` only moves forward (no force), and only to a newer version (checked above).
           case "$TAG" in
             *-*) echo "$TAG is a pre-release: stable stays where it is" ;;
             *) git push -q origin HEAD:stable ;;

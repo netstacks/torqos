@@ -59,7 +59,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    import json, shlex
+    import json, os, shlex
     machine.wait_for_unit("multi-user.target")
     repo = "/var/lib/torq/config"
     # The boot-time drift check ran (a unit that never ran also reports Result=success, so check
@@ -208,7 +208,10 @@ pkgs.testers.runNixOSTest {
         assert "## commit " in out and "## system/host.json: networking hostName\n" in out, out
         assert "## commit " not in machine.succeed(dev_sh("torqcli show configuration")), "no internals unless asked"
         # Every NixOS setting of the system, TorqOS's too, generated with it for torqcli.
-        schema = json.loads(machine.succeed("cat /etc/torq/nixos-schema.json"))
+        # (Copied out as a file: at 4.8 MB, read through the shell's output it once came back cut.)
+        machine.copy_from_vm("/etc/torq/nixos-schema.json", "")
+        with open(os.path.join(machine.out_dir, "nixos-schema.json")) as f:
+            schema = json.load(f)
         # (Settings have a type; a section that takes any key of its own says what each key takes.)
         locs = {".".join(s["loc"]): s["type"] for s in schema["settings"] if "type" in s}
         free = {".".join(s["loc"]) for s in schema["settings"] if "free" in s}

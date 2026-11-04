@@ -2138,12 +2138,28 @@ fn setup_builds_switches_then_ledgers_once() {
     assert!(e.contains("did not build: nothing was set up"), "{e}");
     assert!(failing.ledger.read_all().unwrap().is_empty() && !marker.exists(), "never switched");
     assert!(!repo.join(".git").exists() && repo.join("desktop.nix").exists(), "files left, history gone");
-    // Built, but the switch reported a problem: the machine boots it from now on, so it is ledgered,
-    // saying so.
+    // Built, but the switch reported a problem after making it the boot default: the machine starts
+    // it from now on, so it is ledgered, saying so.
     let (dir, repo) = config_dir();
-    let partly = Broker::new(&repo, dir.path().join("state"), "false").with_confirm_commands("echo /nix/store/ccc", "true", "true", "true");
+    let profile = dir.path().join("system");
+    let partly = Broker::new(&repo, dir.path().join("state"), &format!("ln -sfn /nix/store/ccc {} && false", profile.display()))
+        .with_current_system(dir.path().join("current-system"))
+        .with_system_profile(&profile)
+        .with_confirm_commands("echo /nix/store/ccc", "true", "true", "true");
     let e = partly.set_up().unwrap();
     assert_eq!((e.body.seq, e.body.reason.as_str()), (1, "TorqOS set up (the switch reported a problem: show system alarms)"));
+    // The switch failed before the new system took either way (neither running nor the boot
+    // default): the machine is still the image, with no account — nothing is set up, as for a build
+    // that failed, so setup asks again (audit A4; it was ledgered as change #1).
+    let (dir, repo) = config_dir();
+    let none = Broker::new(&repo, dir.path().join("state"), "false")
+        .with_current_system(dir.path().join("current-system"))
+        .with_system_profile(dir.path().join("no-profile"))
+        .with_confirm_commands("echo /nix/store/ddd", "true", "true", "true");
+    let e = format!("{:#}", none.set_up().unwrap_err());
+    assert!(e.contains("still runs and starts the image: nothing was set up"), "{e}");
+    assert!(none.ledger.read_all().unwrap().is_empty(), "no change #1");
+    assert!(!repo.join(".git").exists() && repo.join("desktop.nix").exists(), "files left, history gone: setup can try again");
 }
 
 /// `request system password`: the hash set at once (here a command that only reads it), kept in

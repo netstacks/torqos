@@ -114,7 +114,7 @@ before you go on. A ⏹ with *adversarial* means both kinds.
       Secure Boot (M4 or later); the reviews' findings are in ADR-033's amendment.
 - [x] ADR-039 (2026-11-03, `checks.<system>.free`): the source statement in `release.yml`; a CI check that the image and ISO hold
       nothing nixpkgs marks unfree. *Test:* the check fails when `claude-code` is put in the image on purpose.
-- [ ] **⏹ audit** — end of M2. Then a release (`v0.2.0`) from a machine tracking `stable`.
+- [x] **⏹ audit** — end of M2 (2026-11-04, `docs/AUDIT-2026-11-04.md`: no high finding; A1, A4, A12 fixed, A3 and A11 in part, the rest in KNOWN-GAPS). Then a release (`v0.2.0`) from a machine tracking `stable`.
 
 ### M3 — trust (ADR-035, ADR-036)
 Order matters: the socket first, because everything after keys on identity.

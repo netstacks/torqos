@@ -405,8 +405,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     bump (`.github/workflows/bump.yml`): what Actions' own token pushes starts no workflow, and
     the bump's tests must run.
   - **Not covered yet:** an attacker able to move `stable` back to an older signed release
-    (a downgrade): `stable` only moves forward when CI moves it, and `show | compare` shows the
-    version before a commit, but the machine does not refuse an older release by itself. The check
+    (a downgrade): `stable` only moves forward when CI moves it, and since the audit of
+    2026-11-04 (A3) only to a higher version than it holds, but `show | compare` shows the release's
+    date, not its version, and the machine does not refuse an older release by itself. The check
     is torqcli's, at update: a person who edits the lock by hand is past it (as they are past any
     check, being able to commit).
 

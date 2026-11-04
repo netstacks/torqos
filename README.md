@@ -247,7 +247,7 @@ that imports a TorqOS release and holds that machine's settings, written only by
   files in `/etc`, its units, or TorqOS itself are refused when the system is evaluated, however they
   are spelled.
 - **Signed releases**, for images and for updates, checked with OpenSSH alone.
-- **An auditable history.** The ledger is hash-chained; `torq-broker verify` detects any change to it.
+- **An auditable history.** The ledger is hash-chained; `torq-broker verify` detects an entry edited, added or removed inside the chain (root can still rewrite it whole, or cut its newest entries: anchoring it off the machine is M3).
 - **Privileged code is small Rust**, with `unsafe` and dead code forbidden by the compiler.
 
 The threat model, what is and is not protected today, and the plan for owner-rooted boot security are

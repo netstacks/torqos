@@ -265,6 +265,23 @@ is 6p, N18 is 6 (below).
 | N17 | The /etc/nixos guard stops the default path only; CLAUDE.md says more | CLAUDE.md reworded; the guard is as SECURITY-MODEL says |
 | N19 | Every proposal's diff is in the ledger; each call parses it all | open — diffs by hash beside it |
 
+The audit of 2026-11-04 (end of M2, `docs/AUDIT-2026-11-04.md`), kept as written:
+
+| # | What | Status |
+|---|---|---|
+| A1 | The release check accepted an OpenPGP- or X.509-signed commit (git handed it to gpg and the caller's keyring) | fixed: only an SSH signature, checked before git verifies; gpg's and X.509's programs `false`, no caller's home (cli/src/release.rs, a test with a PGP-signed commit) |
+| A2 | A lock's content hash, not its signed `rev`, decides what is built: a lock someone else wrote can pair the newest signed rev with older source in the store | open — the broker re-fetching each changed input as root and checking its hash and signature (M3, with the socket broker); SECURITY-MODEL says what is not covered |
+| A3 | `stable` could move to an older release; `show \| compare` shows dates, not versions | partly: CI refuses a release not newer than `stable`'s version (release.yml). Open: torqcli showing and comparing versions |
+| A4 | First-boot setup ledgered change #1 when the switch failed before the new system took, leaving the image with no account | fixed: ledgered only if the new system runs or is the boot default; otherwise nothing set up, setup asks again (broker/src/lib.rs `set_up`, its test) |
+| A5 | Release authority wider than the key: the releases token in the bump job's environment, any `v*` tag published | open — a protected environment for release, the token in the step that needs it (GitHub settings) |
+| A6 | The release check says nothing for a source other than the releases repo; `github:` accepted for it | open |
+| A7 | `systemd.suppressedSystemUnits`, a `systemd.mask=` parameter and `torq.setup.enable` switch off the drift check | open — fence them, or assert the units |
+| A8 | The installer's disk is bootable without its hardware file for as long as the write takes | open (6zc's window, wider than it says) |
+| A9 | An interrupted setup leaves a password file under the first name typed | open |
+| A10 | Ctrl-C at a setup question ends setup until the next boot | open — `Restart=always`, or the console's signal keys off as the installer has them |
+| A11 | Release hygiene: a tag moved mid-run signed untested; loose pre-release pattern; no revocation; the fingerprint in one place | partly: the tested commit is what is signed (a moved tag fails), tags are `vX.Y.Z` or `vX.Y.Z-word` only. Open: revocation, the fingerprint elsewhere |
+| A12 | Claims stronger than the code (verify, signed updates, signed modules, sandboxing, rebuilds, compare) | fixed: README, SECURITY-MODEL and ADR-028 say what is true |
+
 Its design notes (§4) are for the AI layer and M3: `SO_PEERCRED` names an account, not a person;
 approve-once for user tier; taint set by the tool layer; what strict mode can mean; where an update
 credential lives; the broker checking the `path:` rule itself; the threat table's "later" items.
