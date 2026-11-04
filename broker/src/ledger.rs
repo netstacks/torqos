@@ -59,17 +59,20 @@ pub struct Ledger {
     path: PathBuf,
     /// How the request came (`socket`, `sudo`): noted in every entry this broker appends (ADR-040).
     via: Option<String>,
+    /// Who asked, as the kernel said (`socket` only): noted with it.
+    caller: Option<String>,
 }
 
 impl Ledger {
     pub fn open(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), via: None }
+        Self { path: path.into(), via: None, caller: None }
     }
 
     /// Note in every entry appended how the request came: what the broker was told, and, for
     /// `sudo`, what root says about itself (ADR-040).
-    pub fn set_via(&mut self, via: Option<String>) {
+    pub fn set_via(&mut self, via: Option<String>, caller: Option<String>) {
         self.via = via;
+        self.caller = caller;
     }
 
     pub fn path(&self) -> &Path {
@@ -116,8 +119,12 @@ impl Ledger {
             None => (1, GENESIS_PREV.to_string()),
         };
         let mut data = new.data;
-        if let (Some(via), Some(d)) = (&self.via, data.as_object_mut()) {
-            d.insert("via".into(), serde_json::Value::String(via.clone()));
+        if let Some(d) = data.as_object_mut() {
+            for (k, v) in [("via", &self.via), ("caller", &self.caller)] {
+                if let Some(v) = v {
+                    d.insert(k.into(), serde_json::Value::String(v.clone()));
+                }
+            }
         }
         let body = Body {
             seq,
@@ -204,7 +211,7 @@ mod tests {
         let mut l = Ledger::open(dir.path().join("ledger.jsonl"));
         let plain = l.append(new("from a unit")).unwrap();
         assert!(plain.body.data.get("via").is_none());
-        l.set_via(Some("sudo".into()));
+        l.set_via(Some("sudo".into()), None);
         let e = l.append(new("through sudo")).unwrap();
         assert_eq!(e.body.data["via"], "sudo");
         assert_eq!(e.body.data["a"], 1, "the entry's own data is kept");

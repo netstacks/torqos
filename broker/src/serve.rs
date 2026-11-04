@@ -71,6 +71,14 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
         .map_err(refuse(false, 1))?
         .uid
         .as_raw();
+    // A caller that sends nothing, or stops reading, holds nothing for long (the audit of ADR-040,
+    // its 3 and 4): the request must come within the time, and a reply no one reads is dropped —
+    // the broker's own output is still read, so a change never waits on its caller.
+    let limit = Some(std::time::Duration::from_secs(socket::TIMEOUT_SECONDS));
+    rustix::net::sockopt::set_socket_timeout(std::io::stdin(), rustix::net::sockopt::Timeout::Recv, limit)
+        .and_then(|()| rustix::net::sockopt::set_socket_timeout(std::io::stdout(), rustix::net::sockopt::Timeout::Send, limit))
+        .context("setting the connection's time limits")
+        .map_err(refuse(false, 1))?;
     let req = read_request().map_err(refuse(false, 2))?;
     let json = req.args.iter().any(|a| a == "--json");
     let refused = refuse(json, 1);
@@ -105,20 +113,43 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
         ("apply" | "revert", Some(seq)) => change(&settings.state_dir, seq, if name == "apply" { "proposal" } else { "applied" }),
         _ => None,
     };
+    // A commit confirmed holds everyone else's changes back while it waits: its own case.
+    let confirmed = name == "apply" && sub.try_get_one::<u32>("confirm").ok().flatten().is_some();
 
-    match socket::gate(&who, name, change.as_ref(), user.as_deref()) {
+    match socket::gate(&who, if confirmed { "apply-confirmed" } else { name }, change.as_ref(), user.as_deref()) {
         Gate::Open => {}
         Gate::Refused(why) => return Err(refused(anyhow::anyhow!(why))),
         Gate::Password => match req.password.as_deref() {
             None => return Err(Refusal { json, code: socket::NEED_PASSWORD, why: format!("this needs {}'s password", who.name) }),
-            Some(p) if !socket::password_ok(&who.name, p) => {
-                return Err(Refusal { json, code: socket::NEED_PASSWORD, why: format!("that is not {}'s password", who.name) })
+            Some(p) => {
+                // One check at a time per account: guesses sent at once wait their turn, and each
+                // wrong one costs PAM's delay before the next is tried (its 1).
+                let _turn = one_at_a_time(who.uid).map_err(&refused)?;
+                if !socket::password_ok(&who.name, p) {
+                    return Err(Refusal { json, code: socket::NEED_PASSWORD, why: format!("that is not {}'s password", who.name) });
+                }
             }
-            Some(_) => {}
         },
     }
     drop(req);
     Ok(run(reply, &who, &args))
+}
+
+/// The turn to check `uid`'s password: an exclusive lock on its file in faillock's directory
+/// (root's alone), held until dropped.
+fn one_at_a_time(uid: u32) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let p = Path::new(socket::FAILLOCK_DIR).join(format!(".turn-{uid}"));
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(&p)
+        .with_context(|| format!("opening {}", p.display()))?;
+    f.lock().context("waiting for the turn to check the password")?;
+    Ok(f)
 }
 
 /// The change `seq` is, if it is a `kind` entry: its tier and the files it touches.
@@ -149,6 +180,8 @@ fn run(reply: &Reply, who: &Caller, args: &[String]) -> i32 {
         // Nothing of serve's environment: the broker reads its settings from broker.json.
         .env_clear()
         .env("TORQ_VIA", "socket")
+        // Who asked, as the kernel said: in every entry, inside what the hash covers (its 6).
+        .env("TORQ_CALLER", &who.name)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .current_dir("/")
         .stdin(Stdio::null())

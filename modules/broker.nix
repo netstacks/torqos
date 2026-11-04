@@ -108,6 +108,9 @@ in
       "d /var/lib/torq 0755 root root -"
       "d ${cfg.stateDir} 0700 root root -"
       "d /run/torq 0755 root root -"
+      # faillock's counts of wrong passwords (ADR-040): root's alone, so a program running as a
+      # person cannot reset its own between guesses.
+      "d /run/torq/faillock 0700 root root -"
     ];
 
     # Drift from the ledger (the machine switched to another configuration, the config repo
@@ -289,6 +292,8 @@ in
         Accept = true;
         # A queue, not a crowd: the broker's lock serialises changes anyway.
         MaxConnections = 16;
+        # Per account (a Unix socket counts its peers by uid): no one holds every connection.
+        MaxConnectionsPerSource = 4;
       };
     };
     systemd.services."torq-broker@" = {
@@ -312,12 +317,12 @@ in
     # password (pam_unix, never an empty one), and faillock counting failures, so that guessing
     # is slow, logged, and stops — five wrong, ten minutes locked.
     security.pam.services.torq-approve.text = ''
-      auth     required       ${pkgs.pam}/lib/security/pam_faillock.so preauth deny=5 unlock_time=600
+      auth     required       ${pkgs.pam}/lib/security/pam_faillock.so preauth dir=/run/torq/faillock deny=5 unlock_time=600
       auth     [success=1 default=ignore] ${pkgs.pam}/lib/security/pam_unix.so
-      auth     [default=die]  ${pkgs.pam}/lib/security/pam_faillock.so authfail deny=5 unlock_time=600
-      auth     sufficient     ${pkgs.pam}/lib/security/pam_faillock.so authsucc deny=5 unlock_time=600
+      auth     [default=die]  ${pkgs.pam}/lib/security/pam_faillock.so authfail dir=/run/torq/faillock deny=5 unlock_time=600
+      auth     sufficient     ${pkgs.pam}/lib/security/pam_faillock.so authsucc dir=/run/torq/faillock deny=5 unlock_time=600
       auth     required       ${pkgs.pam}/lib/security/pam_deny.so
-      account  required       ${pkgs.pam}/lib/security/pam_faillock.so
+      account  required       ${pkgs.pam}/lib/security/pam_faillock.so dir=/run/torq/faillock
       account  required       ${pkgs.pam}/lib/security/pam_unix.so
     '';
 

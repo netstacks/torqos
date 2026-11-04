@@ -44,7 +44,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    The second audit (H1, H5) is this item: the approver and the actor are whoever the caller says,
    so ledger attribution, and the agent's restrictions (which key on `--actor agent`), hold only
    for callers that do not lie. Not fixed by patches: the M3 socket takes identity from the kernel.
-   The broker under sudo is not sandboxed either (L3; the socket service will be).
+   The broker under sudo is not sandboxed either (L3), and neither is its socket service yet (ADR-040: it runs as under sudo, a development source in a home included) — see 6zf.
 5. **`torq.url = "path:…"`** in the config template ignores `.gitignore`, so `broker/target/`
    is copied into the store on every evaluation. Prefer `git+file://`. (Fixed for the config repo
    itself: the broker builds the exact commit, `git+file://<repo>?rev=<commit>` (`{flake}`), never
@@ -404,3 +404,28 @@ Its §5 lists claims without a test.
    glob is linked under its files' own names, not its target, and is not checked for where those
    land (no way to make one land in /etc/torq from the tree was found). The unit fence covers
    `torq-*` services, timers and units, not sockets or paths (the broker has none yet).
+
+6zf. **The socket broker's open ends** (ADR-040; its adversarial review, 2026-11-04). Fixed from
+   that review: faillock's counts in a root-only directory (`/run/torq/faillock`), so the person
+   cannot reset their own; password checks one at a time per account; `apply --confirm` an
+   administrator's (it holds everyone else's changes back); services' accounts propose nothing;
+   a request must arrive within 10 s and a reply nobody reads is dropped; four connections per
+   account; every entry records the kernel-given `caller`. Open:
+   - **Proposals are not limited.** A person (or the agent) can propose as often, and as large
+     (8 MiB a request), as they like, and every proposal stays in the hash-chained ledger for good:
+     a ledger, and disk, that only grow. Wants a limit of open proposals per account and a rate.
+   - **`status` holds the broker lock** while it checks the whole ledger: anyone looping it can
+     make others' changes wait and fail as busy (3 s). Check before taking the lock.
+   - **An own-folder `apply` first runs `reconcile`**, which can finish an interrupted setup or
+     roll back an interrupted commit confirmed — ledgered as approved by that person, though
+     `reconcile` itself is an administrator's. It only restores the ledgered state.
+   - **`via` is what the broker was told.** A wheel member may `sudo TORQ_VIA=socket …`, and `su -`
+     sets no SUDO_UID: `via` and `caller` are evidence only for entries a non-root caller made over
+     the socket; root can write anything.
+   - **Reading is everyone's:** every account — the agent's and services' included — sees every
+     proposal (unapplied too), each person's package list, the reasons. Nothing secret is in the
+     ledger (password hashes are kept outside it), but it is wider than root-only was.
+   - **Not sandboxed**: `torq-broker@` runs as the broker under sudo does (a development source is
+     built from a home). N5's sandboxing comes with the root units' own.
+   - The send timeout (a caller that stops reading) is set but not yet exercised by a test; nor is
+     a switch that changes `torq-broker.socket` while an instance runs.

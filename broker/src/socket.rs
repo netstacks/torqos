@@ -23,6 +23,13 @@ pub const ADMINS: &str = "wheel";
 pub const NEED_PASSWORD: i32 = 77;
 /// A request is a line, and no line is longer than this (a large diff, with room).
 pub const MAX_REQUEST: u64 = 8 << 20;
+/// The uids NixOS gives normal accounts (people): `isNormalUser` starts at 1000, below `nobody`.
+pub const PEOPLE_UIDS: std::ops::Range<u32> = 1000..60000;
+/// Where faillock counts a password's failures: root's alone (modules/broker.nix), so that a program
+/// running as the person cannot reset its own count between guesses.
+pub const FAILLOCK_DIR: &str = "/run/torq/faillock";
+/// How long a caller has to send its request, and to take each piece of the reply, in seconds.
+pub const TIMEOUT_SECONDS: u64 = 10;
 
 /// What a caller sends: the broker's arguments, without who it is or any file. A diff or a
 /// password hash comes in the request itself, never as a path for root to open (N16).
@@ -55,6 +62,8 @@ pub struct Caller {
     pub name: String,
     pub agent: bool,
     pub admin: bool,
+    /// A normal account (NixOS gives people uids from 1000): not a service's, which proposes nothing.
+    pub person: bool,
 }
 
 /// What a command needs from its caller.
@@ -110,7 +119,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
         let f: Vec<&str> = l.split(':').collect();
         f.len() == 4 && f[0] == ADMINS && f[3].split(',').any(|m| m == name)
     });
-    Ok(Caller { uid, agent: name == AGENT, name, admin })
+    Ok(Caller { uid, agent: name == AGENT, person: (PEOPLE_UIDS).contains(&uid), name, admin })
 }
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
@@ -118,7 +127,8 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 const OBSERVE: &[&str] = &["log", "verify", "status", "show"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
-/// password it sets (`password`).
+/// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
+/// one else's change can be made, and only an administrator may hold the machine so.
 pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>) -> Gate {
     let admins_only = || {
         if who.admin {
@@ -137,8 +147,18 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
             Gate::Refused("the agent proposes; a person applies".into())
         };
     }
+    // A service's account (nobody, a daemon's) proposes nothing: the ledger is people's, and the
+    // agent's, and every proposal stays in it for good.
+    if !who.person {
+        return Gate::Refused(format!("{} is not a person's account: only people, and the agent, propose changes", who.name));
+    }
     match cmd {
         "propose" => Gate::Open,
+        "apply-confirmed" => match change {
+            Some(c) if c.tier == Tier::Forbidden => Gate::Refused("that change touches what no one may change".into()),
+            Some(_) => admins_only(),
+            None => Gate::Refused("no such change".into()),
+        },
         "apply" | "revert" => match change {
             None => Gate::Refused("no such change".into()),
             Some(c) if c.tier == Tier::Forbidden => Gate::Refused("that change touches what no one may change".into()),
@@ -210,7 +230,7 @@ pub fn password_ok(name: &str, password: &str) -> bool {
 mod tests {
     use super::*;
 
-    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent:x:990:990::/var/empty:/run/current-system/sw/bin/nologin\n";
+    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent:x:990:990::/var/empty:/run/current-system/sw/bin/nologin\nnobody:x:65534:65534::/var/empty:/run/current-system/sw/bin/nologin\nsshd:x:998:998::/var/empty:/run/current-system/sw/bin/nologin\n";
     const GROUP: &str = "root:x:0:\nwheel:x:1:viper\nusers:x:100:sam\n";
 
     fn who(uid: u32) -> Caller {
@@ -222,8 +242,9 @@ mod tests {
 
     #[test]
     fn the_caller_is_the_uid() {
-        assert_eq!(who(1000), Caller { uid: 1000, name: "viper".into(), agent: false, admin: true });
-        assert_eq!(who(1001), Caller { uid: 1001, name: "sam".into(), agent: false, admin: false });
+        assert_eq!(who(1000), Caller { uid: 1000, name: "viper".into(), agent: false, admin: true, person: true });
+        assert_eq!(who(1001), Caller { uid: 1001, name: "sam".into(), agent: false, admin: false, person: true });
+        assert!(!who(65534).person && !who(998).person && !who(990).person);
         assert!(who(990).agent && !who(990).admin);
         assert!(caller(4242, PASSWD, GROUP).is_err(), "no account");
         // A name that is only a prefix of a wheel member's is not one.
@@ -307,5 +328,25 @@ mod tests {
         let p = with_identity(&["propose".into(), "--reason".into(), "x".into()], "propose", &who(990), Some("/run/d"), None).unwrap();
         assert_eq!(p, ["propose", "--reason", "x", "--actor", "agent", "--diff", "/run/d"]);
         assert!(with_identity(&["propose".into()], "propose", &who(1000), None, None).is_err(), "a proposal brings its diff");
+    }
+
+    /// The audit of ADR-040 (2026-11-04, its 2): `apply --confirm` holds every other change back
+    /// until it is confirmed or expires — an administrator's to do, own folder or not.
+    #[test]
+    fn holding_the_machine_is_an_administrators() {
+        let mine = change(Tier::User, &["users/sam/packages.json"]);
+        assert!(matches!(gate(&who(1001), "apply-confirmed", Some(&mine), None), Gate::Refused(_)));
+        assert_eq!(gate(&who(1000), "apply-confirmed", Some(&mine), None), Gate::Password);
+        assert!(matches!(gate(&who(990), "apply-confirmed", Some(&mine), None), Gate::Refused(_)));
+    }
+
+    /// Its 5: a service's account (nobody, sshd) proposes nothing — every proposal stays in the
+    /// ledger for good; reading is still everyone's.
+    #[test]
+    fn services_propose_nothing() {
+        for uid in [65534, 998] {
+            assert!(matches!(gate(&who(uid), "propose", None, None), Gate::Refused(_)), "{uid}");
+            assert_eq!(gate(&who(uid), "log", None, None), Gate::Open, "{uid}");
+        }
     }
 }

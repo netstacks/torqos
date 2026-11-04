@@ -31,12 +31,13 @@ tell a person from a program at a root shell — nothing can.
   the uid the kernel reports, never a flag. Reading the ledger is anyone's; a person's own folder
   is theirs to change; someone else's folder, or the system, takes an administrator (`wheel`) and
   **their password**, checked by the broker through PAM, with faillock stopping guessing (five
-  wrong: ten minutes). The agent's account (`torq-agent`) proposes and can do nothing else. A
+  wrong: ten minutes, counted where only root can reach). The agent's account (`torq-agent`) proposes and can do nothing else. A
   program in the owner's shell has their uid but not their password — the human gate. Its limit,
   stated: a program running as the owner could show a fake prompt and read what is typed into it;
   the password is safe from other accounts, and from that program once typed into torqcli (which
   makes itself non-dumpable), not from being asked for by it. `sudo torq-broker` remains the
-  recovery door; its entries say `via: sudo`, which is what root says about itself.
+  recovery door; its entries say `via: sudo`, which is what root says about itself — `via` and
+  `caller` are evidence only for what a non-root account sent over the socket (KNOWN-GAPS 6zf).
 
 - **The `root` account is locked** (no password: nobody logs in as root). **Root's powers** are
   borrowed through `sudo` by the owner, with the owner's own password; `sudo bash` borrows them for a

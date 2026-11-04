@@ -218,12 +218,12 @@ fn main() {
     // How the request came, read before the environment is cleared: from `serve` (the socket), or
     // through sudo — what root says about itself, marked as such (ADR-040). Neither: the machine's
     // own units, setup, or root at a shell.
-    let via = match (std::env::var("TORQ_VIA").ok().as_deref(), std::env::var_os("SUDO_UID")) {
-        (Some("socket"), _) if config::running_as_root() => Some("socket".to_string()),
-        (_, Some(_)) => Some("sudo".to_string()),
-        _ => None,
+    let (via, caller) = match (std::env::var("TORQ_VIA").ok().as_deref(), std::env::var_os("SUDO_UID")) {
+        (Some("socket"), _) if config::running_as_root() => (Some("socket".to_string()), std::env::var("TORQ_CALLER").ok()),
+        (_, Some(_)) => (Some("sudo".to_string()), None),
+        _ => (None, None),
     };
-    if let Err(e) = run(cli, via) {
+    if let Err(e) = run(cli, via, caller) {
         // Another operation is running: "try again later", exit 75 (EX_TEMPFAIL) from any command.
         let busy = e.downcast_ref::<Busy>().is_some();
         if json {
@@ -281,7 +281,7 @@ fn settings(cli: &mut Cli) -> Result<Settings> {
     Ok(s)
 }
 
-fn run(mut cli: Cli, via: Option<String>) -> Result<()> {
+fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> {
     let json = cli.json;
     let s = settings(&mut cli)?;
     let mut b = Broker::new(&s.repo, &s.state_dir, &s.rebuild)
@@ -291,7 +291,7 @@ fn run(mut cli: Cli, via: Option<String>) -> Result<()> {
         .with_people(&s.people)
         // On a real machine the rollback uses the old system's own commands (its etc/torq/broker.json).
         .with_anchor_settings(config::running_as_root());
-    b.ledger.set_via(via);
+    b.ledger.set_via(via, caller);
     match cli.cmd {
         Cmd::Serve => unreachable!("served before the settings are read"),
         Cmd::Init => {

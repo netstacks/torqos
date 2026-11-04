@@ -96,9 +96,13 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a person's own settings are theirs: no password, no sudo"):
         p = propose("sam", own_diff("sam"), "hello for sam")
-        assert p["actor"] == "user" and p["tier"] == "user" and p["data"]["via"] == "socket", p
+        assert p["actor"] == "user" and p["tier"] == "user" and p["data"]["via"] == "socket" and p["data"]["caller"] == "sam", p
         code, v = answer(ask("sam", {"args": ["--json", "apply", str(p["seq"])]}))
         assert code == 0 and v["approved_by"] == "sam" and v["data"]["via"] == "socket", (code, v)
+        # A commit confirmed holds everyone's changes back while it waits: an administrator's,
+        # even for their own folder (the audit's 2).
+        code, v = answer(ask("sam", {"args": ["--json", "apply", str(p["seq"]), "--confirm", "1440"]}))
+        assert code == 1 and "not an administrator" in v["error"], (code, v)
         # Someone else's are not theirs (KNOWN-GAPS 6a): sam cannot apply dev's.
         p = propose("sam", own_diff("dev"), "hello for dev, by sam")
         code, v = answer(ask("sam", {"args": ["--json", "apply", str(p["seq"])]}))
@@ -116,14 +120,14 @@ pkgs.testers.runNixOSTest {
         assert code == 77 and v["password"] and "needs dev's password" in v["error"], (code, v)
         code, v = answer(ask("dev", {"args": ["--json", "apply", seq], "password": "wrong-guess"}))
         assert code == 77 and "not dev's password" in v["error"], (code, v)
-        machine.succeed("test $(faillock --user dev | grep -c '^[0-9]') -ge 1")
+        machine.succeed("test $(faillock --dir /run/torq/faillock --user dev | grep -c '^[0-9]') -ge 1")
         machine.succeed(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = false'")
         # The right one: applied, ledgered as dev's, through the socket.
         code, v = answer(ask("dev", {"args": ["--json", "apply", seq], "password": "Torq-sock-2210"}))
         assert code == 0 and v["approved_by"] == "dev" and v["data"]["via"] == "socket", (code, v)
         night = v["seq"]
         machine.succeed(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = true'")
-        machine.succeed("faillock --user dev --reset")
+        machine.succeed("faillock --dir /run/torq/faillock --user dev --reset")
 
     with subtest("guessing stops: five wrong, locked, even with the right one"):
         # Someone else's folder: an administrator's password.
@@ -133,13 +137,28 @@ pkgs.testers.runNixOSTest {
             assert code == 77
         code, v = answer(ask("dev", {"args": ["--json", "apply", str(p["seq"])], "password": "Torq-sock-2210"}))
         assert code == 77, ("locked out", code, v)
-        machine.succeed("faillock --user dev --reset")
+        # The count is root's: the person cannot reset it, by the tool or by hand (the audit's 1).
+        machine.fail("su - dev -c 'faillock --dir /run/torq/faillock --user dev --reset'")
+        machine.fail("su - dev -c ': > /run/torq/faillock/dev'")
+        machine.fail("su - dev -c 'ls /run/torq/faillock'")
+        code, v = answer(ask("dev", {"args": ["--json", "apply", str(p["seq"])], "password": "Torq-sock-2210"}))
+        assert code == 77, ("still locked", code, v)
+        machine.succeed("faillock --dir /run/torq/faillock --user dev --reset")
         code, v = answer(ask("dev", {"args": ["--json", "apply", str(p["seq"])], "password": "Torq-sock-2210"}))
         assert code == 0, (code, v)
 
+    with subtest("a service's account proposes nothing; a caller that sends nothing is let go"):
+        code, v = answer(ask("nobody", {"args": ["--json", "propose", "--reason=x"], "diff": own_diff("nobody")}))
+        assert code == 1 and "not a person's account" in v["error"], (code, v)
+        code, v = answer(ask("nobody", {"args": ["--json", "verify"]}))
+        assert code == 0, (code, v)
+        # Silent for longer than the limit: the broker hangs up on it (the audit's 4).
+        out = machine.succeed("su -s /bin/sh sam -c 'sleep 15 | timeout 40 socat -t 40 - UNIX-CONNECT:/run/torq/broker.sock'")
+        assert '"exit":2' in out and 'reading the request' in out, out
+
     with subtest("the agent proposes, and can do nothing else"):
         p = propose("torq-agent", own_diff("dev"), "the agent suggests hello")
-        assert p["actor"] == "agent", p
+        assert p["actor"] == "agent" and p["data"]["caller"] == "torq-agent", p
         for args in [["apply", str(p["seq"])], ["revert", "3"], ["confirm"], ["reconcile"], ["repair"], ["password", "--user", "dev"]]:
             code, v = answer(ask("torq-agent", {"args": ["--json"] + args, "password": "Torq-sock-2210", "hash": "$6$x$y"}))
             assert code == 1 and "the agent proposes; a person applies" in v["error"], (args, code, v)
