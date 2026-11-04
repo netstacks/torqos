@@ -611,7 +611,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   switch; `torq5` first). Each machine builds Lanzaboote itself until releases carry it prebuilt
   (ADR-039's cache). The size budget comes down by what Python saved. A second reviewer on the
   diff (docs/DRIVING.md): a bootloader bug leaves a machine that does not start.
-- **Amended (2026-11-03): deferred.** Built on a branch (`lanzaboote`, kept), it showed the
+- **Amended (2026-11-03): deferred.** Built on a branch (`lanzaboote`, 63cf007, since deleted), it showed the
   premise false: Python is not only the boot writer's — `growpart` (cloud-utils, the root grown
   at the first boot, `boot.growPartition`) needs it too, so Lanzaboote saves none of the 134 MB,
   and adds sbctl and lzbt (1228 → 1277 MB of the 1280 budget). Its fresh reviews found what

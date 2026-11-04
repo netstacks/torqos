@@ -145,7 +145,7 @@ first.
       the menu, a commit confirmed rolled back by a power cut, the editor off.)*
 - [ ] **Python out** (ADR-032/033): the root grown by systemd-repart instead of growpart; then the
       boot writer is the last thing needing Python. Lanzaboote is deferred to Secure Boot (ADR-033,
-      amended 2026-11-03), branch `lanzaboote` kept.
+      amended 2026-11-03); the branch is deleted, its lessons in the ADR.
 - [x] **Upstreams** (ADR-039): a source statement on each release; CI fails an image or ISO that
       holds anything nixpkgs marks unfree (redistributable firmware, which it counts as free, is on
       the ISO). *(checks.<system>.free, 2026-11-03: nothing lets an unfree package into either, on
@@ -218,7 +218,7 @@ acceptance tests, each a VM test.
 ## Later (not planned now): boot security, and limits on root
 
 - Owner-rooted boot security (own Secure Boot keys, TPM2 + PIN; SECURITY-MODEL.md), tested in
-  emulation first (QEMU + OVMF + swtpm). Lanzaboote comes with it (ADR-033, deferred to here; branch `lanzaboote`).
+  emulation first (QEMU + OVMF + swtpm). Lanzaboote comes with it (ADR-033, deferred to here; its amendment holds what the first try learned).
 - Strict mode without break-glass: no root shell at all, once every task an owner needs is a
   torqcli command (ADR-035).
 - A shared base configuration with per-host overlays, for fleets (ADR-036).

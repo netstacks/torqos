@@ -108,7 +108,7 @@ before you go on. A ⏹ with *adversarial* means both kinds.
 - [x] The EFI-partition VM test **first**, against today's Python writer: entries after a switch,
       rollback by choosing an older entry, a `commit confirmed` rolled back by a reboot, the editor
       off. *(tests/boot.nix, check `boot`, 2026-11-03; mutation-checked with the editor on.)*
-- [~] Lanzaboote (ADR-033): built on branch `lanzaboote`, then **deferred** (2026-11-03, the owner):
+- [~] Lanzaboote (ADR-033): built on a branch (deleted 2026-11-04; its lessons in the ADR), then **deferred** (2026-11-03, the owner):
       Python stays for growpart anyway, so it saved nothing, and its reviews found the move unsafe
       as built (a full EFI partition, a clean-up that can remove working entries). It comes with
       Secure Boot (M4 or later); the reviews' findings are in ADR-033's amendment.

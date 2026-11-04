@@ -162,7 +162,7 @@ broker first.
   reviewed in a fresh session and its findings fixed: the ISO installer (ADR-031; KNOWN-GAPS 6zc);
   the skeleton (ADR-032; 6zd); the EFI-partition test (`tests/boot.nix`, check `boot`) —
   ADR-033's Lanzaboote **deferred** to Secure Boot (its premise was false: Python stays for
-  growpart; branch `lanzaboote` kept, its reviews' findings in the ADR's amendment); ADR-039
+  growpart; branch deleted 2026-11-04, its reviews' findings in the ADR's amendment); ADR-039
   (`checks.<system>.free`, the release notes' source statement); the fence's holes (an /etc path
   with `..`, `specialisation`, `torq.installer`, /etc files other modules land in /etc/torq —
   modules/security.nix; 6ze); the SSH greeting and the README in the brand. The end-of-M2 audit
