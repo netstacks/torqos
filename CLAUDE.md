@@ -114,8 +114,8 @@ The ISO installer (ADR-031) puts that same image on real hardware: `torq install
 writes it to the disk a person names and leaves the detected hardware for first-boot setup.
 Also built: a smaller TorqOS (ADR-032: no `nixos-rebuild` or NixOS's other tools on an installed
 machine, a size budget), the EFI-partition test (ADR-033: Lanzaboote itself deferred to Secure
-Boot), and ADR-039's source statement and unfree check (`checks.<system>.free`). **Left of M2:**
-the end-of-milestone audit, then `v0.2.0`.
+Boot), and ADR-039's source statement and unfree check (`checks.<system>.free`). The end-of-M2 audit is
+done (`docs/AUDIT-2026-11-04.md`); **left of M2:** the `v0.2.0` tag.
 
 **Then M3 — trust** (ADR-035, ADR-036): the broker as a socket service with identity from
 `SO_PEERCRED`, the agent's account, the config repo's remote (push after every change, the ledger
@@ -156,22 +156,22 @@ broker first.
 - Keep `docs/` in sync when behaviour changes.
 - Things in this scaffold marked `TODO(M1)` / `TODO(M2)` are the intended next steps.
 
-## Current status (read this first) — 2026-11-03
+## Current status (read this first) — 2026-11-04
 
-- **Handoff (2026-11-04, M2 built; the audit and `v0.2.0` are left):** on `main`, each branch
-  reviewed in a fresh session and its findings fixed: the ISO installer (ADR-031) and its
-  follow-ups (KNOWN-GAPS 6zc); the skeleton (ADR-032; 6zd); the EFI-partition test
-  (`tests/boot.nix`, check `boot`) — ADR-033's Lanzaboote **deferred** to Secure Boot (its premise
-  was false: Python stays for growpart; branch `lanzaboote` kept, its reviews' findings in the
-  ADR's amendment); ADR-039 (`checks.<system>.free`, the release notes' source statement); the
-  fence's holes found by audit (an /etc path with `..`, `specialisation`, `torq.installer`, and
-  /etc files other modules land in /etc/torq — modules/security.nix; 6ze); the SSH greeting (the
-  mark in letters, fastfetch's minimal build) and the README in the brand. CI logs its disk and
-  memory each minute (`room:` lines) after the runner died three times. torq5 runs `main`
-  ae5dc87 (change #21); taking the rest is one more ledgered switch — and then the trial
-  greeting block in viper's `~/.zprofile` comes out (it would greet twice). **Next:** the M2
-  audit in a fresh session (`docs/AUDIT-<date>.md`, DRIVING.md), then `v0.2.0` — a tag, the
-  owner's to push.
+- **Handoff (2026-11-04, M2 done; `v0.2.0` is the owner's tag to push):** on `main`, each branch
+  reviewed in a fresh session and its findings fixed: the ISO installer (ADR-031; KNOWN-GAPS 6zc);
+  the skeleton (ADR-032; 6zd); the EFI-partition test (`tests/boot.nix`, check `boot`) —
+  ADR-033's Lanzaboote **deferred** to Secure Boot (its premise was false: Python stays for
+  growpart; branch `lanzaboote` kept, its reviews' findings in the ADR's amendment); ADR-039
+  (`checks.<system>.free`, the release notes' source statement); the fence's holes (an /etc path
+  with `..`, `specialisation`, `torq.installer`, /etc files other modules land in /etc/torq —
+  modules/security.nix; 6ze); the SSH greeting and the README in the brand. The end-of-M2 audit
+  (`docs/AUDIT-2026-11-04.md`): no high finding; A1 (gpg-signed releases accepted) and A4 (setup
+  ledgering a failed switch) fixed, A3 and A11 in part, A2 and the rest in KNOWN-GAPS' audit table
+  for M3. The version is 0.2.0 (`scripts/bump-version`); release.yml refuses a tag that is not the
+  source's version, or would move `stable` back. torq5 runs this `main` (change #23, TorqOS 0.2.0).
+  `nix flake check` green on 2026-11-04. **Next:** the owner tags `v0.2.0` (CONTRIBUTING.md,
+  "Releasing") once CI is green on `main`; then M3, starting with the socket broker (A2 with it).
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
   aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is
   written for this host. Tests here: **broker 118, torqcli 241** (`cargo test` in `nix develop`,
