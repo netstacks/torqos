@@ -158,7 +158,7 @@ broker first.
 
 ## Current status (read this first) — 2026-11-04
 
-- **Handoff (2026-11-04, M2 done; `v0.2.0` is the owner's tag to push):** on `main`, each branch
+- **Handoff (2026-11-04, M2 done; **v0.2.0 released** 2026-11-04, `stable` moved):** on `main`, each branch
   reviewed in a fresh session and its findings fixed: the ISO installer (ADR-031; KNOWN-GAPS 6zc);
   the skeleton (ADR-032; 6zd); the EFI-partition test (`tests/boot.nix`, check `boot`) —
   ADR-033's Lanzaboote **deferred** to Secure Boot (its premise was false: Python stays for
@@ -170,14 +170,14 @@ broker first.
   ledgering a failed switch) fixed, A3 and A11 in part, A2 and the rest in KNOWN-GAPS' audit table
   for M3. The version is 0.2.0 (`scripts/bump-version`, which with `--release` also tags and pushes); release.yml refuses a tag that is not the
   source's version, or would move `stable` back. torq5 runs this `main` (change #23, TorqOS 0.2.0).
-  `nix flake check` green on 2026-11-04. **Next:** the owner runs `scripts/bump-version 0.2.0 --release` (CONTRIBUTING.md,
-  "Releasing") once CI is green on `main`; then M3, starting with the socket broker (A2 with it).
+  `nix flake check` green on 2026-11-04. **Next:** the owner's end-to-end ESXi install from the v0.2.0 ISO (CONTRIBUTING.md,
+  "Releasing" for later ones); then M3, starting with the socket broker (A2 with it). The repo is public since 2026-11-04 (rulesets on `main` and `v*`, SECURITY.md).
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
   aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is
   written for this host. Tests here: **broker 118, torqcli 241** (`cargo test` in `nix develop`,
   also run in the Nix build sandbox).
 - **M2 is essentially done** — images (qcow2 + ESXi VMDK, both arches), first-boot setup,
-  customer-safe defaults, signed releases (ADR-028; v0.1.0 and v0.1.1 out), the test/bump/release
+  customer-safe defaults, signed releases (ADR-028; v0.1.0, v0.1.1 and v0.2.0 out), the test/bump/release
   workflows, and `tests/image.nix`. `torq5` was installed from the v0.1.1 image and its first
   update moved it to the releases repo, which was the last acceptance criterion for releases.
   The **ISO installer** (ADR-031, `tests/installer.nix`) is built: USB stick → chosen disk → its
