@@ -23,7 +23,9 @@ pkgs.testers.runNixOSTest {
     # it is the agent.
     users.users.torq-agent = { isSystemUser = true; group = "torq-agent"; };
     users.groups.torq-agent = { };
-    torq.broker.rebuildCommand = "true";
+    # A rebuild that says a lot, as a real one does: every apply's answer and exit must still come
+    # through a burst of the build's output (the third review of ADR-040).
+    torq.broker.rebuildCommand = "seq 1 6000 >&2";
     # socat speaks to the socket; jq reads the answers; tmux is a terminal to type a password at.
     environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.tmux pkgs.pam ];
     environment.etc."torq-test/desktop.nix".text = "{ nightLight = false; }\n";
@@ -97,7 +99,11 @@ pkgs.testers.runNixOSTest {
     with subtest("a person's own settings are theirs: no password, no sudo"):
         p = propose("sam", own_diff("sam"), "hello for sam")
         assert p["actor"] == "user" and p["tier"] == "user" and p["data"]["via"] == "socket" and p["data"]["caller"] == "sam", p
-        code, v = answer(ask("sam", {"args": ["--json", "apply", str(p["seq"])]}))
+        r = ask("sam", {"args": ["--json", "apply", str(p["seq"])]})
+        code, v = answer(r)
+        # The build's 6000 lines: a reader keeping up gets them, or is told how many were left out —
+        # and always the answer and the exit code.
+        assert "\n6000\n" in r[2] or "not shown" in r[2], r[2][-300:]
         assert code == 0 and v["approved_by"] == "sam" and v["data"]["via"] == "socket", (code, v)
         # A commit confirmed holds everyone's changes back while it waits: an administrator's,
         # even for their own folder (the audit's 2).

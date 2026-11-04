@@ -178,7 +178,9 @@ fn over_socket(r: &Request, err: &mut dyn Write) -> Result<(Option<i32>, Vec<u8>
                 let _ = err.write_all(t.as_bytes());
             }
             Ok(Frame::Exit(c)) => code = Some(c),
-            Err(_) => anyhow::bail!("the broker's answer is not one this torq command reads (update the machine first)"),
+            // A line cut short is the broker gone mid-write (its caller too slow, or serve ended):
+            // what came is all there is, and no exit code — as if it hung up.
+            Err(_) => break,
         }
     }
     Ok((code, out))

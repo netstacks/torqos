@@ -48,7 +48,7 @@ pub struct Request {
 
 /// What comes back, one JSON line at a time: the broker's standard output and error as they come,
 /// and how it ended, last.
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Frame {
     Out(String),

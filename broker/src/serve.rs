@@ -11,7 +11,7 @@ use serde_json::json;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,49 +20,92 @@ use torq_broker::ledger::Ledger;
 use torq_broker::policy::Tier;
 use torq_broker::socket::{self, Caller, Change, Frame, Gate, Request};
 
-/// How many frames may wait for a caller that reads slowly: past that it has fallen behind, and is
-/// dropped (the second review of ADR-040, its 2) — the broker's own output is never held up.
-const QUEUE: usize = 1024;
+/// How many frames may wait for the caller. Past that, lines are left out — counted, and said —
+/// rather than the broker's output ever waiting on the caller (the reviews of ADR-040).
+const QUEUE: usize = 4096;
+/// How much of the broker's standard output (its answer) is kept for a caller that has fallen behind.
+const KEEP_BYTES: usize = 16 << 20;
 
 /// The connection's output: a frame per line, written by a thread of its own from a bounded queue.
-/// Sending never waits on the caller: a caller that has gone, or cannot keep up, is dropped, and
-/// nothing stops because of it.
+/// Sending never waits on the caller: when the caller falls behind, lines are left out and the
+/// caller is told how many; a caller that has gone (its connection broken, or not read for the
+/// send timeout) gets nothing more. Nothing the broker does stops because of either.
 #[derive(Clone)]
 struct Reply {
     queue: SyncSender<Frame>,
     gone: Arc<AtomicBool>,
+    skipped: Arc<AtomicU64>,
 }
 
 impl Reply {
-    /// The reply, and its writer (to wait for, a while, at the end).
+    /// The reply, and its writer's end (to wait for, a while, at the end).
     fn start() -> (Reply, Receiver<()>) {
         let (queue, frames) = sync_channel::<Frame>(QUEUE);
-        let gone = Arc::new(AtomicBool::new(false));
+        let (gone, skipped) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
         let (done, finished) = sync_channel(1);
-        let g = gone.clone();
+        let (g, s) = (gone.clone(), skipped.clone());
         std::thread::spawn(move || {
-            let mut out = std::io::stdout();
-            for f in frames {
-                if g.load(Ordering::Relaxed) {
-                    continue;
+            let mut out = std::io::BufWriter::with_capacity(256 * 1024, std::io::stdout().lock());
+            while let Ok(first) = frames.recv() {
+                // Everything waiting, in one go; then what was left out, said; then flushed.
+                put(&mut out, &g, &first);
+                while let Ok(more) = frames.try_recv() {
+                    put(&mut out, &g, &more);
                 }
-                let line = serde_json::to_string(&f).unwrap_or_default();
-                if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+                let n = s.swap(0, Ordering::Relaxed);
+                if n > 0 {
+                    put(&mut out, &g, &Frame::Err(format!("[{n} lines of output not shown: they came faster than they could be sent]\n")));
+                }
+                if !g.load(Ordering::Relaxed) && out.flush().is_err() {
                     g.store(true, Ordering::Relaxed);
                 }
             }
             let _ = done.send(());
         });
-        (Reply { queue, gone }, finished)
+        (Reply { queue, gone, skipped }, finished)
     }
 
+    /// While the broker runs: never waits. A full queue leaves the frame out, and counts it.
     fn send(&self, f: Frame) {
         if self.gone.load(Ordering::Relaxed) {
             return;
         }
         match self.queue.try_send(f) {
             Ok(()) => {}
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => self.gone.store(true, Ordering::Relaxed),
+            Err(TrySendError::Full(_)) => {
+                self.skipped.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(TrySendError::Disconnected(_)) => self.gone.store(true, Ordering::Relaxed),
+        }
+    }
+
+    /// Standard output's way in: queued, or false when the queue is full (the frame then waits).
+    fn offer(&self, f: &Frame) -> bool {
+        if self.gone.load(Ordering::Relaxed) {
+            return true;
+        }
+        match self.queue.try_send(f.clone()) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.gone.store(true, Ordering::Relaxed);
+                true
+            }
+        }
+    }
+
+    /// Once the broker is done (its lock released, so waiting harms no one): the frame is sent,
+    /// waiting for room, until `deadline`.
+    fn send_last(&self, mut f: Frame, deadline: Instant) {
+        while !self.gone.load(Ordering::Relaxed) {
+            match self.queue.try_send(f) {
+                Ok(()) => return,
+                Err(TrySendError::Full(back)) if Instant::now() < deadline => {
+                    f = back;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
         }
     }
 }
@@ -83,12 +126,20 @@ pub fn serve() -> i32 {
             code
         }
     };
-    reply.send(Frame::Exit(code));
     // The last frames go out to a caller still reading, for a while; then serve ends, whoever is
     // still at the other end.
+    let deadline = Instant::now() + Duration::from_secs(socket::TIMEOUT_SECONDS);
+    reply.send_last(Frame::Exit(code), deadline);
     drop(reply);
-    let _ = finished.recv_timeout(Duration::from_secs(socket::TIMEOUT_SECONDS));
+    let _ = finished.recv_timeout(deadline.saturating_duration_since(Instant::now()));
     code
+}
+
+/// One frame to the caller, unless it has gone; a failed write means it has.
+fn put(out: &mut impl Write, gone: &AtomicBool, f: &Frame) {
+    if !gone.load(Ordering::Relaxed) && serde_json::to_string(f).map_or(true, |l| writeln!(out, "{l}").is_err()) {
+        gone.store(true, Ordering::Relaxed);
+    }
 }
 
 struct Refusal {
@@ -199,19 +250,26 @@ fn change(state_dir: &Path, seq: u64, kind: &str) -> Option<Change> {
     Some(Change { tier, files })
 }
 
-/// One JSON line, no longer than the limit, all of it within the time (the socket's receive
-/// timeout bounds each read; this, the whole — a byte now and then does not hold a connection).
+/// One JSON line, no longer than the limit, all of it within the time: each read may wait only
+/// for what is left of it, and the line ends at its first newline.
 fn read_request() -> Result<Request> {
+    use rustix::net::sockopt::{set_socket_timeout, Timeout};
     let deadline = Instant::now() + Duration::from_secs(socket::TIMEOUT_SECONDS);
     let mut stdin = std::io::stdin().take(socket::MAX_REQUEST);
     let (mut line, mut buf) = (Vec::new(), [0u8; 64 * 1024]);
-    while !line.ends_with(b"\n") {
-        if Instant::now() > deadline {
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
             bail!("reading the request: it did not come within {} s", socket::TIMEOUT_SECONDS);
         }
+        set_socket_timeout(std::io::stdin(), Timeout::Recv, Some(left.max(Duration::from_millis(1)))).context("reading the request")?;
         let n = stdin.read(&mut buf).context("reading the request")?;
         if n == 0 {
             bail!("the request is one JSON line, at most {} bytes", socket::MAX_REQUEST);
+        }
+        if let Some(end) = buf[..n].iter().position(|&b| b == b'\n') {
+            line.extend_from_slice(&buf[..end]);
+            break;
         }
         line.extend_from_slice(&buf[..n]);
     }
@@ -240,26 +298,52 @@ fn run(reply: &Reply, who: &Caller, args: &[String]) -> i32 {
             return 1;
         }
     };
-    let forward = |from: Option<Box<dyn Read + Send>>, frame: fn(String) -> Frame| {
+    // Standard error (the build's progress) may be left out when the caller falls behind; standard
+    // output — the broker's answer, its JSON — never is: what does not fit waits, up to a limit, and
+    // goes once the broker is done.
+    let forward = |from: Option<Box<dyn Read + Send>>, frame: fn(String) -> Frame, keep: bool| {
         let reply = reply.clone();
         std::thread::spawn(move || {
-            let Some(from) = from else { return };
+            let mut held: Vec<Frame> = Vec::new();
+            let mut held_bytes = 0usize;
+            let Some(from) = from else { return held };
             let mut r = BufReader::new(from);
             let mut line = Vec::new();
             while r.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
-                reply.send(frame(String::from_utf8_lossy(&line).into_owned()));
+                let f = frame(String::from_utf8_lossy(&line).into_owned());
+                if keep && (!held.is_empty() || !reply.offer(&f)) {
+                    if held_bytes < KEEP_BYTES {
+                        held_bytes += line.len();
+                        held.push(f);
+                    } else {
+                        reply.skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else if !keep {
+                    reply.send(f);
+                }
                 line.clear();
             }
+            held
         })
     };
-    let out = forward(child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>), Frame::Out);
-    let err = forward(child.stderr.take().map(|e| Box::new(e) as Box<dyn Read + Send>), Frame::Err);
-    let _ = out.join();
-    let _ = err.join();
-    match child.wait() {
+    let out = forward(child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>), Frame::Out, true);
+    let err = forward(child.stderr.take().map(|e| Box::new(e) as Box<dyn Read + Send>), Frame::Err, false);
+    let code = match child.wait() {
         Ok(s) => s.code().unwrap_or(1),
         Err(_) => 1,
+    };
+    // Its output, to its end — unless something it started still holds the pipes open: then a
+    // while, and no longer (serve must end).
+    let until = Instant::now() + Duration::from_secs(socket::TIMEOUT_SECONDS);
+    while !(out.is_finished() && err.is_finished()) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
     }
+    if out.is_finished() {
+        for f in out.join().unwrap_or_default() {
+            reply.send_last(f, until + Duration::from_secs(socket::TIMEOUT_SECONDS));
+        }
+    }
+    code
 }
 
 /// A directory for one request's files: in the broker's state directory (root's, 0700), its own
