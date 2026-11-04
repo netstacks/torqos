@@ -23,8 +23,9 @@ pub const ADMINS: &str = "wheel";
 pub const NEED_PASSWORD: i32 = 77;
 /// A request is a line, and no line is longer than this (a large diff, with room).
 pub const MAX_REQUEST: u64 = 8 << 20;
-/// The uids NixOS gives normal accounts (people): `isNormalUser` starts at 1000, below `nobody`.
-pub const PEOPLE_UIDS: std::ops::Range<u32> = 1000..60000;
+/// The uids NixOS gives normal accounts (people): `isNormalUser` starts at 1000; Nix's build users
+/// start at 30001, and are not people.
+pub const PEOPLE_UIDS: std::ops::Range<u32> = 1000..30000;
 /// Where faillock counts a password's failures: root's alone (modules/broker.nix), so that a program
 /// running as the person cannot reset its own count between guesses.
 pub const FAILLOCK_DIR: &str = "/run/torq/faillock";

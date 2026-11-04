@@ -407,10 +407,18 @@ Its §5 lists claims without a test.
 
 6zf. **The socket broker's open ends** (ADR-040; its adversarial review, 2026-11-04). Fixed from
    that review: faillock's counts in a root-only directory (`/run/torq/faillock`), so the person
-   cannot reset their own; password checks one at a time per account; `apply --confirm` an
+   cannot reset their own; password checks one at a time per account (not yet exercised by a test); `apply --confirm` an
    administrator's (it holds everyone else's changes back); services' accounts propose nothing;
-   a request must arrive within 10 s and a reply nobody reads is dropped; four connections per
-   account; every entry records the kernel-given `caller`. Open:
+   the whole request within 10 s; the reply through a bounded queue, so a caller that stops reading,
+   or reads too slowly, is dropped and the broker never waits on it (the second review); four connections per
+   account; every entry records the kernel-given `caller`; Nix's build users (uid 30001 on) are not
+   people. Open:
+   - **sudo has no lockout.** faillock guards the broker's password check, but a program running as
+     the owner can guess the same password through `sudo -S`, su or passwd — pam_unix's delay only,
+     no limit. Adding faillock to sudo and su (the same directory) changes how the owner is locked out
+     machine-wide: the owner's decision, not yet taken.
+   - **The agent as a DynamicUser** (ai.nix's plan) would not be in /etc/passwd, which the broker
+     reads to name its caller: the agent's account (M3's next item) is a static system user.
    - **Proposals are not limited.** A person (or the agent) can propose as often, and as large
      (8 MiB a request), as they like, and every proposal stays in the hash-chained ledger for good:
      a ledger, and disk, that only grow. Wants a limit of open proposals per account and a rate.
@@ -427,5 +435,5 @@ Its §5 lists claims without a test.
      ledger (password hashes are kept outside it), but it is wider than root-only was.
    - **Not sandboxed**: `torq-broker@` runs as the broker under sudo does (a development source is
      built from a home). N5's sandboxing comes with the root units' own.
-   - The send timeout (a caller that stops reading) is set but not yet exercised by a test; nor is
+   - A caller that reads too slowly (the reply queue) is not yet exercised by a test; nor is
      a switch that changes `torq-broker.socket` while an instance runs.

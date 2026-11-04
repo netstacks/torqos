@@ -155,6 +155,15 @@ pkgs.testers.runNixOSTest {
         # Silent for longer than the limit: the broker hangs up on it (the audit's 4).
         out = machine.succeed("su -s /bin/sh sam -c 'sleep 15 | timeout 40 socat -t 40 - UNIX-CONNECT:/run/torq/broker.sock'")
         assert '"exit":2' in out and 'reading the request' in out, out
+        # Four connections per account: a fifth waits for none of them, it is refused at once.
+        machine.succeed("for i in 1 2 3 4; do su -s /bin/sh sam -c 'sleep 8 | socat -t 20 - UNIX-CONNECT:/run/torq/broker.sock' >/dev/null 2>&1 & done; sleep 2")
+        fifth = f"printf '%s\\n' {shlex.quote(json.dumps({'args': ['verify']}))} | socat -t 5 - UNIX-CONNECT:/run/torq/broker.sock"
+        out = machine.execute(f"su -s /bin/sh sam -c {shlex.quote(fifth)} 2>&1")[1]
+        assert '"exit"' not in out, out
+        # Another account is not held up by sam's.
+        code, v = answer(ask("dev", {"args": ["--json", "verify"]}))
+        assert code == 0, (code, v)
+        machine.sleep(10)
 
     with subtest("the agent proposes, and can do nothing else"):
         p = propose("torq-agent", own_diff("dev"), "the agent suggests hello")

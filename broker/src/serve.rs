@@ -11,47 +11,83 @@ use serde_json::json;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use torq_broker::config::{self, Settings};
 use torq_broker::ledger::Ledger;
 use torq_broker::policy::Tier;
 use torq_broker::socket::{self, Caller, Change, Frame, Gate, Request};
 
-/// The connection's output: a frame per line. Written while anyone listens; once the caller has
-/// gone, nothing more is sent, and nothing stops because of it.
+/// How many frames may wait for a caller that reads slowly: past that it has fallen behind, and is
+/// dropped (the second review of ADR-040, its 2) — the broker's own output is never held up.
+const QUEUE: usize = 1024;
+
+/// The connection's output: a frame per line, written by a thread of its own from a bounded queue.
+/// Sending never waits on the caller: a caller that has gone, or cannot keep up, is dropped, and
+/// nothing stops because of it.
 #[derive(Clone)]
-struct Reply(Arc<Mutex<Option<std::io::Stdout>>>);
+struct Reply {
+    queue: SyncSender<Frame>,
+    gone: Arc<AtomicBool>,
+}
 
 impl Reply {
-    fn send(&self, f: &Frame) {
-        let Ok(mut out) = self.0.lock() else { return };
-        let gone = match out.as_mut() {
-            Some(o) => serde_json::to_string(f).map_or(true, |line| writeln!(o, "{line}").and_then(|_| o.flush()).is_err()),
-            None => false,
-        };
-        if gone {
-            *out = None;
+    /// The reply, and its writer (to wait for, a while, at the end).
+    fn start() -> (Reply, Receiver<()>) {
+        let (queue, frames) = sync_channel::<Frame>(QUEUE);
+        let gone = Arc::new(AtomicBool::new(false));
+        let (done, finished) = sync_channel(1);
+        let g = gone.clone();
+        std::thread::spawn(move || {
+            let mut out = std::io::stdout();
+            for f in frames {
+                if g.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let line = serde_json::to_string(&f).unwrap_or_default();
+                if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+                    g.store(true, Ordering::Relaxed);
+                }
+            }
+            let _ = done.send(());
+        });
+        (Reply { queue, gone }, finished)
+    }
+
+    fn send(&self, f: Frame) {
+        if self.gone.load(Ordering::Relaxed) {
+            return;
+        }
+        match self.queue.try_send(f) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => self.gone.store(true, Ordering::Relaxed),
         }
     }
 }
 
 /// Serve the one request; the exit code it ended with (also sent, last).
 pub fn serve() -> i32 {
-    let reply = Reply(Arc::new(Mutex::new(Some(std::io::stdout()))));
+    let (reply, finished) = Reply::start();
     let code = match answer(&reply) {
         Ok(code) => code,
         Err(Refusal { json, code, why }) => {
             // A caller that asked for JSON reads its error as JSON (`{"error": …}`), as the broker
             // writes it; a person reads text.
             if json {
-                reply.send(&Frame::Out(format!("{}\n", json!({ "error": why, "password": code == socket::NEED_PASSWORD }))));
+                reply.send(Frame::Out(format!("{}\n", json!({ "error": why, "password": code == socket::NEED_PASSWORD }))));
             } else {
-                reply.send(&Frame::Err(format!("Error: {why}\n")));
+                reply.send(Frame::Err(format!("Error: {why}\n")));
             }
             code
         }
     };
-    reply.send(&Frame::Exit(code));
+    reply.send(Frame::Exit(code));
+    // The last frames go out to a caller still reading, for a while; then serve ends, whoever is
+    // still at the other end.
+    drop(reply);
+    let _ = finished.recv_timeout(Duration::from_secs(socket::TIMEOUT_SECONDS));
     code
 }
 
@@ -163,14 +199,23 @@ fn change(state_dir: &Path, seq: u64, kind: &str) -> Option<Change> {
     Some(Change { tier, files })
 }
 
-/// One JSON line, no longer than the limit.
+/// One JSON line, no longer than the limit, all of it within the time (the socket's receive
+/// timeout bounds each read; this, the whole — a byte now and then does not hold a connection).
 fn read_request() -> Result<Request> {
-    let mut line = String::new();
-    BufReader::new(std::io::stdin().take(socket::MAX_REQUEST)).read_line(&mut line).context("reading the request")?;
-    if !line.ends_with('\n') {
-        bail!("the request is one JSON line, at most {} bytes", socket::MAX_REQUEST);
+    let deadline = Instant::now() + Duration::from_secs(socket::TIMEOUT_SECONDS);
+    let mut stdin = std::io::stdin().take(socket::MAX_REQUEST);
+    let (mut line, mut buf) = (Vec::new(), [0u8; 64 * 1024]);
+    while !line.ends_with(b"\n") {
+        if Instant::now() > deadline {
+            bail!("reading the request: it did not come within {} s", socket::TIMEOUT_SECONDS);
+        }
+        let n = stdin.read(&mut buf).context("reading the request")?;
+        if n == 0 {
+            bail!("the request is one JSON line, at most {} bytes", socket::MAX_REQUEST);
+        }
+        line.extend_from_slice(&buf[..n]);
     }
-    serde_json::from_str(&line).context("the request is not one the broker reads")
+    serde_json::from_slice(&line).context("the request is not one the broker reads")
 }
 
 /// The broker itself, as root, with `args`: its output to the caller as it comes, its exit code.
@@ -191,7 +236,7 @@ fn run(reply: &Reply, who: &Caller, args: &[String]) -> i32 {
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            reply.send(&Frame::Err(format!("Error: running the broker for {}: {e}\n", who.name)));
+            reply.send(Frame::Err(format!("Error: running the broker for {}: {e}\n", who.name)));
             return 1;
         }
     };
@@ -202,7 +247,7 @@ fn run(reply: &Reply, who: &Caller, args: &[String]) -> i32 {
             let mut r = BufReader::new(from);
             let mut line = Vec::new();
             while r.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
-                reply.send(&frame(String::from_utf8_lossy(&line).into_owned()));
+                reply.send(frame(String::from_utf8_lossy(&line).into_owned()));
                 line.clear();
             }
         })
