@@ -347,10 +347,10 @@ pub fn run() -> Result<()> {
         let _ = Command::new(format!("{BIN}/systemctl")).arg("poweroff").status();
         return Ok(());
     }
-    println!();
+    // The welcome is on the screen already, above the check: the disks follow it.
+    println!("\n");
     let mut closed = 0;
     loop {
-        println!("\n{}\n", welcome());
         let done = install(&image, bytes, &sha);
         closed = if done.as_ref().is_err_and(|e| format!("{e:#}").contains("the console closed")) { closed + 1 } else { 0 };
         match done {
@@ -363,7 +363,7 @@ pub fn run() -> Result<()> {
             // A Ctrl-D starts over; a console that only ever reads as closed has nobody to start
             // over for: ended, for systemd to start the installer again.
             Err(e) if closed >= 3 => return Err(e),
-            Err(e) => println!("\n{e:#}\nStarting over."),
+            Err(e) => println!("\n{e:#}\nStarting over.\n\n{}\n", welcome()),
         }
     }
 }
