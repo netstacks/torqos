@@ -168,9 +168,9 @@ broker first.
   modules/security.nix; 6ze); the SSH greeting and the README in the brand. The end-of-M2 audit
   (`docs/AUDIT-2026-11-04.md`): no high finding; A1 (gpg-signed releases accepted) and A4 (setup
   ledgering a failed switch) fixed, A3 and A11 in part, A2 and the rest in KNOWN-GAPS' audit table
-  for M3. The version is 0.2.0 (`scripts/bump-version`); release.yml refuses a tag that is not the
+  for M3. The version is 0.2.0 (`scripts/bump-version`, which with `--release` also tags and pushes); release.yml refuses a tag that is not the
   source's version, or would move `stable` back. torq5 runs this `main` (change #23, TorqOS 0.2.0).
-  `nix flake check` green on 2026-11-04. **Next:** the owner tags `v0.2.0` (CONTRIBUTING.md,
+  `nix flake check` green on 2026-11-04. **Next:** the owner runs `scripts/bump-version 0.2.0 --release` (CONTRIBUTING.md,
   "Releasing") once CI is green on `main`; then M3, starting with the socket broker (A2 with it).
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
   aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is

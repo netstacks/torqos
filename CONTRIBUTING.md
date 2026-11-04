@@ -37,13 +37,18 @@ and only then publishes the source to `netstacks/torqos-releases` (signed, tagge
 and a GitHub Release with the files and their signed checksums.
 
 ```sh
-scripts/bump-version 0.2.0 --commit       # the version machines will report, everywhere it is written
-git push origin main                      # and wait for CI to be green on it
-git tag -a v0.2.0 -m "TorqOS v0.2.0"
-git push origin v0.2.0
+scripts/bump-version 0.3.0 --release      # bump and commit if needed, check, ask, tag v0.3.0, push
+scripts/bump-version 0.3.0-rc1 --release  # a pre-release of 0.3.0 first
 ```
 
-A tag with a hyphen (`v0.2.0-rc1`) is a pre-release: everything runs and is published, but `stable`
-does not move, so no machine updates to it. It needs no bump: `-rc1` is the tag's, not the source's.
+`--release` refuses before it changes anything unless: you are on `main` with nothing uncommitted,
+`main` is GitHub's, CI has not failed there, the tag is not taken, and a stable version is newer
+than the last stable tag. It then shows what it will push and asks you to type the tag (`--yes`
+skips the question); a wrong answer undoes its version commit. Without `--release`,
+`scripts/bump-version 0.3.0 [--commit]` only sets the version, for a release made by hand
+(`git tag -a v0.3.0 -m "TorqOS v0.3.0" && git push origin v0.3.0`).
+
+A tag with a hyphen (`v0.3.0-rc1`) is a pre-release: everything runs and is published, but `stable`
+does not move, so no machine updates to it. The source carries `0.3.0`; `-rc1` is the tag's alone.
 A tag that is not the source's version is refused before anything runs. A release that fails is not
 retagged: fix it and tag the next patch version.
