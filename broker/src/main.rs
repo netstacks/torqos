@@ -9,6 +9,8 @@
 
 use anyhow::{Context, Result};
 
+mod serve;
+
 use torq_broker::config::{self, Requested, Settings};
 use torq_broker::{ledger::Entry, policy::Actor, Broker, Busy};
 use serde_json::json;
@@ -48,6 +50,7 @@ enum Cmd {
     Log { brief: bool },
     Verify,
     Status,
+    Serve,
 }
 
 /// The command line, declared with clap's builder (its derive macros write an `allow(dead_code)`,
@@ -149,6 +152,9 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("status").about(
             "Compare the machine with its ledger: running system, config repo, interrupted operations, ledger chain. Exits 1 if anything is not as ledgered, 75 if an operation is running.",
         ))
+        .subcommand(Command::new("serve").about(
+            "Answer one request on the socket (torq-broker.socket hands it the connection as standard input and output): the caller from the kernel (SO_PEERCRED), what it may do by its account and the change's tier, a system change's password through PAM (ADR-040).",
+        ))
 }
 
 /// The command line read into `Cli` (clap exits with its usage on a mistake, as before).
@@ -185,6 +191,7 @@ fn parse_cli() -> Cli {
         "log" => Cmd::Log { brief: sub.get_flag("brief") },
         "verify" => Cmd::Verify,
         "status" => Cmd::Status,
+        "serve" => Cmd::Serve,
         other => unreachable!("clap knows no subcommand {other}"),
     };
     Cli {
@@ -204,8 +211,19 @@ fn parse_cli() -> Cli {
 
 fn main() {
     let cli = parse_cli();
+    if matches!(cli.cmd, Cmd::Serve) {
+        std::process::exit(serve::serve());
+    }
     let json = cli.json;
-    if let Err(e) = run(cli) {
+    // How the request came, read before the environment is cleared: from `serve` (the socket), or
+    // through sudo — what root says about itself, marked as such (ADR-040). Neither: the machine's
+    // own units, setup, or root at a shell.
+    let via = match (std::env::var("TORQ_VIA").ok().as_deref(), std::env::var_os("SUDO_UID")) {
+        (Some("socket"), _) if config::running_as_root() => Some("socket".to_string()),
+        (_, Some(_)) => Some("sudo".to_string()),
+        _ => None,
+    };
+    if let Err(e) = run(cli, via) {
         // Another operation is running: "try again later", exit 75 (EX_TEMPFAIL) from any command.
         let busy = e.downcast_ref::<Busy>().is_some();
         if json {
@@ -263,17 +281,19 @@ fn settings(cli: &mut Cli) -> Result<Settings> {
     Ok(s)
 }
 
-fn run(mut cli: Cli) -> Result<()> {
+fn run(mut cli: Cli, via: Option<String>) -> Result<()> {
     let json = cli.json;
     let s = settings(&mut cli)?;
-    let b = Broker::new(&s.repo, &s.state_dir, &s.rebuild)
+    let mut b = Broker::new(&s.repo, &s.state_dir, &s.rebuild)
         .with_current_system(&s.current_system)
         .with_system_profile(&s.system_profile)
         .with_confirm_commands(&s.build, &s.activate, &s.boot, &s.schedule)
         .with_people(&s.people)
         // On a real machine the rollback uses the old system's own commands (its etc/torq/broker.json).
         .with_anchor_settings(config::running_as_root());
+    b.ledger.set_via(via);
     match cli.cmd {
+        Cmd::Serve => unreachable!("served before the settings are read"),
         Cmd::Init => {
             b.init()?;
             if json {

@@ -109,6 +109,7 @@
       checks = forSystems linuxSystems (pkgs: {
         broker = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         trust-loop = import ./tests/trust-loop.nix { inherit pkgs self; };
+        socket = import ./tests/socket.nix { inherit pkgs self; };
         # How a machine starts: a real EFI partition and its boot menu (ADR-033).
         boot = import ./tests/boot.nix { inherit pkgs self; };
         tree = import ./tests/tree.nix { inherit pkgs self; };
@@ -199,6 +200,8 @@
       devShells = forSystems allSystems (pkgs: {
         default = pkgs.mkShell ({
           packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer git nixfmt-rfc-style ];
+          # The broker links PAM (ADR-040: a system change's password, checked as root).
+          buildInputs = [ pkgs.pam ];
         } // self.packages.${pkgs.stdenv.hostPlatform.system}.torq.filterEnv);
       });
     };

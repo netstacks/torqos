@@ -14,6 +14,7 @@ pub mod config;
 pub mod ledger;
 pub mod policy;
 pub mod repo;
+pub mod socket;
 
 use anyhow::{bail, Context, Result};
 use ledger::{Entry, Ledger, NewEntry};

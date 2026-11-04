@@ -57,11 +57,19 @@ pub struct NewEntry {
 
 pub struct Ledger {
     path: PathBuf,
+    /// How the request came (`socket`, `sudo`): noted in every entry this broker appends (ADR-040).
+    via: Option<String>,
 }
 
 impl Ledger {
     pub fn open(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self { path: path.into(), via: None }
+    }
+
+    /// Note in every entry appended how the request came: what the broker was told, and, for
+    /// `sudo`, what root says about itself (ADR-040).
+    pub fn set_via(&mut self, via: Option<String>) {
+        self.via = via;
     }
 
     pub fn path(&self) -> &Path {
@@ -107,6 +115,10 @@ impl Ledger {
             Some(last) => (last.body.seq + 1, last.hash.clone()),
             None => (1, GENESIS_PREV.to_string()),
         };
+        let mut data = new.data;
+        if let (Some(via), Some(d)) = (&self.via, data.as_object_mut()) {
+            d.insert("via".into(), serde_json::Value::String(via.clone()));
+        }
         let body = Body {
             seq,
             ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -116,7 +128,7 @@ impl Ledger {
             tier: new.tier,
             tainted: new.tainted,
             reason: new.reason,
-            data: new.data,
+            data,
             prev_hash,
         };
         let hash = hash_body(&body)?;
@@ -183,6 +195,23 @@ mod tests {
         assert_eq!(a.body.prev_hash, GENESIS_PREV);
         assert_eq!(b.body.prev_hash, a.hash);
         assert_eq!(l.verify().unwrap(), 2);
+    }
+
+    /// ADR-040: how a request came is in each entry, inside what the hash covers.
+    #[test]
+    fn each_entry_says_how_the_request_came() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Ledger::open(dir.path().join("ledger.jsonl"));
+        let plain = l.append(new("from a unit")).unwrap();
+        assert!(plain.body.data.get("via").is_none());
+        l.set_via(Some("sudo".into()));
+        let e = l.append(new("through sudo")).unwrap();
+        assert_eq!(e.body.data["via"], "sudo");
+        assert_eq!(e.body.data["a"], 1, "the entry's own data is kept");
+        assert_eq!(l.verify().unwrap(), 2);
+        let p = dir.path().join("ledger.jsonl");
+        fs::write(&p, fs::read_to_string(&p).unwrap().replace("\"via\":\"sudo\"", "\"via\":\"socket\"")).unwrap();
+        assert!(l.verify().is_err(), "the note is covered by the hash");
     }
 
     #[test]

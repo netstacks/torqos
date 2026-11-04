@@ -276,6 +276,51 @@ in
       };
     };
 
+    # The broker's door (ADR-040): a socket anyone may connect to, because who may do what is
+    # decided inside — by the caller's uid, from the kernel (SO_PEERCRED), and the change's tier.
+    # Each connection is one `torq-broker serve`, as root, its standard input and output the
+    # connection. torqcli needs no sudo; `sudo torq-broker` stays the recovery door.
+    systemd.sockets.torq-broker = {
+      description = "TorqOS change broker";
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "/run/torq/broker.sock";
+        SocketMode = "0666";
+        Accept = true;
+        # A queue, not a crowd: the broker's lock serialises changes anyway.
+        MaxConnections = 16;
+      };
+    };
+    systemd.services."torq-broker@" = {
+      description = "TorqOS change broker: one request";
+      after = [ "torq-broker-init.service" ];
+      # Never stopped or restarted by a switch — the switch it is running, often.
+      restartIfChanged = false;
+      stopIfChanged = false;
+      serviceConfig = {
+        ExecStart = "${lib.getExe cfg.package} serve";
+        StandardInput = "socket";
+        StandardOutput = "socket";
+        StandardError = "journal";
+        # Its settings (and PATH) come from /etc/torq/broker.json, and it runs as it does under
+        # sudo: no ProtectHome, since a development source (`path:/home/…`, ADR-009) is built from
+        # a home.
+      };
+    };
+
+    # A system change's password (ADR-040), checked by the broker as root: the account's own
+    # password (pam_unix, never an empty one), and faillock counting failures, so that guessing
+    # is slow, logged, and stops — five wrong, ten minutes locked.
+    security.pam.services.torq-approve.text = ''
+      auth     required       ${pkgs.pam}/lib/security/pam_faillock.so preauth deny=5 unlock_time=600
+      auth     [success=1 default=ignore] ${pkgs.pam}/lib/security/pam_unix.so
+      auth     [default=die]  ${pkgs.pam}/lib/security/pam_faillock.so authfail deny=5 unlock_time=600
+      auth     sufficient     ${pkgs.pam}/lib/security/pam_faillock.so authsucc deny=5 unlock_time=600
+      auth     required       ${pkgs.pam}/lib/security/pam_deny.so
+      account  required       ${pkgs.pam}/lib/security/pam_faillock.so
+      account  required       ${pkgs.pam}/lib/security/pam_unix.so
+    '';
+
     # A commit confirmed still waiting at boot was not confirmed before the machine restarted: its
     # timer was transient and is gone, and the boot default was never changed, so this boot already
     # runs the system before it. Put the config back to match and ledger the rollback. Nothing

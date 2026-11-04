@@ -167,9 +167,15 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'printf \"configure\\nset users dev packages jq\\nexit\\nexit\\n\" | torqcli'")
         machine.succeed("su - dev -c 'test \"$(stat -c %a ~/.local/state/torq/candidate.json)\" = 600'")
         # The ledger is root's (its state directory is 0700): the numbers come through the broker, as a
-        # commit does. Without it there are no numbers, rather than git's (which a rollback can differ from).
+        # commit does — over its socket, for any account (ADR-040): reading the ledger needs no sudo.
+        # Without the broker there are no numbers, rather than git's (which a rollback can differ from).
+        machine.succeed("test \"$(stat -c %a /var/lib/torq/state)\" = 700")
+        out = machine.succeed("su - dev -c 'torqcli -c \"show system commit\"'")
+        assert out.splitlines()[0].startswith("Rollback"), out
+        machine.succeed("systemctl stop torq-broker.socket")
         out = machine.fail("su - dev -c 'torqcli -c \"show system commit\"' 2>&1")
-        assert "could not read the ledger" in out, out
+        assert "could not read the ledger" in out or "reaching the broker" in out, out
+        machine.succeed("systemctl start torq-broker.socket")
         out = machine.succeed("torqcli -c 'show system commit'")
         # (A heading, then the newest configuration: 0.)
         assert out.splitlines()[0].startswith("Rollback") and " host" in out.splitlines()[1] and "tester" in out.splitlines()[1], out
