@@ -161,7 +161,7 @@ Before an agent exists it needs an identity the kernel vouches for, and before a
 its record has to live off the machine. Both faces want this: a server's ledger anchored in git is
 the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
 
-- [ ] **The broker as a socket service**, identity from `SO_PEERCRED`; `torqcli` without sudo;
+- [~] **The broker as a socket service** (built 2026-11-04, ADR-040, `tests/socket.nix`; adversarial review before `main`), identity from `SO_PEERCRED`; `torqcli` without sudo;
       `--actor` and `--approved-by` no longer taken from the caller (KNOWN-GAPS 4, 6a). System-tier
       approval asks the owner's password (a terminal now; a dialog on the desktop, M4). `torq-broker`
       under sudo stays for dev mode and recovery. The audit's socket items (N16, N15) with it.

@@ -23,7 +23,13 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    `torq.security.lockdown = "none"`, or swapping `torq.url` in `flake.nix`. Today only
    human review of the diff catches these. Needs a design (evaluate the old and new config and
    diff protected options?).
-4. **Caller-supplied identity:** `--actor`, `--tainted` and `--approved-by` are trusted as given.
+4. **Caller-supplied identity — closed on the socket (ADR-040, 2026-11-04, `tests/socket.nix`).**
+   The broker's socket takes the caller from `SO_PEERCRED` and refuses `--actor`, `--approved-by`
+   and any file path; torqcli uses it, without sudo; a system change asks the caller's password
+   (PAM). What stays: `sudo torq-broker` (dev mode and recovery) is root, and still trusts the
+   flags it is given — its entries are marked `via: sudo`; `--tainted` can still only be set by the
+   caller (it only raises). The history of this item, as it stood before:
+   `--actor`, `--tainted` and `--approved-by` are trusted as given.
    (Configuration no longer is: a root broker takes its repo, state directory, rebuild command and
    PATH/HOME only from `/etc/torq/broker.json`, refuses a flag or `TORQ_*` variable that differs,
    and clears its caller's environment — ADR-016, piece 1e.) Fine under sudo in M1; the M3 socket
@@ -50,9 +56,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    (~770 MB). The fix is the one above: the dev source as `git+file:///home/<you>/torq` (committed
    files only, `.gitignore` respected).
 
-6a. **User tier is not bound to a user:** `users/alice/packages.json` is user tier whoever proposes
-   it, so an agent session acting for viper could change alice's apps. Needs the caller identity
-   from #4 (M3 socket). A user's packages also act in that user's *session*: autostart entries,
+6a. **User tier is not bound to a user — closed on the socket (ADR-040):** a person applies their
+   own folder (`users/<them>/`) without a password; anyone else's needs an administrator and their
+   password. Before: `users/alice/packages.json` was user tier whoever proposed
+   it, so an agent session acting for viper could change alice's apps. A user's packages also act in that user's *session*: autostart entries,
    D-Bus session services and systemd user units from their profile (never system-wide).
 
 6b. **Drift detection has blind spots** (ADR-012): a lock that never frees (a leaked holder) makes
@@ -261,7 +268,7 @@ is 6p, N18 is 6 (below).
 | N11 | The broker takes `$6$` alone as a hash | fixed: crypt's whole form (`policy::password_hash_ok`) |
 | N14 | `TORQ_NIXOS_SCHEMA` honoured in release builds | not so: only a test reads it; torqcli reads /etc/torq/nixos-schema.json, fixed |
 | N15 | Helpers found through PATH (`nix`, `git`, `id`, `ssh-keygen`, …) | open — absolute paths |
-| N16 | The broker reads `--diff`/`--hash-file` without an owner check or O_NOFOLLOW | open (matters with the M3 socket) |
+| N16 | The broker reads `--diff`/`--hash-file` without an owner check or O_NOFOLLOW | closed on the socket (ADR-040): a diff or hash comes in the request, written by the broker to its own 0700 directory; `sudo torq-broker` is root reading root's choice |
 | N17 | The /etc/nixos guard stops the default path only; CLAUDE.md says more | CLAUDE.md reworded; the guard is as SECURITY-MODEL says |
 | N19 | Every proposal's diff is in the ledger; each call parses it all | open — diffs by hash beside it |
 

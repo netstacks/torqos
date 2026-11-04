@@ -249,7 +249,9 @@ broker first.
   torqcli -c "request system update; configure; show | compare; commit comment \"…\""   # asks y/N
   ```
   Read the prompt before answering: it must show only `[edit system software]` (not `[edit system
-  software torq]`, which would change where TorqOS comes from).
+  software torq]`, which would change where TorqOS comes from). From ADR-040 on (the broker on a
+  socket), torqcli needs no sudo, and a system commit then asks the owner's password at the
+  terminal — the owner gives it for dev work; it is never written into the repo or memory.
   To change the machine's config repo itself (not just bump inputs), do it by hand:
   ```bash
   rm -rf /tmp/cfg && cp -r /var/lib/torq/config /tmp/cfg && cd /tmp/cfg   # edit, then:

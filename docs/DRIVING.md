@@ -118,7 +118,7 @@ before you go on. A ⏹ with *adversarial* means both kinds.
 
 ### M3 — trust (ADR-035, ADR-036)
 Order matters: the socket first, because everything after keys on identity.
-- [ ] The broker as a socket service; `SO_PEERCRED`; torqcli without sudo; the owner's password
+- [~] The broker as a socket service (built on `socket-broker`, ADR-040; the adversarial review next); `SO_PEERCRED`; torqcli without sudo; the owner's password
       for system tier. *Test:* a VM test that a caller cannot name its actor or approver.
       **⏹ adversarial.**
 - [ ] The agent's account `torq-agent` and the allow-list at the broker. *Test:* `torq-agent`
