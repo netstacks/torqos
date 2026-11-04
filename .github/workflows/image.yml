@@ -1,6 +1,6 @@
 # The TorqOS images (docs/INSTALL.md), x86_64 and aarch64, each built on a runner of its own
 # architecture: the qcow2 (UTM, QEMU, Proxmox), the VMDK (VMware ESXi) and the ISO installer (real
-# hardware, ADR-031), kept as the run's artifacts with their checksums. Run by hand (Actions →
+# hardware, ADR-031), kept a day as the run's artifacts with their checksums. Run by hand (Actions →
 # image → Run workflow, or `gh workflow run image.yml`), and as a step of every release
 # (release.yml).
 name: image
@@ -64,4 +64,6 @@ jobs:
         with:
           name: torqos-${{ matrix.system }}
           path: out/
-          retention-days: 14
+          # A day: a release publishes them (release.yml) within its own run, and the repo is private, so
+          # every stored GB counts against its 0.5 GB of Actions storage. A hand run's images: download them that day.
+          retention-days: 1
