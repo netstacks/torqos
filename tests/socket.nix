@@ -28,6 +28,10 @@ pkgs.testers.runNixOSTest {
     torq.broker.rebuildCommand = "seq 1 6000 >&2";
     # socat speaks to the socket; jq reads the answers; tmux is a terminal to type a password at.
     environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.tmux pkgs.pam ];
+    # su asks at a terminal: the password typed into one, as dev (the su check, below).
+    environment.etc."torq-test/su-as-dev".text = ''
+      (sleep 1; printf '%s\n' "$1") | script -qec "su dev -c 'touch /tmp/su-$2'" /dev/null
+    '';
     environment.etc."torq-test/desktop.nix".text = "{ nightLight = false; }\n";
     environment.etc."torq-test/system.diff".text = ''
       --- a/desktop.nix
@@ -221,5 +225,33 @@ pkgs.testers.runNixOSTest {
         v = json.loads(machine.succeed(f"torq-broker --json propose --actor user --base {head()} --diff /tmp/by-hand.diff --reason by-root"))
         assert "via" not in v["data"], v
         machine.succeed("torq-broker verify")
+
+    with subtest("sudo, su and passwd lock as the broker does: five wrong, ten minutes, counted by root"):
+        machine.succeed("faillock --dir /run/torq/faillock --user dev --reset")
+        sudo = lambda pw: machine.execute(f"su - dev -c {shlex.quote(f'printf %s {shlex.quote(pw)} | sudo -S -k -p \"\" true')}")[0]
+        assert sudo("Torq-sock-2210") == 0, "the right password works"
+        for _ in range(5):
+            assert sudo("guess") != 0
+        assert sudo("Torq-sock-2210") != 0, "locked: even the right one"
+        # The same count as the broker's: locked there too.
+        code, v = answer(ask("dev", {"args": ["--json", "apply", "1"], "password": "Torq-sock-2210"}))
+        assert code in (1, 77), (code, v)
+        machine.fail("su - dev -c 'faillock --dir /run/torq/faillock --user dev --reset'")
+        machine.succeed("faillock --dir /run/torq/faillock --user dev --reset")
+        assert sudo("Torq-sock-2210") == 0, "unlocked by root"
+        # su still works with the right password (through a terminal, as su asks), and counts a wrong one.
+        def su(pw, mark):
+            machine.execute(f"rm -f /tmp/su-{mark}")
+            machine.execute(f"su - sam -c {shlex.quote(f'sh /etc/torq-test/su-as-dev {shlex.quote(pw)} {mark}')}")
+            return machine.execute(f"test -e /tmp/su-{mark}")[0] == 0
+        assert su("Torq-sock-2210", "right"), "su with the right password"
+        assert not su("guess", "wrong"), "su with a wrong one"
+        assert int(machine.succeed("faillock --dir /run/torq/faillock --user dev | grep -c '^[0-9]'").strip()) >= 1
+        machine.succeed("faillock --dir /run/torq/faillock --user dev --reset")
+
+        for svc in ["sudo", "su", "passwd"]:
+            stack = machine.succeed(f"grep -E '^auth' /etc/pam.d/{svc}")
+            assert "pam_faillock.so preauth dir=/run/torq/faillock deny=5" in stack and "authfail dir=/run/torq/faillock" in stack, (svc, stack)
+            assert "pam_faillock.so required" not in stack.replace("  ", " "), stack
   '';
 }

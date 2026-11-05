@@ -412,11 +412,8 @@ Its §5 lists claims without a test.
    the whole request within 10 s; the reply through a bounded queue, so a caller that stops reading,
    or reads too slowly, is dropped and the broker never waits on it (the second review); four connections per
    account; every entry records the kernel-given `caller`; Nix's build users (uid 30001 on) are not
-   people. Open:
-   - **sudo has no lockout.** faillock guards the broker's password check, but a program running as
-     the owner can guess the same password through `sudo -S`, su or passwd — pam_unix's delay only,
-     no limit. Adding faillock to sudo and su (the same directory) changes how the owner is locked out
-     machine-wide: the owner's decision, not yet taken.
+   people; and sudo, su and passwd lock as the broker does (the owner's decision, 2026-11-04:
+   `torq.security.passwordLockout`, the same count in the same root-only directory). Open:
    - **The agent as a DynamicUser** (ai.nix's plan) would not be in /etc/passwd, which the broker
      reads to name its caller: the agent's account (M3's next item) is a static system user.
    - **Proposals are not limited.** A person (or the agent) can propose as often, and as large

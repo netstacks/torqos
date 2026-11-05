@@ -108,10 +108,10 @@ in
       "d /var/lib/torq 0755 root root -"
       "d ${cfg.stateDir} 0700 root root -"
       "d /run/torq 0755 root root -"
-      # faillock's counts of wrong passwords (ADR-040): root's alone, so a program running as a
-      # person cannot reset its own between guesses.
-      "d /run/torq/faillock 0700 root root -"
     ];
+    # faillock's counts of wrong passwords (ADR-040): root's alone, so a program running as a person
+    # cannot reset its own between guesses. (The same entry as modules/security.nix's, for sudo and su.)
+    systemd.tmpfiles.settings."10-torq-faillock"."/run/torq/faillock".d = { mode = "0700"; user = "root"; group = "root"; };
 
     # Drift from the ledger (the machine switched to another configuration, the config repo
     # changed behind the broker's back, an interrupted operation, a broken ledger) must not go
