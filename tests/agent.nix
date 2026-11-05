@@ -20,7 +20,7 @@ pkgs.testers.runNixOSTest {
     # The owner lets the agent propose ssh's settings, and nothing else of the system.
     torq.agent.mayPropose.settings = [ "services.openssh" ];
     torq.broker.rebuildCommand = "true";
-    environment.systemPackages = [ pkgs.socat pkgs.jq ];
+    environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.tmux ];
   };
 
   testScript = ''
@@ -102,5 +102,38 @@ pkgs.testers.runNixOSTest {
         assert code == 1 and "a person applies" in v["error"], (code, v)
         code, v = ask("dev", {"args": ["--json", "apply", str(p["seq"])]})
         assert code == 0 and v["approved_by"] == "dev", (code, v)
+
+    with subtest("a person sees the agent's proposals and applies one, at the terminal"):
+        # Proposed against the configuration as it is now (the one before was prepared against an
+        # older one, and the broker would refuse it: the configuration has moved on since).
+        code, v = propose(services("{\"openssh\": {\"enable\": true}, \"nginx\": {\"enable\": false}}"), "ssh on, now")
+        assert code == 0, (code, v)
+        out = machine.succeed("su - dev -c 'torqcli show system proposals'")
+        assert "ssh on" in out and "agent (torq-agent)" in out and "htop for dev" not in out, out
+        ssh = v["seq"]
+        # Not a proposal, or one already applied: said, nothing done.
+        out = machine.fail("su - dev -c 'torqcli request system apply 1' 2>&1")
+        assert "not a proposal waiting" in out, out
+        # Without a terminal, nobody to ask: not applied.
+        machine.fail(f"su - dev -c 'torqcli request system apply {ssh}' < /dev/null")
+        machine.succeed(f"git -C {repo} show HEAD:nixos/services.json | grep -q '\"openssh\": {{\"enable\": false}}'")
+        # At a terminal: the diff shown, the question, then dev's password (a system change).
+        machine.succeed(f"su - dev -c \"tmux new-session -d -s a -x 160 -y 50 'torqcli request system apply {ssh}; sleep 600'\"")
+        pane = lambda: machine.succeed("su - dev -c 'tmux capture-pane -p -t a'")
+        machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t a' | grep -q 'Apply?'", timeout=60)
+        assert "Proposal #" in pane() and "by torq-agent" in pane() and "openssh" in pane() and "This changes the system" in pane(), pane()
+        machine.succeed("su - dev -c 'tmux send-keys -t a y Enter'")
+        machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t a' | grep -q 'Password for dev:'", timeout=60)
+        machine.succeed("su - dev -c 'tmux send-keys -t a Torq-sock-2210 Enter'")
+        try:
+            machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t a' | grep -q 'applied proposal'", timeout=60)
+        except Exception:
+            print(pane())
+            raise
+        machine.succeed(f"git -C {repo} show HEAD:nixos/services.json | grep -q '\"openssh\": {{\"enable\": true}}'")
+        e = last()
+        assert e["kind"] == "applied" and e["approved_by"] == "dev" and e["data"]["proposal"] == ssh, e
+        out = machine.succeed("su - dev -c 'torqcli show system proposals'")
+        assert "ssh on, now" not in out, out
   '';
 }

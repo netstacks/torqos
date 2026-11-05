@@ -135,6 +135,82 @@ impl Machine for Real<'_> {
         Ok(warnings)
     }
 
+    fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64> {
+        let scratch = scratch_dir()?;
+        let file = scratch.path().join("change.diff");
+        fs::write(&file, diff)?;
+        let log = run::start_log()?;
+        let file = file.to_string_lossy();
+        let args = propose_args(&file, base, reason);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let proposed = done(run::broker_json(broker(self.cli, &args)?, &log)?, "propose")?;
+        proposed["seq"].as_u64().context("the broker did not say which proposal it made")
+    }
+
+    fn proposals(&self, fit: Option<usize>) -> Result<String> {
+        let entries = crate::read_ledger(self.cli)?;
+        let waiting = waiting_proposals(&entries);
+        if waiting.is_empty() {
+            return Ok("No proposals are waiting.\n".into());
+        }
+        let width = fit.unwrap_or(usize::MAX);
+        let mut out = String::from("Waiting for a person (request system apply <n>):\n");
+        for e in waiting {
+            let by = e.data["caller"].as_str().map_or(e.actor.clone(), |c| format!("{} ({})", e.actor, c));
+            let line = format!(
+                "  #{:<4} {}  {:<6} {}{}  {}",
+                e.seq,
+                history::one_line(&e.ts, 25),
+                history::one_line(&e.tier, 8),
+                history::one_line(&by, 30),
+                if e.tainted { "  ⚠ read untrusted content" } else { "" },
+                history::one_line(&e.reason, 80)
+            );
+            out.push_str(&format!("{}\n", history::one_line(&line, width)));
+        }
+        Ok(out)
+    }
+
+    fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
+        let entries = crate::read_ledger(self.cli)?;
+        if !waiting_proposals(&entries).iter().any(|e| e.seq == seq) {
+            bail!("#{seq} is not a proposal waiting to be applied (show system proposals lists them)");
+        }
+        let log = run::start_log()?;
+        let seq_s = seq.to_string();
+        let p = done(run::broker_json(broker(self.cli, &["show", &seq_s])?, &log)?, "apply")?;
+        // The entry as the ledger has it: its fields at the top (the broker flattens its body).
+        let body = &p;
+        let (tier, tainted) = (body["tier"].as_str().unwrap_or("system").to_string(), body["tainted"].as_bool().unwrap_or(false));
+        let files: Vec<String> = body["data"]["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(|f| history::one_line(f, 80)).collect();
+        let by = body["data"]["caller"].as_str().or(body["actor"].as_str()).unwrap_or("?");
+        let diff: String = body["data"]["diff"].as_str().unwrap_or_default().lines().map(|l| format!("  {}\n", history::clean(l))).collect();
+        let what = format!(
+            "Proposal #{seq} \"{}\" (by {}, {})\n  files: {}\n{diff}",
+            history::one_line(body["reason"].as_str().unwrap_or_default(), 60),
+            history::one_line(by, 30),
+            history::one_line(body["ts"].as_str().unwrap_or_default(), 25),
+            files.join(", "),
+        );
+        let why = match (tier.as_str(), tainted) {
+            (_, true) => "The session that proposed it read untrusted content (the web, mail, a download): check it closely. ",
+            ("system", false) => "This changes the system (all users). ",
+            _ => "",
+        };
+        if let Some(stop) = self.ask(&format!("{what}{why}Apply? ")).go_on("applied")? {
+            return Ok(stop);
+        }
+        let mut args = vec!["apply", &seq_s, "--approved-by", me];
+        if tainted {
+            args.push("--confirm-tainted"); // asked just now, in words
+        }
+        let v = {
+            let _p = if crate::asks_for_password(self.cli) { None } else { Some(run::Progress::start("Applying")) };
+            done(run::broker_json(broker(self.cli, &args)?, &log)?, "apply")?
+        };
+        Ok(format!("applied proposal #{seq} (change #{})\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64> {
         let scratch = scratch_dir()?;
         let file = scratch.path().join("change.diff");
@@ -600,6 +676,16 @@ fn writes_never_go_through_a_link() {
     assert!(no_link_on_the_way(d.path(), "system/host.json").is_ok());
 }
 
+
+/// The proposals no one has applied (or tried to): what `show system proposals` lists and
+/// `request system apply` takes.
+fn waiting_proposals(entries: &[history::Entry]) -> Vec<&history::Entry> {
+    entries
+        .iter()
+        .filter(|e| e.kind == "proposal")
+        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed") && e.data["proposal"].as_u64() == Some(p.seq)))
+        .collect()
+}
 /// `propose`'s arguments. Every value given as `--name=value`: a reason or comment that starts with
 /// `-` (any change of an existing value does: "-   host-name two; …") must not read as an option.
 fn propose_args(diff: &str, base: &str, reason: &str) -> Vec<String> {

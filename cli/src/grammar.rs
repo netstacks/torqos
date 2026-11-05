@@ -246,12 +246,14 @@ static SHOW_SYSTEM: &[Node] = &[
     fixed("alarms", "Whether this machine is as its history says", In::Op).whole(|r| Ok(Op::ShowAlarms { display: r.display })).pipes(Pipes::Views(DETAIL)),
     fixed("commit", "The configurations so far, newest first", In::Op).whole(|r| Ok(Op::ShowCommits { display: r.display })).pipes(Pipes::Views(DETAIL)),
     fixed("ledger", "Every change, as the ledger has it (refused and failed ones too)", In::Op).whole(ledger).pipes(Pipes::Filters).then(&[value(Value::Count, "How many entries (20)").whole(ledger).pipes(Pipes::Filters)]),
+    fixed("proposals", "Changes proposed and waiting for a person (the agent's): request system apply <n> applies one", In::Op).whole(|_| Ok(Op::ShowProposals)).pipes(Pipes::Filters),
     fixed("rollback", "An earlier configuration, or how two differ", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(show_rollback).pipes(Pipes::Views(CONFIGURATION_VIEWS)).then(&[fixed("compare", "How it differs from another one", In::Op).then(&[value(Value::Rollback, "The configuration to compare with").whole(show_rollback).pipes(Pipes::Views(COMPARISON))])])]),
     fixed("storage", "The disks: size and use, and the system versions kept", In::Op).whole(|_| Ok(Op::ShowStorage)).pipes(Pipes::Filters),
     fixed("uptime", "How long the machine has run, its load, and its last change", In::Op).whole(|_| Ok(Op::ShowUptime)).pipes(Pipes::Filters),
 ];
 
 static REQUEST_SYSTEM: &[Node] = &[
+    fixed("apply", "Apply a change someone else proposed (the agent's): it shows it and asks first", In::Op).then(&[value(Value::Change, "The proposal's number, from show system proposals").whole(|r| Ok(Op::Request(Request::Apply { proposal: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
     fixed("password", "Change a person's password (yours, or <user>'s)", In::Op).whole(password).then(&[value(Value::User, "Whose (yours, if none)").whole(password)]),
     fixed("repair", "Return a machine changed outside TorqOS to its last configuration (it asks first)", In::Op).whole(|_| Ok(Op::Request(Request::Repair))),
     fixed("revert", "Undo one change: a new change that reverses it (it asks first, unless it only touches your own settings)", In::Op).then(&[value(Value::Change, "The change's number, from show system ledger").whole(|r| Ok(Op::Request(Request::Revert { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),

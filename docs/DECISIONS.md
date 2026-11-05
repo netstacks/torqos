@@ -921,8 +921,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   same branch or the one after: with requests no longer root's own, the broker re-fetches each
   changed input itself and checks its hash and signature.
 
-## ADR-041 — The agent's account: `torq-agent`, and what it may propose (proposed)
-- **Status:** proposed, 2026-11-05; ADR-035's account lever, after ADR-040 (the socket). The owner:
+## ADR-041 — The agent's account: `torq-agent`, and what it may propose
+- **Status:** accepted (the owner, 2026-11-04: "do it"); 1–4 built 2026-11-05, 5 designed and next. ADR-035's account lever, after ADR-040 (the socket). The owner:
   people will drive TorqOS with the AI tools they already use — Claude Code first — so the account
   is made to be one such a tool can run as, not only TorqOS's own agent (M5).
 - **Context:** ADR-040 made identity the kernel's: whatever arrives from the `torq-agent` uid is

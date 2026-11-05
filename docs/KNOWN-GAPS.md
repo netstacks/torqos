@@ -348,7 +348,10 @@ Its §5 lists claims without a test.
    in words and exits 0. Scripts and monitoring use `sudo torq-broker --json status` (its `ok`,
    `busy`, exit codes), which is what `torq status` read. Pending-change detail (`torq log <n>`) has
    no torqcli view yet beyond `show system ledger`. (Found by review of 4g.)
-6m. **The fence is not the AI's boundary.** modules/settings-fence.nix keeps the broker's own inputs
+6m. **The fence is not the AI's boundary — the agent's list is (ADR-041, 2026-11-05, `tests/agent.nix`):** the broker
+   refuses every proposal of the agent's account that changes a setting outside `torq.agent.mayPropose`
+   (none by default), or anything that is no setting, and ledgers the refusal. What stays as below
+   is the fence for people's own changes. Before: modules/settings-fence.nix keeps the broker's own inputs
    out of the configuration tree's data and refuses module directives (`_type`) in it, but settings
    that run code as root — a service's script, sudo rules, wrappers, tmpfiles, activation scripts,
    binary caches and their keys, extra groups — stay settable: ordinary system-tier power when a
@@ -434,3 +437,16 @@ Its §5 lists claims without a test.
      built from a home). N5's sandboxing comes with the root units' own.
    - A caller that reads too slowly (the reply queue) is not yet exercised by a test; nor is
      a switch that changes `torq-broker.socket` while an instance runs.
+
+6zg. **The agent's account, first step (ADR-041)** — open ends:
+   - **Running a tool as the agent** (Claude Code, the owner's wish) is designed, not built: `torq
+     agent run [--share <dir>] -- <command>` (ADR-041, 5). Until then a person can run one as the
+     account by hand (`sudo -u torq-agent …`, an administrator's), with nothing of their own shared.
+   - **The agent's own `commit`** (it proposes and stops) is tested in torqcli's unit tests, not in a
+     VM: the VM tests' configurations are stubs torqcli cannot evaluate.
+   - **Stale proposals stay listed.** A proposal prepared against an older configuration is refused
+     at `request system apply` (the configuration has moved on), but `show system proposals` still
+     lists it; there is no way to withdraw or expire one.
+   - **The list is by setting, not by what a setting does.** `services.openssh` allows every option
+     under it — `services.openssh.extraConfig` included. Listing a subtree is trusting the agent
+     with all of it; the narrower the list, the safer.

@@ -9,6 +9,9 @@ use crate::tree::Schema;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+/// The agent's account (ADR-041, modules/agent.nix): its commit proposes and stops.
+const AGENT: &str = "torq-agent";
+
 /// What the session needs from the machine: evaluation and the broker.
 pub trait Machine {
     /// `commit check`: does the configuration at commit `base`, with these tree files changed
@@ -53,6 +56,12 @@ pub trait Machine {
     fn ssh_keys(&self, base: &str, files: &[(String, Option<String>)]) -> Result<(String, Vec<String>)>;
     /// `show system ledger <count>`: the ledger's last entries, as a person reads them.
     fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String>;
+    /// The proposals waiting for a person (ADR-041): `show system proposals`.
+    fn proposals(&self, fit: Option<usize>) -> Result<String>;
+    /// `request system apply <n>`: show proposal <n>, ask, apply it (as `me`).
+    fn apply_proposal(&self, seq: u64, me: &str) -> Result<String>;
+    /// Propose `diff` against `base` and stop there (the agent's commit, ADR-041): the proposal's number.
+    fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64>;
     /// The running machine: its versions, uptime, interfaces and disks (facts.rs).
     fn facts(&self) -> Result<crate::facts::Facts>;
     /// `request system revert <change>`: undo that one change (a new change forward), asked as a
@@ -398,7 +407,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals => {
                 self.show_operational(op)
             }
             Op::Request(r) => self.request(r),
@@ -693,6 +702,7 @@ impl<'a> Session<'a> {
                 }
             }
             Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail), self.fit),
+            Op::ShowProposals => self.machine.proposals(self.fit),
             Op::ShowServices => {
                 // What the configuration in effect turns on: NixOS's services (`services <name> enable`,
                 // `virtualisation <name> enable`), and what the old list still turns on.
@@ -910,6 +920,7 @@ impl<'a> Session<'a> {
             syntax::Request::Repair => self.machine.repair(),
             syntax::Request::Password { user } => self.machine.set_password(user.as_deref().unwrap_or(&self.me.clone())),
             syntax::Request::Revert { change } => self.machine.revert(change, &self.me),
+            syntax::Request::Apply { proposal } => self.machine.apply_proposal(proposal, &self.me),
             syntax::Request::Update { all } => self.update(all),
             syntax::Request::SoftwareRollback { n } => self.software_rollback(n),
         }
@@ -1234,6 +1245,19 @@ impl<'a> Session<'a> {
             (_, false) => Some(format!("This changes the settings of: {}.", others.join(", "))),
             _ => None,
         };
+        // The agent proposes, and a person applies (ADR-040, ADR-041): its commit stops at the
+        // proposal — there is no one here to ask, and nothing it could approve.
+        if self.me == AGENT {
+            if o.confirm.is_some() {
+                bail!("not proposed: the agent proposes, and a commit confirmed is a person's to make");
+            }
+            let scratch = tempfile::tempdir()?;
+            let diff = candidate::unified_diff(scratch.path(), &changes)?;
+            let reason = crate::history::one_line(&o.comment.clone().unwrap_or_else(|| summary(&compare)), usize::MAX);
+            let seq = self.machine.propose(&diff, &base, &reason)?;
+            self.discard()?;
+            return Ok(warned + &self.said(&format!("proposed as #{seq}: a person applies it (request system apply {seq})")));
+        }
         // Asked: the warnings were shown with the question; not asked, they come with the outcome.
         let warned = if why.is_some() { String::new() } else { warned };
         if let Some(why) = why {
@@ -2035,6 +2059,16 @@ mod tests {
                 (Some(before), true) => Ok(("dev".into(), before.clone())),
                 _ => Ok(("dev".into(), self.keys.clone())),
             }
+        }
+        fn proposals(&self, _fit: Option<usize>) -> Result<String> {
+            Ok("(no proposals)\n".into())
+        }
+        fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
+            Ok(format!("applied proposal #{seq} for {me}\n"))
+        }
+        fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64> {
+            self.commits.borrow_mut().push((diff.into(), base.into(), "proposed".into(), reason.into(), None));
+            Ok(41)
         }
         fn revert(&self, seq: u64, me: &str) -> Result<String> {
             Ok(format!("reverted {seq} for {me}\n"))
@@ -3318,6 +3352,23 @@ mod tests {
         let m = Fake::default();
         let mut s = session(d.path(), None, &m);
         assert_eq!(run(&mut s, &["configure", "commit"]), "Entering configuration mode\ncommit complete (no changes)\n");
+    }
+
+    /// ADR-041: the agent's commit proposes and stops — no question (no one to ask), never applied;
+    /// a commit confirmed is not the agent's.
+    #[test]
+    fn the_agents_commit_proposes_and_stops() {
+        let (d, m) = (repo(), Fake { answer: false, ..Fake::default() });
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, AGENT);
+        let out = run(&mut s, &["configure", "set system time-zone UTC", "commit"]);
+        assert!(out.contains("proposed as #41: a person applies it (request system apply 41)"), "{out}");
+        assert!(!out.contains("Commit?") && !out.contains("commit complete"), "{out}");
+        assert_eq!(m.commits.borrow().len(), 1);
+        assert_eq!(m.commits.borrow()[0].2, "proposed", "proposed, not committed");
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, AGENT);
+        run(&mut s, &["configure", "set system time-zone UTC"]);
+        let e = format!("{:#}", s.exec("commit confirmed 5").unwrap_err());
+        assert!(e.contains("a commit confirmed is a person's"), "{e}");
     }
 
     #[test]
