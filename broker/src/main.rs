@@ -54,6 +54,7 @@ enum Cmd {
     RemoteKey,
     Push,
     RemoteShow,
+    RemoteClear { approved_by: String },
 }
 
 /// The command line, declared with clap's builder (its derive macros write an `allow(dead_code)`,
@@ -157,7 +158,8 @@ fn command_line() -> clap::Command {
         ))
         .subcommand(Command::new("remote-key").about("The machine's key for the config repo's remote (ADR-036): made the first time, kept after; its public half printed, to add to the repository as a deploy key with write access."))
         .subcommand(Command::new("push").about("Push the configuration and the ledger to the remote now (after every change it is pushed anyway; this is the timer's retry): the remote's ledger checked first."))
-        .subcommand(Command::new("remote").about("The remote: its URL, the last push, and what its ledger says of this one (asked now)."))
+        .subcommand(Command::new("remote").about("The remote: its URL, the last push, what its ledger said of this one then, and its alarm, if any."))
+        .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
         .subcommand(Command::new("serve").about(
             "Answer one request on the socket (torq-broker.socket hands it the connection as standard input and output): the caller from the kernel (SO_PEERCRED), what it may do by its account and the change's tier, a system change's password through PAM (ADR-040).",
         ))
@@ -201,6 +203,7 @@ fn parse_cli() -> Cli {
         "remote-key" => Cmd::RemoteKey,
         "push" => Cmd::Push,
         "remote" => Cmd::RemoteShow,
+        "remote-clear" => Cmd::RemoteClear { approved_by: by(sub) },
         other => unreachable!("clap knows no subcommand {other}"),
     };
     Cli {
@@ -308,7 +311,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     let writes = matches!(
         cli.cmd,
         Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. }
-            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. }
     );
     let _push = writes.then_some(PushAfter(&b));
     match cli.cmd {
@@ -332,12 +335,20 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 std::process::exit(1);
             }
         },
+        Cmd::RemoteClear { approved_by } => {
+            let e = b.clear_remote_alarm(&approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
         Cmd::RemoteShow => {
             let r = b.remote()?;
             let last = r.as_ref().and_then(|r| r.last());
             let key = r.as_ref().is_some_and(|r| r.key().exists());
             if json {
-                println!("{}", json!({ "url": r.as_ref().map(|r| r.url.clone()), "key": key, "last": last }));
+                let alarm = r.as_ref().and_then(|r| r.alarm());
+                println!("{}", json!({ "url": r.as_ref().map(|r| r.url.clone()), "key": key, "last": last, "alarm": alarm }));
             } else {
                 match (&r, &last) {
                     (None, _) => println!("no remote: this machine's configuration and ledger are kept here only"),

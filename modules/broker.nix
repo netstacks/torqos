@@ -177,6 +177,8 @@ in
       restartIfChanged = false;
       serviceConfig.Type = "oneshot";
       script = "${lib.getExe cfg.package} push || true";
+      # Each git call to the remote is stopped after a minute (the broker's); the whole, after five.
+      serviceConfig.TimeoutStartSec = "5min";
     };
     systemd.timers.torq-remote-push = lib.mkIf (config.torq.remote.url != null) {
       wantedBy = [ "timers.target" ];

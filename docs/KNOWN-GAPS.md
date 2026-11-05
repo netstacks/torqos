@@ -479,3 +479,20 @@ Its §5 lists claims without a test.
      ("N more not recorded") would close it.
    - **A refusal's hash is of the request's file as the broker re-reads it**: over the socket that is
      the broker's own copy (root's 0700 directory); under sudo, root's word.
+
+6zh. **The remote's open ends (ADR-036, the push and the anchor; its review, 2026-11-05).** Fixed
+   from it: a merge in the remote's ledger history is refused (a rewrite set beside it passed a
+   first-parent walk); the history is checked from the last commit verified, one ledger at a time;
+   every git call to the remote stopped after a minute (a remote that answered but never finished
+   held the broker's lock); `main` not pushed while a commit confirmed waits (its rollback would
+   have forked it); the ledger commit made on the remote's newest; the alarm sticky until a person
+   clears it, ledgered, and raised too for a ledger gone from the remote or a changed host key;
+   a day without a push an alarm; the wording blames neither side; paths quoted. Open:
+   - **The machine's alarm is root's.** Root can delete `alarm.json` or `verified`, as it can rewrite
+     the ledger. The record root cannot reach is the remote's protected `torq-ledger` branch; a check
+     of it from elsewhere (another machine, a CI job) is what makes the anchor root-proof.
+   - **First contact is trusted.** The host key is pinned when first seen (`accept-new`); a host key
+     given with the URL would close it. A changed key is an alarm; the fix, when it is a rotation,
+     is to remove `remote/known_hosts` as root and clear the alarm.
+   - **Not yet tested in a VM:** a commit confirmed rolled back with a remote (unit reasoning only).
+   - **The key's creation is not ledgered** (`remote-key`); only the URL, a setting, is.

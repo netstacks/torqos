@@ -1,7 +1,8 @@
 # NixOS VM test: the config repo's remote (ADR-036) — pushed after every change, the ledger anchored
-# there; a ledger rewritten here is an alarm, even one pushed on top by root; an unreachable remote
-# never fails a change. A second machine is the remote: a bare repository behind SSH that, as
-# branch protection would, refuses to rewrite or delete.
+# there as the branch `torq-ledger`. A ledger cut short here, one rewritten and pushed on top by root,
+# one set beside the remote's history in a merge — each an alarm, and a sticky one; an unreachable or
+# stalled remote never fails a change, nor holds the broker. A second machine is the remote: a bare
+# repository behind SSH that, as branch protection would, refuses to rewrite or delete.
 { pkgs, self }:
 
 pkgs.testers.runNixOSTest {
@@ -9,7 +10,8 @@ pkgs.testers.runNixOSTest {
 
   nodes.gitserver = { pkgs, ... }: {
     services.openssh.enable = true;
-    users.users.git = { isNormalUser = true; shell = "${pkgs.git}/bin/git-shell"; };
+    # bash, so that a forced command can stand in for a remote that stalls (below).
+    users.users.git = { isNormalUser = true; shell = pkgs.bash; };
     environment.systemPackages = [ pkgs.git ];
   };
 
@@ -27,13 +29,16 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    import json, shlex
+    import json, shlex, time
     start_all()
     gitserver.wait_for_unit("sshd.service")
-    gitserver.succeed("su - git -s /bin/sh -c 'git init -q --bare config.git && git -C config.git config receive.denyNonFastForwards true && git -C config.git config receive.denyDeletes true && mkdir -p ~/.ssh && chmod 700 ~/.ssh'")
+    fresh_remote = "git init -q --bare config.git && git -C config.git config receive.denyNonFastForwards true && git -C config.git config receive.denyDeletes true"
+    gitserver.succeed(f"su - git -c {shlex.quote(fresh_remote + ' && mkdir -p ~/.ssh && chmod 700 ~/.ssh')}")
     machine.wait_for_unit("multi-user.target")
     repo = "/var/lib/torq/config"
     remote = "/home/git/config.git"
+    url = "ssh://git@gitserver/home/git/config.git"
+    ssh = "ssh -F /dev/null -i /var/lib/torq/state/remote/key -o UserKnownHostsFile=/var/lib/torq/state/remote/known_hosts -o BatchMode=yes"
     machine.succeed(f"mkdir -p {repo} && echo '{{}}' > {repo}/desktop.json && touch {repo}/flake.nix && torq-broker init")
 
     def change(n):
@@ -46,8 +51,24 @@ pkgs.testers.runNixOSTest {
     def last():
         return json.loads(machine.succeed("cat /var/lib/torq/state/remote/last.json"))
 
+    def remote_git(cmd):
+        return gitserver.succeed(f"git -c safe.directory='*' -C {remote} {cmd}")
+
     def remote_ledger():
-        return gitserver.succeed(f"git -c safe.directory='*' -C {remote} cat-file blob refs/torq/ledger:ledger.jsonl")
+        return remote_git("cat-file blob refs/heads/torq-ledger:ledger.jsonl")
+
+    def local_ledger():
+        return machine.succeed("cat /var/lib/torq/state/ledger.jsonl")
+
+    def root_pushes(script):
+        # Root on the machine, with the machine's key: what the broker's checks must see through.
+        machine.succeed(f"cd {repo} && export GIT_SSH_COMMAND={shlex.quote(ssh)} && {script}")
+
+    def commit_ledger(parents):
+        ps = " ".join(f"-p {p}" for p in parents)
+        return ("blob=$(git hash-object -w /var/lib/torq/state/ledger.jsonl) && "
+                "tree=$(printf '100644 blob %s\\tledger.jsonl\\n' $blob | git mktree) && "
+                f"git -c user.name=root -c user.email=root@machine commit-tree $tree {ps} -m rewritten")
 
     with subtest("no key yet: a change still lands, and says so"):
         change(1)
@@ -60,58 +81,90 @@ pkgs.testers.runNixOSTest {
         machine.fail("su - dev -c 'cat /var/lib/torq/state/remote/key'")
         machine.fail("su -s /bin/sh torq-agent -c 'cat /var/lib/torq/state/remote/key'")
         gitserver.succeed(f"echo {shlex.quote(key)} > /home/git/.ssh/authorized_keys && chown git /home/git/.ssh/authorized_keys && chmod 600 /home/git/.ssh/authorized_keys")
-        change(2)
-        # (The proposal was pushed too, so the apply's push finds the remote agreeing.)
-        assert last()["ok"] and last()["anchor"]["state"] == "agrees", last()
-        assert gitserver.succeed(f"git -c safe.directory='*' -C {remote} rev-parse refs/heads/main").strip() == machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
-        assert remote_ledger() == machine.succeed("cat /var/lib/torq/state/ledger.jsonl")
-        change(3)
-        assert last()["ok"] and last()["anchor"]["state"] == "agrees", last()
-        assert remote_ledger() == machine.succeed("cat /var/lib/torq/state/ledger.jsonl")
-        # The remote's host key, pinned at first contact.
+        for n in [2, 3]:
+            change(n)
+            assert last()["ok"], last()
+            assert remote_git("rev-parse refs/heads/main").strip() == machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+            assert remote_ledger() == local_ledger()
+        # The ledger on the remote is a branch, one line of commits; the remote's host key, pinned.
+        assert remote_git("rev-list --count --min-parents=2 refs/heads/torq-ledger").strip() == "0"
         machine.succeed("grep -q gitserver /var/lib/torq/state/remote/known_hosts")
-        # And a person sees it, no sudo.
         out = machine.succeed("su - dev -c 'torqcli show system remote'")
-        assert "Remote: ssh://git@gitserver/home/git/config.git" in out and "Last push" in out and "as they are here" in out, out
+        assert f"Remote: {url}" in out and "Last push" in out and "as they are here" in out, out
 
-    with subtest("out of reach: the change lands, the push waits, the retry catches up"):
-        gitserver.succeed("systemctl stop sshd.socket sshd.service || systemctl stop sshd")
+    with subtest("out of reach, or stalled: the change lands, the broker is not held, the retry catches up"):
+        gitserver.succeed("systemctl stop sshd")
         change(4)
         assert not last()["ok"] and last()["anchor"]["state"] == "unreachable", last()
-        machine.succeed("torq-broker status")  # not an alarm: only late
+        machine.succeed("torq-broker status")  # late is not an alarm
         gitserver.succeed("systemctl start sshd")
         gitserver.wait_for_unit("sshd.service")
+        # A remote that answers but never finishes (a forced command that sleeps): a minute at most.
+        gitserver.succeed("sed -i 's|^|command=\"sleep 600\" |' /home/git/.ssh/authorized_keys")
+        t = time.time()
+        machine.fail("torq-broker push")
+        assert time.time() - t < 200, "stopped by the broker's time limit"
+        assert "longer than" in last()["error"], last()
+        gitserver.succeed("sed -i 's|^command=\"sleep 600\" ||' /home/git/.ssh/authorized_keys")
         machine.succeed("torq-broker push")
-        assert last()["ok"], last()
-        assert remote_ledger() == machine.succeed("cat /var/lib/torq/state/ledger.jsonl")
+        assert last()["ok"] and remote_ledger() == local_ledger(), last()
 
-    with subtest("a ledger cut short here is an alarm, and is not pushed"):
+    with subtest("set beside the history in a merge, by root: an alarm"):
         machine.succeed("cp /var/lib/torq/state/ledger.jsonl /tmp/ledger.good")
         machine.succeed("head -n -2 /tmp/ledger.good > /var/lib/torq/state/ledger.jsonl")
+        # A fake root holding the cut ledger, merged with the remote's real tip: not a rewind, so a
+        # remote that refuses rewinds takes it.
+        root_pushes(f"fake=$({commit_ledger([])}) && tip=$(git ls-remote {url} refs/heads/torq-ledger | cut -f1) && "
+                    f"git fetch -q {url} refs/heads/torq-ledger && "
+                    f"m=$({commit_ledger(['$fake', '$tip'])}) && git push -q {url} $m:refs/heads/torq-ledger")
+        out = machine.fail("torq-broker push")
+        assert "merge" in out, out
+        out = machine.fail("torq-broker status")
+        assert "disagree" in out, out
+
+    with subtest("the alarm stays: a remote out of reach does not clear it; a person does, ledgered"):
+        gitserver.succeed("systemctl stop sshd")
+        machine.fail("torq-broker push")
+        out = machine.fail("torq-broker status")
+        assert "disagree" in out, out
+        gitserver.succeed("systemctl start sshd")
+        gitserver.wait_for_unit("sshd.service")
+        e = json.loads(machine.succeed("torq-broker --json remote-clear --approved-by dev"))
+        assert e["kind"] == "remote_cleared" and e["approved_by"] == "dev", e
+        # Still true (the merge is still there): raised again at the next push.
+        out = machine.fail("torq-broker push")
+        assert "merge" in out, out
+
+    def fresh(ledger):
+        # A new, empty remote, this machine's ledger as given, and the alarm cleared (that is itself
+        # an entry, pushed at once: to the empty remote, which takes it).
+        gitserver.succeed(f"rm -rf {remote} && su - git -c {shlex.quote(fresh_remote)}")
+        machine.succeed(f"cp {ledger} /var/lib/torq/state/ledger.jsonl")
+        machine.succeed("torq-broker --json remote-clear --approved-by dev")
+        assert last()["ok"] and remote_ledger() == local_ledger(), last()
+
+    with subtest("cut short here: not pushed, an alarm"):
+        fresh("/tmp/ledger.good")
+        machine.succeed("cp /var/lib/torq/state/ledger.jsonl /tmp/ledger.good2")
+        machine.succeed("head -n -2 /tmp/ledger.good2 > /var/lib/torq/state/ledger.jsonl")
         machine.succeed("torq-broker verify")  # the chain alone cannot see a cut end (KNOWN-GAPS 2)
         before = remote_ledger()
         out = machine.fail("torq-broker push")
-        assert "not pushed" in out, out
+        assert "not pushed" in out and "missing here" in out, out
         assert remote_ledger() == before
         out = machine.fail("torq-broker status")
-        assert "not the one its remote was given" in out, out
+        assert "disagree" in out, out
 
-    with subtest("rewritten and pushed on top, by root with the machine's key: the remote's history says so"):
-        ssh = "ssh -F /dev/null -i /var/lib/torq/state/remote/key -o UserKnownHostsFile=/var/lib/torq/state/remote/known_hosts -o BatchMode=yes"
-        machine.succeed(
-            f"cd {repo} && blob=$(git hash-object -w /var/lib/torq/state/ledger.jsonl) && "
-            "tree=$(printf '100644 blob %s\\tledger.jsonl\\n' $blob | git mktree) && "
-            "c=$(git -c user.name=root -c user.email=root@machine commit-tree $tree -p refs/torq/ledger -m rewritten) && git update-ref refs/torq/ledger $c && "
-            f"GIT_SSH_COMMAND={shlex.quote(ssh)} git push -q ssh://git@gitserver/home/git/config.git refs/torq/ledger:refs/torq/ledger"
-        )
-        assert remote_ledger() == machine.succeed("cat /var/lib/torq/state/ledger.jsonl"), "the remote's newest is the rewritten one"
+    with subtest("rewritten here and pushed on top by root: the remote's history says so"):
+        fresh("/tmp/ledger.good2")
+        machine.succeed("cp /var/lib/torq/state/ledger.jsonl /tmp/ledger.good3")
+        machine.succeed("head -n -2 /tmp/ledger.good3 > /var/lib/torq/state/ledger.jsonl")
+        root_pushes(f"tip=$(git ls-remote {url} refs/heads/torq-ledger | cut -f1) && git fetch -q {url} refs/heads/torq-ledger && "
+                    f"c=$({commit_ledger(['$tip'])}) && git push -q {url} $c:refs/heads/torq-ledger")
+        assert remote_ledger() == local_ledger(), "the remote's newest is the rewritten one"
         out = machine.fail("torq-broker push")
-        assert "rewritten at its push" in out, out
-        # Whatever the remote allows (branch protection is its own), taking the rewrite back — a forced
-        # push of the history before it — leaves this machine's ledger still not the remote's start.
-        machine.execute(f"cd {repo} && GIT_SSH_COMMAND={shlex.quote(ssh)} git push -q --force ssh://git@gitserver/home/git/config.git $(git rev-parse refs/torq/ledger~1):refs/torq/ledger")
-        out = machine.fail("torq-broker push")
-        assert "not pushed" in out, out
-        machine.fail("torq-broker status")
+        assert "rewritten" in out, out
+        out = machine.fail("torq-broker status")
+        assert "disagree" in out, out
   '';
 }

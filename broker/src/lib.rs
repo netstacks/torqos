@@ -192,6 +192,10 @@ pub struct Status {
     /// The last exchange with the config repo's remote (ADR-036), if it has one: read, not asked —
     /// status goes nowhere on the network.
     pub remote: Option<remote::Pushed>,
+    /// A disagreement with the remote, kept until a person clears it.
+    pub remote_alarm: Option<remote::Alarm>,
+    /// The remote set, but its URL refused (not SSH): nothing is pushed.
+    pub remote_refused: Option<String>,
 }
 
 impl Status {
@@ -205,8 +209,28 @@ impl Status {
         if let Err(e) = &self.ledger {
             p.push(format!("ledger: {e}"));
         }
-        if let Some(remote::Anchor::Differs { why }) = self.remote.as_ref().and_then(|r| r.anchor.as_ref()) {
-            p.push(format!("the ledger here is not the one its remote was given: {why} (nothing more is pushed until this is understood)"));
+        // The remote (ADR-036). What a person reads here is this machine's own record: root can
+        // rewrite it as it can the ledger. The check that root cannot reach is the remote itself —
+        // its ledger branch, read from anywhere.
+        if let Some(a) = &self.remote_alarm {
+            p.push(format!(
+                "this machine's ledger and its remote's disagree (since {}): {} — nothing more is pushed until a person looks into it and clears it (torq-broker remote-clear)",
+                a.at, a.why
+            ));
+        }
+        if let Some(why) = &self.remote_refused {
+            p.push(format!("the remote is not used: {why}"));
+        }
+        if let Some(last) = self.remote.as_ref().filter(|l| !l.ok && l.error.as_deref().is_none_or(|e| !e.starts_with("no key yet"))) {
+            let day_ago = chrono::Utc::now() - chrono::Duration::hours(24);
+            let since = last.last_ok.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+            if since.is_none_or(|t| t < day_ago) {
+                p.push(format!(
+                    "nothing has reached the remote for a day or more ({}): {}",
+                    last.last_ok.as_deref().map_or("never".to_string(), |t| format!("last at {t}")),
+                    last.error.as_deref().unwrap_or("?")
+                ));
+            }
         }
         if let Some(i) = &self.interrupted {
             p.push(format!("the {} of #{} was interrupted: run `torq-broker reconcile --approved-by <name>`", i.op, i.target));
@@ -455,44 +479,127 @@ impl Broker {
         self.remote.as_deref().map(|u| remote::Remote::new(u, &self.state_dir)).transpose()
     }
 
-    /// After a change: the configuration and the ledger to the remote, if there is one — first the
-    /// remote's ledger, checked against this one (each push it was given must start with the one
-    /// before, and this one with the newest), and nothing pushed if it differs. Busy (another
-    /// operation, which will push when it is done): nothing. What happened is recorded either way,
-    /// for `status` and `show system remote`; a remote out of reach never fails the change.
+    /// After a change: the configuration and the ledger to the remote, if there is one (ADR-036).
+    ///
+    /// First the remote's ledger: its history must be one line (no merge), hold the commit checked
+    /// last time, and every push since must start with the one before; then this ledger must start
+    /// with the remote's newest. Anything else raises the alarm — sticky: nothing more is pushed
+    /// until a person clears it (`remote-clear`, ledgered) — and so does a remote whose ledger has
+    /// gone after one was pushed, or whose host key changed. Then the ledger, as a commit on top of
+    /// the remote's newest, and `main` with it (not while a commit confirmed waits: it may yet be
+    /// rolled back, and `main` is never rewound) — atomic, never forced. Busy: nothing (the operation
+    /// pushes when it is done). Out of reach: recorded; the change stands.
     pub fn sync_remote(&self) -> Result<Option<remote::Pushed>> {
         let Some(r) = self.remote()? else { return Ok(None) };
         let Some(_lock) = Lock::try_acquire(&self.state_dir)? else { return Ok(None) };
         let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let last_ok = r.last().and_then(|p| if p.ok { Some(p.at) } else { p.last_ok });
+        let fail = |error: String, anchor: Option<remote::Anchor>| remote::Pushed { at: now(), ok: false, error: Some(error), entries: 0, anchor, last_ok: last_ok.clone() };
         if !r.key().exists() {
-            let p = remote::Pushed { at: now(), ok: false, error: Some("no key yet: request system remote key".into()), entries: 0, anchor: None };
+            let p = fail("no key yet: request system remote key".into(), None);
             r.record(&p)?;
             return Ok(Some(p));
         }
-        let local = fs::read_to_string(self.ledger.path()).unwrap_or_default();
         let ssh = r.ssh_command();
-        let anchor = match self.repo.fetch_remote_ledger(&r.url, &ssh) {
-            Err(e) => remote::Anchor::Unreachable { error: format!("{e:#}") },
-            Ok(None) => remote::Anchor::Empty,
-            Ok(Some(_)) => match self.repo.remote_ledger_history() {
-                Ok(h) => remote::anchor_history(&h, &local),
-                Err(e) => remote::Anchor::Unreachable { error: format!("{e:#}") },
-            },
-        };
-        let pushed = match &anchor {
-            remote::Anchor::Unreachable { error } => Err(anyhow::anyhow!(error.clone())),
-            remote::Anchor::Differs { why } => Err(anyhow::anyhow!("not pushed: {why}")),
-            _ => {
-                let entries = self.ledger.read_all()?.len();
-                self.repo.record_ledger(self.ledger.path(), entries).and_then(|_| self.repo.push_remote(&r.url, &ssh)).map(|()| entries)
+        let anchor = self.check_remote(&r, &ssh);
+        if let remote::Anchor::Differs { why } = &anchor {
+            r.raise(why)?;
+        }
+        if let Some(a) = r.alarm() {
+            let p = fail(format!("not pushed: {}", a.why), Some(anchor));
+            r.record(&p)?;
+            return Ok(Some(p));
+        }
+        let tip = match &anchor {
+            remote::Anchor::Unreachable { error } => {
+                let p = fail(error.clone(), Some(anchor.clone()));
+                r.record(&p)?;
+                return Ok(Some(p));
             }
+            _ => r.verified(),
         };
+        let entries = self.ledger.read_all()?;
+        let with_main = pending_confirm(&entries).is_none();
+        let pushed = self
+            .repo
+            .record_ledger(self.ledger.path(), entries.len(), tip.as_deref())
+            .and_then(|c| self.repo.push_remote(&r.url, &ssh, with_main).map(|()| c));
         let p = match pushed {
-            Ok(entries) => remote::Pushed { at: now(), ok: true, error: None, entries, anchor: Some(anchor) },
-            Err(e) => remote::Pushed { at: now(), ok: false, error: Some(format!("{e:#}")), entries: 0, anchor: Some(anchor) },
+            Ok(commit) => {
+                r.set_verified(&commit)?;
+                remote::Pushed { at: now(), ok: true, error: None, entries: entries.len(), anchor: Some(anchor), last_ok: Some(now()) }
+            }
+            Err(e) => fail(format!("{e:#}"), Some(anchor)),
         };
         r.record(&p)?;
         Ok(Some(p))
+    }
+
+    /// What the remote's ledger says of this one (the checks of `sync_remote`), fetched now. On
+    /// agreement, its newest commit is the one verified.
+    fn check_remote(&self, r: &remote::Remote, ssh: &str) -> remote::Anchor {
+        let differs = |why: String| remote::Anchor::Differs { why };
+        let tip = match self.repo.fetch_remote_ledger(&r.url, ssh) {
+            Err(e) => {
+                let error = format!("{e:#}");
+                // A host key that changed is not "out of reach": it is someone else answering, or a
+                // key the owner rotated — a person decides which (the review of ADR-036).
+                if error.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") || error.contains("Host key verification failed") {
+                    return differs("the remote's host key is not the one pinned (someone else answering, or a new key: a person decides)".into());
+                }
+                return remote::Anchor::Unreachable { error };
+            }
+            Ok(None) if r.verified().is_some() => return differs("the remote's ledger is gone, though it was given one".into()),
+            Ok(None) => return remote::Anchor::Empty,
+            Ok(Some(tip)) => tip,
+        };
+        let walk = || -> Result<remote::Anchor> {
+            if !self.repo.ledger_history_linear(&tip)? {
+                return Ok(differs("the remote's ledger history has a merge in it: a rewrite set beside what it rewrites".into()));
+            }
+            let since = r.verified();
+            if let Some(v) = &since {
+                if !self.repo.has_ancestor(v, &tip)? {
+                    return Ok(differs("the remote's ledger no longer holds the history checked before: it was rewritten".into()));
+                }
+            }
+            // One ledger at a time: each push since the last check must start with the one before.
+            let mut prev = since.as_deref().map(|v| self.repo.ledger_at(v)).transpose()?;
+            for (i, c) in self.repo.ledger_commits(since.as_deref(), &tip)?.iter().enumerate() {
+                let text = self.repo.ledger_at(c)?;
+                if let Some(p) = &prev {
+                    if let remote::Anchor::Differs { why } = remote::anchor(Some(p), &text) {
+                        return Ok(differs(format!("the remote's ledger was rewritten by a later push ({} after the last check): {why}", i + 1)));
+                    }
+                }
+                prev = Some(text);
+            }
+            let local = fs::read_to_string(self.ledger.path()).unwrap_or_default();
+            let a = remote::anchor(prev.as_deref(), &local);
+            if matches!(a, remote::Anchor::Agrees { .. }) {
+                r.set_verified(&tip)?;
+            }
+            Ok(a)
+        };
+        walk().unwrap_or_else(|e| remote::Anchor::Unreachable { error: format!("{e:#}") })
+    }
+
+    /// A person clears the remote's alarm, having looked into it: ledgered, and the next push checks
+    /// the remote's whole history again (an alarm that is still true is raised again).
+    pub fn clear_remote_alarm(&self, approved_by: &str) -> Result<Entry> {
+        let r = self.remote()?.context("no remote is set")?;
+        let _l = Lock::acquire(&self.state_dir)?;
+        let why = r.alarm().map(|a| a.why).context("the remote has no alarm to clear")?;
+        r.clear()?;
+        self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(approved_by.into()),
+            kind: "remote_cleared".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: format!("The remote's alarm cleared: {}", why.chars().filter(|c| !c.is_control()).take(300).collect::<String>()),
+            data: json!({ "url": r.url }),
+        })
     }
 
     /// What the agent may propose (ADR-041): `torq.agent.mayPropose`, from broker.json.
@@ -608,6 +715,8 @@ impl Broker {
             pending_confirm,
             overdue,
             remote: self.remote().ok().flatten().and_then(|r| r.last()),
+            remote_alarm: self.remote().ok().flatten().and_then(|r| r.alarm()),
+            remote_refused: self.remote().err().map(|e| format!("{e:#}")),
             ledger,
             head: self.repo.head().ok(),
             dirty: self.repo.ensure_clean().is_err() && self.repo.head().is_ok(),
@@ -1966,6 +2075,8 @@ mod tests {
             pending_confirm: pending,
             overdue,
             remote: None,
+            remote_alarm: None,
+            remote_refused: None,
         }
     }
 

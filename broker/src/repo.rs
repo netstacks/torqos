@@ -1,5 +1,10 @@
 //! Git operations on the local config repo. Shells out to `git`; the broker identity is fixed.
 
+/// Where the ledger lives on the remote: a branch, so that branch protection can keep it (ADR-036).
+pub const REMOTE_LEDGER: &str = "refs/heads/torq-ledger";
+/// How long one git call to the remote may take, at most, in seconds.
+pub const NET_SECONDS: u64 = 60;
+
 use anyhow::{bail, Context, Result};
 use std::ffi::OsStr;
 use std::path::{self, Path, PathBuf};
@@ -41,9 +46,23 @@ impl Repo {
 
     /// Like `git_env`, but stdout's exact bytes (file contents must not be "repaired" into text).
     fn git_env_bytes(&self, env: &[(&str, &OsStr)], args: &[&str]) -> Result<Vec<u8>> {
+        self.git_run(env, args, None)
+    }
+
+    /// git itself: no hooks, no fsmonitor, paths literal, the broker's identity; `limit`: killed
+    /// after that many seconds (the network's calls).
+    fn git_run(&self, env: &[(&str, &OsStr)], args: &[&str], limit: Option<u64>) -> Result<Vec<u8>> {
         let user_name = format!("user.name={NAME}");
         let user_email = format!("user.email={EMAIL}");
-        let out = crate::config::command("git")
+        let mut c = match limit {
+            Some(s) => {
+                let mut c = crate::config::command("timeout");
+                c.args(["--kill-after=5", &s.to_string(), "git"]);
+                c
+            }
+            None => crate::config::command("git"),
+        };
+        let out = c
             .envs(env.iter().copied())
             // A path is a path, never a pattern: `*?[` in a proposed file's name match only itself
             // (the audit of ADR-041: ls-files took the first file a pattern matched).
@@ -69,6 +88,9 @@ impl Repo {
             .output()
             .context("running git")?;
         if !out.status.success() {
+            if limit.is_some() && out.status.code() == Some(124) {
+                bail!("git {} took longer than {} s and was stopped", args.first().unwrap_or(&""), limit.unwrap_or(0));
+            }
             bail!(
                 "git {} failed: {}",
                 args.join(" "),
@@ -80,64 +102,89 @@ impl Repo {
 
     /// git, to the remote (ADR-036): SSH and nothing else — no `ext::` (which runs a command), no
     /// `file://`, no other transport — with `ssh` as `ssh_command` names it (its key, its pinned
-    /// host key), and no more than a minute.
+    /// host key), objects checked as they come, no submodule followed, and stopped after
+    /// `NET_SECONDS` whatever the remote does (a remote that answers keepalives but sends nothing
+    /// must not hold the broker's lock: the review of ADR-036).
     fn git_net(&self, ssh_command: &str, args: &[&str]) -> Result<String> {
-        let mut a = vec!["-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always", "-c", "credential.helper=", "-c", "core.askPass="];
+        let mut a = vec![
+            "-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always", "-c", "credential.helper=", "-c", "core.askPass=",
+            "-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "-c", "submodule.recurse=false",
+        ];
         a.extend_from_slice(args);
-        let ssh = OsStr::new(ssh_command);
-        let env = [("GIT_SSH_COMMAND", ssh), ("GIT_TERMINAL_PROMPT", OsStr::new("0")), ("GIT_HTTP_LOW_SPEED_TIME", OsStr::new("30"))];
-        self.git_env(&env, &a)
+        let env = [("GIT_SSH_COMMAND", OsStr::new(ssh_command)), ("GIT_TERMINAL_PROMPT", OsStr::new("0"))];
+        Ok(String::from_utf8_lossy(&self.git_run(&env, &a, Some(NET_SECONDS))?).into_owned())
     }
 
-    /// Record the ledger in the repo as `refs/torq/ledger`: a commit holding `ledger.jsonl` as it is
-    /// now, on top of the one before (a chain git keeps, the remote can refuse to rewrite). Nothing
-    /// new when the ledger has not changed. The commit id, if there is one.
-    pub fn record_ledger(&self, ledger: &Path, entries: usize) -> Result<Option<String>> {
+    /// Record the ledger as `refs/torq/ledger`: a commit holding `ledger.jsonl` as it is now, on top
+    /// of `parent` — the remote's newest, when it has one, so that the chain is always the remote's
+    /// and more (a local ref moved or lost cannot fork it: the review of ADR-036). Nothing new when
+    /// the ledger is what `parent` holds.
+    pub fn record_ledger(&self, ledger: &Path, entries: usize, parent: Option<&str>) -> Result<String> {
         let ledger = path::absolute(ledger)?.to_string_lossy().into_owned();
         let blob = self.git(&["hash-object", "-w", "--", &ledger])?.trim().to_string();
         let tree = self.git_stdin(&["mktree"], &format!("100644 blob {blob}\tledger.jsonl\n"))?.trim().to_string();
-        let parent = self.git(&["rev-parse", "-q", "--verify", "refs/torq/ledger^{commit}"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        if let Some(p) = &parent {
+        if let Some(p) = parent {
             if self.git(&["rev-parse", &format!("{p}^{{tree}}")])?.trim() == tree {
-                return Ok(Some(p.clone()));
+                self.git(&["update-ref", "refs/torq/ledger", p])?;
+                return Ok(p.to_string());
             }
         }
         let msg = format!("ledger: {entries} entries");
         let mut args = vec!["commit-tree", tree.as_str(), "-m", msg.as_str()];
-        if let Some(p) = &parent {
-            args.extend(["-p", p.as_str()]);
+        if let Some(p) = parent {
+            args.extend(["-p", p]);
         }
         let commit = self.git(&args)?.trim().to_string();
-        let mut update = vec!["update-ref", "refs/torq/ledger", commit.as_str()];
-        if let Some(p) = &parent {
-            update.push(p.as_str()); // only on top of the one before: never rewritten
-        }
-        self.git(&update)?;
-        Ok(Some(commit))
+        self.git(&["update-ref", "refs/torq/ledger", &commit])?;
+        Ok(commit)
     }
+    // (The ledger, on the remote, is a branch: `torq-ledger`. Branch protection covers branches, so
+    // the remote can refuse to rewrite or delete it — GitHub's rulesets, for one, cover nothing else.)
 
-    /// Push the configuration (HEAD, as `main`) and the ledger's ref to `url` — never forced: the
-    /// remote's history only grows.
-    pub fn push_remote(&self, url: &str, ssh_command: &str) -> Result<()> {
-        self.git_net(ssh_command, &["push", "--porcelain", "--", url, "HEAD:refs/heads/main", "refs/torq/ledger:refs/torq/ledger"])?;
+    /// Push the ledger's ref to `url`, and the configuration (HEAD, as `main`) with it unless
+    /// `with_main` is false (a commit confirmed waits: it may yet be rolled back, and `main` is never
+    /// rewound) — never forced: the remote's history only grows. Atomic: both, or neither.
+    pub fn push_remote(&self, url: &str, ssh_command: &str, with_main: bool) -> Result<()> {
+        let ledger = format!("refs/torq/ledger:{REMOTE_LEDGER}");
+        let mut args = vec!["push", "--porcelain", "--atomic", "--no-recurse-submodules", "--", url, ledger.as_str()];
+        if with_main {
+            args.push("HEAD:refs/heads/main");
+        }
+        self.git_net(ssh_command, &args)?;
         Ok(())
     }
 
-    /// The remote's ledger, as it has it (None: it has none yet).
+    /// The remote's ledger: its newest commit, fetched as `refs/torq/remote-ledger` (None: it has
+    /// none).
     pub fn fetch_remote_ledger(&self, url: &str, ssh_command: &str) -> Result<Option<String>> {
-        let refs = self.git_net(ssh_command, &["ls-remote", "--", url, "refs/torq/ledger"])?;
+        let refs = self.git_net(ssh_command, &["ls-remote", "--", url, REMOTE_LEDGER])?;
         if refs.trim().is_empty() {
             return Ok(None);
         }
-        self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--", url, "+refs/torq/ledger:refs/torq/remote-ledger"])?;
-        Ok(Some(self.git(&["cat-file", "blob", "refs/torq/remote-ledger:ledger.jsonl"])?))
+        self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--no-recurse-submodules", "--", url, &format!("+{REMOTE_LEDGER}:refs/torq/remote-ledger")])?;
+        Ok(Some(self.git(&["rev-parse", "refs/torq/remote-ledger^{commit}"])?.trim().to_string()))
     }
 
-    /// Every ledger the remote was given, oldest first (after `fetch_remote_ledger`): each a commit
-    /// of `refs/torq/remote-ledger`'s history.
-    pub fn remote_ledger_history(&self) -> Result<Vec<String>> {
-        let commits = self.git(&["rev-list", "--reverse", "--first-parent", "refs/torq/remote-ledger"])?;
-        commits.lines().map(|c| self.git(&["cat-file", "blob", &format!("{c}:ledger.jsonl")])).collect()
+    /// Whether the remote's ledger history is one line — no merge anywhere in it: a merge would let a
+    /// rewrite sit beside the history it rewrites (the review of ADR-036, H1).
+    pub fn ledger_history_linear(&self, tip: &str) -> Result<bool> {
+        Ok(self.git(&["rev-list", "--count", "--min-parents=2", tip])?.trim() == "0")
+    }
+
+    /// Whether `ancestor` is in `tip`'s history.
+    pub fn has_ancestor(&self, ancestor: &str, tip: &str) -> Result<bool> {
+        self.is_ancestor(ancestor, tip)
+    }
+
+    /// The ledger commits after `since` (exclusive; None: from the first), oldest first, up to `tip`.
+    pub fn ledger_commits(&self, since: Option<&str>, tip: &str) -> Result<Vec<String>> {
+        let range = since.map_or(tip.to_string(), |s| format!("{s}..{tip}"));
+        Ok(self.git(&["rev-list", "--reverse", &range])?.lines().map(String::from).collect())
+    }
+
+    /// The ledger a ledger commit holds.
+    pub fn ledger_at(&self, commit: &str) -> Result<String> {
+        self.git(&["cat-file", "blob", &format!("{commit}:ledger.jsonl")])
     }
 
     fn git_stdin(&self, args: &[&str], input: &str) -> Result<String> {

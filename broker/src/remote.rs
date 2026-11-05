@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// a transport git would ask a helper for; as root, none of them.
 pub fn url_ok(url: &str) -> bool {
     let safe = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-/~".contains(c));
-    let host_ok = |h: &str| !h.is_empty() && !h.starts_with('-') && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-".contains(c));
+    let host_ok = |h: &str| !h.is_empty() && !h.starts_with(['-', '.']) && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-".contains(c));
     let user_ok = |u: &str| !u.is_empty() && !u.starts_with('-') && u.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
     if let Some(rest) = url.strip_prefix("ssh://") {
         let Some((authority, path)) = rest.split_once('/') else { return false };
@@ -47,6 +47,9 @@ pub struct Remote {
 pub struct Pushed {
     /// When it was tried (UTC, RFC 3339).
     pub at: String,
+    /// When a push last went through (UTC), whenever that was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ok: Option<String>,
     /// Whether it went through.
     pub ok: bool,
     /// Why not.
@@ -76,6 +79,10 @@ pub enum Anchor {
 
 impl Remote {
     pub fn new(url: &str, state_dir: &Path) -> Result<Self> {
+        // The paths go into the shell command git runs for ssh, single-quoted: none may hold a quote.
+        if state_dir.to_string_lossy().contains(['\'', '\n']) {
+            bail!("the broker's state directory has a quote in its name: no remote");
+        }
         if !url_ok(url) {
             bail!("the remote must be an SSH URL (ssh://host/path or user@host:path), not {url:?}");
         }
@@ -112,11 +119,48 @@ impl Remote {
     /// time, held to after), never a question, and a dead connection given up.
     pub fn ssh_command(&self) -> String {
         format!(
-            "ssh -F /dev/null -i {} -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile={} -o StrictHostKeyChecking=accept-new \
+            "ssh -F /dev/null -i '{}' -o IdentitiesOnly=yes -o IdentityAgent=none -o 'UserKnownHostsFile={}' -o StrictHostKeyChecking=accept-new \
              -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3",
             self.key().display(),
             self.dir.join("known_hosts").display()
         )
+    }
+
+    /// The remote's ledger commit last checked and found to agree (None: none yet, or forgotten —
+    /// then the whole of its history is checked).
+    pub fn verified(&self) -> Option<String> {
+        let v = std::fs::read_to_string(self.dir.join("verified")).ok()?;
+        let v = v.trim();
+        (v.len() == 40 && v.bytes().all(|b| b.is_ascii_hexdigit())).then(|| v.to_string())
+    }
+
+    pub fn set_verified(&self, commit: &str) -> Result<()> {
+        write_atomic(&self.dir, "verified", commit.as_bytes())
+    }
+
+    /// A disagreement with the remote, once found, stays until a person clears it
+    /// (`torq-broker remote-clear`, ledgered): a network blip, or a later push, does not make it go.
+    pub fn alarm(&self) -> Option<Alarm> {
+        serde_json::from_slice(&std::fs::read(self.dir.join("alarm.json")).ok()?).ok()
+    }
+
+    pub fn raise(&self, why: &str) -> Result<()> {
+        if self.alarm().is_some() {
+            return Ok(()); // the first one found is the one to look into
+        }
+        let a = Alarm { at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), why: why.to_string() };
+        write_atomic(&self.dir, "alarm.json", &serde_json::to_vec(&a)?)
+    }
+
+    /// Clear the alarm, and what was verified: the next push checks the remote's whole history again.
+    pub fn clear(&self) -> Result<()> {
+        for f in ["alarm.json", "verified"] {
+            match std::fs::remove_file(self.dir.join(f)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub fn last(&self) -> Option<Pushed> {
@@ -133,6 +177,21 @@ impl Remote {
     }
 }
 
+/// A disagreement between this machine's ledger and its remote's.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Alarm {
+    pub at: String,
+    pub why: String,
+}
+
+fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let tmp = dir.join(format!("{name}.tmp"));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, dir.join(name)).with_context(|| format!("writing {}", dir.join(name).display()))
+}
+
 /// Compare the remote's ledger (its text) with this machine's: it must be this one's first lines,
 /// exactly.
 pub fn anchor(remote: Option<&str>, local: &str) -> Anchor {
@@ -140,24 +199,12 @@ pub fn anchor(remote: Option<&str>, local: &str) -> Anchor {
     let r: Vec<&str> = remote.lines().filter(|l| !l.trim().is_empty()).collect();
     let l: Vec<&str> = local.lines().filter(|l| !l.trim().is_empty()).collect();
     if r.len() > l.len() {
-        return Anchor::Differs { why: format!("the remote has {} entries, this machine {}: entries here were removed", r.len(), l.len()) };
+        return Anchor::Differs { why: format!("the remote has {} entries and this machine {}: entries are missing here, or the remote is another machine's", r.len(), l.len()) };
     }
     if let Some(i) = r.iter().zip(&l).position(|(a, b)| a != b) {
-        return Anchor::Differs { why: format!("entry {} differs from the remote's: the ledger here was rewritten", i + 1) };
+        return Anchor::Differs { why: format!("entry {} here and the remote's disagree: one of them was rewritten, or the remote is another machine's", i + 1) };
     }
     Anchor::Agrees { remote: r.len(), local: l.len() }
-}
-
-/// The remote's ledgers, each as it was pushed (oldest first), against this machine's: each must
-/// start with the one before — what was pushed is never taken back, not even by a push of root's —
-/// and this one must start with the newest.
-pub fn anchor_history(history: &[String], local: &str) -> Anchor {
-    for (i, w) in history.windows(2).enumerate() {
-        if let Anchor::Differs { why } = anchor(Some(&w[0]), &w[1]) {
-            return Anchor::Differs { why: format!("the remote's ledger was rewritten at its push {}: {why}", i + 2) };
-        }
-    }
-    anchor(history.last().map(String::as_str), local)
 }
 
 #[cfg(test)]
@@ -176,16 +223,6 @@ mod tests {
         ] {
             assert!(!url_ok(bad), "{bad}");
         }
-    }
-
-    /// A push of root's that replaces the ledger is new on the remote, not a rewrite of what it had:
-    /// the history shows it.
-    #[test]
-    fn a_rewrite_pushed_on_top_is_seen_in_the_history() {
-        let h = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(anchor_history(&h(&["a\n", "a\nb\n"]), "a\nb\nc\n"), Anchor::Agrees { remote: 2, local: 3 });
-        assert!(matches!(anchor_history(&h(&["a\nb\n", "a\nX\n"]), "a\nX\n"), Anchor::Differs { .. }));
-        assert_eq!(anchor_history(&[], "a\n"), Anchor::Empty);
     }
 
     #[test]

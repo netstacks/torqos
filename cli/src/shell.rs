@@ -142,6 +142,13 @@ impl Machine for Real<'_> {
             return Ok("No remote: this machine's configuration and its ledger are kept here only (torq remote url <ssh url> names one).\n".into());
         };
         let mut out = format!("Remote: {}\n", history::one_line(url, 120));
+        if let Some(why) = v["alarm"]["why"].as_str() {
+            out.push_str(&format!(
+                "  ⚠ This machine's ledger and the remote's disagree (since {}): {}\n    Nothing more is pushed until a person looks into it; then: request system remote clear.\n",
+                history::one_line(v["alarm"]["at"].as_str().unwrap_or("?"), 30),
+                history::one_line(why, 300)
+            ));
+        }
         if !v["key"].as_bool().unwrap_or(false) {
             out.push_str("  No key yet: request system remote key makes one, to add to the repository as a deploy key.\n");
         }
@@ -164,13 +171,22 @@ impl Machine for Real<'_> {
                 last["anchor"]["local"].as_u64().unwrap_or(0)
             )),
             Some("differs") => out.push_str(&format!(
-                "  ⚠ Its ledger is not this one's start: {} — nothing more is pushed.\n",
+                "  At the last push it disagreed: {}\n",
                 history::one_line(last["anchor"]["why"].as_str().unwrap_or("?"), 200)
             )),
             Some("unreachable") => out.push_str("  It could not be reached at the last push.\n"),
             _ => {}
         }
         Ok(out)
+    }
+
+    fn remote_clear(&self, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["remote-clear", "--approved-by", me])?, &log)?, "request system remote clear")?;
+        Ok(format!(
+            "The remote's alarm is cleared (ledger #{}): the next push checks its whole history again, and raises it again if it is still true.\n",
+            v["seq"].as_u64().unwrap_or(0)
+        ))
     }
 
     fn remote_key(&self) -> Result<String> {
