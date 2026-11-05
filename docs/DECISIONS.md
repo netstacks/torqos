@@ -776,7 +776,11 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   (`flake.nix`, `flake.lock`: `request system update` is how software changes). The broker only
   fetches it (`fetch-incoming`, a read for anyone); the person reads `show | compare` and commits,
   or not. Nothing from the remote is applied by any other path. `incoming` is where a person, another
-  tool or a pull request puts what this machine should take; it stays there after.
+  tool or a pull request puts what this machine should take; it stays there after. Only people fetch
+  it (not the agent, not services: it goes to the network, as root), under a lock of its own, and
+  not from a remote whose ledger disagrees. **What travels:** everything but the hardware *file* —
+  boot and file-system *settings*, and config files that set them, come with it, shown in the
+  compare; read them.
 
 ## ADR-037 — Applications: a ladder, every rung declared (proposed)
 - **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small

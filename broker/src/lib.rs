@@ -614,7 +614,14 @@ impl Broker {
         if !r.key().exists() {
             bail!("no key for the remote yet: request system remote key");
         }
-        let _l = Lock::acquire(&self.state_dir)?;
+        // Not from a remote whose ledger disagrees with this one's: what it offers is in question.
+        if let Some(a) = r.alarm() {
+            bail!("not pulled: this machine's ledger and the remote's disagree ({}) — a person looks into it first", a.why);
+        }
+        // A lock of its own, not the broker's: a fetch (up to two minutes) must not hold everyone's
+        // changes back (the review of pull). Git takes objects and a ref while the broker commits.
+        let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(self.state_dir.join("fetch.lock"))?;
+        lock.try_lock().map_err(|_| anyhow::anyhow!("another fetch from the remote is running: try again when it is done"))?;
         self.repo.fetch_incoming(&r.url, &r.ssh_command())
     }
 

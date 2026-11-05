@@ -133,11 +133,11 @@ pkgs.testers.runNixOSTest {
         incoming = as_git("git -C config.git rev-parse refs/heads/incoming").strip()
         # Fetched — by anyone, over the socket: a read — and nothing on the machine changes.
         out = machine.succeed("su - dev -c 'torqcli request system pull'")
-        assert f"Loaded the remote's incoming configuration ({incoming[:12]})" in out or "Loaded the remote's incoming configuration" in out, out
+        assert "Loaded the remote's incoming configuration" in out and "Kept as this machine's own" in out, out
         assert machine.succeed(f"git -C {repo} rev-parse refs/torq/incoming").strip() == incoming
         assert machine.succeed(f"git -C {repo} rev-parse HEAD").strip() == head, "nothing applied"
         assert local_ledger() == entries, "nothing ledgered"
-        machine.succeed(f"git -C {repo} show HEAD:desktop.json | grep -vq 99")
+        machine.fail(f"git -C {repo} show HEAD:desktop.json | grep -q 99")
     with subtest("set beside the history in a merge, by root: an alarm"):
         machine.succeed("cp /var/lib/torq/state/ledger.jsonl /tmp/ledger.good")
         machine.succeed("head -n -2 /tmp/ledger.good > /var/lib/torq/state/ledger.jsonl")
@@ -150,6 +150,9 @@ pkgs.testers.runNixOSTest {
         assert "merge" in out, out
         out = machine.fail("torq-broker status")
         assert "disagree" in out, out
+        # And nothing is pulled from a remote whose ledger disagrees with this one's.
+        out = machine.fail("su - dev -c 'torqcli request system pull' 2>&1")
+        assert "not pulled" in out, out
 
     with subtest("the alarm stays: a remote out of reach does not clear it; a person does, ledgered"):
         gitserver.succeed("systemctl stop sshd")

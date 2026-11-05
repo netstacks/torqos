@@ -169,7 +169,7 @@ impl Repo {
         if refs.trim().is_empty() {
             return Ok(None);
         }
-        self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--no-recurse-submodules", "--", url, &format!("+{REMOTE_LEDGER}:refs/torq/remote-ledger")])?;
+        self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--no-recurse-submodules", "--no-auto-gc", "--no-auto-maintenance", "--", url, &format!("+{REMOTE_LEDGER}:refs/torq/remote-ledger")])?;
         Ok(Some(self.git(&["rev-parse", "refs/torq/remote-ledger^{commit}"])?.trim().to_string()))
     }
 
@@ -181,7 +181,7 @@ impl Repo {
         if refs.trim().is_empty() {
             return Ok(None);
         }
-        self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--no-recurse-submodules", "--", url, &format!("+{INCOMING}:refs/torq/incoming")])?;
+        self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--no-recurse-submodules", "--no-auto-gc", "--no-auto-maintenance", "--", url, &format!("+{INCOMING}:refs/torq/incoming")])?;
         Ok(Some(self.git(&["rev-parse", "refs/torq/incoming^{commit}"])?.trim().to_string()))
     }
 

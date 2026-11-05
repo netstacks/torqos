@@ -515,3 +515,8 @@ Its §5 lists claims without a test.
      only. `incoming` is not cleared after: a second pull of it loads nothing new (the candidate is
      the configuration in effect). `show system remote` does not yet say whether `incoming` has
      something this machine has not taken.
+   - **A pull's fetch has no size cap** (only a time limit): a remote, or whoever writes its
+     `incoming`, can put large objects into the config repo; they stay until git collects them.
+   - **The pulled configuration is evaluated before the commit question** — as on any commit, by
+     the person's torqcli (`nix eval`, pure): its Nix may build what it imports (import from
+     derivation) before anyone says yes. It cannot reach root.

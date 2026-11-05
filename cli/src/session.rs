@@ -1018,7 +1018,10 @@ impl<'a> Session<'a> {
         let theirs: std::collections::BTreeSet<&String> = crate::attach::files(&c.attached).filter(|f| f.as_str() != HARDWARE).collect();
         for f in &theirs {
             let remote = self.repo.file_at(&id, f)?.map(String::from_utf8).transpose().with_context(|| format!("{f}: not text"))?;
-            if remote != self.repo.file_at(&base, f)?.map(String::from_utf8).transpose()? {
+            // A file newly attached is shown whole, even if its text is here already (detached, kept):
+            // what will be imported is what the person reads (the review of pull).
+            let attached_here = crate::attach::files(&here.attached).any(|h| h == *f);
+            if !attached_here || remote != self.repo.file_at(&base, f)?.map(String::from_utf8).transpose()? {
                 c.nix.insert(f.to_string(), remote);
             }
         }
@@ -1028,12 +1031,14 @@ impl<'a> Session<'a> {
         self.candidate = Some(c);
         self.save()?;
         let after = self.pending()?;
-        let what = match (before, after) {
-            (_, 0) => "it is the same as the configuration in effect".to_string(),
-            (_, n) => format!("{} from the configuration in effect (`show | compare` lists them; `commit` makes it the machine's)", changes(n)),
+        let what = match after {
+            0 => "it is the same as the configuration in effect".to_string(),
+            n => format!("{} from the configuration in effect (`show | compare` lists them; `commit` makes it the machine's)", changes(n)),
         };
+        let discarded = if before > 0 { format!(" (The candidate's {} before it were discarded.)", changes(before)) } else { String::new() };
         Ok(self.said(&format!(
-            "Loaded the remote's incoming configuration ({}): {what}. This machine's hardware file and software are kept.",
+            "Loaded the remote's incoming configuration ({}): {what}. Kept as this machine's own: its hardware file and its software. \
+             Its boot and file-system settings, and its config files, come with it: read them.{discarded}",
             short(&id)
         )))
     }
@@ -3422,7 +3427,7 @@ mod tests {
         let m = Fake { incoming: Some(id.clone()), ..Fake::default() };
         let mut s = session(d.path(), None, &m);
         let out = run(&mut s, &["request system pull"]);
-        assert!(out.contains(&format!("Loaded the remote's incoming configuration ({})", short(&id))) && out.contains("hardware file and software are kept"), "{out}");
+        assert!(out.contains(&format!("Loaded the remote's incoming configuration ({})", short(&id))) && out.contains("Kept as this machine's own: its hardware file and its software"), "{out}");
         let c = s.candidate().unwrap().clone();
         assert!(c.attached[""].contains("extra.nix") && c.attached[""].contains("hardware-configuration.nix"), "{:?}", c.attached);
         assert_eq!(c.nix.get("extra.nix"), Some(&Some("{ extra = 1; }\n".to_string())));

@@ -125,7 +125,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "fetch-incoming"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
@@ -155,6 +155,8 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
     }
     match cmd {
         "propose" => Gate::Open,
+        // A person's, not everyone's: it goes to the network, as root (the review of pull).
+        "fetch-incoming" => Gate::Open,
         "apply-confirmed" => match change {
             Some(c) if c.tier == Tier::Forbidden => Gate::Refused("that change touches what no one may change".into()),
             Some(_) => admins_only(),
@@ -339,6 +341,14 @@ mod tests {
         assert!(matches!(gate(&who(1001), "apply-confirmed", Some(&mine), None), Gate::Refused(_)));
         assert_eq!(gate(&who(1000), "apply-confirmed", Some(&mine), None), Gate::Password);
         assert!(matches!(gate(&who(990), "apply-confirmed", Some(&mine), None), Gate::Refused(_)));
+    }
+
+    /// The review of pull: a fetch goes to the network, as root — a person's, not everyone's.
+    #[test]
+    fn only_people_fetch_from_the_remote() {
+        assert_eq!(gate(&who(1001), "fetch-incoming", None, None), Gate::Open);
+        assert!(matches!(gate(&who(990), "fetch-incoming", None, None), Gate::Refused(_)), "the agent");
+        assert!(matches!(gate(&who(65534), "fetch-incoming", None, None), Gate::Refused(_)), "nobody");
     }
 
     /// Its 5: a service's account (nobody, sshd) proposes nothing — every proposal stays in the
