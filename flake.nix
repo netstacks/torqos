@@ -111,6 +111,7 @@
         trust-loop = import ./tests/trust-loop.nix { inherit pkgs self; };
         socket = import ./tests/socket.nix { inherit pkgs self; };
         agent = import ./tests/agent.nix { inherit pkgs self; };
+        agent-run = import ./tests/agent-run.nix { inherit pkgs self; };
         # How a machine starts: a real EFI partition and its boot menu (ADR-033).
         boot = import ./tests/boot.nix { inherit pkgs self; };
         tree = import ./tests/tree.nix { inherit pkgs self; };

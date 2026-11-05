@@ -1,0 +1,93 @@
+# NixOS VM test: `torq agent run` (ADR-041, 5) — a program run as the agent's account, as a person
+# would run Claude Code: who it is, what it sees, the one directory shared with it, what it can
+# change (it proposes), and that a sandbox of its own still works inside the launcher's.
+{ pkgs, self }:
+
+let
+  devHash = "$6$torqsocketsalt$Z7RLey3l5vKGfukhfuZYYM/EjWNo7QM8.65r88XmZ9z3/jBCY.NAnH7RwYpiLoE2fedxUd/I7UFcKDX1KEXDg/";
+in
+pkgs.testers.runNixOSTest {
+  name = "torq-agent-run";
+
+  nodes.machine = { pkgs, lib, ... }: {
+    imports = [ self.nixosModules.default ];
+    torq.user = "dev";
+    torq.desktop.enable = false;
+    users.users.root.hashedPasswordFile = lib.mkForce null;
+    users.users.dev.hashedPasswordFile = lib.mkForce null;
+    users.users.dev.hashedPassword = devHash;
+    users.users.sam = { isNormalUser = true; hashedPasswordFile = lib.mkForce null; hashedPassword = "!"; };
+    torq.broker.rebuildCommand = "true";
+    environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.bubblewrap ];
+  };
+
+  testScript = ''
+    import json, shlex
+    machine.wait_for_unit("multi-user.target")
+    machine.wait_for_unit("torq-broker.socket")
+    repo = "/var/lib/torq/config"
+    machine.succeed(f"mkdir -p {repo} && echo '{{}}' > {repo}/desktop.json && touch {repo}/flake.nix && torq-broker init")
+    machine.succeed("su - dev -c 'mkdir -p ~/src/project ~/other && echo secret > ~/secret && echo mine > ~/src/project/README'")
+
+    def as_dev(cmd, ok=True):
+        code, out = machine.execute(f"su - dev -c {shlex.quote(cmd)} 2>&1")
+        assert (code == 0) == ok, f"{cmd}: exit {code}, expected {'success' if ok else 'failure'}:\n{out}"
+        return out
+
+    def agent(inner, share=None, ok=True):
+        s = f"--share {share} " if share else ""
+        return as_dev(f"torq agent run {s}-- sh -c {shlex.quote(inner)}", ok)
+
+    with subtest("it runs as the agent, in the agent's home, without a password"):
+        out = agent("id -un; echo $HOME; pwd; touch ~/state && stat -c %U ~/state")
+        assert out.split() == ["torq-agent", "/var/lib/torq-agent", "/var/lib/torq-agent", "torq-agent"], out
+        # No sudo from there, and no password was asked (sudo -n would have failed otherwise).
+        agent("sudo -n true", ok=False)
+
+    with subtest("it sees no home, no one's runtime directory, a /tmp of its own"):
+        machine.succeed("su - dev -c 'echo t > /tmp/dev-tmp'")
+        out = agent("ls -A /home; ls -A /run/user; ls -A /tmp; cat /home/dev/secret 2>/dev/null || echo HIDDEN")
+        assert out.split() == ["HIDDEN"], out
+
+    with subtest("one directory shared: read and write it, nothing beside it"):
+        out = agent("pwd; cat README; echo agent > made-by-agent; ls -A /home/dev; cat /home/dev/secret 2>/dev/null || echo HIDDEN", share="/home/dev/src/project")
+        lines = out.splitlines()
+        assert all(x in lines for x in ["/home/dev/src/project", "mine", "src", "HIDDEN"]) and "secret" not in lines, out
+        assert "Shared with the agent: /home/dev/src/project" in out, out
+        # What the agent made stays the person's to change, and theirs the agent's (default ACLs).
+        as_dev("echo dev >> ~/src/project/made-by-agent && cat ~/src/project/made-by-agent | grep -q dev")
+        agent("echo again >> made-by-agent && echo again >> README", share="/home/dev/src/project")
+        # Outside the launcher, the agent has no way into the home at all — not even to the shared
+        # directory by its name: it was handed the directory, open, not a path (and the home has no
+        # ACL of the agent's).
+        machine.fail("su -s /bin/sh torq-agent -c 'test -d /home/dev/src/project'")
+        machine.fail("getfacl -p /home/dev /home/dev/src 2>/dev/null | grep -q torq-agent")
+        machine.fail("su -s /bin/sh torq-agent -c 'ls /home/dev'")
+
+        machine.fail("su -s /bin/sh torq-agent -c 'cat /home/dev/secret'")
+        machine.fail("su -s /bin/sh torq-agent -c 'ls /home/dev/other'")
+
+    with subtest("only one's own directory, inside one's home, and not the home itself"):
+        for share in ["/home/dev", "/etc", "/home/dev/secret", "/var/lib/torq"]:
+            out = as_dev(f"torq agent run --share {share} -- true", ok=False)
+            assert "share" in out or "not" in out, (share, out)
+        machine.succeed("mkdir /home/dev/rootdir")
+        out = as_dev("torq agent run --share /home/dev/rootdir -- true", ok=False)
+        assert "not yours to share" in out, out
+        # Only an administrator starts it; the launcher refuses anyone but the agent.
+        machine.fail("su - sam -c 'torq agent run -- true'")
+        out = machine.fail("su - dev -c '/run/current-system/sw/bin/torq-agent-run -- true' 2>&1")
+        assert "runs as the agent" in out, out
+
+    with subtest("what it changes, it proposes; a person applies"):
+        req = json.dumps({"args": ["--json", "propose", "--base=" + machine.succeed(f"git -C {repo} rev-parse HEAD").strip(), "--reason=hello for dev"],
+                          "diff": "--- /dev/null\n+++ b/users/dev/packages.json\n@@ -0,0 +1 @@\n+[\"hello\"]\n"})
+        out = agent(f"printf '%s\\n' {shlex.quote(req)} | socat -t 30 - UNIX-CONNECT:/run/torq/broker.sock")
+        e = json.loads(machine.succeed("torq-broker log --json --brief | tail -1"))
+        assert e["kind"] == "proposal" and e["actor"] == "agent" and e["data"]["caller"] == "torq-agent", (e, out)
+
+    with subtest("a sandbox of its own still runs inside (as Claude Code's does)"):
+        out = agent("bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent sh -c 'id -un; echo nested'")
+        assert "nested" in out, out
+  '';
+}

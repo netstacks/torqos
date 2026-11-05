@@ -2,10 +2,18 @@
 # (ADR-040: the broker names its caller from the kernel's uid). It proposes, and only what
 # `torq.agent.mayPropose` lists; a person applies. It is made for TorqOS's own agent (M5) and for the
 # AI tools people already use — Claude Code first — run as it rather than as the owner.
-{ config, lib, ... }:
+{ config, lib, pkgs, ... }:
 
 let
   cfg = config.torq.agent;
+  # `torq agent run` (ADR-041, 5): a person starts a program as the agent. This runs as the agent
+  # (sudo -u, which drops privilege: no password); it hides every home and the people's runtime
+  # directories, gives a private /tmp, and binds in only the directory shared with it.
+  agentRun = pkgs.writeShellApplication {
+    name = "torq-agent-run";
+    runtimeInputs = [ pkgs.bubblewrap pkgs.coreutils ];
+    text = builtins.readFile ./agent-run.sh;
+  };
 in
 {
   options.torq.agent.mayPropose = {
@@ -58,5 +66,19 @@ in
       hashedPassword = "!";
     };
     users.groups.torq-agent = { };
+
+    # A person may start a program as the agent — only through the launcher, only as the agent: from
+    # a person to the agent is down, not up, so no password (and no count against the lockout).
+    environment.systemPackages = [ agentRun pkgs.acl ];
+    security.sudo.extraRules = [{
+      groups = [ "wheel" ];
+      runAs = "torq-agent";
+      commands = [{ command = "${agentRun}/bin/torq-agent-run"; options = [ "NOPASSWD" ]; }];
+    }];
+    # The shared directory comes as a descriptor torqcli opened, as the person — the agent has no
+    # way into their home, not even to pass through: sudo keeps it open for the launcher (`-C`).
+    security.sudo.extraConfig = ''
+      Defaults!${agentRun}/bin/torq-agent-run closefrom_override
+    '';
   };
 }
