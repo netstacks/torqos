@@ -201,6 +201,8 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t c' | grep -q 'Password for dev:'", timeout=120)
         machine.succeed("su - dev -c 'tmux send-keys -t c Torq-sock-2210 Enter'")
         machine.wait_until_succeeds(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = false'", timeout=120)
+        # The commit comes first, the ledger's entry once the rebuild is done: wait for that.
+        machine.wait_until_succeeds("torq-broker log --json --brief | tail -1 | jq -e '.kind == \"reverted\"'", timeout=120)
         last = json.loads(machine.succeed("torq-broker log --json --brief | tail -1"))
         assert last["kind"] == "reverted" and last["approved_by"] == "dev" and last["data"]["via"] == "socket", last
         assert "Torq-sock-2210" not in pane(), pane()
