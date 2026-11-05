@@ -93,6 +93,24 @@ pkgs.testers.runNixOSTest {
         e = json.loads(machine.succeed("torq-broker log --json --brief | tail -1"))
         assert e["kind"] == "proposal" and e["actor"] == "agent" and e["data"]["caller"] == "torq-agent", (e, out)
 
+
+    with subtest("nothing it starts outlives it; one session at a time; nothing setuid; the homes stay hidden"):
+        # A process it leaves behind, detached, ends with the session (its own process namespace).
+        agent("setsid sleep 300 > /dev/null 2>&1 < /dev/null & echo left")
+        machine.wait_until_fails("pgrep -u torq-agent", timeout=20)
+        # While a session runs, no other may share a directory (its programs could race the ACLs).
+        machine.succeed("su - dev -c 'torq agent run -- sleep 30' > /dev/null 2>&1 &")
+        machine.wait_until_succeeds("pgrep -u torq-agent sleep", timeout=20)
+        out = as_dev("torq agent run --share /home/dev/src/project -- true", ok=False)
+        assert "running already" in out, out
+        machine.succeed("pkill -u torq-agent sleep || true")
+        machine.wait_until_fails("pgrep -u torq-agent", timeout=20)
+        # The share is nosuid and nodev; the hidden homes cannot be uncovered from the agent's own
+        # namespaces (the mounts it was given are locked under it).
+        out = agent("findmnt -no OPTIONS --target .", share="/home/dev/src/project")
+        assert "nosuid" in out and "nodev" in out, out
+        agent("unshare -Urm umount /home", ok=False)
+        agent("unshare -Urm umount /home/dev/src/project", ok=False)
     with subtest("a sandbox of its own still runs inside (as Claude Code's does)"):
         out = agent("bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent sh -c 'id -un; echo nested'")
         assert "nested" in out, out

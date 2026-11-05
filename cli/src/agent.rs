@@ -94,6 +94,26 @@ pub fn owned(dir: &Path, uid: u32) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     Ok((dirs, files))
 }
 
+
+/// A process of the agent's account running now, if there is one (its pid): /proc's entries are
+/// owned by each process's user.
+fn agent_running() -> Result<Option<u32>> {
+    use std::os::unix::fs::MetadataExt;
+    let passwd = std::fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
+    let Some(uid) = passwd.lines().find_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        (f.first() == Some(&AGENT)).then(|| f.get(2)?.parse::<u32>().ok()).flatten()
+    }) else {
+        bail!("there is no {AGENT} account on this machine");
+    };
+    for e in std::fs::read_dir("/proc").context("reading /proc")?.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        if e.metadata().is_ok_and(|m| m.uid() == uid) {
+            return Ok(Some(pid));
+        }
+    }
+    Ok(None)
+}
 /// setfacl with `args` on each of `paths` at once.
 fn acl_many(args: &[&str], paths: &[PathBuf]) -> Result<()> {
     if paths.is_empty() {
@@ -125,9 +145,16 @@ pub fn run(args: &[String]) -> Result<i32> {
         let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set: no home to share from")?);
         let uid = rustix::process::getuid().as_raw();
         let dir = checked_share(share, &home, uid)?;
-        // The agent may read and write what of it is the person's; what either makes there stays the
-        // other's to change (the default ACLs). What the agent made has these already, and is not the
-        // person's to change. No link is followed.
+        // One session of the agent's at a time, and none while the directory is walked: a program of the
+        // agent's running now could swap a file it can write for a link, between the walk's look and its
+        // ACL, and be granted wherever the link leads (the review of ADR-041, 5). With its own process
+        // namespace (the launcher), nothing of a session outlives it.
+        if let Some(pid) = agent_running()? {
+            bail!("the agent is running already (process {pid}): one session at a time, and none while a directory is shared");
+        }
+        // The agent may read and write what of it is the person's; what it makes there, the person may
+        // rename and delete, and (default ACLs) read and write unless the agent narrows it — the agent
+        // owns what it makes. What the agent made is not the person's to set ACLs on. No link is followed.
         let (dirs, files) = owned(&dir, uid)?;
         for chunk in files.chunks(200) {
             acl_many(&["-m", &format!("u:{AGENT}:rwX")], chunk)?;
@@ -144,7 +171,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         sudo.extend(["-C".into(), (fd + 1).to_string()]);
         launch.extend(["--share-fd".into(), fd.to_string(), dir.to_string_lossy().into_owned()]);
         _shared = Some(f);
-        eprintln!("Shared with the agent: {} (undo: setfacl -R -x u:{AGENT} -- {})", dir.display(), dir.display());
+        eprintln!("Shared with the agent: {} (undo: setfacl -R -P -x u:{AGENT},d:u:{AGENT} -- {})", dir.display(), dir.display());
     }
     launch.push("--".into());
     launch.extend(r.command);

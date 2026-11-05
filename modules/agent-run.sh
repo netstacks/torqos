@@ -6,7 +6,8 @@
 # is — by its name, then checked against that descriptor, device and inode (its name could have been
 # pointed elsewhere; then nothing runs). Then it drops to
 # torq-agent (setpriv: its uid and group, no capabilities, no new privileges) and runs the program in
-# bubblewrap: the people's runtime directories (their sockets: ssh-agent, D-Bus) hidden, /tmp its own,
+# bubblewrap, in a process namespace of its own (nothing it starts outlives it): the people's runtime
+# directories (their sockets: ssh-agent, D-Bus) hidden, /tmp its own,
 # its home the agent's. Nothing the person asked for runs as root; the agent has no way into the home.
 set -euo pipefail
 if [ "$(id -u)" != 0 ]; then
@@ -52,6 +53,9 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
     # that was opened (device and inode): if a link on the way led elsewhere, nothing runs.
     stage=/run/torq-agent-stage
     mount --bind -- "$share" "$stage"
+    # Nothing in it runs with more than its runner has: no setuid program the agent leaves there
+    # works for the person who runs it later; no device nodes.
+    mount -o remount,bind,nosuid,nodev -- "$stage"
     if [ "$(stat -c %d:%i "$stage")" != "$(stat -L -c %d:%i "/proc/self/fd/$fd")" ]; then
       echo "torq-agent-run: $share is not the directory that was opened (a link changed?): nothing run" >&2
       exit 2
@@ -65,7 +69,7 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
   fi
   exec setpriv --reuid torq-agent --regid torq-agent --init-groups --no-new-privs \
     --inh-caps=-all --bounding-set=-all -- \
-    bwrap --die-with-parent --dev-bind / / \
+    bwrap --die-with-parent --unshare-pid --dev-bind / / --proc /proc \
       --tmpfs /run/user --tmpfs /tmp --tmpfs /root \
       --clearenv \
       --setenv HOME /var/lib/torq-agent --setenv USER torq-agent --setenv LOGNAME torq-agent \
