@@ -2405,3 +2405,44 @@ fn a_hostile_repository_is_refused_before_anything_is_adopted() {
     let e = format!("{:#}", new_machine.check_stage(&stage_with("waiting", "", &waiting), url).unwrap_err());
     assert!(e.contains("still waiting"), "{e}");
 }
+
+/// ADR-035: a stuck operation holds the broker's lock for as long as it is stuck, and that is when a
+/// person needs the shell. Break-glass is recorded through it, and what it needs of its text.
+#[test]
+fn break_glass_is_recorded_while_an_operation_holds_the_lock() {
+    let (dir, repo) = config_dir();
+    let state = dir.path().join("state");
+    let b = Broker::new(&repo, &state, "true");
+    b.init().unwrap();
+    let held = fs::File::create(state.join("broker.lock")).unwrap();
+    held.try_lock().unwrap();
+    let (e, unsent) = b.break_glass("alice", "the switch is stuck").unwrap();
+    assert_eq!((e.body.kind.as_str(), e.body.approved_by.as_deref()), ("break_glass", Some("alice")));
+    assert_eq!(unsent, None, "no remote: nothing to send");
+    drop(held);
+    b.ledger.verify().unwrap();
+    for (by, why) in [("alice", ""), ("alice", "  "), ("alice", "a\nb"), ("../x", "why")] {
+        assert!(b.break_glass(by, why).is_err(), "{by:?} {why:?}");
+    }
+    assert_eq!(b.ledger.read_all().unwrap().len(), e.body.seq as usize, "refused: nothing written");
+}
+
+/// Writers of the ledger do not interleave: appends from many threads leave one unbroken chain.
+#[test]
+fn ledger_appends_at_once_leave_one_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.jsonl");
+    let threads: Vec<_> = (0..8).map(|i| {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            for j in 0..10 {
+                torq_broker::ledger::Ledger::open(&path).append(torq_broker::ledger::NewEntry {
+                    actor: "user".into(), approved_by: None, kind: "refused".into(), tier: "system".into(), tainted: false,
+                    reason: format!("{i}-{j}"), data: serde_json::json!({}),
+                }).unwrap();
+            }
+        })
+    }).collect();
+    threads.into_iter().for_each(|t| t.join().unwrap());
+    assert_eq!(torq_broker::ledger::Ledger::open(&path).verify().unwrap(), 80);
+}

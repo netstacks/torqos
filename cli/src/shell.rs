@@ -974,6 +974,9 @@ fn run_shell(args: &[String]) -> Result<i32> {
         return crate::setup::run().map(|()| 0);
     }
     // The ISO installer (its console, as root, ADR-031): its own program too.
+    if args.first().map(String::as_str) == Some("break-glass") {
+        return crate::agent::break_glass(&args[1..]);
+    }
     // A program run as the agent's account (ADR-041): its own entry, not a command of the shell.
     if args.first().map(String::as_str) == Some("agent") {
         return crate::agent::run(&args[1..]);

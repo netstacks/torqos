@@ -56,6 +56,7 @@ enum Cmd {
     RemoteShow,
     RemoteClear { approved_by: String },
     FetchIncoming,
+    BreakGlass { by: String, reason: String },
     AdoptKey { url: String },
     AdoptInspect { url: String },
     Adopt { url: String, own: PathBuf, head: String, tip: String, user: String },
@@ -166,6 +167,7 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("adopt-key").about("First-boot setup: this machine's key for a repository it is about to adopt (ADR-036), made the first time.").arg(Arg::new("url").long("url").required(true)))
         .subcommand(Command::new("adopt-inspect").about("First-boot setup: fetch the repository into a staging copy and check it (its ledger one line, every push extending the last, its chain whole, main the commit it ends at); changes nothing of the machine.").arg(Arg::new("url").long("url").required(true)))
         .subcommand(Command::new("adopt").about("First-boot setup: become the machine the repository holds: its history and ledger, this machine's hardware file and software (the files in --own) as a new commit, built, switched to, ledgered.").arg(Arg::new("url").long("url").required(true)).arg(Arg::new("own").long("own").required(true).value_parser(value_parser!(PathBuf))).arg(Arg::new("head").long("head").required(true)).arg(Arg::new("tip").long("tip").required(true)).arg(Arg::new("user").long("user").required(true)))
+        .subcommand(Command::new("break-glass").about("A root shell is about to open (torq break-glass, ADR-035): who and why into the ledger, and to the remote if there is one. Exits 3 if the remote has not got it.").arg(Arg::new("by").long("by").required(true)).arg(Arg::new("reason").long("reason").required(true)))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
         .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
         .subcommand(Command::new("serve").about(
@@ -213,6 +215,7 @@ fn parse_cli() -> Cli {
         "remote" => Cmd::RemoteShow,
         "remote-clear" => Cmd::RemoteClear { approved_by: by(sub) },
         "fetch-incoming" => Cmd::FetchIncoming,
+        "break-glass" => Cmd::BreakGlass { by: s(sub, "by").unwrap_or_default(), reason: s(sub, "reason").unwrap_or_default() },
         "adopt-key" => Cmd::AdoptKey { url: s(sub, "url").unwrap_or_default() },
         "adopt-inspect" => Cmd::AdoptInspect { url: s(sub, "url").unwrap_or_default() },
         "adopt" => Cmd::Adopt { url: s(sub, "url").unwrap_or_default(), own: p(sub, "own").unwrap_or_default(), head: s(sub, "head").unwrap_or_default(), tip: s(sub, "tip").unwrap_or_default(), user: s(sub, "user").unwrap_or_default() },
@@ -362,6 +365,14 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 return print_entry(&e);
             }
             println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::BreakGlass { by, reason } => {
+            let (e, unsent) = b.break_glass(&by, &reason)?;
+            println!("on the record: ledger #{} ({} breaks the glass)", e.body.seq, printable(&by));
+            if let Some(why) = unsent {
+                println!("the remote has not got it: {}", printable(&why));
+                std::process::exit(3);
+            }
         }
         Cmd::FetchIncoming => {
             let id = b.fetch_incoming()?;

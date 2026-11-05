@@ -180,6 +180,23 @@ pub fn run(args: &[String]) -> Result<i32> {
     Err(anyhow::Error::from(e).context("starting the agent (sudo torq-agent-run)"))
 }
 
+/// `torq break-glass "<reason>"` (ADR-035): a root shell, after the record. The launcher, through
+/// sudo (the person's password), writes the ledger entry, pushes it, and only then opens the shell.
+pub fn break_glass(args: &[String]) -> Result<i32> {
+    const LAUNCHER: &str = "/run/current-system/sw/bin/torq-break-glass";
+    let reason = args.join(" ");
+    if reason.trim().is_empty() {
+        bail!("usage: torq break-glass \"<why>\" — the reason goes in the ledger, before the shell opens");
+    }
+    if crate::me()? == AGENT {
+        bail!("the agent has no root shell: it proposes, and a person applies");
+    }
+    let launcher = std::fs::canonicalize(LAUNCHER).with_context(|| format!("{LAUNCHER}: not on this machine"))?;
+    use std::os::unix::process::CommandExt;
+    let e = Command::new(SUDO).arg("--").arg(launcher).arg(&reason).exec();
+    Err(anyhow::Error::from(e).context("starting break-glass (sudo)"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

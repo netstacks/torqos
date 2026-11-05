@@ -858,6 +858,36 @@ impl Broker {
         Ok(e)
     }
 
+    /// `torq break-glass` (ADR-035): a root shell is about to open. On the record first — who and why
+    /// — then off the machine, if it has a remote: the entry, and why the remote has not got it, if it
+    /// has not. It takes no operation's lock: a stuck switch is when a person needs this most.
+    pub fn break_glass(&self, by: &str, reason: &str) -> Result<(Entry, Option<String>)> {
+        if !policy::user_name_ok(by) {
+            bail!("who is breaking the glass: {by:?} is not a person's name");
+        }
+        if reason.trim().is_empty() || reason.chars().any(char::is_control) || reason.chars().count() > 200 {
+            bail!("the reason is one line of text, at most 200 characters, not empty");
+        }
+        let e = self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(by.into()),
+            kind: "break_glass".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: reason.into(),
+            data: json!({}),
+        })?;
+        // The entry stands from here: a failure to send it is said, never taken for no record.
+        let unsent = match self.sync_remote() {
+            Ok(Some(p)) if p.ok => None,
+            Ok(Some(p)) => Some(p.error.unwrap_or_else(|| "the push failed".into())),
+            Ok(None) if matches!(self.remote(), Ok(None)) => None,
+            Ok(None) => Some("an operation is running: it goes with the next push".into()),
+            Err(e) => Some(format!("{e:#}")),
+        };
+        Ok((e, unsent))
+    }
+
     /// A person clears the remote's alarm, having looked into it: ledgered, and the next push checks
     /// the remote's whole history again (an alarm that is still true is raised again).
     pub fn clear_remote_alarm(&self, approved_by: &str) -> Result<Entry> {

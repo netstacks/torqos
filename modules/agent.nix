@@ -16,6 +16,14 @@ let
   };
 in
 {
+  options.torq.agent.launcher = lib.mkOption {
+    type = lib.types.package;
+    internal = true;
+    readOnly = true;
+    default = agentRun;
+    description = "The launcher of `torq agent run` (strict mode names it in its sudo rule).";
+  };
+
   options.torq.agent.mayPropose = {
     users = lib.mkOption {
       type = lib.types.listOf lib.types.str;

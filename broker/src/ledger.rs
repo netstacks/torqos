@@ -112,6 +112,13 @@ impl Ledger {
 
     /// Verify the full chain. Refuses to append on top of a broken chain.
     pub fn append(&self, new: NewEntry) -> Result<Entry> {
+        // One writer at a time, and for milliseconds: separate from the broker's lock, which an
+        // operation holds for minutes, so that `torq break-glass` is recorded while a switch is stuck.
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let guard = OpenOptions::new().write(true).create(true).truncate(false).open(self.path.with_extension("lock"))?;
+        guard.lock().context("locking the ledger")?;
         let entries = self.read_all()?;
         verify_entries(&entries)?;
         let (seq, prev_hash) = match entries.last() {
@@ -141,9 +148,6 @@ impl Ledger {
         let hash = hash_body(&body)?;
         let entry = Entry { body, hash };
 
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
         let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
         writeln!(f, "{}", serde_json::to_string(&entry)?)?;
         f.sync_all()?;

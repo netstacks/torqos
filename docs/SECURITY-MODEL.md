@@ -58,7 +58,7 @@ tell a person from a program at a root shell — nothing can.
   but data a root process deletes, and a ledger it rewrites, need snapshots of data and the signed
   ledger, both later), and **unnecessary** (TorqOS's own AI layer: an unprivileged agent that reads
   and proposes, never `sudo`; the owner approves each proposal).
-- **Strict mode (later, optional):** the owner's `sudo` may run only TorqOS's own commands — no
+- **Strict mode (optional, off by default):** the owner's `sudo` runs only break-glass and the agent's launcher — no
   root shell to run anything in — with a deliberate, ledgered break-glass for emergencies.
 - **Dev mode** (the machine TorqOS is built on) is the labelled exception: passwordless `sudo` and an
   AI coding agent with root. Customer images ship with it off.

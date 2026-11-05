@@ -224,6 +224,7 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         "init" => ("·", "TorqOS set up".to_string()),
         "repaired" if e.data["restored"] == false => ("✗", "Tried to return the machine to its history".to_string()),
         "repaired" => ("✓", "Returned the machine to its history".to_string()),
+        "break_glass" => ("⚠", format!("Root shell opened: {}", clean(&e.reason))),
         "adopted" => ("✓", "This machine adopted the configuration".to_string()),
         "refused" => ("✗", format!("Refused: {}", clean(&e.reason))),
         "remote_cleared" => ("✓", clean(&e.reason)),

@@ -713,6 +713,15 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   dev mode and recovery. Measured boot (SECURITY-MODEL) and data snapshots come after, as planned.
   What TorqOS can then say, truthfully: *the agent cannot get root; the owner can, but not
   silently; and what root does here cannot rewrite the record elsewhere or outlive a rebuild.*
+- **Amended (2026-11-05): strict mode and break-glass built.** `torq.security.strict.enable`, off by
+  default, a choice in the tree. An administrator's sudo runs two things: break-glass and the
+  agent's launcher. Not the broker, though this ADR said "TorqOS's own commands": torqcli needs no
+  sudo (ADR-040), and the broker's commands under sudo are root's own (it reads any file named to
+  it, and sets passwords), so a rule naming it was a quiet way round. Polkit's administrator is root
+  alone. `torq break-glass "<why>"` asks the person's password, writes the entry, pushes it, and only
+  then opens the shell; if the remote cannot be reached it says so and asks. The ledger has its own
+  lock, held for one append, so a stuck switch cannot keep the entry out. If the ledger cannot be
+  written there is no shell (KNOWN-GAPS 6zj).
 
 ## ADR-036 — The config repo's remote: the machine is a URL
 - **Status:** accepted (the owner, 2026-11-05: "yes"); the push and the anchor built 2026-11-05, pull and
