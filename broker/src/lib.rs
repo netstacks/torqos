@@ -221,15 +221,19 @@ impl Status {
         if let Some(why) = &self.remote_refused {
             p.push(format!("the remote is not used: {why}"));
         }
-        if let Some(last) = self.remote.as_ref().filter(|l| !l.ok && l.error.as_deref().is_none_or(|e| !e.starts_with("no key yet"))) {
+        if let Some(last) = &self.remote {
             let day_ago = chrono::Utc::now() - chrono::Duration::hours(24);
-            let since = last.last_ok.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
-            if since.is_none_or(|t| t < day_ago) {
+            let since = last.failing_since.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+            if !last.ok && since.is_some_and(|t| t < day_ago) {
                 p.push(format!(
-                    "nothing has reached the remote for a day or more ({}): {}",
-                    last.last_ok.as_deref().map_or("never".to_string(), |t| format!("last at {t}")),
+                    "nothing has reached the remote for a day or more (failing since {}; {}): {}",
+                    last.failing_since.as_deref().unwrap_or("?"),
+                    last.last_ok.as_deref().map_or("never pushed".to_string(), |t| format!("last pushed {t}")),
                     last.error.as_deref().unwrap_or("?")
                 ));
+            }
+            if let Some(why) = last.main.as_deref().filter(|w| w.starts_with("the remote's main")) {
+                p.push(format!("{why} — the ledger is pushed; the configuration there is behind"));
             }
         }
         if let Some(i) = &self.interrupted {
@@ -493,8 +497,19 @@ impl Broker {
         let Some(r) = self.remote()? else { return Ok(None) };
         let Some(_lock) = Lock::try_acquire(&self.state_dir)? else { return Ok(None) };
         let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let last_ok = r.last().and_then(|p| if p.ok { Some(p.at) } else { p.last_ok });
-        let fail = |error: String, anchor: Option<remote::Anchor>| remote::Pushed { at: now(), ok: false, error: Some(error), entries: 0, anchor, last_ok: last_ok.clone() };
+        let before = r.last();
+        let last_ok = before.as_ref().and_then(|p| if p.ok { Some(p.at.clone()) } else { p.last_ok.clone() });
+        let failing_since = before.as_ref().and_then(|p| if p.ok { None } else { p.failing_since.clone().or(Some(p.at.clone())) }).unwrap_or_else(now);
+        let fail = |error: String, anchor: Option<remote::Anchor>| remote::Pushed {
+            at: now(),
+            ok: false,
+            error: Some(error),
+            main: None,
+            entries: 0,
+            anchor,
+            last_ok: last_ok.clone(),
+            failing_since: Some(failing_since.clone()),
+        };
         if !r.key().exists() {
             let p = fail("no key yet: request system remote key".into(), None);
             r.record(&p)?;
@@ -510,27 +525,33 @@ impl Broker {
             r.record(&p)?;
             return Ok(Some(p));
         }
-        let tip = match &anchor {
-            remote::Anchor::Unreachable { error } => {
-                let p = fail(error.clone(), Some(anchor.clone()));
+        if let remote::Anchor::Unreachable { error } = &anchor {
+            let p = fail(error.clone(), Some(anchor.clone()));
+            r.record(&p)?;
+            return Ok(Some(p));
+        }
+        // The ledger first, alone: whatever becomes of `main`, the ledger reaches the remote.
+        let entries = self.ledger.read_all()?;
+        let ledger = self.repo.record_ledger(self.ledger.path(), entries.len(), r.verified().as_deref()).and_then(|c| self.repo.push_ledger(&r.url, &ssh).map(|()| c));
+        let commit = match ledger {
+            Ok(c) => c,
+            Err(e) => {
+                let p = fail(format!("{e:#}"), Some(anchor));
                 r.record(&p)?;
                 return Ok(Some(p));
             }
-            _ => r.verified(),
         };
-        let entries = self.ledger.read_all()?;
-        let with_main = pending_confirm(&entries).is_none();
-        let pushed = self
-            .repo
-            .record_ledger(self.ledger.path(), entries.len(), tip.as_deref())
-            .and_then(|c| self.repo.push_remote(&r.url, &ssh, with_main).map(|()| c));
-        let p = match pushed {
-            Ok(commit) => {
-                r.set_verified(&commit)?;
-                remote::Pushed { at: now(), ok: true, error: None, entries: entries.len(), anchor: Some(anchor), last_ok: Some(now()) }
-            }
-            Err(e) => fail(format!("{e:#}"), Some(anchor)),
+        r.set_verified(&commit)?;
+        // Then `main` — never while it may yet be rewound: a commit confirmed waiting (its rollback),
+        // an operation unfinished (its reconcile), a setup not yet done; never forced.
+        let main = if pending_confirm(&entries).is_some() {
+            Some("not pushed while a commit confirmed waits (it may yet be rolled back)".to_string())
+        } else if self.read_pending()?.is_some() || self.setup_path().exists() {
+            Some("not pushed while an operation is unfinished".to_string())
+        } else {
+            self.repo.push_main(&r.url, &ssh).err().map(|e| format!("the remote's main did not take this configuration: {e:#}"))
         };
+        let p = remote::Pushed { at: now(), ok: true, error: None, main, entries: entries.len(), anchor: Some(anchor), last_ok: Some(now()), failing_since: None };
         r.record(&p)?;
         Ok(Some(p))
     }
@@ -581,7 +602,9 @@ impl Broker {
             }
             Ok(a)
         };
-        walk().unwrap_or_else(|e| remote::Anchor::Unreachable { error: format!("{e:#}") })
+        // Fetched, the remote's ledger is here to read: what cannot be read of it (no ledger.jsonl in a
+        // commit, a broken object) is a disagreement, not "out of reach" (the second review of ADR-036).
+        walk().unwrap_or_else(|e| differs(format!("the remote's ledger cannot be read: {e:#}")))
     }
 
     /// A person clears the remote's alarm, having looked into it: ledgered, and the next push checks

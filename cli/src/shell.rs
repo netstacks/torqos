@@ -164,6 +164,9 @@ impl Machine for Real<'_> {
                 }
             }
         }
+        if let Some(why) = last["main"].as_str() {
+            out.push_str(&format!("  The configuration ({}) was not pushed: {}\n", "main", history::one_line(why, 200)));
+        }
         match last["anchor"]["state"].as_str() {
             Some("agrees") => out.push_str(&format!(
                 "  Its ledger: the first {} of this machine's {} entries, as they are here.\n",

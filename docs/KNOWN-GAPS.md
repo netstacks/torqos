@@ -487,7 +487,22 @@ Its §5 lists claims without a test.
    held the broker's lock); `main` not pushed while a commit confirmed waits (its rollback would
    have forked it); the ledger commit made on the remote's newest; the alarm sticky until a person
    clears it, ledgered, and raised too for a ledger gone from the remote or a changed host key;
-   a day without a push an alarm; the wording blames neither side; paths quoted. Open:
+   a day without a push an alarm; the wording blames neither side; paths quoted. From the second
+   review: `main` never pushed while an operation is unfinished, and pushed apart from the ledger
+   (a `main` the remote refuses — another history there — is a problem of its own, and no longer
+   keeps the ledger from it); a ledger the remote holds but that cannot be read is a disagreement;
+   each URL has its own record (a new one starts afresh); a day after pushes began to fail, an
+   alarm. Open:
+   - **What the anchor needs from the remote:** on `torq-ledger`, for the deploy key, no
+     non-fast-forward update and no deletion. Without them root can replace the remote's history.
+     torq5's remote (`netstacks/torq5-config`) is private and **unprotected** for now: GitHub keeps
+     branch protection on private repositories for paid plans (the owner's choice, 2026-11-05).
+     Protection, when added: `deletion`, `non_fast_forward` on every branch.
+   - **A check from elsewhere must walk every step.** Root may still append any fast-forward commit;
+     a verifier off the machine must check each push extends the one before, not only the tip.
+   - **A remote, or a man in the middle on first contact, can latch the alarm** (a "host key
+     changed", a history it rewrote): pushes stop until an administrator clears it — a denial of
+     service on the owner, never a way in.
    - **The machine's alarm is root's.** Root can delete `alarm.json` or `verified`, as it can rewrite
      the ledger. The record root cannot reach is the remote's protected `torq-ledger` branch; a check
      of it from elsewhere (another machine, a CI job) is what makes the anchor root-proof.

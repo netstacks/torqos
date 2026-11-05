@@ -49,7 +49,7 @@ pkgs.testers.runNixOSTest {
         return json.loads(machine.succeed(f"torq-broker --json apply {p['seq']} --approved-by dev"))
 
     def last():
-        return json.loads(machine.succeed("cat /var/lib/torq/state/remote/last.json"))
+        return json.loads(machine.succeed("cat /var/lib/torq/state/remote/*/last.json"))
 
     def remote_git(cmd):
         return gitserver.succeed(f"git -c safe.directory='*' -C {remote} {cmd}")
@@ -109,6 +109,22 @@ pkgs.testers.runNixOSTest {
         machine.succeed("torq-broker push")
         assert last()["ok"] and remote_ledger() == local_ledger(), last()
 
+
+    with subtest("a main of another history on the remote does not keep the ledger from it"):
+        # (As a repository created with a README would have.)
+        as_git = lambda cmd: gitserver.succeed(f"su - git -c {shlex.quote(cmd)}")
+        as_git("rm -rf other && git init -q other && git -C other -c user.name=x -c user.email=x@x commit -q --allow-empty -m other && git -C other push -q ~/config.git HEAD:refs/heads/other")
+        as_git("git -C config.git update-ref refs/heads/main refs/heads/other")
+        change(5)
+        assert last()["ok"] and "did not take" in last()["main"], last()
+        assert remote_ledger() == local_ledger(), "the ledger reached it all the same"
+        out = machine.fail("torq-broker status")
+        assert "the remote's main did not take" in out, out
+        # Put right on the remote's side, the next change pushes main again.
+        as_git("git -C config.git update-ref -d refs/heads/main")
+        change(6)
+        assert last()["ok"] and last().get("main") is None, last()
+        machine.succeed("torq-broker status")
     with subtest("set beside the history in a merge, by root: an alarm"):
         machine.succeed("cp /var/lib/torq/state/ledger.jsonl /tmp/ledger.good")
         machine.succeed("head -n -2 /tmp/ledger.good > /var/lib/torq/state/ledger.jsonl")

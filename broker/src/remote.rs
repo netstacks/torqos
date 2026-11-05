@@ -39,7 +39,11 @@ pub fn url_ok(url: &str) -> bool {
 /// The remote's place in the broker's state: its key, the host key pinned, the last push.
 pub struct Remote {
     pub url: String,
+    /// The machine's: its key, the host keys pinned.
     dir: PathBuf,
+    /// This remote's (by its URL): the last push, what was verified, its alarm — a new URL starts
+    /// afresh rather than alarming at a history that is another repository's (the review of ADR-036).
+    here: PathBuf,
 }
 
 /// The last push, as the broker recorded it.
@@ -47,11 +51,18 @@ pub struct Remote {
 pub struct Pushed {
     /// When it was tried (UTC, RFC 3339).
     pub at: String,
+    /// When pushes began to fail, if they are failing (UTC): a day after it, an alarm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_since: Option<String>,
     /// When a push last went through (UTC), whenever that was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ok: Option<String>,
     /// Whether it went through.
     pub ok: bool,
+    /// Why `main` was not taken, when the ledger was (another history there, a commit confirmed
+    /// waiting, an operation unfinished).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main: Option<String>,
     /// Why not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -86,7 +97,10 @@ impl Remote {
         if !url_ok(url) {
             bail!("the remote must be an SSH URL (ssh://host/path or user@host:path), not {url:?}");
         }
-        Ok(Remote { url: url.to_string(), dir: state_dir.join("remote") })
+        use sha2::Digest as _;
+        let dir = state_dir.join("remote");
+        let here = dir.join(&hex::encode(sha2::Sha256::digest(url.as_bytes()))[..16]);
+        Ok(Remote { url: url.to_string(), dir, here })
     }
 
     pub fn key(&self) -> PathBuf {
@@ -129,19 +143,19 @@ impl Remote {
     /// The remote's ledger commit last checked and found to agree (None: none yet, or forgotten —
     /// then the whole of its history is checked).
     pub fn verified(&self) -> Option<String> {
-        let v = std::fs::read_to_string(self.dir.join("verified")).ok()?;
+        let v = std::fs::read_to_string(self.here.join("verified")).ok()?;
         let v = v.trim();
         (v.len() == 40 && v.bytes().all(|b| b.is_ascii_hexdigit())).then(|| v.to_string())
     }
 
     pub fn set_verified(&self, commit: &str) -> Result<()> {
-        write_atomic(&self.dir, "verified", commit.as_bytes())
+        write_atomic(&self.here, "verified", commit.as_bytes())
     }
 
     /// A disagreement with the remote, once found, stays until a person clears it
     /// (`torq-broker remote-clear`, ledgered): a network blip, or a later push, does not make it go.
     pub fn alarm(&self) -> Option<Alarm> {
-        serde_json::from_slice(&std::fs::read(self.dir.join("alarm.json")).ok()?).ok()
+        serde_json::from_slice(&std::fs::read(self.here.join("alarm.json")).ok()?).ok()
     }
 
     pub fn raise(&self, why: &str) -> Result<()> {
@@ -149,13 +163,13 @@ impl Remote {
             return Ok(()); // the first one found is the one to look into
         }
         let a = Alarm { at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), why: why.to_string() };
-        write_atomic(&self.dir, "alarm.json", &serde_json::to_vec(&a)?)
+        write_atomic(&self.here, "alarm.json", &serde_json::to_vec(&a)?)
     }
 
     /// Clear the alarm, and what was verified: the next push checks the remote's whole history again.
     pub fn clear(&self) -> Result<()> {
         for f in ["alarm.json", "verified"] {
-            match std::fs::remove_file(self.dir.join(f)) {
+            match std::fs::remove_file(self.here.join(f)) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
                 _ => {}
             }
@@ -164,16 +178,11 @@ impl Remote {
     }
 
     pub fn last(&self) -> Option<Pushed> {
-        serde_json::from_slice(&std::fs::read(self.dir.join("last.json")).ok()?).ok()
+        serde_json::from_slice(&std::fs::read(self.here.join("last.json")).ok()?).ok()
     }
 
     pub fn record(&self, p: &Pushed) -> Result<()> {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
-        let f = self.dir.join("last.json");
-        let tmp = self.dir.join("last.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(p)?)?;
-        std::fs::rename(&tmp, &f).with_context(|| format!("writing {}", f.display()))
+        write_atomic(&self.here, "last.json", &serde_json::to_vec(p)?)
     }
 }
 

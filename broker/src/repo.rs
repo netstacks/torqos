@@ -88,8 +88,10 @@ impl Repo {
             .output()
             .context("running git")?;
         if !out.status.success() {
-            if limit.is_some() && out.status.code() == Some(124) {
-                bail!("git {} took longer than {} s and was stopped", args.first().unwrap_or(&""), limit.unwrap_or(0));
+            // (124: timeout stopped it; 137: it had to kill it.)
+            if limit.is_some() && matches!(out.status.code(), Some(124 | 137)) {
+                let what = args.iter().find(|a| matches!(**a, "push" | "fetch" | "ls-remote")).unwrap_or(&"to the remote");
+                bail!("git {what} took longer than {} s and was stopped", limit.unwrap_or(0));
             }
             bail!(
                 "git {} failed: {}",
@@ -141,16 +143,18 @@ impl Repo {
     // (The ledger, on the remote, is a branch: `torq-ledger`. Branch protection covers branches, so
     // the remote can refuse to rewrite or delete it — GitHub's rulesets, for one, cover nothing else.)
 
-    /// Push the ledger's ref to `url`, and the configuration (HEAD, as `main`) with it unless
-    /// `with_main` is false (a commit confirmed waits: it may yet be rolled back, and `main` is never
-    /// rewound) — never forced: the remote's history only grows. Atomic: both, or neither.
-    pub fn push_remote(&self, url: &str, ssh_command: &str, with_main: bool) -> Result<()> {
+    /// Push the ledger's ref to `url` — never forced: the remote's history only grows.
+    pub fn push_ledger(&self, url: &str, ssh_command: &str) -> Result<()> {
         let ledger = format!("refs/torq/ledger:{REMOTE_LEDGER}");
-        let mut args = vec!["push", "--porcelain", "--atomic", "--no-recurse-submodules", "--", url, ledger.as_str()];
-        if with_main {
-            args.push("HEAD:refs/heads/main");
-        }
-        self.git_net(ssh_command, &args)?;
+        self.git_net(ssh_command, &["push", "--porcelain", "--no-recurse-submodules", "--", url, &ledger])?;
+        Ok(())
+    }
+
+    /// Push the configuration (HEAD) as the remote's `main` — never forced. Apart from the ledger: a
+    /// `main` the remote refuses (another history there) must not keep the ledger from it (the second
+    /// review of ADR-036).
+    pub fn push_main(&self, url: &str, ssh_command: &str) -> Result<()> {
+        self.git_net(ssh_command, &["push", "--porcelain", "--no-recurse-submodules", "--", url, "HEAD:refs/heads/main"])?;
         Ok(())
     }
 
