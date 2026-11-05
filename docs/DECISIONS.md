@@ -975,7 +975,11 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      ACL on what of the directory is the person's (default ACLs, so files either makes stay both
      of theirs); the agent gets no permission on the home itself (the owner's choice, 2026-11-05: a
      pass-through ACL let the agent read the home's world-readable files by name). A sandbox of the
-     tool's own (Claude Code's bubblewrap) runs inside. Not settled: what "tainted" means for a tool
+     tool's own (Claude Code's bubblewrap) runs inside; nothing it starts outlives it (its own process
+     namespace); the share is nosuid and nodev; one session at a time while sharing. **What a share
+     means:** whatever the agent writes there may later run as the person — a git hook, `.envrc`, a
+     Makefile, a package's scripts, a tool's own hooks (`.claude/settings.json`) — so a share is
+     trusting the agent with the person's next `git commit` there. Not settled: what "tainted" means for a tool
      that reads the web (the agent still marks its own).
 - **Tested** (`tests/agent.nix`, each failing if its claim broke): the account exists as stated (no
   password, nologin, no groups, its home 0700); as it, a proposal of the owner's packages is

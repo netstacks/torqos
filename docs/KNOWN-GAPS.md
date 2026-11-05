@@ -453,6 +453,14 @@ Its §5 lists claims without a test.
      descriptor's device and inode, the owner, setpriv), but it is root code a person's arguments
      reach — the kind the broker's rule says should be Rust. And the sandbox is bubblewrap's with
      the network on: a tool run as the agent can reach anything the machine can.
+   - **A share runs as the person later.** What the agent writes in a shared project — a git hook,
+     `.envrc`, a Makefile, a package's scripts, `.claude/settings.json` hooks — runs as the person
+     the next time they use it there, and the person is an administrator. Not blocked (it is what a
+     shared project is); a review of what changed there (`git status`, `.git/hooks`) after a session
+     is the defence, for now. The agent can also make its own files there unreadable to the person
+     (it owns them); the person can still remove them.
+   - **The agent as a service** (M5) runs as the same account: `torq agent run --share` refuses while
+     any agent process runs, so a running agent service will block sharing until that is designed.
    - **The agent's own `commit`** (it proposes and stops) is tested in torqcli's unit tests, not in a
      VM: the VM tests' configurations are stubs torqcli cannot evaluate.
    - **Stale proposals stay listed.** A proposal prepared against an older configuration is refused
