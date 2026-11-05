@@ -1508,7 +1508,7 @@ fn commit_confirmed_then_confirm() {
     assert_eq!(Confirmable::link(&m.profile), SYS1, "the boot default is untouched: a reboot rolls back");
     // Built, then the rollback scheduled, and only then activated: never the new system without a timer.
     let log = m.log();
-    let sched = format!("schedule {seq} 600 /nix/store/old-broker/bin/torq-broker ");
+    let sched = format!("schedule {} 600 /nix/store/old-broker/bin/torq-broker ", c["timer"]);
     let (b, s, act) = (log.find("build").unwrap(), log.find(&sched).unwrap(), log.find(&format!("activate {SYS2}")).unwrap());
     assert!(b < s && s < act, "{log}");
     assert!(log[s..].lines().next().unwrap().ends_with(" UTC"), "a wall-clock deadline: {log}");
@@ -2462,6 +2462,25 @@ fn break_glass_during_a_build_leaves_the_commit_confirmed_timer_armed() {
     let r = m.b.expire_confirm(Some(named), false).unwrap().expect("rolled back");
     assert_eq!(r.body.kind, "rolled_back");
     m.assert_back(&anchor);
+}
+
+/// A proposal that failed may be applied again, while the first attempt's timer still waits: that
+/// timer is not this attempt's, and has no say over it.
+#[test]
+fn an_earlier_attempts_timer_has_no_say_over_a_retry() {
+    let activate = format!("test -e DIR/second && {ACTIVATE}");
+    let m = Confirmable::new_with(BUILD, &activate, SCHEDULE);
+    let seq = m.propose_theme();
+    assert!(m.b.apply_confirmed(seq, "casey", false, 1).is_err());
+    fs::write(m.dir.path().join("second"), "").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let a = m.b.apply_confirmed(seq, "casey", false, 600).unwrap();
+    let named: Vec<u64> = m.log().lines().filter_map(|l| l.strip_prefix("schedule ")?.split(' ').next()?.parse().ok()).collect();
+    assert_eq!(named.len(), 2, "{}", m.log());
+    assert_ne!(named[0], named[1], "each attempt its own: systemd refuses a unit name twice");
+    assert!(m.b.expire_confirm(Some(named[0]), false).unwrap().is_none(), "the first attempt's timer finds nothing");
+    assert_eq!(a.body.data["confirm"]["timer"], named[1]);
+    assert!(m.b.expire_confirm(Some(named[1]), false).unwrap().is_some(), "its own does");
 }
 
 /// Before a machine's ledger begins, an entry would be #1, and setup would take it for set up.

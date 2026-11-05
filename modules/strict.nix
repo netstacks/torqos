@@ -14,7 +14,7 @@ let
   # ledgered, each use would not be.
   rootGroups = [ "docker" "podman" "lxd" "incus-admin" "libvirtd" "disk" ];
   inRootGroup = lib.unique (
-    lib.attrNames (lib.filterAttrs (_: u: lib.intersectLists rootGroups u.extraGroups != [ ]) config.users.users)
+    lib.attrNames (lib.filterAttrs (_: u: lib.intersectLists rootGroups ([ u.group ] ++ u.extraGroups) != [ ]) config.users.users)
     ++ lib.concatMap (g: config.users.groups.${g}.members or [ ]) rootGroups
   );
   # As root, through sudo (the person's password): the record, then the shell.

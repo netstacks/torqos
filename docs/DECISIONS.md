@@ -722,7 +722,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   "<why>"` asks the person's password every time, writes the entry, pushes it, and only
   then opens the shell; if the remote cannot be reached it says so and asks. The ledger has its own
   lock, held for one append, so a stuck switch cannot keep the entry out; since an entry can then land
-  during an apply, its timer names the proposal, never a number predicted. If the ledger cannot be
+  during an apply, a commit confirmed's timer has an id of its own for each attempt (`confirm.timer`),
+  never a ledger number predicted. If the ledger cannot be
   written there is no shell, and no fallback: the owner's decision, "I prefer secure over back doors".
 
 ## ADR-036 — The config repo's remote: the machine is a URL

@@ -142,7 +142,7 @@ fn command_line() -> clap::Command {
         .subcommand(
             Command::new("expire-confirm")
                 .about("Roll back the commit confirmed that is waiting (its timer runs this at the deadline).")
-                .arg(Arg::new("seq").value_parser(value_parser!(u64)).help("Only if this applied change is the one waiting."))
+                .arg(Arg::new("seq").value_parser(value_parser!(u64)).help("Only if this applied change, or the timer it names, is the one waiting."))
                 .arg(flag("reboot", "Run at boot: the machine restarted before the change was confirmed.")),
         )
         .subcommand(Command::new("revert").about("Undo one applied change: a new commit that reverts it, rebuild, ledger.").arg(seq()).arg(by()))

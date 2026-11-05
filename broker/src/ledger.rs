@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -80,8 +80,12 @@ impl Ledger {
     }
 
     pub fn read_all(&self) -> Result<Vec<Entry>> {
-        let _held = self.shared();
-        self.read_unlocked()
+        // Parsed after the guard is gone: readers hold writers off for the read alone.
+        let text = {
+            let _held = self.shared();
+            self.text()?
+        };
+        Self::parse(&text)
     }
 
     /// Hold off writers while the guard lives (a line is never seen half written). For a moment only,
@@ -92,19 +96,20 @@ impl Ledger {
         Some(f)
     }
 
-    fn read_unlocked(&self) -> Result<Vec<Entry>> {
+    fn text(&self) -> Result<String> {
         if !self.path.exists() {
-            return Ok(vec![]);
+            return Ok(String::new());
         }
-        let f = fs::File::open(&self.path)
-            .with_context(|| format!("opening ledger {}", self.path.display()))?;
+        fs::read_to_string(&self.path).with_context(|| format!("opening ledger {}", self.path.display()))
+    }
+
+    fn parse(text: &str) -> Result<Vec<Entry>> {
         let mut out = vec![];
-        for (i, line) in BufReader::new(f).lines().enumerate() {
-            let line = line?;
+        for (i, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            let e: Entry = serde_json::from_str(&line).with_context(|| format!("ledger line {} is not a valid entry", i + 1))?;
+            let e: Entry = serde_json::from_str(line).with_context(|| format!("ledger line {} is not a valid entry", i + 1))?;
             // Byte for byte what the broker writes for this entry (`append`): a field it does not know
             // (which the hash would not cover, as it hashes the entry it reads), a key twice, a value
             // written another way — any of them is an edit (audits of 2026-10-31).
@@ -132,7 +137,7 @@ impl Ledger {
         }
         let guard = OpenOptions::new().write(true).create(true).truncate(false).open(self.path.with_extension("lock"))?;
         guard.lock().context("locking the ledger")?;
-        let entries = self.read_unlocked()?;
+        let entries = Self::parse(&self.text()?)?;
         verify_entries(&entries)?;
         let (seq, prev_hash) = match entries.last() {
             Some(last) => (last.body.seq + 1, last.hash.clone()),

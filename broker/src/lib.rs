@@ -74,9 +74,9 @@ pub struct Broker {
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingConfirm {
     pub applied: u64,
-    /// The proposal it applied: what its timer names (`schedule_rollback`).
+    /// What its timer names (`schedule_rollback`); none in a commit confirmed from before it had one.
     #[serde(skip)]
-    proposal: Option<u64>,
+    timer: Option<u64>,
     pub deadline: String,
     /// The config and the system before the commit: what an unconfirmed commit goes back to.
     pub anchor_commit: String,
@@ -107,7 +107,7 @@ fn pending_confirm(entries: &[Entry]) -> Option<PendingConfirm> {
     let c = &a.body.data["confirm"];
     Some(PendingConfirm {
         applied: seq,
-        proposal: a.body.data["proposal"].as_u64(),
+        timer: c["timer"].as_u64(),
         deadline: c["deadline"].as_str()?.into(),
         anchor_commit: c["anchor_commit"].as_str()?.into(),
         anchor_system: c["anchor_system"].as_str()?.into(),
@@ -880,7 +880,7 @@ impl Broker {
             bail!("the reason is one line of text, at most 200 characters, not empty");
         }
         // Entry #1 would be taken for a machine set up, and setup and adopt would refuse it for good.
-        if self.ledger.read_all()?.first().is_none_or(|e| e.body.kind != "init") {
+        if self.ledger.read_all()?.is_empty() {
             bail!("this machine is not set up yet: it has no ledger to put this in");
         }
         let e = self.ledger.append(NewEntry {
@@ -1996,11 +1996,14 @@ impl Broker {
         // timer to undo it. A failure in any step goes straight back to the anchor, not a rebuild;
         // a broker killed in any step is reconciled the same way (`pending.anchor_system`), by the
         // next operation or by the timer.
+        // This attempt's own, in milliseconds: never a ledger number, which `torq break-glass` could take
+        // while the build runs, and never an earlier attempt's, whose timer may still be waiting.
+        let timer = chrono::Utc::now().timestamp_millis().unsigned_abs();
         let activated = match (confirm, &anchor_system) {
             (Some(minutes), Some(anchor)) => self
                 .build_system(&lock, &commit)
                 .and_then(|system| {
-                    let deadline = self.schedule_rollback(&lock, proposal_seq, minutes)?;
+                    let deadline = self.schedule_rollback(&lock, timer, minutes)?;
                     self.run_command(&lock, "activation", &self.activate_cmd, &[("system", &system)])?;
                     if self.running_system().as_deref() != Some(system.as_str()) {
                         bail!("activation finished, but the running system is not {system}");
@@ -2008,6 +2011,7 @@ impl Broker {
                     Ok(deadline)
                 })
                 .map(|deadline| Some(json!({
+                    "timer": timer,
                     "minutes": minutes,
                     "deadline": deadline,
                     "anchor_commit": before,
@@ -2082,20 +2086,19 @@ impl Broker {
         let _ = fs::remove_file(self.build_link());
     }
 
-    /// Start the timer that rolls back the change of proposal `seq` after `minutes`; returns the
-    /// deadline. The proposal, not the entry to come: `torq break-glass` may take that number while
-    /// the build runs, and a proposal is applied once, so an old timer never fits a newer change.
+    /// Start the timer that rolls back this attempt's change after `minutes`; returns the deadline.
+    /// `timer` is what it will name: the `timer` of the `confirm` record.
     /// It runs this broker by its own path (`exe`), so the rollback does not depend on the system
     /// being rolled back. If this broker dies before the change is ledgered, the timer's run reconciles
     /// the interrupted apply (`pending.anchor_system`): the anchor is restored all the same.
-    fn schedule_rollback(&self, lock: &Lock, seq: u64, minutes: u32) -> Result<String> {
+    fn schedule_rollback(&self, lock: &Lock, timer: u64, minutes: u32) -> Result<String> {
         let deadline = chrono::Utc::now() + chrono::Duration::minutes(minutes.into());
         self.run_command(
             lock,
             "rollback timer",
             &self.schedule_cmd,
             &[
-                ("seq", &seq.to_string()),
+                ("seq", &timer.to_string()),
                 ("seconds", &(u64::from(minutes) * 60).to_string()),
                 ("deadline", &deadline.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
                 ("broker", &self.exe.to_string_lossy()),
@@ -2201,7 +2204,7 @@ impl Broker {
     /// Idempotent, so an interrupted rollback is finished by running it again (`resumed`).
     fn expire_locked(&self, lock: &Lock, seq: Option<u64>, by_reboot: bool, resumed: Option<Pending>) -> Result<Option<Entry>> {
         let entries = self.ledger.read_all()?;
-        let pc = pending_confirm(&entries).filter(|pc| seq.is_none_or(|s| s == pc.applied || Some(s) == pc.proposal));
+        let pc = pending_confirm(&entries).filter(|pc| seq.is_none_or(|s| s == pc.applied || Some(s) == pc.timer));
         // "By reboot" only after one: the boot-time unit also starts on the switch that first adds it.
         let pc = pc.filter(|pc| !by_reboot || pc.boot_id.is_none() || pc.boot_id != self.boot_id());
         let Some(pc) = pc else {
@@ -2403,7 +2406,7 @@ mod tests {
 
     fn waiting() -> PendingConfirm {
         PendingConfirm {
-            proposal: None,
+            timer: None,
             applied: 3,
             deadline: "2026-10-30T12:00:00Z".into(),
             anchor_commit: "a".into(),

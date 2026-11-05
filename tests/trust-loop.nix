@@ -418,11 +418,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test -e /etc/torq-test/new-system")
         machine.succeed(f"grep -q 'nightLight = true' {repo}/desktop.nix")
         # A real wall-clock timer, running the broker that made the change by its store path.
-        unit = f"torq-confirm-{a['seq']}"
+        unit = f"torq-confirm-{a['data']['confirm']['timer']}"
         machine.succeed(f"systemctl is-active {unit}.timer")
         machine.succeed(f"systemctl show -p TimersCalendar {unit}.timer | grep -q 'UTC'")
         machine.succeed(f"systemctl show -p ExecStart {unit}.service "
-                        f"| grep -Eq 'argv\\[\\]=/nix/store/[^ ]+/bin/torq-broker expire-confirm {a['seq']} '")
+                        f"| grep -Eq 'argv\\[\\]=/nix/store/[^ ]+/bin/torq-broker expire-confirm {a['data']['confirm']['timer']} '")
         out = machine.succeed("torq-broker status")
         assert "rolls back at" in out, out
         out = machine.fail(f"torq-broker revert {a['seq']} --approved-by tester 2>&1")
@@ -468,7 +468,7 @@ pkgs.testers.runNixOSTest {
         c = broker("confirm --approved-by tester")
         assert c["kind"] == "confirmed" and c["data"]["applied"] == a["seq"], c
         # The timer still fires at the deadline, and finds nothing to roll back.
-        machine.wait_until_succeeds(f"journalctl -u torq-confirm-{a['seq']}.service | grep -q 'nothing is waiting'", timeout=180)
+        machine.wait_until_succeeds(f"journalctl -u torq-confirm-{a['data']['confirm']['timer']}.service | grep -q 'nothing is waiting'", timeout=180)
         assert running() == new_system
         machine.succeed(f"grep -q 'nightLight = true' {repo}/desktop.nix")
         assert last_entry()["kind"] == "confirmed"

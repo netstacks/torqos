@@ -19,6 +19,7 @@ assert
   !(says "without break-glass" (failed { }))
   && says "without break-glass" (failed { users.users.dev.extraGroups = [ "docker" ]; })
   && says "without break-glass" (failed { users.groups.disk.members = [ "dev" ]; })
+  && says "without break-glass" (failed { users.users.dev.group = "docker"; })
   && says "not with dev mode" (failed { torq.dev.enable = true; });
 pkgs.testers.runNixOSTest {
   name = "torq-strict";
