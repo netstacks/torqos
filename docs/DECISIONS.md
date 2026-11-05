@@ -721,7 +721,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   alone. `torq break-glass "<why>"` asks the person's password, writes the entry, pushes it, and only
   then opens the shell; if the remote cannot be reached it says so and asks. The ledger has its own
   lock, held for one append, so a stuck switch cannot keep the entry out. If the ledger cannot be
-  written there is no shell (KNOWN-GAPS 6zj).
+  written there is no shell, and no fallback: the owner's decision, "I prefer secure over back doors".
 
 ## ADR-036 — The config repo's remote: the machine is a URL
 - **Status:** accepted (the owner, 2026-11-05: "yes"); the push and the anchor built 2026-11-05, pull and

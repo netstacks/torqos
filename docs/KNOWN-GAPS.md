@@ -542,10 +542,10 @@ Its §5 lists claims without a test.
      machine makes a dev machine. The summary does not call it out.
 
 6zj. **Strict mode and break-glass (ADR-035).** Open:
-   - **No ledger, no shell.** If the entry cannot be written (a full disk, a broken ledger) break-glass
-     refuses, and with strict mode on sudo offers nothing else: the way in is then the machine's
-     console, at the boot menu. The rule is "a root shell only after a ledger entry"; an owner may
-     prefer a shell with a louder record for this case. Nothing is built for it.
+   - **No ledger, no shell, by the owner's decision (2026-11-05: "I prefer secure over back doors").**
+     If the entry cannot be written (a full disk, a broken ledger) break-glass refuses, and with strict
+     mode on sudo offers nothing else: the way in is then the machine's console, at the boot menu.
+     This is a limit accepted, not a gap to close: do not add a fallback shell.
    - **What the shell does is not recorded,** only that it opened, who opened it and why.
    - **It keeps root rare, not absent.** A person with the password can still commit a configuration
      that runs anything as root: that is a change, ledgered, and it is meant to work.
