@@ -454,6 +454,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   working tree, uncommitted edits included (KNOWN-GAPS, "Dev mode"), so what the ledger records on
   the dev machine is reversible but not always reproducible from the repository. `docs/DEV-SETUP.md` is written for this
   host; the Mac/UTM instructions are in git history.
+- **Amended (2026-11-05, the owner):** during development the tests run here, not on every push:
+  `nix flake check` on torq5 before each merge to `main`. CI's `test` runs for pull requests, by
+  hand, and as the first step of every release; aarch64 is built there at each release.
 
 ## ADR-031 — The ISO installer writes the image, and detects the hardware
 - **Context:** M2's last piece is TorqOS on real hardware: an ISO to boot from a USB stick that

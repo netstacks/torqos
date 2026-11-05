@@ -1,11 +1,11 @@
-# The tests (docs/ROADMAP.md, M2 "CI"): every push to main and every pull request runs what
-# `nix flake check` runs here — the packages with their unit tests, the tree checks, the VM tests
-# (with KVM) — on x86_64. A pull request's commits must also each be signed off (DCO, CONTRIBUTING.md).
+# The tests (docs/ROADMAP.md, M2 "CI"): what `nix flake check` runs on the dev host — the packages
+# with their unit tests, the tree checks, the VM tests (with KVM) — on x86_64. Not on every push:
+# during development the full check runs on the dev host before anything merges (docs/DRIVING.md);
+# here it runs for pull requests (whose commits must each be signed off, DCO, CONTRIBUTING.md), by
+# hand, and as the first step of every release (release.yml), whose images are also built for aarch64.
 name: test
 
 on:
-  push:
-    branches: [main]
   pull_request:
   # By hand: all of it, or one check while looking into it (`gh workflow run test.yml -f check=image`).
   workflow_dispatch:

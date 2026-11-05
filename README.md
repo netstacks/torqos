@@ -288,6 +288,8 @@ nix develop -c sh -c 'cd broker && cargo test'   # the broker's unit tests
 |---|---|
 | `tree` | The configuration tree is read as documented, and what it may never set is refused (evaluation only) |
 | `trust-loop` | Commits, confirmed commits, rollbacks, the ledger and the shell, on a real NixOS |
+| `socket` | The broker's door: who is asking is the kernel's answer; a system change takes an administrator's password; five wrong lock it, at sudo and su too |
+| `agent` | The agent's account proposes only what its list allows, every refusal ledgered; a person sees what a proposal does and applies it |
 | `accounts`, `ssh` | Who can log in, and how; passwords never in the configuration |
 | `image` | The release image from first boot through setup to its first signed update |
 | `installer` | The ISO from a USB stick to a chosen disk, and that disk's first boot |
@@ -295,8 +297,9 @@ nix develop -c sh -c 'cd broker && cargo test'   # the broker's unit tests
 | `free`, `size` | Nothing unfree in an image or the ISO; a new machine within its size budget |
 | `broker` | The broker's own tests, in the build sandbox |
 
-CI runs them on every push and pull request, builds the images for both architectures, and publishes
-a release on each `v*` tag. Developing TorqOS in a VM: [docs/DEV-SETUP.md](docs/DEV-SETUP.md).
+They run on the dev host before every merge; CI runs them for pull requests and every release,
+builds the images for both architectures, and publishes a release on each `v*` tag. Developing
+TorqOS in a VM: [docs/DEV-SETUP.md](docs/DEV-SETUP.md).
 
 ## Repository layout
 

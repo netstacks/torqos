@@ -13,6 +13,9 @@ Three rules that cover most of what goes wrong:
    session, given only the diff and the ADR — not the builder's summary — tells you whether it does.
 3. **Nothing ships from a dirty tree.** `git status` before `request system update` on torq5: a
    `path:` source builds whatever is on disk, committed or not.
+4. **The tests run here.** `nix flake check` on torq5, green, before anything merges to `main` —
+   not GitHub's CI, which runs only for pull requests, by hand and at each release (ADR-030,
+   amended). aarch64 is built at each release; nothing tests it day to day.
 
 ## The loop, for one piece of work
 

@@ -119,7 +119,7 @@ first.
       moves it there. v0.1.0 out (2026-11-02), checked from outside. Done: `torq5`, installed from
       the image, had its first update move its source from the image's own store path to
       `git+…/torqos-releases?ref=stable` as one ledgered change, and runs a release.*
-- [x] **CI (GitHub Actions):** *test* on every push and pull request (`nix flake check`: tree
+- [x] **CI (GitHub Actions):** *test* on pull requests, by hand and in every release (not on every push since 2026-11-05: the dev host runs it before each merge) (`nix flake check`: tree
       checks and the VM tests, with KVM); *(the `test` workflow, 2026-11-02, with the DCO
       sign-off check on pull requests)* *nixpkgs bump* weekly, as a pull request the tests run
       on *(the `bump` workflow, 2026-11-02: one branch, `bump/nixpkgs`, replaced each week until

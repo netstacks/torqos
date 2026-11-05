@@ -62,7 +62,7 @@ broker/                Rust crate: torq-broker (ledger, policy, git, rebuild, ro
 cli/                   Rust crate: torqcli — the grammar, the candidate, the tree (ADR-025)
 tests/                 NixOS VM tests
 release/               allowed_signers: the keys a machine trusts a release from
-.github/workflows/     test on every push, weekly nixpkgs bump, release on a v* tag
+.github/workflows/     test (pull requests, by hand, each release), weekly nixpkgs bump, release on a v* tag
 branding/              the TorqOS logo, icons, terminal logos and palette (modules/branding.nix)
 docs/                  design docs and decision log
 ```
