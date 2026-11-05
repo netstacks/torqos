@@ -289,6 +289,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_system_profile(&s.system_profile)
         .with_confirm_commands(&s.build, &s.activate, &s.boot, &s.schedule)
         .with_people(&s.people)
+        .with_agent_limits(&s.agent)
         // On a real machine the rollback uses the old system's own commands (its etc/torq/broker.json).
         .with_anchor_settings(config::running_as_root());
     b.ledger.set_via(via, caller);

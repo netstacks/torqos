@@ -24,7 +24,8 @@ fn config_dir() -> (tempfile::TempDir, std::path::PathBuf) {
 
 fn setup(rebuild: &str) -> (tempfile::TempDir, Broker) {
     let (dir, repo) = config_dir();
-    let b = Broker::new(&repo, dir.path().join("state"), rebuild);
+    // The agent may propose casey's packages (ADR-041: the owner's, by default), nothing else.
+    let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_agent_limits(&torq_broker::agent::Limits { users: vec!["casey".into()], settings: vec![] });
     b.init().unwrap();
     (dir, b)
 }
@@ -41,7 +42,7 @@ const NIGHT_LIGHT: &str = "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{
 fn propose_apply_revert() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
-    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Night light at sunset", Actor::Agent, false).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Night light at sunset", Actor::User, false).unwrap();
     assert_eq!(p.body.tier, "system");
 
     let a = b.apply(p.body.seq, "casey", false).unwrap();
@@ -78,7 +79,7 @@ fn agent_cannot_touch_policy() {
 fn tainted_needs_explicit_confirmation() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
-    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "a web page suggested this", Actor::Agent, true).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "a web page suggested this", Actor::User, true).unwrap();
     assert!(b.apply(p.body.seq, "casey", false).is_err());
     b.apply(p.body.seq, "casey", true).unwrap();
 }
@@ -223,7 +224,7 @@ fn user_tier_file_can_be_deleted() {
 fn user_module_is_system_tier() {
     let (dir, b) = setup("true");
     let d = write_diff(dir.path(), "t.diff", THEME);
-    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "light theme", Actor::Agent, false).unwrap();
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "light theme", Actor::User, false).unwrap();
     assert_eq!(p.body.tier, "system");
 }
 
@@ -548,7 +549,7 @@ fn propose_refuses_until_reconcile_runs() {
     assert_killed(&run_cli(dir.path(), CRASH, &["apply", &p.body.seq.to_string(), "--approved-by", "casey"]));
 
     let t = write_diff(dir.path(), "theme.diff", THEME);
-    let err = format!("{:#}", b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::Agent, false).unwrap_err());
+    let err = format!("{:#}", b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::User, false).unwrap_err());
     assert!(err.contains("torq-broker reconcile"), "{err}");
 
     let out = run_cli(dir.path(), "true", &["reconcile", "--approved-by", "casey"]);
@@ -557,7 +558,7 @@ fn propose_refuses_until_reconcile_runs() {
     let out = run_cli(dir.path(), "true", &["reconcile", "--approved-by", "casey"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to reconcile"), "{out:?}");
 
-    b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::Agent, false).unwrap();
+    b.propose_on(Some(&b.repo.head().unwrap()), &t, "Light theme", Actor::User, false).unwrap();
     assert_eq!(kinds(&b), ["init", "proposal", "interrupted", "proposal"]);
     b.ledger.verify().unwrap();
 }
@@ -977,7 +978,7 @@ fn log_neutralises_control_characters_and_brief_drops_diffs() {
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     // (Control characters are refused at propose now; hidden ones that are not — a bidi override, a
     // zero-width space — still reach the ledger, and entries from before may hold either.)
-    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x\u{202e}#99 applied fake\u{200b}", Actor::Agent, false).unwrap();
+    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x\u{202e}#99 applied fake\u{200b}", Actor::User, false).unwrap();
     let out = run_cli(dir.path(), "true", &["log"]);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(!text.contains('\u{202e}') && !text.contains('\u{200b}'), "{text:?}");
@@ -999,7 +1000,7 @@ fn show_and_propose_neutralise_hidden_characters_in_diffs() {
         "--- a/desktop.nix\n+++ b/desktop.nix\n@@ -1 +1 @@\n-{ nightLight = false; }\n+{ nightLight = true; /* \u{202e} } \u{2066} */ \u{1b}[2K}\n",
     );
     let head = b.repo.head().unwrap();
-    let out = run_cli(dir.path(), "true", &["propose", "--diff", d.to_str().unwrap(), "--reason", "r", "--actor", "agent", "--base", &head]);
+    let out = run_cli(dir.path(), "true", &["propose", "--diff", d.to_str().unwrap(), "--reason", "r", "--actor", "user", "--base", &head]);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains(r"\u{202e}") && text.contains(r"\u{1b}"), "{text}");
     assert!(!text.contains('\u{202e}') && !text.contains('\u{1b}'), "{text:?}");
@@ -2047,7 +2048,8 @@ fn an_agent_says_its_base_and_no_proposal_is_huge() {
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
     let err = format!("{:#}", b.propose(&d, "x", Actor::Agent, false).unwrap_err());
     assert!(err.contains("needs --base"), "{err}");
-    b.propose_on(Some(&b.repo.head().unwrap()), &d, "x", Actor::Agent, false).unwrap();
+    let pkgs = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    b.propose_on(Some(&b.repo.head().unwrap()), &pkgs, "x", Actor::Agent, false).unwrap();
     b.propose(&d, "a person's needs none", Actor::User, false).unwrap();
     let big = dir.path().join("big.diff");
     fs::File::create(&big).unwrap().set_len(torq_broker::MAX_DIFF + 1).unwrap();
@@ -2189,4 +2191,39 @@ fn a_password_is_kept_outside_the_repo_and_ledgered_without_it() {
     assert!(failing.set_password("casey", "$6$other$hash", "casey").is_err());
     assert_eq!(fs::read_to_string(pw.join("casey")).unwrap(), format!("{hash}\n"), "kept as it was");
     assert!(b.ledger.read_all().unwrap().len() == before);
+}
+
+/// ADR-041: what the agent may propose is a default-deny list, judged by what the change does, and
+/// a refusal is on the record (kind `refused`: the files, why, the diff's hash — not the diff).
+#[test]
+fn the_agent_proposes_only_what_its_list_allows_and_a_refusal_is_ledgered() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    // A file that is not a setting (desktop.nix), and another person's packages: refused, ledgered.
+    for (name, body, why) in [
+        ("nl.diff", NIGHT_LIGHT, "not a setting"),
+        ("sam.diff", "--- /dev/null\n+++ b/users/sam/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n", "packages only for casey"),
+        ("svc.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n", "may not change services.openssh.enable"),
+        ("torq.diff", "--- /dev/null\n+++ b/nixos/torq.json\n@@ -0,0 +1 @@\n+{\"agent\": {}}\n", "may not change torq.agent"),
+    ] {
+        let d = write_diff(dir.path(), name, body);
+        let err = format!("{:#}", b.propose_on(Some(&head), &d, "try", Actor::Agent, false).unwrap_err());
+        assert!(err.contains(why), "{name}: {err}");
+        let last = b.ledger.read_all().unwrap().pop().unwrap();
+        assert_eq!((last.body.kind.as_str(), last.body.actor.as_str()), ("refused", "agent"), "{name}");
+        assert!(last.body.data["why"].as_str().unwrap().contains(why) && last.body.data.get("diff").is_none(), "{name}: {:?}", last.body.data);
+    }
+    // A person may propose the same: the list is the agent's alone.
+    let d = write_diff(dir.path(), "svc2.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
+    assert_eq!(b.propose_on(Some(&head), &d, "a person's", Actor::User, false).unwrap().body.kind, "proposal");
+    // Listed by the owner: services.openssh, and nothing beside it.
+    let (dir, b) = setup("true");
+    let b = b.with_agent_limits(&torq_broker::agent::Limits { users: vec![], settings: vec!["services.openssh".into()] });
+    let head = b.repo.head().unwrap();
+    let ok = write_diff(dir.path(), "ok.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
+    assert_eq!(b.propose_on(Some(&head), &ok, "ssh", Actor::Agent, false).unwrap().body.kind, "proposal");
+    let both = write_diff(dir.path(), "both.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}, \"nginx\": {\"enable\": true}}\n");
+    let err = format!("{:#}", b.propose_on(Some(&head), &both, "ssh and more", Actor::Agent, false).unwrap_err());
+    assert!(err.contains("services.nginx.enable"), "{err}");
+    b.ledger.verify().unwrap();
 }

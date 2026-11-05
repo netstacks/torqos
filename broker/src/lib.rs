@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![forbid(dead_code)]
 
+pub mod agent;
 pub mod config;
 pub mod ledger;
 pub mod policy;
@@ -61,6 +62,8 @@ pub struct Broker {
     password_cmd: String,
     /// The people the configuration declares: the only accounts `set_password` changes.
     people: Vec<String>,
+    /// What the agent may propose (ADR-041).
+    agent_limits: agent::Limits,
 }
 
 /// A `commit confirmed` waiting for `confirm`: an `applied` entry with a `confirm` record and no
@@ -421,10 +424,17 @@ impl Broker {
             passwords_dir: PathBuf::from("/var/lib/torq/secrets/passwords"),
             password_cmd: "chpasswd -e".into(),
             people: Vec::new(),
+            agent_limits: agent::Limits::default(),
         }
     }
 
     /// The people the configuration declares (its normal users, from the broker's fixed settings).
+    /// What the agent may propose (ADR-041): `torq.agent.mayPropose`, from broker.json.
+    pub fn with_agent_limits(mut self, limits: &agent::Limits) -> Self {
+        self.agent_limits = limits.clone();
+        self
+    }
+
     pub fn with_people(mut self, people: &[String]) -> Self {
         self.people = people.to_vec();
         self
@@ -790,6 +800,36 @@ impl Broker {
         Ok(())
     }
 
+    /// Why the agent may not propose the change in `diff_path` (touching `files`), or None: each file
+    /// as HEAD has it and as the change leaves it, read as JSON; a file that is not JSON is no
+    /// setting, and never the agent's.
+    fn agent_refusal(&self, diff_path: &Path, files: &[String]) -> Result<Option<String>> {
+        const MAX: u64 = 1 << 20;
+        let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).ok();
+        let mut touched = Vec::new();
+        for (path, after) in self.repo.proposed_files(diff_path, files, MAX)? {
+            let not_a_setting = || Ok(Some(format!("{path}: not a setting (a regular JSON file of the tree) — never the agent's")));
+            let before = match self.repo.file_at_head(&path, MAX) {
+                Ok(None) => None,
+                Ok(Some(b)) => match json(&b) {
+                    Some(v) => Some(v),
+                    None => return not_a_setting(),
+                },
+                Err(_) => return not_a_setting(),
+            };
+            let after = match after {
+                None => None,
+                Some(f) if f.mode == "100644" && f.size <= MAX => match json(&f.content) {
+                    Some(v) => Some(v),
+                    None => return not_a_setting(),
+                },
+                Some(_) => return not_a_setting(),
+            };
+            touched.push(agent::Touched { path, before, after });
+        }
+        Ok(agent::refusal(&self.agent_limits, &touched))
+    }
+
     pub fn propose(&self, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         self.propose_on(None, diff_path, reason, actor, tainted)
     }
@@ -838,15 +878,33 @@ impl Broker {
         fs::write(&copy, &diff)?;
         let files = self.repo.diff_files(&copy).and_then(|files| {
             self.check_user_data(&copy, &files)?;
-            Ok(files)
+            // The agent's proposals: only what its list allows (ADR-041), judged by what changes.
+            let refused = if actor == Actor::Agent { self.agent_refusal(&copy, &files)? } else { None };
+            Ok((files, refused))
         });
         let _ = fs::remove_file(&copy);
-        let files = files?;
+        let (files, refused) = files?;
         if files.is_empty() {
             bail!("diff changes no files");
         }
+        // What no one's proposal may touch (the policy, the ledger) is refused as that first: the
+        // agent's list comes after.
         let tier = policy::tier_for_paths(&files);
         policy::check_allowed(actor, tier)?;
+        if let Some(why) = refused {
+            // On the record, not only turned away: who tried what, and why not (the diff's hash, not
+            // the diff — a refusal is not a proposal).
+            self.ledger.append(NewEntry {
+                actor: actor.to_string(),
+                approved_by: None,
+                kind: "refused".into(),
+                tier: policy::tier_for_paths(&files).to_string(),
+                tainted,
+                reason: reason.into(),
+                data: json!({ "files": files, "diff_sha256": hex::encode(Sha256::digest(diff.as_bytes())), "why": why }),
+            })?;
+            bail!("refused: {why}");
+        }
         self.ledger.append(NewEntry {
             actor: actor.to_string(),
             approved_by: None,

@@ -188,6 +188,8 @@ in
         home = "/root";
         # The only accounts whose password the broker sets (modules/accounts.nix).
         people = config.torq.accounts.people;
+        # What the agent may propose (ADR-041, modules/agent.nix).
+        agent = { inherit (config.torq.agent.mayPropose) users settings; };
       };
      }
 

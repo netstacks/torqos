@@ -19,10 +19,9 @@ pkgs.testers.runNixOSTest {
     users.users.dev.hashedPasswordFile = lib.mkForce null;
     users.users.dev.hashedPassword = devHash;
     users.users.sam = { isNormalUser = true; hashedPasswordFile = lib.mkForce null; hashedPassword = samHash; };
-    # The agent's account (ADR-035; the module that makes it is M3's next item): what arrives from
-    # it is the agent.
-    users.users.torq-agent = { isSystemUser = true; group = "torq-agent"; };
-    users.groups.torq-agent = { };
+    # The agent's account comes from modules/agent.nix (ADR-041); it may propose any person's
+    # packages here, so that what this test checks is the socket's rules, not the agent's list.
+    torq.agent.mayPropose.users = [ "dev" "sam" "torq-agent" ];
     # A rebuild that says a lot, as a real one does: every apply's answer and exit must still come
     # through a burst of the build's output (the third review of ADR-040).
     torq.broker.rebuildCommand = "seq 1 6000 >&2";

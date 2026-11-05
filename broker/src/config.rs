@@ -44,6 +44,10 @@ pub struct Settings {
     /// password `password` sets. None listed (an older file): no password is set.
     #[serde(default)]
     pub people: Vec<String>,
+    /// What the agent may propose (ADR-041, `torq.agent.mayPropose`). None listed (an older file):
+    /// nothing but what is no setting at all is refused — it may propose nothing.
+    #[serde(default)]
+    pub agent: crate::agent::Limits,
 }
 
 /// What the caller asked for, by flag or `TORQ_*` variable; None where nothing was given.
@@ -111,6 +115,7 @@ impl Settings {
             path,
             home,
             people: Vec::new(),
+            agent: crate::agent::Limits::default(),
         }
     }
 
@@ -187,6 +192,7 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             path: defaults.path,
             home: defaults.home,
             people: defaults.people,
+            agent: defaults.agent,
         }),
     }
 }
@@ -255,6 +261,7 @@ mod tests {
             path: "/run/current-system/sw/bin".into(),
             home: "/root".into(),
             people: vec!["casey".into()],
+            agent: crate::agent::Limits::default(),
         }
     }
     fn defaults() -> Settings {

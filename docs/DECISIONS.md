@@ -920,3 +920,59 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   (`cli/src/main.rs` `BROKER`, the "sudo asks for your password" errors) goes. A2 comes next on the
   same branch or the one after: with requests no longer root's own, the broker re-fetches each
   changed input itself and checks its hash and signature.
+
+## ADR-041 — The agent's account: `torq-agent`, and what it may propose (proposed)
+- **Status:** proposed, 2026-11-05; ADR-035's account lever, after ADR-040 (the socket). The owner:
+  people will drive TorqOS with the AI tools they already use — Claude Code first — so the account
+  is made to be one such a tool can run as, not only TorqOS's own agent (M5).
+- **Context:** ADR-040 made identity the kernel's: whatever arrives from the `torq-agent` uid is
+  the agent, and it may only propose. But nothing makes that account yet (the socket test creates
+  one by hand), and a proposal from it may still touch anything a person's could: the settings
+  fence (`modules/settings-fence.nix`) keeps out the broker's own inputs, not the settings that
+  run code as root — a service's script, sudo rules, tmpfiles, binary caches and their keys
+  (KNOWN-GAPS 6m). A person reviews each proposal, but a review is not a boundary; a default-deny
+  list at the broker is.
+- **Decision:**
+  1. **The account** (`modules/agent.nix`, always present): a static system user `torq-agent` —
+     static, because the broker names its caller from /etc/passwd (a DynamicUser is not there,
+     KNOWN-GAPS 6zf) — in its own group, no password, no login shell (`nologin`: no SSH, no
+     console), in no other group (no `wheel`, so no sudo; no device groups). Its home,
+     `/var/lib/torq-agent` (0700, its own), is where a tool keeps its state and credentials (Claude
+     Code's `~/.claude`), so they are never the owner's. It reaches the system only through the
+     broker's socket, as torqcli does; what it runs, it runs with its own uid.
+  2. **What it may propose: a default-deny list at the broker**, checked on every proposal from the
+     agent's uid, by what the change *does*, not only which files it touches:
+     - **Never:** anything outside the tree's settings — the config files (`config-files.json` and
+       the Nix files it attaches), `flake.nix`, `flake.lock`, the hardware file — and anything in
+       `torq.*` (the agent's own limits live there) or the fence's list.
+     - **A person's packages** (`users/<name>/packages.json`): the owner's (`torq.user`) by default;
+       `torq.agent.mayPropose.users` names others.
+     - **Settings** (`nixos/<top>.json`, `system/<name>.json`): only the subtrees
+       `torq.agent.mayPropose.settings` lists (default: none — the agent may propose packages and
+       nothing else until the owner says otherwise). The broker compares each JSON file before and
+       after the change and checks every setting that changes against the list: `services.openssh`
+       allows `services.openssh.settings.PasswordAuthentication`, not `services.nginx`.
+     - The list is the broker's (`/etc/torq/broker.json`, from the module), and `torq.*` is never on
+       it, so the agent cannot propose widening its own list.
+  3. **A refusal is ledgered** (`kind: refused`: who, which files, why, the diff's hash — not the
+     diff), so an agent that tries is on the record, not only turned away.
+  4. **People see and approve the agent's proposals in torqcli:** the agent's `commit` proposes and
+     stops (`proposed as #n: a person applies it`); `show system proposals` lists what waits;
+     `request system apply <n>` shows its diff (and whether its session read untrusted content),
+     asks, and applies it — with the person's password for a system change, as their own commit.
+  5. **A tool like Claude Code, run as the agent — designed for here, built next.** `torq agent run
+     [--share <dir>] -- <command>` (a root-owned launcher a wheel member may start, `systemd-run
+     --uid=torq-agent --pty`): the agent's home as its home, network on (its model's API), the rest
+     of /home hidden, and one directory the owner shares (a project) bound in, read-write. What is
+     not settled, and is written down rather than guessed: how sharing a directory meets file
+     ownership (ACLs, or an idmapped bind); whether the tool's own sandbox (Claude Code's) and the
+     launcher's compose; and what "tainted" means for a tool that reads the web.
+- **Tested** (`tests/agent.nix`, each failing if its claim broke): the account exists as stated (no
+  password, nologin, no groups, its home 0700); as it, a proposal of the owner's packages is
+  accepted; a system setting not on the list, a setting on the list beside one that is not, a config
+  file, `flake.nix`, `torq.*`, and another person's packages are each refused **and ledgered**; with
+  `mayPropose.settings = [ "services.openssh" ]` an `openssh` change is accepted and an `nginx` one
+  refused; the agent's torqcli `commit` proposes and stops; a person's `request system apply`
+  applies it, asking the password for a system change.
+- **Not:** the agent applying anything, ever (ADR-040); the launcher (5) in this step; the agent's
+  model, tools or prompts (M5).

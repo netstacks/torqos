@@ -160,6 +160,28 @@ impl Repo {
         })
     }
 
+    /// A file as HEAD has it: None when HEAD has none at `path`; refused when it is not a regular
+    /// file or is larger than `max_bytes`.
+    pub fn file_at_head(&self, path: &str, max_bytes: u64) -> Result<Option<Vec<u8>>> {
+        // "<mode> <type> <object>\t<path>\0", or nothing when there is none.
+        let entry = self.git(&["ls-tree", "-z", "HEAD", "--", path])?;
+        let Some((meta, _)) = entry.split_once('\t') else {
+            return Ok(None);
+        };
+        let mut fields = meta.split(' ');
+        let (Some(mode), Some(_), Some(object)) = (fields.next(), fields.next(), fields.next()) else {
+            bail!("unexpected git ls-tree output for {path}: {entry:?}");
+        };
+        if mode != "100644" {
+            bail!("{path} is not a regular file in the configuration");
+        }
+        let size: u64 = self.git(&["cat-file", "-s", object])?.trim().parse().context("blob size")?;
+        if size > max_bytes {
+            bail!("{path} is larger than {max_bytes} bytes");
+        }
+        Ok(Some(self.git_env_bytes(&[], &["cat-file", "blob", object])?))
+    }
+
     /// Run `f` with GIT_INDEX_FILE pointing at a scratch index holding HEAD with the diff applied:
     /// the proposal's result, without touching the repo's own index or working tree.
     fn with_proposal_index<T>(&self, diff_path: &Path, f: impl FnOnce(&[(&str, &OsStr)]) -> Result<T>) -> Result<T> {
