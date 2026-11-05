@@ -862,6 +862,11 @@ impl Broker {
     /// without an entry each, so that refusals cannot fill the ledger.
     fn record_refusal(&self, diff_path: &Path, reason: &str, tainted: bool, why: &str) -> Result<()> {
         let entries = self.ledger.read_all()?;
+        // Only once the machine's ledger has begun (its `init`): before, a refusal would be entry #1,
+        // and setup and init would take the ledger for one already set up (the second review).
+        if entries.first().is_none_or(|e| e.body.kind != "init") {
+            return Ok(());
+        }
         let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
         let recent = entries
             .iter()
@@ -909,10 +914,18 @@ impl Broker {
                 bail!("refused: the agent's reason is at most {AGENT_REASON_MAX} characters");
             }
             let entries = self.ledger.read_all()?;
+            // Only those still able to land: an agent's proposal carries its base, and one prepared
+            // against an older configuration can never be applied (the second review).
+            let head = self.repo.head().ok();
+            let done: std::collections::HashSet<u64> = entries
+                .iter()
+                .filter(|e| matches!(e.body.kind.as_str(), "applied" | "apply_failed"))
+                .filter_map(|e| e.body.data["proposal"].as_u64())
+                .collect();
             let waiting = entries
                 .iter()
-                .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent")
-                .filter(|p| !entries.iter().any(|e| matches!(e.body.kind.as_str(), "applied" | "apply_failed") && e.body.data["proposal"] == json!(p.body.seq)))
+                .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent" && !done.contains(&p.body.seq))
+                .filter(|p| head.is_some() && p.body.data["base"].as_str() == head.as_deref())
                 .count();
             if waiting >= AGENT_WAITING_MAX {
                 bail!("refused: {waiting} of the agent's proposals are waiting for a person already (at most {AGENT_WAITING_MAX})");

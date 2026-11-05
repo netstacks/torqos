@@ -167,7 +167,8 @@ impl Repo {
     /// shown (the audit of ADR-041: a diff's own text can say one thing while `git apply` does
     /// another — lines past a hunk's count, text before a header, one file patched twice).
     pub fn proposal_effect(&self, diff_path: &Path) -> Result<String> {
-        self.with_proposal_index(diff_path, |env| self.git_env(env, &["diff", "--cached", "--no-renames", "--no-color", "--no-ext-diff", "HEAD"]))
+        // --text: a .gitattributes (`-diff`, `binary`) cannot turn the change into "Binary files differ".
+        self.with_proposal_index(diff_path, |env| self.git_env(env, &["diff", "--cached", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "HEAD"]))
     }
 
     /// A file as HEAD has it: None when HEAD has none at `path`; refused when it is not a regular

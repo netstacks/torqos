@@ -141,6 +141,11 @@ pub fn tier_for_path(path: &str) -> Tier {
     if p.contains("..") {
         return Tier::Forbidden;
     }
+    // Git's own files in the tree (.gitattributes, .gitignore, .gitmodules) are no configuration, and
+    // change how git shows and applies everything else (the second review of ADR-041).
+    if p.split('/').any(|c| c.starts_with(".git")) {
+        return Tier::Forbidden;
+    }
     if FORBIDDEN_PREFIXES.iter().any(|f| p.starts_with(f)) {
         return Tier::Forbidden;
     }
@@ -249,6 +254,15 @@ mod tests {
         assert!(!ok("packages.json", &at_most(257)));
         assert!(!ok("unknown.json", "[]"), "a leaf without a shape is never ok");
         assert!(!ok("cli.json", r#"{"style": "j"}"#), "no longer a user leaf (ADR-021)");
+    }
+
+    /// The second review of ADR-041: git's own files change how git shows and applies the rest.
+    #[test]
+    fn gits_own_files_are_no_ones() {
+        for p in [".gitattributes", "nixos/.gitattributes", "users/casey/.gitignore", ".gitmodules"] {
+            assert_eq!(tier_for_path(p), Tier::Forbidden, "{p}");
+        }
+        assert_eq!(tier_for_path("nixos/services.json"), Tier::System);
     }
 
     #[test]

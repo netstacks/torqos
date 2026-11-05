@@ -2289,3 +2289,29 @@ fn the_agents_list_is_checked_again_at_apply() {
     let err = format!("{:#}", narrowed.apply(p.body.seq, "casey", false).unwrap_err());
     assert!(err.contains("no longer allow"), "{err}");
 }
+
+/// The second review of ADR-041: a refusal before the ledger has begun is not entry #1 (setup
+/// would take it for a machine already set up); and the agent's waiting proposals are only those
+/// that can still land — once a person changes anything, the older ones no longer count.
+#[test]
+fn the_agents_record_never_blocks_setup_or_the_agent() {
+    let (dir, repo) = config_dir();
+    let fresh = Broker::new(&repo, dir.path().join("state"), "true");
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    assert!(fresh.propose_on(Some(&"a".repeat(40)), &d, "before setup", Actor::Agent, false).is_err());
+    assert!(fresh.ledger.read_all().unwrap().is_empty(), "no entry before init");
+    fresh.init().unwrap();
+    assert_eq!(fresh.ledger.read_all().unwrap()[0].body.kind, "init");
+
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    assert!(b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).is_err());
+    // A person's change moves the configuration on: the twenty can no longer land, nor count.
+    let mine = write_diff(dir.path(), "m.diff", NIGHT_LIGHT);
+    let p = b.propose(&mine, "mine", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    b.propose_on(Some(&b.repo.head().unwrap()), &d, "htop, now", Actor::Agent, false).unwrap();
+}

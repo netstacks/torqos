@@ -444,7 +444,10 @@ Its §5 lists claims without a test.
    hunk's count); every refusal of the agent's is ledgered, the forbidden ones and the diffs that do
    not apply included, at most 30 an hour; its reasons at most 200 characters, at most 20 of its
    proposals waiting; its list checked again at apply; paths given to git literally; a bare `system`
-   refused. Open ends:
+   refused. From the second review: no refusal is ledgered before the ledger has begun (it would
+   have stopped setup); only proposals that can still land count toward the twenty; the shown
+   diff is forced to text, and git's own files (`.gitattributes`, `.gitignore`, …) are refused for
+   everyone. Open ends:
    - **Running a tool as the agent** (Claude Code, the owner's wish) is designed, not built: `torq
      agent run [--share <dir>] -- <command>` (ADR-041, 5). Until then a person can run one as the
      account by hand (`sudo -u torq-agent …`, an administrator's), with nothing of their own shared.
@@ -459,3 +462,8 @@ Its §5 lists claims without a test.
    - **`tainted` is the proposer's word.** The agent marks its own proposals as having read untrusted
      content; a proposal without the mark proves nothing. It should come from the session that runs
      the agent (M5), not from the agent.
+   - **Past 30 refusals an hour, the rest leave no entry** (a cap, so that refusals cannot fill the
+     ledger): an agent can spend the 30 and then probe unrecorded for the hour. One summary entry
+     ("N more not recorded") would close it.
+   - **A refusal's hash is of the request's file as the broker re-reads it**: over the socket that is
+     the broker's own copy (root's 0700 directory); under sudo, root's word.

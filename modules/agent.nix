@@ -25,7 +25,8 @@ in
         it, and ledgers the refusal. None, by default: the agent proposes packages and nothing else.
         `torq.*` is never the agent's, listed or not (its own limits are there), and nor are config
         files, `flake.nix` or the lock.
-\n        `system.<name>` means both torqcli's own settings (`system host-name`, `system packages`:
+
+        `system.<name>` means both torqcli's own settings (`system host-name`, `system packages`:
         `system.host`, `system.packages`) and NixOS's `system.*` options of that name — list the
         narrowest one. A bare `system` is refused: it would allow `system.activationScripts`, code
         run as root.
