@@ -964,13 +964,19 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      stops (`proposed as #n: a person applies it`); `show system proposals` lists what waits;
      `request system apply <n>` shows its diff (and whether its session read untrusted content),
      asks, and applies it — with the person's password for a system change, as their own commit.
-  5. **A tool like Claude Code, run as the agent — designed for here, built next.** `torq agent run
-     [--share <dir>] -- <command>` (a root-owned launcher a wheel member may start, `systemd-run
-     --uid=torq-agent --pty`): the agent's home as its home, network on (its model's API), the rest
-     of /home hidden, and one directory the owner shares (a project) bound in, read-write. What is
-     not settled, and is written down rather than guessed: how sharing a directory meets file
-     ownership (ACLs, or an idmapped bind); whether the tool's own sandbox (Claude Code's) and the
-     launcher's compose; and what "tainted" means for a tool that reads the web.
+  5. **A tool like Claude Code, run as the agent (built 2026-11-05, `tests/agent-run.nix`).**
+     `torq agent run [--share <dir>] [--] <command>` — `torq agent run --share ~/project -- claude`.
+     An administrator starts it without a password; sudo runs `torq-agent-run` as root, which, in a
+     mount namespace of its own, binds the shared directory where it is — checked to be the very
+     directory torqcli opened as the person (device and inode of the descriptor it is handed), and
+     theirs — hides every home around it, and then drops to `torq-agent` for good (`setpriv`: its
+     uid, no capabilities, no new privileges) before running anything, in bubblewrap: the people's
+     runtime directories hidden, /tmp its own, the agent's home its home, network on. Sharing is an
+     ACL on what of the directory is the person's (default ACLs, so files either makes stay both
+     of theirs); the agent gets no permission on the home itself (the owner's choice, 2026-11-05: a
+     pass-through ACL let the agent read the home's world-readable files by name). A sandbox of the
+     tool's own (Claude Code's bubblewrap) runs inside. Not settled: what "tainted" means for a tool
+     that reads the web (the agent still marks its own).
 - **Tested** (`tests/agent.nix`, each failing if its claim broke): the account exists as stated (no
   password, nologin, no groups, its home 0700); as it, a proposal of the owner's packages is
   accepted; a system setting not on the list, a setting on the list beside one that is not, a config

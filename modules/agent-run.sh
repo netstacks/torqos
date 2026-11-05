@@ -1,10 +1,16 @@
-# torq-agent-run [--share-fd <n> <dir>] [--] [<command> …] — as the agent (`torq agent run` starts
-# it, through sudo -u torq-agent). The program sees the machine as the agent may: every home hidden,
-# the people's runtime directories (their sockets: ssh-agent, D-Bus) hidden, /tmp its own, and only
-# the one directory shared with it, read-write. Its home is the agent's; it reaches the system through
-# the broker's socket, as torqcli does — it proposes, and a person applies.
-if [ "$(id -un)" != torq-agent ]; then
-  echo "torq-agent-run: runs as the agent (start it with: torq agent run)" >&2
+# torq-agent-run [--share-fd <n> <dir>] [--] [<command> …] — started by `torq agent run`, through
+# sudo, as root: it does one thing as root, then is the agent for good.
+#
+# As root, in a mount namespace of its own: every home hidden, and the one directory shared with the
+# agent — the directory torqcli opened, as the person, handed over as descriptor <n> — bound where it
+# is — by its name, then checked against that descriptor, device and inode (its name could have been
+# pointed elsewhere; then nothing runs). Then it drops to
+# torq-agent (setpriv: its uid and group, no capabilities, no new privileges) and runs the program in
+# bubblewrap: the people's runtime directories (their sockets: ssh-agent, D-Bus) hidden, /tmp its own,
+# its home the agent's. Nothing the person asked for runs as root; the agent has no way into the home.
+set -euo pipefail
+if [ "$(id -u)" != 0 ]; then
+  echo "torq-agent-run: is started by torq agent run (through sudo)" >&2
   exit 2
 fi
 share="" fd=""
@@ -18,34 +24,54 @@ fi
 if [ $# -eq 0 ]; then
   set -- bash
 fi
-args=(
-  --die-with-parent --dev-bind / /
-  --tmpfs /home --tmpfs /run/user --tmpfs /tmp --tmpfs /root
-  --clearenv
-  --setenv HOME /var/lib/torq-agent --setenv USER torq-agent --setenv LOGNAME torq-agent
-  --setenv SHELL /run/current-system/sw/bin/bash
-  --setenv PATH /run/wrappers/bin:/run/current-system/sw/bin
-  --setenv TERM "${TERM:-dumb}"
-)
-if [ -n "${LANG-}" ]; then
-  args+=(--setenv LANG "$LANG")
-fi
 if [ -n "$share" ]; then
-  # The directory comes open: torqcli opened it, as the person, and checked it is theirs. The agent
-  # cannot reach it by its name, and needs no way into the home it is in; it appears where it is.
+  person=${SUDO_UID:?torq-agent-run: shares only for the person who ran sudo}
+  case "$fd" in
+    '' | *[!0-9]*) echo "torq-agent-run: --share-fd needs a descriptor number" >&2; exit 2 ;;
+  esac
+  link=/proc/self/fd/$fd
+  # The open directory itself: a directory, the person's, and where it says it is.
+  if [ ! -d "$link" ] || [ "$(stat -L -c %u "$link")" != "$person" ] || [ "$(readlink "$link")" != "$share" ]; then
+    echo "torq-agent-run: descriptor $fd is not $share, a directory of yours" >&2
+    exit 2
+  fi
   case "$share" in
     /home/*/*) ;;
     *) echo "torq-agent-run: shares a directory inside a home, not $share" >&2; exit 2 ;;
   esac
-  case "$fd" in
-    '' | *[!0-9]*) echo "torq-agent-run: --share-fd needs a descriptor number" >&2; exit 2 ;;
-  esac
-  if [ ! -d "/proc/self/fd/$fd" ]; then
-    echo "torq-agent-run: descriptor $fd is not an open directory" >&2
-    exit 2
-  fi
-  args+=(--bind-fd "$fd" "$share" --chdir "$share")
-else
-  args+=(--chdir /var/lib/torq-agent)
 fi
-exec bwrap "${args[@]}" -- "$@"
+# (The inner script is single-quoted on purpose: its variables are its own arguments.)
+# shellcheck disable=SC2016
+# The shared directory bound, as root, and checked to be the one that was opened (a descriptor from
+# another mount namespace cannot itself be bound); every home hidden around it; then the agent.
+exec unshare --mount --propagation private -- bash -euo pipefail -c '
+  share=$1 fd=$2
+  shift 2
+  if [ -n "$share" ]; then
+    # Bound by its name, on a staging point only root reaches; then checked to be the very directory
+    # that was opened (device and inode): if a link on the way led elsewhere, nothing runs.
+    stage=/run/torq-agent-stage
+    mount --bind -- "$share" "$stage"
+    if [ "$(stat -c %d:%i "$stage")" != "$(stat -L -c %d:%i "/proc/self/fd/$fd")" ]; then
+      echo "torq-agent-run: $share is not the directory that was opened (a link changed?): nothing run" >&2
+      exit 2
+    fi
+    eval "exec $fd<&-"
+  fi
+  mount -t tmpfs -o mode=0755,nosuid,nodev torq-agent-homes /home
+  if [ -n "$share" ]; then
+    mkdir -p -- "$share"
+    mount --move "$stage" "$share"
+  fi
+  exec setpriv --reuid torq-agent --regid torq-agent --init-groups --no-new-privs \
+    --inh-caps=-all --bounding-set=-all -- \
+    bwrap --die-with-parent --dev-bind / / \
+      --tmpfs /run/user --tmpfs /tmp --tmpfs /root \
+      --clearenv \
+      --setenv HOME /var/lib/torq-agent --setenv USER torq-agent --setenv LOGNAME torq-agent \
+      --setenv SHELL /run/current-system/sw/bin/bash \
+      --setenv PATH /run/wrappers/bin:/run/current-system/sw/bin \
+      --setenv TERM "${TERM:-dumb}" \
+      --chdir "${share:-/var/lib/torq-agent}" \
+      -- "$@"
+' torq-agent-run "$share" "$fd" "$@"

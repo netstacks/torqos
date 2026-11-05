@@ -77,7 +77,14 @@ pkgs.testers.runNixOSTest {
         # Only an administrator starts it; the launcher refuses anyone but the agent.
         machine.fail("su - sam -c 'torq agent run -- true'")
         out = machine.fail("su - dev -c '/run/current-system/sw/bin/torq-agent-run -- true' 2>&1")
-        assert "runs as the agent" in out, out
+        assert "is started by torq agent run" in out, out
+        # The launcher's root step checks what it is handed: the open directory must be the one named,
+        # and the person's own — or nothing runs.
+        launcher = machine.succeed("readlink -f /run/current-system/sw/bin/torq-agent-run").strip()
+        for fd_of, named in [("/home/dev/src/project", "/home/dev/other"), ("/home/dev/rootdir", "/home/dev/rootdir")]:
+            out = as_dev(f"sudo -C 4 {launcher} --share-fd 3 {named} -- touch {named}/ran 3< {fd_of}", ok=False)
+            assert "is not" in out, (fd_of, named, out)
+        machine.fail("test -e /home/dev/other/ran -o -e /home/dev/rootdir/ran")
 
     with subtest("what it changes, it proposes; a person applies"):
         req = json.dumps({"args": ["--json", "propose", "--base=" + machine.succeed(f"git -C {repo} rev-parse HEAD").strip(), "--reason=hello for dev"],

@@ -448,9 +448,11 @@ Its §5 lists claims without a test.
    have stopped setup); only proposals that can still land count toward the twenty; the shown
    diff is forced to text, and git's own files (`.gitattributes`, `.gitignore`, …) are refused for
    everyone. Open ends:
-   - **Running a tool as the agent** (Claude Code, the owner's wish) is designed, not built: `torq
-     agent run [--share <dir>] -- <command>` (ADR-041, 5). Until then a person can run one as the
-     account by hand (`sudo -u torq-agent …`, an administrator's), with nothing of their own shared.
+   - **`torq agent run` (ADR-041, 5) has a root first step**: `torq-agent-run`, a shell script, runs
+     as root to bind the shared directory, then drops to the agent. It is small and checked (the
+     descriptor's device and inode, the owner, setpriv), but it is root code a person's arguments
+     reach — the kind the broker's rule says should be Rust. And the sandbox is bubblewrap's with
+     the network on: a tool run as the agent can reach anything the machine can.
    - **The agent's own `commit`** (it proposes and stops) is tested in torqcli's unit tests, not in a
      VM: the VM tests' configurations are stubs torqcli cannot evaluate.
    - **Stale proposals stay listed.** A proposal prepared against an older configuration is refused

@@ -11,7 +11,7 @@ let
   # directories, gives a private /tmp, and binds in only the directory shared with it.
   agentRun = pkgs.writeShellApplication {
     name = "torq-agent-run";
-    runtimeInputs = [ pkgs.bubblewrap pkgs.coreutils ];
+    runtimeInputs = [ pkgs.bubblewrap pkgs.coreutils pkgs.util-linux pkgs.bash ];
     text = builtins.readFile ./agent-run.sh;
   };
 in
@@ -67,16 +67,20 @@ in
     };
     users.groups.torq-agent = { };
 
-    # A person may start a program as the agent — only through the launcher, only as the agent: from
-    # a person to the agent is down, not up, so no password (and no count against the lockout).
+    # A person (an administrator) may start a program as the agent, only through the launcher: it
+    # binds the one shared directory as root, then drops to the agent for good before running
+    # anything (modules/agent-run.sh). No password: administrators have root already, and the
+    # program runs with less than they have.
     environment.systemPackages = [ agentRun pkgs.acl ];
+    # Where the launcher binds a shared directory first, as root, before checking it (root's alone).
+    systemd.tmpfiles.settings."10-torq-agent"."/run/torq-agent-stage".d = { mode = "0700"; user = "root"; group = "root"; };
     security.sudo.extraRules = [{
       groups = [ "wheel" ];
-      runAs = "torq-agent";
+      runAs = "root";
       commands = [{ command = "${agentRun}/bin/torq-agent-run"; options = [ "NOPASSWD" ]; }];
     }];
     # The shared directory comes as a descriptor torqcli opened, as the person — the agent has no
-    # way into their home, not even to pass through: sudo keeps it open for the launcher (`-C`).
+    # way into their home: sudo keeps that descriptor open for the launcher (`-C`).
     security.sudo.extraConfig = ''
       Defaults!${agentRun}/bin/torq-agent-run closefrom_override
     '';

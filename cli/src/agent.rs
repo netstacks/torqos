@@ -1,7 +1,8 @@
 //! `torq agent run [--share <dir>] [--] [<command> …]` (ADR-041, 5): a program — Claude Code, or any
 //! other — run as the agent's account, not as the person who starts it.
 //!
-//! It runs as `torq-agent` (through `sudo -u torq-agent torq-agent-run`, which drops privilege), in
+//! It runs as `torq-agent` (through `sudo torq-agent-run`, which binds the shared directory as root and
+//! then drops to the agent for good), in
 //! the launcher's sandbox (modules/agent-run.sh): every home hidden but the one directory shared with
 //! it, the people's runtime directories hidden, /tmp its own. Its home is the agent's, so a tool's
 //! settings and credentials are never the person's. What it changes in the system, it proposes —
@@ -148,8 +149,8 @@ pub fn run(args: &[String]) -> Result<i32> {
     launch.push("--".into());
     launch.extend(r.command);
     use std::os::unix::process::CommandExt;
-    let e = Command::new(SUDO).args(&sudo).args(["-u", AGENT, "--"]).args(&launch).exec();
-    Err(anyhow::Error::from(e).context("starting the agent (sudo -u torq-agent torq-agent-run)"))
+    let e = Command::new(SUDO).args(&sudo).arg("--").args(&launch).exec();
+    Err(anyhow::Error::from(e).context("starting the agent (sudo torq-agent-run)"))
 }
 
 #[cfg(test)]
