@@ -522,6 +522,10 @@ Its §5 lists claims without a test.
      derivation) before anyone says yes. It cannot reach root.
 
 6zi. **Adopt at setup (ADR-036).** Open:
+   - **First contact is trusted, and SSH proves nothing about the deploy key.** Anyone answering as the
+     host on first contact is pinned, and can accept any key and serve a forged repository: the
+     console shows the host key's fingerprint and the commits to compare, and only that person's
+     comparing stops it. Pinned host keys for common hosts, or the old ledger's hash typed in, would.
    - **The trust is the deploy key.** Whoever can add a key to the repository decides what a new
      machine becomes; commits are not signed yet, so nothing on the machine can tell a repository
      rewritten by its host from the owner's. The ledger's checks show it is consistent, not whose.

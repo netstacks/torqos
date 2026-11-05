@@ -216,6 +216,9 @@ struct Adopting {
     url: String,
     host: String,
     user: String,
+    /// What was shown: adopted exactly, or not at all.
+    head: String,
+    tip: String,
     hash: String,
 }
 
@@ -239,7 +242,7 @@ fn adopt_questions() -> Result<Option<Adopting>> {
         }
         match broker_says(&["adopt-key", "--url", &url]) {
             Ok(v) => break (url, v["public_key"].as_str().unwrap_or_default().to_string()),
-            Err(e) => println!("  {e:#}"),
+            Err(e) => println!("  {}", crate::history::clean(&format!("{e:#}"))),
         }
     };
     println!("\nThis machine's key:\n\n{key}\n\nAdd it to the repository as a deploy key, with write access: only someone who can\nadminister the repository can, and that is what says this machine may be it.");
@@ -249,7 +252,7 @@ fn adopt_questions() -> Result<Option<Adopting>> {
         match broker_says(&["adopt-inspect", "--url", &url]) {
             Ok(v) => break v,
             Err(e) => {
-                println!("  {e:#}");
+                println!("  {}", crate::history::clean(&format!("{e:#}")));
                 if line("Try again? (yes / no)", "yes")? != "yes" {
                     return Ok(None);
                 }
@@ -257,12 +260,31 @@ fn adopt_questions() -> Result<Option<Adopting>> {
         }
     };
     let text = |k: &str| crate::history::one_line(found[k].as_str().unwrap_or("?"), 80);
-    let (host, user) = (text("host"), text("user"));
-    valid_user(&user)?;
-    println!("\n  machine {host}, owner {user}, {} changes in its history", found["entries"].as_u64().unwrap_or(0));
+    let (host, user, head, tip) = (text("host"), text("user"), text("head"), text("tip"));
+    if let Err(e) = valid_user(&user).and_then(|()| valid_host(&host)) {
+        println!("  The repository's configuration is not one to adopt: {}", crate::history::clean(&format!("{e:#}")));
+        return Ok(None);
+    }
+    let list = |k: &str| found[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| crate::history::one_line(s, 40)).collect::<Vec<_>>().join(", ")).filter(|s| !s.is_empty());
+    println!(
+        "\n  machine {host}, owner {user}, {} changes in its history ({} ledger entries)\n  its configuration commit {}, its ledger commit {}",
+        found["changes"].as_u64().unwrap_or(0),
+        found["entries"].as_u64().unwrap_or(0),
+        &head[..head.len().min(12)],
+        &tip[..tip.len().min(12)]
+    );
+    println!("  the remote's host key {}", crate::history::one_line(found["host_key"].as_str().unwrap_or("(none pinned)"), 120));
+    println!("  Compare these with the old machine's, or the host's published key: whoever answered first is who this reads.");
+    println!("\n  This configuration will run on this machine as root. It turns SSH {}.", if found["ssh"].as_bool().unwrap_or(false) { "on" } else { "off" });
+    if let Some(k) = list("keyed") {
+        println!("  SSH keys of: {k}");
+    }
+    if let Some(f) = list("files") {
+        println!("  Nix files it attaches (any NixOS configuration): {f}");
+    }
     match found["remote"].as_str() {
         Some(r) if r == url => {}
-        Some(r) => println!("  ! It pushes to another remote: {}", crate::history::one_line(r, 100)),
+        Some(r) => println!("  ! It names another remote: {}", crate::history::one_line(r, 100)),
         None => println!("  ! It names no remote: this machine will not push there until `torq remote url` is set."),
     }
     println!("  This machine's own hardware file and software take the place of the repository's.");
@@ -281,7 +303,7 @@ fn adopt_questions() -> Result<Option<Adopting>> {
     if line("Become this machine? (yes / no)", "yes")? != "yes" {
         return Ok(None);
     }
-    Ok(Some(Adopting { url, host, user, hash }))
+    Ok(Some(Adopting { url, host, user, hash, head, tip }))
 }
 
 /// The password, this machine's own files, and the broker to do the rest (as `apply` hands over).
@@ -313,14 +335,14 @@ fn adopt(a: &Adopting) -> Result<()> {
     let ok = {
         let _p = crate::run::Progress::start("Building this machine's system and switching to it");
         std::process::Command::new(SYSTEMD_RUN)
-            .args(["--wait", "--collect", "--quiet", &format!("--unit={BROKER_UNIT}"), "--property=StandardOutput=journal", "--property=StandardError=journal", BROKER, "adopt", "--url", &a.url, "--own", "/run/torq-adopt"])
+            .args(["--wait", "--collect", "--quiet", &format!("--unit={BROKER_UNIT}"), "--property=StandardOutput=journal", "--property=StandardError=journal", BROKER, "adopt", "--url", &a.url, "--own", "/run/torq-adopt", "--head", &a.head, "--tip", &a.tip, "--user", &a.user])
             .status()
             .context("running the broker")?
             .success()
     };
     if !ok {
         let log = std::process::Command::new(JOURNALCTL).args(["-u", BROKER_UNIT, "-o", "cat", "-n", "12", "--no-pager"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-        bail!("the adopted configuration did not build:\n{}", log.trim_end());
+        bail!("the adopted configuration did not build:\n{}", log.trim_end().lines().map(crate::history::clean).collect::<Vec<_>>().join("\n"));
     }
     Ok(())
 }

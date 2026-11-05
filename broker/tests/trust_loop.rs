@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 #![forbid(dead_code)]
 
-use torq_broker::{policy::Actor, Broker};
+use torq_broker::{policy::Actor, repo::Repo, Broker};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -2314,4 +2314,67 @@ fn the_agents_record_never_blocks_setup_or_the_agent() {
     let p = b.propose(&mine, "mine", Actor::User, false).unwrap();
     b.apply(p.body.seq, "casey", false).unwrap();
     b.propose_on(Some(&b.repo.head().unwrap()), &d, "htop, now", Actor::Agent, false).unwrap();
+}
+
+/// ADR-036, the review of adopt: what a repository must be for a new machine to adopt it. A staged
+/// repository (as `stage_from` leaves one) built here from a real broker's repo and ledger.
+#[test]
+fn a_hostile_repository_is_refused_before_anything_is_adopted() {
+    let sh = |dir: &Path, script: &str| {
+        let ok = std::process::Command::new("sh").arg("-c").arg(script).current_dir(dir).status().unwrap().success();
+        assert!(ok, "{script}");
+    };
+    // A machine as setup leaves one.
+    let (dir, repo) = config_dir();
+    sh(&repo, "mkdir -p nixos system && echo '{\"user\": \"alice\"}' > nixos/torq.json && echo '{\"host-name\": \"first\"}' > system/host.json \
+        && echo '{\"\": \"hardware-configuration.nix\"}' > config-files.json && echo '{ }' > hardware-configuration.nix && rm -rf policy");
+    let b = Broker::new(&repo, dir.path().join("state"), "true");
+    b.init().unwrap();
+    let new_machine = Broker::new(dir.path().join("new-config"), dir.path().join("new-state"), "true");
+    fs::create_dir_all(dir.path().join("new-state")).unwrap();
+    let url = "git@host:x.git";
+    // Its repository as staged: main (`git_step` on a working copy) and the ledger, as pushed.
+    let stage_with = |name: &str, git_step: &str, ledger: &Path| -> Repo {
+        let work = dir.path().join(format!("{name}-work"));
+        let stage = dir.path().join(format!("{name}.git"));
+        sh(dir.path(), &format!("git clone -q {} {}", repo.display(), work.display()));
+        if !git_step.is_empty() {
+            sh(&work, &format!("{git_step} && git add -Af . && git -c user.name=t -c user.email=t@t commit -qm step"));
+        }
+        sh(dir.path(), &format!("git clone -q --bare {} {}", work.display(), stage.display()));
+        sh(&stage, &format!("b=$(git hash-object -w {}) && t=$(printf '100644 blob %s\\tledger.jsonl\\n' $b | git mktree) && c=$(git -c user.name=t -c user.email=t@t commit-tree $t -m l) && git update-ref refs/torq/remote-ledger $c && git symbolic-ref HEAD refs/heads/main", ledger.display()));
+        Repo::new(stage)
+    };
+    let ledger = b.ledger.path().to_path_buf();
+    let a = new_machine.check_stage(&stage_with("good", "", &ledger), url).unwrap();
+    assert_eq!((a.user.as_str(), a.host.as_str()), ("alice", "first"));
+    // What is adopted is what was shown: the commits and the owner, or nothing (no second fetch).
+    sh(dir.path(), &format!("cp -r good.git {}", dir.path().join("new-state/adopt.git").display()));
+    let own = dir.path().join("own");
+    let e = format!("{:#}", new_machine.adopt(url, &own, &"0".repeat(40), &a.tip, &a.user).unwrap_err());
+    assert!(e.contains("not what was shown"), "{e}");
+    let e = format!("{:#}", new_machine.adopt(url, &own, &a.head, &a.tip, "mallory").unwrap_err());
+    assert!(e.contains("not what was shown"), "{e}");
+    assert!(!new_machine.repo.is_initialised(), "nothing adopted");
+    for (name, step, why) in [
+        ("link", "rm hardware-configuration.nix && ln -s /etc/shadow hardware-configuration.nix", "not a plain file"),
+        ("lock", "ln -s ../state/remote/key flake.lock", "not a plain file"),
+        ("attrs", "echo '* -diff' > .gitattributes", "no configuration may"),
+        ("policy", "mkdir policy && echo x > policy/tiers.toml", "no configuration may"),
+        ("noread", "echo '{}' > config-files.json", "does not read a hardware file"),
+        ("moved", "echo x > stray.txt", "is not the commit its ledger ends at"),
+    ] {
+        let e = format!("{:#}", new_machine.check_stage(&stage_with(name, step, &ledger), url).unwrap_err());
+        assert!(e.contains(why), "{name}: {e}");
+    }
+    // A ledger with a commit confirmed waiting would drive the boot's rollback: refused.
+    let waiting = dir.path().join("waiting.jsonl");
+    fs::copy(&ledger, &waiting).unwrap();
+    let forged = torq_broker::ledger::Ledger::open(&waiting);
+    forged.append(torq_broker::ledger::NewEntry {
+        actor: "user".into(), approved_by: Some("alice".into()), kind: "applied".into(), tier: "system".into(), tainted: false, reason: "x".into(),
+        data: serde_json::json!({ "commit": b.repo.head().unwrap(), "confirm": { "deadline": "2099-01-01T00:00:00Z", "anchor_commit": "a", "anchor_system": "/tmp/x", "boot_id": "b" } }),
+    }).unwrap();
+    let e = format!("{:#}", new_machine.check_stage(&stage_with("waiting", "", &waiting), url).unwrap_err());
+    assert!(e.contains("still waiting"), "{e}");
 }

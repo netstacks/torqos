@@ -791,7 +791,13 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   changes. An adopted machine **continues** the old one: its repo history and ledger, then one
   commit putting in this machine's hardware file and the image's software (`flake.nix`, `flake.lock`:
   a repository's may name a source that was the old machine's own), and one entry, `adopted`. So the
-  remote's ledger stays this one's start, and pushing goes on.
+  remote's ledger stays this one's start, and pushing goes on. From its review: adopted is exactly
+  what was shown — the commits and owner are pinned, nothing is fetched after the question — and a
+  repository is refused for a link at any of this machine's own files (written without following
+  anything), a path no one may change, no hardware file read, a commit confirmed still waiting in
+  its ledger (which would drive the boot's rollback, as root), or a size past reason. The console
+  shows the commits and the host key's fingerprint to compare, and says what is being given: this
+  configuration runs here as root, SSH on or off, who has keys, which Nix files it attaches.
 
 ## ADR-037 — Applications: a ladder, every rung declared (proposed)
 - **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small

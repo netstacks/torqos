@@ -128,6 +128,20 @@ impl Remote {
         Ok(std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?.trim().to_string())
     }
 
+    /// Forget the host keys pinned: an adoption given up, on a machine with nothing yet to protect.
+    pub fn forget_host(&self) -> Result<()> {
+        match std::fs::remove_file(self.dir.join("known_hosts")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The fingerprint of the host key pinned, for a person to compare with the host's published one.
+    pub fn host_fingerprint(&self) -> Option<String> {
+        let out = crate::config::command("ssh-keygen").arg("-lf").arg(self.dir.join("known_hosts")).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.split_whitespace().nth(1)).collect::<Vec<_>>().join(", "))
+    }
+
     /// How git reaches the remote: no ssh configuration of anyone's, this key and no other, the host key
     /// pinned (accepted the first
     /// time, held to after), never a question, and a dead connection given up.

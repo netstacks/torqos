@@ -196,10 +196,30 @@ impl Repo {
         Ok(())
     }
 
-    /// A file of commit `rev` as text (None: it has none).
-    pub fn text_at(&self, rev: &str, path: &str) -> Option<String> {
-        self.git(&["cat-file", "blob", &format!("{rev}:{path}")]).ok()
+    /// A file of commit `rev` as text, if it is at most `max` bytes (None: none, or larger).
+    pub fn text_at_most(&self, rev: &str, path: &str, max: u64) -> Option<String> {
+        let object = format!("{rev}:{path}");
+        let size: u64 = self.git(&["cat-file", "-s", &object]).ok()?.trim().parse().ok()?;
+        if size > max {
+            return None;
+        }
+        self.git(&["cat-file", "blob", &object]).ok()
     }
+
+    /// The ledger of a ledger commit, refused above `max` bytes.
+    pub fn ledger_at_most(&self, commit: &str, max: u64) -> Result<String> {
+        self.text_at_most(commit, "ledger.jsonl", max).with_context(|| format!("the ledger at {commit} is missing, or larger than {max} bytes"))
+    }
+
+    /// Every path of commit `rev`'s tree, with its mode (100644, 100755, 120000 a link, 160000 …).
+    pub fn tree_paths(&self, rev: &str) -> Result<Vec<(String, String)>> {
+        let out = self.git(&["ls-tree", "-r", "-z", rev])?;
+        Ok(out.split('\0').filter(|l| !l.is_empty()).filter_map(|l| {
+            let (meta, path) = l.split_once('\t')?;
+            Some((meta.split(' ').next()?.to_string(), path.to_string()))
+        }).collect())
+    }
+
 
     /// The commit `name` points to.
     pub fn commit_of(&self, name: &str) -> Result<String> {
@@ -221,9 +241,11 @@ impl Repo {
         Ok(())
     }
 
-    /// Commit the working tree as it is: its changes, with `message`. The new HEAD.
-    pub fn commit_all(&self, message: &str) -> Result<String> {
-        self.git(&["add", "-A"])?;
+    /// Commit `files`, whatever the tree's ignore rules say, with `message`. The new HEAD.
+    pub fn commit_files(&self, files: &[&str], message: &str) -> Result<String> {
+        let mut add = vec!["add", "-f", "--"];
+        add.extend_from_slice(files);
+        self.git(&add)?;
         self.git(&["commit", "-q", "--allow-empty", "-m", message])?;
         self.sync()?;
         self.head()

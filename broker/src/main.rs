@@ -58,7 +58,7 @@ enum Cmd {
     FetchIncoming,
     AdoptKey { url: String },
     AdoptInspect { url: String },
-    Adopt { url: String, own: PathBuf },
+    Adopt { url: String, own: PathBuf, head: String, tip: String, user: String },
 }
 
 /// The command line, declared with clap's builder (its derive macros write an `allow(dead_code)`,
@@ -165,7 +165,7 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("remote").about("The remote: its URL, the last push, what its ledger said of this one then, and its alarm, if any."))
         .subcommand(Command::new("adopt-key").about("First-boot setup: this machine's key for a repository it is about to adopt (ADR-036), made the first time.").arg(Arg::new("url").long("url").required(true)))
         .subcommand(Command::new("adopt-inspect").about("First-boot setup: fetch the repository into a staging copy and check it (its ledger one line, every push extending the last, its chain whole, main the commit it ends at); changes nothing of the machine.").arg(Arg::new("url").long("url").required(true)))
-        .subcommand(Command::new("adopt").about("First-boot setup: become the machine the repository holds: its history and ledger, this machine's hardware file and software (the files in --own) as a new commit, built, switched to, ledgered.").arg(Arg::new("url").long("url").required(true)).arg(Arg::new("own").long("own").required(true).value_parser(value_parser!(PathBuf))))
+        .subcommand(Command::new("adopt").about("First-boot setup: become the machine the repository holds: its history and ledger, this machine's hardware file and software (the files in --own) as a new commit, built, switched to, ledgered.").arg(Arg::new("url").long("url").required(true)).arg(Arg::new("own").long("own").required(true).value_parser(value_parser!(PathBuf))).arg(Arg::new("head").long("head").required(true)).arg(Arg::new("tip").long("tip").required(true)).arg(Arg::new("user").long("user").required(true)))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
         .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
         .subcommand(Command::new("serve").about(
@@ -215,7 +215,7 @@ fn parse_cli() -> Cli {
         "fetch-incoming" => Cmd::FetchIncoming,
         "adopt-key" => Cmd::AdoptKey { url: s(sub, "url").unwrap_or_default() },
         "adopt-inspect" => Cmd::AdoptInspect { url: s(sub, "url").unwrap_or_default() },
-        "adopt" => Cmd::Adopt { url: s(sub, "url").unwrap_or_default(), own: p(sub, "own").unwrap_or_default() },
+        "adopt" => Cmd::Adopt { url: s(sub, "url").unwrap_or_default(), own: p(sub, "own").unwrap_or_default(), head: s(sub, "head").unwrap_or_default(), tip: s(sub, "tip").unwrap_or_default(), user: s(sub, "user").unwrap_or_default() },
         other => unreachable!("clap knows no subcommand {other}"),
     };
     Cli {
@@ -356,8 +356,8 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             let a = b.adopt_inspect(&url)?;
             println!("{}", if json { serde_json::to_string(&a)? } else { format!("{a:?}") });
         }
-        Cmd::Adopt { url, own } => {
-            let e = b.adopt(&url, &own)?;
+        Cmd::Adopt { url, own, head, tip, user } => {
+            let e = b.adopt(&url, &own, &head, &tip, &user)?;
             if json {
                 return print_entry(&e);
             }
@@ -505,7 +505,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                     // Ledger text comes from whoever proposed: never let it drive the terminal.
                     println!(
                         "#{:<4} {} {:<12} {:<9} {:<6}{} {}",
-                        e.body.seq, e.body.ts, e.body.kind, e.body.tier, printable(&e.body.actor),
+                        e.body.seq, printable(&e.body.ts), printable(&e.body.kind), printable(&e.body.tier), printable(&e.body.actor),
                         if e.body.tainted { " ⚠" } else { "" }, printable(&e.body.reason)
                     );
                 }

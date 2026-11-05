@@ -110,6 +110,8 @@ pkgs.testers.runNixOSTest {
     with subtest("second: what it found, read before anything changes; then it is that machine"):
         answer(second, "")
         on_console(second, "machine first, owner alice")
+        on_console(second, "the remote's host key SHA256:")
+        on_console(second, "will run on this machine as root")
         on_console(second, "own hardware file and software")
         second.fail("test -s /var/lib/torq/state/ledger.jsonl")
         on_console(second, "alice's password (on this machine):")

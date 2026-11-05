@@ -174,6 +174,16 @@ pub struct Adoptable {
     pub head: String,
     /// The ledger commit checked.
     pub tip: String,
+    /// The remote's host key, as pinned at first contact (its SHA-256 fingerprint): for the person to
+    /// compare, since anyone answering first would be pinned.
+    pub host_key: Option<String>,
+    /// Changes it made (applied, reverted, repaired), of its `entries`.
+    pub changes: usize,
+    /// Whether its configuration turns SSH on, who has keys, and which Nix files it attaches: what the
+    /// person is giving this machine to.
+    pub ssh: bool,
+    pub keyed: Vec<String>,
+    pub files: Vec<String>,
 }
 
 /// How the machine compares with its ledger. See `Broker::status`.
@@ -640,14 +650,16 @@ impl Broker {
     }
 
     /// The machine's key for a remote it is about to adopt from (first-boot setup, ADR-036): its
-    /// public half, for the person to add to the repository. Nothing else changes.
+    /// public half, for the person to add to the repository. A host key pinned by an adoption given
+    /// up is forgotten: this one starts from nothing.
     pub fn adopt_key(&self, url: &str, host: &str) -> Result<String> {
-        remote::Remote::new(url, &self.state_dir)?.public_key(host)
+        let r = remote::Remote::new(url, &self.state_dir)?;
+        r.forget_host()?;
+        r.public_key(host)
     }
 
-    /// Fetch the repository at `url` into a staging repository and check it — its ledger one line,
-    /// each push extending the one before, the hash chain whole, and `main` the commit it ends at —
-    /// changing nothing of the machine: what it is, for a person to read before adopting it.
+    /// Fetch the repository at `url` into a staging repository and check it, changing nothing of the
+    /// machine: what it is, for a person to read before adopting it.
     pub fn adopt_inspect(&self, url: &str) -> Result<Adoptable> {
         if !self.ledger.read_all()?.is_empty() || self.repo.is_initialised() {
             bail!("this machine already has a configuration: only a new one adopts");
@@ -658,13 +670,31 @@ impl Broker {
         }
         let stage = Repo::new(self.state_dir.join("adopt.git"));
         stage.stage_from(url, &r.ssh_command())?;
+        let mut a = self.check_stage(&stage, url)?;
+        a.host_key = r.host_fingerprint();
+        Ok(a)
+    }
+
+    /// The checks of a staged repository, none of them to the network. Its ledger: one line, each
+    /// push extending the one before, the chain whole, nothing still waiting (a repository's ledger
+    /// is someone else's text: an unsettled commit confirmed would drive the boot's rollback, as
+    /// root), and `main` the commit it ends at. Its tree: no path no one may change, and this
+    /// machine's own files plain files or absent (a link there would be followed, as root).
+    pub fn check_stage(&self, stage: &Repo, url: &str) -> Result<Adoptable> {
+        const MAX_LEDGER: u64 = 64 << 20;
+        const MAX_PUSHES: usize = 100_000;
+        const MAX_SETTING: u64 = 1 << 20;
         let tip = stage.commit_of("refs/torq/remote-ledger")?;
         if !stage.ledger_history_linear(&tip)? {
             bail!("the repository's ledger history has a merge in it: refused");
         }
+        let commits = stage.ledger_commits(None, &tip)?;
+        if commits.len() > MAX_PUSHES {
+            bail!("the repository's ledger has {} pushes: more than a machine makes", commits.len());
+        }
         let mut prev: Option<String> = None;
-        for c in stage.ledger_commits(None, &tip)? {
-            let text = stage.ledger_at(&c)?;
+        for c in &commits {
+            let text = stage.ledger_at_most(c, MAX_LEDGER)?;
             if let remote::Anchor::Differs { why } = remote::anchor(prev.as_deref(), &text) {
                 bail!("the repository's ledger was rewritten along the way: {why}");
             }
@@ -675,49 +705,98 @@ impl Broker {
         fs::write(&file, &text)?;
         let staged = Ledger::open(&file);
         let entries = staged.verify().context("the repository's ledger does not verify")?;
-        let head = stage.commit_of("refs/heads/main")?;
-        if ledgered_commit(&staged.read_all()?).as_deref() != Some(head.as_str()) {
-            bail!("the repository's main is not the commit its ledger ends at");
+        let list = staged.read_all()?;
+        if pending_confirm(&list).is_some() {
+            bail!("the repository's ledger has a commit confirmed still waiting: refused");
         }
-        let json = |p: &str| stage.text_at(&head, p).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).unwrap_or_default();
+        let head = stage.commit_of("refs/heads/main")?;
+        for (mode, path) in stage.tree_paths(&head)? {
+            if policy::tier_for_path(&path) == Tier::Forbidden {
+                bail!("the repository holds {path:?}, which no configuration may: refused");
+            }
+            if matches!(path.as_str(), "hardware-configuration.nix" | "flake.nix" | "flake.lock" | "config-files.json") && mode != "100644" {
+                bail!("the repository's {path} is not a plain file: refused");
+            }
+        }
+        let json = |p: &str| stage.text_at_most(&head, p, MAX_SETTING).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).unwrap_or_default();
         let torq = json("nixos/torq.json");
         let user = torq["user"].as_str().filter(|u| policy::user_name_ok(u)).context("the repository names no owner")?.to_string();
+        // This machine's hardware file must be read: attached at the top, as a new machine's is.
+        let attached = json("config-files.json");
+        let names = |v: &serde_json::Value| -> Vec<String> {
+            match v {
+                serde_json::Value::String(s) => vec![s.clone()],
+                serde_json::Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+                _ => vec![],
+            }
+        };
+        if !names(&attached[""]).iter().any(|f| f == "hardware-configuration.nix") {
+            bail!("the repository's configuration does not read a hardware file: refused");
+        }
+        let files: Vec<String> = attached.as_object().into_iter().flat_map(|o| o.values()).flat_map(names).filter(|f| f != "hardware-configuration.nix").collect();
+        if ledgered_commit(&list).as_deref() != Some(head.as_str()) {
+            bail!("the repository's main is not the commit its ledger ends at");
+        }
+        let users = json("nixos/users.json");
+        let keyed: Vec<String> = users["users"].as_object().into_iter().flatten().filter(|(_, u)| u["openssh"]["authorizedKeys"]["keys"].as_array().is_some_and(|k| !k.is_empty())).map(|(n, _)| n.clone()).collect();
         Ok(Adoptable {
             url: url.to_string(),
             user,
             host: json("system/host.json")["host-name"].as_str().unwrap_or("?").to_string(),
             remote: torq["remote"]["url"].as_str().map(String::from),
             entries,
-            head,
+            changes: list.iter().filter(|e| matches!(e.body.kind.as_str(), "applied" | "reverted" | "repaired" | "adopted")).count(),
+            head: head.clone(),
             tip,
+            host_key: None,
+            ssh: json("nixos/services.json")["openssh"]["enable"].as_bool().unwrap_or(false),
+            keyed,
+            files,
         })
     }
 
-    /// Become the machine the repository at `url` holds (ADR-036): its history and its ledger, then
-    /// this machine's own hardware file and software (`own`: a directory with hardware-configuration.nix,
-    /// flake.nix, flake.lock) as a new commit — built and switched to, then ledgered as `adopted`. The
-    /// ledger goes in last: a failure leaves the machine new, for setup to start again.
-    pub fn adopt(&self, url: &str, own: &Path) -> Result<Entry> {
-        let a = self.adopt_inspect(url)?;
+    /// Become the machine staged by `adopt_inspect` — exactly that one, `head` and `tip` as the person
+    /// was shown them, for `user`; nothing is fetched again (ADR-036): its history and its ledger,
+    /// then this machine's own hardware file and software (`own`: hardware-configuration.nix,
+    /// flake.nix, flake.lock) as a new commit, built and switched to, then ledgered as `adopted`.
+    /// The ledger goes in last: a failure leaves the machine new, for setup to start again.
+    pub fn adopt(&self, url: &str, own: &Path, head: &str, tip: &str, user: &str) -> Result<Entry> {
+        if !self.ledger.read_all()?.is_empty() || self.repo.is_initialised() {
+            bail!("this machine already has a configuration: only a new one adopts");
+        }
         let lock = Lock::acquire(&self.state_dir)?;
         if switch_running() {
             bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then adopt");
         }
         let r = remote::Remote::new(url, &self.state_dir)?;
-        let stage = self.state_dir.join("adopt.git");
+        let stage_path = self.state_dir.join("adopt.git");
+        let a = self.check_stage(&Repo::new(&stage_path), url)?;
+        if a.head != head || a.tip != tip || a.user != user {
+            bail!("what is staged is not what was shown: nothing was adopted");
+        }
         let undo = || {
             let _ = fs::remove_dir_all(self.repo.root());
+            let _ = fs::remove_dir_all(&stage_path);
+            let _ = fs::remove_file(self.state_dir.join("adopt-ledger.jsonl"));
         };
-        let head = (|| -> Result<String> {
-            self.repo.clone_stage(&stage)?;
-            for f in ["hardware-configuration.nix", "flake.nix", "flake.lock"] {
-                fs::copy(own.join(f), self.repo.root().join(f)).with_context(|| format!("putting this machine's {f} in"))?;
+        let commit = (|| -> Result<String> {
+            self.repo.clone_stage(&stage_path)?;
+            let files = ["hardware-configuration.nix", "flake.nix", "flake.lock"];
+            for f in files {
+                // A new file, whatever was at that name: nothing there is followed.
+                let to = self.repo.root().join(f);
+                match fs::remove_file(&to) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                    _ => {}
+                }
+                let bytes = fs::read(own.join(f)).with_context(|| format!("reading this machine's {f}"))?;
+                fs::OpenOptions::new().write(true).create_new(true).open(&to).and_then(|mut w| std::io::Write::write_all(&mut w, &bytes)).with_context(|| format!("putting this machine's {f} in"))?;
             }
-            self.repo.commit_all("This machine adopts this configuration: its hardware file and software\n\nActor: user\nTier: system")
+            self.repo.commit_files(&files, "This machine adopts this configuration: its hardware file and software\n\nActor: user\nTier: system")
         })()
         .inspect_err(|_| undo())?;
-        let built = self.build_system(&lock, &head).inspect_err(|_| undo()).context("the adopted configuration did not build: nothing was adopted")?;
-        let switched = self.rebuild(&lock, &head);
+        let built = self.build_system(&lock, &commit).inspect_err(|_| undo()).context("the adopted configuration did not build: nothing was adopted")?;
+        let switched = self.rebuild(&lock, &commit);
         if let Err(e) = &switched {
             let took = self.running_system().as_deref() == Some(built.as_str()) || self.next_boot().as_deref() == Some(built.as_str());
             if !took {
@@ -733,11 +812,12 @@ impl Broker {
             kind: "adopted".into(),
             tier: Tier::System.to_string(),
             tainted: false,
-            reason: format!("This machine adopted {} (its hardware file and software its own)", a.host),
-            data: self.with_system(json!({ "commit": head, "url": url, "from": a.head })),
+            reason: format!("This machine adopted {} (its hardware file and software its own)", a.host.chars().filter(|c| !c.is_control()).take(63).collect::<String>()),
+            data: self.with_system(json!({ "commit": commit, "url": url, "from": a.head })),
         })?;
-        r.set_verified(&a.tip)?;
-        let _ = fs::remove_dir_all(&stage);
+        // Done: from here nothing may undo it. What is left is housekeeping.
+        let _ = r.set_verified(&a.tip);
+        let _ = fs::remove_dir_all(&stage_path);
         let _ = fs::remove_file(self.state_dir.join("adopt-ledger.jsonl"));
         Ok(e)
     }
