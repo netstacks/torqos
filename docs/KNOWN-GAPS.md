@@ -12,7 +12,9 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    `reconciled_by`; edits made in the repo *during* a rebuild are still reset by a failed
    apply's restore (only reconcile snapshots them). The broker's git runs no hook and no fsmonitor of
    the repo (`core.hooksPath=/dev/null`, `core.fsmonitor=false`; second audit, M1: fixed).
-2. **`verify` cannot detect truncation of the newest entries, and the chain is unkeyed** (second
+2. **With a remote, a cut or rewritten ledger is an alarm (ADR-036, 2026-11-05, `tests/remote.nix`):**
+   the remote holds every ledger pushed, and this one must extend the newest (`status`). Without a
+   remote — the default — what follows still holds. **`verify` cannot detect truncation of the newest entries, and the chain is unkeyed** (second
    audit, H2): it is sha256 over each entry and the one before, so a writer of the file (root)
    can rewrite the history and recompute the chain; it does not cross-check git `Ledger-Entry`
    trailers against the ledger, and commits are not signed (L1). What it does catch: an edited,

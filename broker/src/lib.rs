@@ -12,6 +12,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod remote;
 pub mod ledger;
 pub mod policy;
 pub mod repo;
@@ -64,6 +65,8 @@ pub struct Broker {
     people: Vec<String>,
     /// What the agent may propose (ADR-041).
     agent_limits: agent::Limits,
+    /// The config repo's remote, if the owner named one (ADR-036).
+    remote: Option<String>,
 }
 
 /// A `commit confirmed` waiting for `confirm`: an `applied` entry with a `confirm` record and no
@@ -186,6 +189,9 @@ pub struct Status {
     pub pending_confirm: Option<PendingConfirm>,
     /// Its deadline passed more than two minutes ago and it has not been rolled back.
     pub overdue: bool,
+    /// The last exchange with the config repo's remote (ADR-036), if it has one: read, not asked —
+    /// status goes nowhere on the network.
+    pub remote: Option<remote::Pushed>,
 }
 
 impl Status {
@@ -198,6 +204,9 @@ impl Status {
         let mut p = Vec::new();
         if let Err(e) = &self.ledger {
             p.push(format!("ledger: {e}"));
+        }
+        if let Some(remote::Anchor::Differs { why }) = self.remote.as_ref().and_then(|r| r.anchor.as_ref()) {
+            p.push(format!("the ledger here is not the one its remote was given: {why} (nothing more is pushed until this is understood)"));
         }
         if let Some(i) = &self.interrupted {
             p.push(format!("the {} of #{} was interrupted: run `torq-broker reconcile --approved-by <name>`", i.op, i.target));
@@ -430,10 +439,62 @@ impl Broker {
             password_cmd: "chpasswd -e".into(),
             people: Vec::new(),
             agent_limits: agent::Limits::default(),
+            remote: None,
         }
     }
 
     /// The people the configuration declares (its normal users, from the broker's fixed settings).
+    /// The config repo's remote (ADR-036): `torq.remote.url`, from broker.json.
+    pub fn with_remote(mut self, url: Option<&str>) -> Self {
+        self.remote = url.map(String::from);
+        self
+    }
+
+    /// The remote, if there is one (its URL checked: SSH only).
+    pub fn remote(&self) -> Result<Option<remote::Remote>> {
+        self.remote.as_deref().map(|u| remote::Remote::new(u, &self.state_dir)).transpose()
+    }
+
+    /// After a change: the configuration and the ledger to the remote, if there is one — first the
+    /// remote's ledger, checked against this one (each push it was given must start with the one
+    /// before, and this one with the newest), and nothing pushed if it differs. Busy (another
+    /// operation, which will push when it is done): nothing. What happened is recorded either way,
+    /// for `status` and `show system remote`; a remote out of reach never fails the change.
+    pub fn sync_remote(&self) -> Result<Option<remote::Pushed>> {
+        let Some(r) = self.remote()? else { return Ok(None) };
+        let Some(_lock) = Lock::try_acquire(&self.state_dir)? else { return Ok(None) };
+        let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        if !r.key().exists() {
+            let p = remote::Pushed { at: now(), ok: false, error: Some("no key yet: request system remote key".into()), entries: 0, anchor: None };
+            r.record(&p)?;
+            return Ok(Some(p));
+        }
+        let local = fs::read_to_string(self.ledger.path()).unwrap_or_default();
+        let ssh = r.ssh_command();
+        let anchor = match self.repo.fetch_remote_ledger(&r.url, &ssh) {
+            Err(e) => remote::Anchor::Unreachable { error: format!("{e:#}") },
+            Ok(None) => remote::Anchor::Empty,
+            Ok(Some(_)) => match self.repo.remote_ledger_history() {
+                Ok(h) => remote::anchor_history(&h, &local),
+                Err(e) => remote::Anchor::Unreachable { error: format!("{e:#}") },
+            },
+        };
+        let pushed = match &anchor {
+            remote::Anchor::Unreachable { error } => Err(anyhow::anyhow!(error.clone())),
+            remote::Anchor::Differs { why } => Err(anyhow::anyhow!("not pushed: {why}")),
+            _ => {
+                let entries = self.ledger.read_all()?.len();
+                self.repo.record_ledger(self.ledger.path(), entries).and_then(|_| self.repo.push_remote(&r.url, &ssh)).map(|()| entries)
+            }
+        };
+        let p = match pushed {
+            Ok(entries) => remote::Pushed { at: now(), ok: true, error: None, entries, anchor: Some(anchor) },
+            Err(e) => remote::Pushed { at: now(), ok: false, error: Some(format!("{e:#}")), entries: 0, anchor: Some(anchor) },
+        };
+        r.record(&p)?;
+        Ok(Some(p))
+    }
+
     /// What the agent may propose (ADR-041): `torq.agent.mayPropose`, from broker.json.
     pub fn with_agent_limits(mut self, limits: &agent::Limits) -> Self {
         self.agent_limits = limits.clone();
@@ -546,6 +607,7 @@ impl Broker {
         Ok(Status {
             pending_confirm,
             overdue,
+            remote: self.remote().ok().flatten().and_then(|r| r.last()),
             ledger,
             head: self.repo.head().ok(),
             dirty: self.repo.ensure_clean().is_err() && self.repo.head().is_ok(),
@@ -1903,6 +1965,7 @@ mod tests {
             busy: None,
             pending_confirm: pending,
             overdue,
+            remote: None,
         }
     }
 

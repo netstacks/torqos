@@ -125,7 +125,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
@@ -169,7 +169,7 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         },
         // Their own password: the current one first, as passwd asks.
         "password" if user == Some(who.name.as_str()) => Gate::Password,
-        "password" | "confirm" | "reconcile" | "repair" => admins_only(),
+        "password" | "confirm" | "reconcile" | "repair" | "remote-key" => admins_only(),
         other => Gate::Refused(format!("`{other}` is not run over the socket (it is the machine's own, as root)")),
     }
 }
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn the_machines_own_commands_are_not_on_the_socket() {
-        for cmd in ["init", "setup", "expire-confirm", "serve", "nonsense"] {
+        for cmd in ["init", "setup", "expire-confirm", "serve", "push", "nonsense"] {
             assert!(matches!(gate(&who(1000), cmd, None, None), Gate::Refused(_)), "{cmd}");
         }
     }

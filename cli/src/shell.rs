@@ -135,6 +135,54 @@ impl Machine for Real<'_> {
         Ok(warnings)
     }
 
+    fn remote(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["remote"])?, &log)?, "show system remote")?;
+        let Some(url) = v["url"].as_str() else {
+            return Ok("No remote: this machine's configuration and its ledger are kept here only (torq remote url <ssh url> names one).\n".into());
+        };
+        let mut out = format!("Remote: {}\n", history::one_line(url, 120));
+        if !v["key"].as_bool().unwrap_or(false) {
+            out.push_str("  No key yet: request system remote key makes one, to add to the repository as a deploy key.\n");
+        }
+        let last = &v["last"];
+        match last["ok"].as_bool() {
+            None => out.push_str("  Nothing pushed yet.\n"),
+            Some(ok) => {
+                let at = history::one_line(last["at"].as_str().unwrap_or("?"), 30);
+                if ok {
+                    out.push_str(&format!("  Last push: {at}, the configuration and {} ledger entries.\n", last["entries"].as_u64().unwrap_or(0)));
+                } else {
+                    out.push_str(&format!("  Last push: {at}, failed: {}\n", history::one_line(last["error"].as_str().unwrap_or("?"), 200)));
+                }
+            }
+        }
+        match last["anchor"]["state"].as_str() {
+            Some("agrees") => out.push_str(&format!(
+                "  Its ledger: the first {} of this machine's {} entries, as they are here.\n",
+                last["anchor"]["remote"].as_u64().unwrap_or(0),
+                last["anchor"]["local"].as_u64().unwrap_or(0)
+            )),
+            Some("differs") => out.push_str(&format!(
+                "  ⚠ Its ledger is not this one's start: {} — nothing more is pushed.\n",
+                history::one_line(last["anchor"]["why"].as_str().unwrap_or("?"), 200)
+            )),
+            Some("unreachable") => out.push_str("  It could not be reached at the last push.\n"),
+            _ => {}
+        }
+        Ok(out)
+    }
+
+    fn remote_key(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["remote-key"])?, &log)?, "request system remote key")?;
+        Ok(format!(
+            "{}\n\nAdd this key to {} as a deploy key, with write access (and protect its branches: no force-push).\n",
+            history::one_line(v["public_key"].as_str().unwrap_or("?"), 200),
+            history::one_line(v["url"].as_str().unwrap_or("the remote"), 120)
+        ))
+    }
+
     fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64> {
         let scratch = scratch_dir()?;
         let file = scratch.path().join("change.diff");

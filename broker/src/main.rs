@@ -51,6 +51,9 @@ enum Cmd {
     Verify,
     Status,
     Serve,
+    RemoteKey,
+    Push,
+    RemoteShow,
 }
 
 /// The command line, declared with clap's builder (its derive macros write an `allow(dead_code)`,
@@ -152,6 +155,9 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("status").about(
             "Compare the machine with its ledger: running system, config repo, interrupted operations, ledger chain. Exits 1 if anything is not as ledgered, 75 if an operation is running.",
         ))
+        .subcommand(Command::new("remote-key").about("The machine's key for the config repo's remote (ADR-036): made the first time, kept after; its public half printed, to add to the repository as a deploy key with write access."))
+        .subcommand(Command::new("push").about("Push the configuration and the ledger to the remote now (after every change it is pushed anyway; this is the timer's retry): the remote's ledger checked first."))
+        .subcommand(Command::new("remote").about("The remote: its URL, the last push, and what its ledger says of this one (asked now)."))
         .subcommand(Command::new("serve").about(
             "Answer one request on the socket (torq-broker.socket hands it the connection as standard input and output): the caller from the kernel (SO_PEERCRED), what it may do by its account and the change's tier, a system change's password through PAM (ADR-040).",
         ))
@@ -192,6 +198,9 @@ fn parse_cli() -> Cli {
         "verify" => Cmd::Verify,
         "status" => Cmd::Status,
         "serve" => Cmd::Serve,
+        "remote-key" => Cmd::RemoteKey,
+        "push" => Cmd::Push,
+        "remote" => Cmd::RemoteShow,
         other => unreachable!("clap knows no subcommand {other}"),
     };
     Cli {
@@ -290,11 +299,53 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_confirm_commands(&s.build, &s.activate, &s.boot, &s.schedule)
         .with_people(&s.people)
         .with_agent_limits(&s.agent)
+        .with_remote(s.remote.as_deref())
         // On a real machine the rollback uses the old system's own commands (its etc/torq/broker.json).
         .with_anchor_settings(config::running_as_root());
     b.ledger.set_via(via, caller);
+    // Whatever a command that writes the ledger does — and however it ends — the remote gets it
+    // afterwards (ADR-036): best-effort, never failing the command.
+    let writes = matches!(
+        cli.cmd,
+        Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. }
+    );
+    let _push = writes.then_some(PushAfter(&b));
     match cli.cmd {
         Cmd::Serve => unreachable!("served before the settings are read"),
+        Cmd::RemoteKey => {
+            let r = b.remote()?.context("no remote is set: `torq remote url <ssh url>` first (a system change)")?;
+            let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+            let key = r.public_key(host.trim())?;
+            if json {
+                println!("{}", json!({ "public_key": key, "url": r.url }));
+            } else {
+                println!("{key}\n\nAdd it to {} as a deploy key, with write access; then: torq-broker push", r.url);
+            }
+        }
+        Cmd::Push => match (b.sync_remote()?, json) {
+            (p, true) => println!("{}", json!({ "pushed": p })),
+            (None, false) => println!("no remote is set (or an operation is running, which pushes when it is done)"),
+            (Some(p), false) if p.ok => println!("pushed: the remote has the configuration and {} ledger entries", p.entries),
+            (Some(p), false) => {
+                println!("not pushed: {}", printable(p.error.as_deref().unwrap_or("?")));
+                std::process::exit(1);
+            }
+        },
+        Cmd::RemoteShow => {
+            let r = b.remote()?;
+            let last = r.as_ref().and_then(|r| r.last());
+            let key = r.as_ref().is_some_and(|r| r.key().exists());
+            if json {
+                println!("{}", json!({ "url": r.as_ref().map(|r| r.url.clone()), "key": key, "last": last }));
+            } else {
+                match (&r, &last) {
+                    (None, _) => println!("no remote: this machine's configuration and ledger are kept here only"),
+                    (Some(r), None) => println!("remote {} (key: {}): nothing pushed yet", r.url, if key { "made" } else { "none yet" }),
+                    (Some(r), Some(p)) => println!("remote {}: last push {} at {}{}", r.url, if p.ok { "went through" } else { "failed" }, p.at, p.error.as_deref().map(|e| format!(" — {}", printable(e))).unwrap_or_default()),
+                }
+            }
+        }
         Cmd::Init => {
             b.init()?;
             if json {
@@ -511,4 +562,13 @@ fn printable_text(s: &str) -> String {
     s.chars()
         .map(|c| if hidden(c) && c != '\n' && c != '\t' { c.escape_unicode().to_string() } else { c.to_string() })
         .collect()
+}
+
+/// Pushes to the remote when dropped: after a command that writes the ledger, however it ended.
+struct PushAfter<'a>(&'a Broker);
+
+impl Drop for PushAfter<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.sync_remote();
+    }
 }

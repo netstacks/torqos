@@ -78,6 +78,89 @@ impl Repo {
         Ok(out.stdout)
     }
 
+    /// git, to the remote (ADR-036): SSH and nothing else — no `ext::` (which runs a command), no
+    /// `file://`, no other transport — with `ssh` as `ssh_command` names it (its key, its pinned
+    /// host key), and no more than a minute.
+    fn git_net(&self, ssh_command: &str, args: &[&str]) -> Result<String> {
+        let mut a = vec!["-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always", "-c", "credential.helper=", "-c", "core.askPass="];
+        a.extend_from_slice(args);
+        let ssh = OsStr::new(ssh_command);
+        let env = [("GIT_SSH_COMMAND", ssh), ("GIT_TERMINAL_PROMPT", OsStr::new("0")), ("GIT_HTTP_LOW_SPEED_TIME", OsStr::new("30"))];
+        self.git_env(&env, &a)
+    }
+
+    /// Record the ledger in the repo as `refs/torq/ledger`: a commit holding `ledger.jsonl` as it is
+    /// now, on top of the one before (a chain git keeps, the remote can refuse to rewrite). Nothing
+    /// new when the ledger has not changed. The commit id, if there is one.
+    pub fn record_ledger(&self, ledger: &Path, entries: usize) -> Result<Option<String>> {
+        let ledger = path::absolute(ledger)?.to_string_lossy().into_owned();
+        let blob = self.git(&["hash-object", "-w", "--", &ledger])?.trim().to_string();
+        let tree = self.git_stdin(&["mktree"], &format!("100644 blob {blob}\tledger.jsonl\n"))?.trim().to_string();
+        let parent = self.git(&["rev-parse", "-q", "--verify", "refs/torq/ledger^{commit}"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(p) = &parent {
+            if self.git(&["rev-parse", &format!("{p}^{{tree}}")])?.trim() == tree {
+                return Ok(Some(p.clone()));
+            }
+        }
+        let msg = format!("ledger: {entries} entries");
+        let mut args = vec!["commit-tree", tree.as_str(), "-m", msg.as_str()];
+        if let Some(p) = &parent {
+            args.extend(["-p", p.as_str()]);
+        }
+        let commit = self.git(&args)?.trim().to_string();
+        let mut update = vec!["update-ref", "refs/torq/ledger", commit.as_str()];
+        if let Some(p) = &parent {
+            update.push(p.as_str()); // only on top of the one before: never rewritten
+        }
+        self.git(&update)?;
+        Ok(Some(commit))
+    }
+
+    /// Push the configuration (HEAD, as `main`) and the ledger's ref to `url` — never forced: the
+    /// remote's history only grows.
+    pub fn push_remote(&self, url: &str, ssh_command: &str) -> Result<()> {
+        self.git_net(ssh_command, &["push", "--porcelain", "--", url, "HEAD:refs/heads/main", "refs/torq/ledger:refs/torq/ledger"])?;
+        Ok(())
+    }
+
+    /// The remote's ledger, as it has it (None: it has none yet).
+    pub fn fetch_remote_ledger(&self, url: &str, ssh_command: &str) -> Result<Option<String>> {
+        let refs = self.git_net(ssh_command, &["ls-remote", "--", url, "refs/torq/ledger"])?;
+        if refs.trim().is_empty() {
+            return Ok(None);
+        }
+        self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--", url, "+refs/torq/ledger:refs/torq/remote-ledger"])?;
+        Ok(Some(self.git(&["cat-file", "blob", "refs/torq/remote-ledger:ledger.jsonl"])?))
+    }
+
+    /// Every ledger the remote was given, oldest first (after `fetch_remote_ledger`): each a commit
+    /// of `refs/torq/remote-ledger`'s history.
+    pub fn remote_ledger_history(&self) -> Result<Vec<String>> {
+        let commits = self.git(&["rev-list", "--reverse", "--first-parent", "refs/torq/remote-ledger"])?;
+        commits.lines().map(|c| self.git(&["cat-file", "blob", &format!("{c}:ledger.jsonl")])).collect()
+    }
+
+    fn git_stdin(&self, args: &[&str], input: &str) -> Result<String> {
+        use std::io::Write as _;
+        let mut child = crate::config::command("git")
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"])
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("running git")?;
+        child.stdin.take().context("git's input")?.write_all(input.as_bytes())?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     /// Flush the repo's whole filesystem (`syncfs`): working tree, objects, refs and directory
     /// renames. `core.fsync` covers only git's own files, but the rebuild builds the working tree
     /// and the ledger is fsynced on every append, so after a power loss the repo must not be behind

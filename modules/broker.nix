@@ -4,6 +4,20 @@ let
   cfg = config.torq.broker;
 in
 {
+  # The config repo's remote (ADR-036): where the configuration and its ledger also live, pushed after
+  # every change. `torq remote url <ssh url>` in the tree (a system change); none by default (ADR-004).
+  options.torq.remote.url = lib.mkOption {
+    type = lib.types.nullOr (lib.types.strMatching "(ssh://([A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/[A-Za-z0-9._~/-]+|[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~/][A-Za-z0-9._~/-]*)");
+    default = null;
+    example = "git@github.com:you/torq5-config.git";
+    description = ''
+      The config repo's remote, over SSH only (ssh://host/path, or user@host:path): after every change
+      the broker pushes the configuration and its ledger there, never forced. A private repository,
+      with branch protection (no force-push): then the ledger it holds cannot be taken back, and a
+      ledger rewritten here is an alarm. The machine's key for it: `request system remote key`.
+    '';
+  };
+
   options.torq.broker = {
     enable = lib.mkOption {
       type = lib.types.bool;
@@ -153,6 +167,24 @@ in
         OnUnitActiveSec = "15min";
       };
     };
+
+    # With a remote (ADR-036): what a change could not push (the remote out of reach), pushed later.
+    # Never fails: an unreachable remote is recorded for `show system remote`, not a broken unit.
+    systemd.services.torq-remote-push = lib.mkIf (config.torq.remote.url != null) {
+      description = "Push this machine's TorqOS configuration and ledger to its remote";
+      after = [ "network-online.target" "torq-broker-init.service" ];
+      wants = [ "network-online.target" ];
+      restartIfChanged = false;
+      serviceConfig.Type = "oneshot";
+      script = "${lib.getExe cfg.package} push || true";
+    };
+    systemd.timers.torq-remote-push = lib.mkIf (config.torq.remote.url != null) {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "3min";
+        OnUnitActiveSec = "15min";
+      };
+    };
     environment.interactiveShellInit = ''
       if [ -s /run/torq/drift ]; then
         echo "TorqOS: this machine is not as its ledger says (details: torqcli show system alarms):" >&2
@@ -181,6 +213,8 @@ in
         path = lib.makeBinPath [
           config.nix.package
           pkgs.gitMinimal
+          # The remote (ADR-036): git over SSH, and the machine's key for it.
+          pkgs.openssh
           pkgs.coreutils
           pkgs.bash
           config.systemd.package
@@ -190,6 +224,8 @@ in
         people = config.torq.accounts.people;
         # What the agent may propose (ADR-041, modules/agent.nix).
         agent = { inherit (config.torq.agent.mayPropose) users settings; };
+        # The config repo's remote (ADR-036): none, or an SSH URL.
+        remote = config.torq.remote.url;
       };
      }
 

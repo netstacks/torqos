@@ -48,6 +48,9 @@ pub struct Settings {
     /// nothing but what is no setting at all is refused — it may propose nothing.
     #[serde(default)]
     pub agent: crate::agent::Limits,
+    /// The config repo's remote (ADR-036, `torq.remote.url`): SSH only. None: local, as ever.
+    #[serde(default)]
+    pub remote: Option<String>,
 }
 
 /// What the caller asked for, by flag or `TORQ_*` variable; None where nothing was given.
@@ -116,6 +119,7 @@ impl Settings {
             home,
             people: Vec::new(),
             agent: crate::agent::Limits::default(),
+            remote: None,
         }
     }
 
@@ -193,6 +197,7 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             home: defaults.home,
             people: defaults.people,
             agent: defaults.agent,
+            remote: defaults.remote,
         }),
     }
 }
@@ -262,6 +267,7 @@ mod tests {
             home: "/root".into(),
             people: vec!["casey".into()],
             agent: crate::agent::Limits::default(),
+            remote: None,
         }
     }
     fn defaults() -> Settings {

@@ -714,8 +714,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   What TorqOS can then say, truthfully: *the agent cannot get root; the owner can, but not
   silently; and what root does here cannot rewrite the record elsewhere or outlive a rebuild.*
 
-## ADR-036 — The config repo's remote: the machine is a URL (proposed)
-- **Status:** proposed, 2026-11-03. Keeps ADR-004's default (local, never pushed) and adds the
+## ADR-036 — The config repo's remote: the machine is a URL
+- **Status:** accepted (the owner, 2026-11-05: "yes"); the push and the anchor built 2026-11-05, pull and
+  adopt next. Keeps ADR-004's default (local, never pushed) and adds the
   remote as a setting; answers VISION's two "far future" questions.
 - **Context:** The config repo is the machine minus its data: `flake.nix`, `flake.lock`, the tree's
   JSON, attached Nix files, `hardware-configuration.nix`, `users/<name>/*.json`. Secrets are kept
@@ -751,6 +752,18 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   minus data (ADR-038). Setup gains an online path (the default stays offline). New: `torq remote
   …` settings, `request system pull`, the remote in `show system alarms`. ADR-004's "network is
   download-only" becomes "download-only until the owner names a remote".
+- **Amended (2026-11-05): built — the push and the anchor** (`tests/remote.nix`). The URL is a
+  setting, `torq remote url` (`torq.remote.url`: SSH only, `ssh://host/path` or `user@host:path` —
+  a git URL can run a command, `ext::`, so nothing else, checked by the module and the broker, git
+  allowed no other transport). The credential: a key the broker makes in its state
+  (`request system remote key` prints the public half, for a deploy key with write access); the
+  remote's host key pinned at first contact; no ssh configuration of anyone's read. After every
+  command that writes the ledger the broker pushes `main` and `refs/torq/ledger` — a chain of
+  commits, each the ledger as it was — never forced; first it fetches the remote's ledger history
+  and checks that each push starts with the one before and this ledger with the newest, and pushes
+  nothing if not: a ledger cut short or rewritten here is an alarm (`status`), and so is one root
+  pushed on top. Out of reach, a change still lands; the push waits for the next change or a
+  timer (15 min). `show system remote` says how the last push went.
 
 ## ADR-037 — Applications: a ladder, every rung declared (proposed)
 - **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small

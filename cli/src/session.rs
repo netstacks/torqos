@@ -58,6 +58,10 @@ pub trait Machine {
     fn ledger(&self, count: usize, fit: Option<usize>) -> Result<String>;
     /// The proposals waiting for a person (ADR-041): `show system proposals`.
     fn proposals(&self, fit: Option<usize>) -> Result<String>;
+    /// `show system remote`: the configuration's remote, and how the last push went (ADR-036).
+    fn remote(&self) -> Result<String>;
+    /// `request system remote key`: this machine's key for the remote, made the first time.
+    fn remote_key(&self) -> Result<String>;
     /// `request system apply <n>`: show proposal <n>, ask, apply it (as `me`).
     fn apply_proposal(&self, seq: u64, me: &str) -> Result<String>;
     /// Propose `diff` against `base` and stop there (the agent's commit, ADR-041): the proposal's number.
@@ -407,7 +411,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowRemote => {
                 self.show_operational(op)
             }
             Op::Request(r) => self.request(r),
@@ -703,6 +707,7 @@ impl<'a> Session<'a> {
             }
             Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail), self.fit),
             Op::ShowProposals => self.machine.proposals(self.fit),
+            Op::ShowRemote => self.machine.remote(),
             Op::ShowServices => {
                 // What the configuration in effect turns on: NixOS's services (`services <name> enable`,
                 // `virtualisation <name> enable`), and what the old list still turns on.
@@ -921,6 +926,7 @@ impl<'a> Session<'a> {
             syntax::Request::Password { user } => self.machine.set_password(user.as_deref().unwrap_or(&self.me.clone())),
             syntax::Request::Revert { change } => self.machine.revert(change, &self.me),
             syntax::Request::Apply { proposal } => self.machine.apply_proposal(proposal, &self.me),
+            syntax::Request::RemoteKey => self.machine.remote_key(),
             syntax::Request::Update { all } => self.update(all),
             syntax::Request::SoftwareRollback { n } => self.software_rollback(n),
         }
@@ -2059,6 +2065,12 @@ mod tests {
                 (Some(before), true) => Ok(("dev".into(), before.clone())),
                 _ => Ok(("dev".into(), self.keys.clone())),
             }
+        }
+        fn remote(&self) -> Result<String> {
+            Ok("no remote\n".into())
+        }
+        fn remote_key(&self) -> Result<String> {
+            Ok("ssh-ed25519 AAAA test\n".into())
         }
         fn proposals(&self, _fit: Option<usize>) -> Result<String> {
             Ok("(no proposals)\n".into())

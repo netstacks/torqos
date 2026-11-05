@@ -291,6 +291,8 @@ nix develop -c sh -c 'cd broker && cargo test'   # the broker's unit tests
 | `trust-loop` | Commits, confirmed commits, rollbacks, the ledger and the shell, on a real NixOS |
 | `socket` | The broker's door: who is asking is the kernel's answer; a system change takes an administrator's password; five wrong lock it, at sudo and su too |
 | `agent` | The agent's account proposes only what its list allows, every refusal ledgered; a person sees what a proposal does and applies it |
+| `agent-run` | A program (Claude Code) run as the agent: one shared directory, nothing else of any home, nothing that outlives it |
+| `remote` | Every change pushed to the remote; a ledger cut short or rewritten here — or pushed on top by root — is an alarm |
 | `accounts`, `ssh` | Who can log in, and how; passwords never in the configuration |
 | `image` | The release image from first boot through setup to its first signed update |
 | `installer` | The ISO from a USB stick to a chosen disk, and that disk's first boot |
