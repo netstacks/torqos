@@ -45,6 +45,9 @@ impl Repo {
         let user_email = format!("user.email={EMAIL}");
         let out = crate::config::command("git")
             .envs(env.iter().copied())
+            // A path is a path, never a pattern: `*?[` in a proposed file's name match only itself
+            // (the audit of ADR-041: ls-files took the first file a pattern matched).
+            .env("GIT_LITERAL_PATHSPECS", "1")
             .arg("-C")
             .arg(&self.root)
             .arg("-c")
@@ -158,6 +161,13 @@ impl Repo {
             }
             Ok(out)
         })
+    }
+
+    /// What the diff in `diff_path` does to HEAD, as git itself writes it: the change a person is
+    /// shown (the audit of ADR-041: a diff's own text can say one thing while `git apply` does
+    /// another — lines past a hunk's count, text before a header, one file patched twice).
+    pub fn proposal_effect(&self, diff_path: &Path) -> Result<String> {
+        self.with_proposal_index(diff_path, |env| self.git_env(env, &["diff", "--cached", "--no-renames", "--no-color", "--no-ext-diff", "HEAD"]))
     }
 
     /// A file as HEAD has it: None when HEAD has none at `path`; refused when it is not a regular

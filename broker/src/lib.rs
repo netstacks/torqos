@@ -115,6 +115,11 @@ pub const MAX_CONFIRM_MINUTES: u32 = 24 * 60;
 
 /// The largest diff a proposal may be (it is ledgered whole): 4 MiB, far beyond any configuration.
 pub const MAX_DIFF: u64 = 4 << 20;
+/// The agent's limits on the ledger (the audit of ADR-041): its reasons, its proposals waiting at
+/// once, its refusals ledgered in an hour.
+pub const AGENT_REASON_MAX: usize = 200;
+pub const AGENT_WAITING_MAX: usize = 20;
+pub const AGENT_REFUSALS_AN_HOUR: usize = 30;
 
 /// How often the rollback of an unconfirmed commit may fail to take before it is ledgered as not
 /// restored (below the timer's 60 tries, so the timer's own runs reach it).
@@ -840,6 +845,51 @@ impl Broker {
     /// mix with the commit in between. Without a base, the diff is applied wherever it applies.
     pub fn propose_on(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         let _l = Lock::acquire(&self.state_dir)?;
+        let proposed = self.propose_locked(base, diff_path, reason, actor, tainted);
+        // Every refusal of the agent's is on the record, whatever refused it — the forbidden paths,
+        // bad data, a diff that does not apply, the list (the audit of ADR-041): an agent that tries
+        // is seen trying. (Busy is not a refusal: nothing was looked at.)
+        if actor == Actor::Agent {
+            if let Err(e) = &proposed {
+                let _ = self.record_refusal(diff_path, reason, tainted, &format!("{e:#}"));
+            }
+        }
+        proposed
+    }
+
+    /// The agent's refusals, ledgered (kind `refused`): why, the diff's hash, its reason shortened —
+    /// never the diff. At most `AGENT_REFUSALS_AN_HOUR` an hour: past that they are turned away
+    /// without an entry each, so that refusals cannot fill the ledger.
+    fn record_refusal(&self, diff_path: &Path, reason: &str, tainted: bool, why: &str) -> Result<()> {
+        let entries = self.ledger.read_all()?;
+        let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+        let recent = entries
+            .iter()
+            .filter(|e| e.body.kind == "refused" && e.body.actor == "agent")
+            .filter(|e| chrono::DateTime::parse_from_rfc3339(&e.body.ts).is_ok_and(|t| t > hour_ago))
+            .count();
+        if recent >= AGENT_REFUSALS_AN_HOUR {
+            return Ok(());
+        }
+        let mut diff = Vec::new();
+        if let Ok(f) = fs::File::open(diff_path) {
+            let _ = std::io::Read::read_to_end(&mut std::io::Read::take(f, MAX_DIFF), &mut diff);
+        }
+        let one_line = |s: &str, n: usize| s.chars().map(|c| if c.is_control() { '?' } else { c }).take(n).collect::<String>();
+        let reason = one_line(reason, AGENT_REASON_MAX);
+        self.ledger.append(NewEntry {
+            actor: Actor::Agent.to_string(),
+            approved_by: None,
+            kind: "refused".into(),
+            tier: Tier::System.to_string(),
+            tainted,
+            reason: if reason.trim().is_empty() { "(no reason)".into() } else { reason },
+            data: json!({ "diff_sha256": hex::encode(Sha256::digest(&diff)), "why": one_line(why, 1000) }),
+        })?;
+        Ok(())
+    }
+
+    fn propose_locked(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         self.refuse_if_interrupted()?;
         // An agent always says what it prepared its change against: without a base, a diff applies on
         // top of whatever the configuration has become (second audit, M2; KNOWN-GAPS 6g).
@@ -851,6 +901,22 @@ impl Broker {
         // could forge one (audit of 2026-11-01, N4).
         if reason.trim().is_empty() || reason.chars().any(char::is_control) {
             bail!("refused: the reason is one line of text (no line breaks or control characters), not empty");
+        }
+        if actor == Actor::Agent {
+            // Short, and not many waiting at once: the agent cannot fill the ledger, or bury one
+            // proposal under others (the audit of ADR-041).
+            if reason.chars().count() > AGENT_REASON_MAX {
+                bail!("refused: the agent's reason is at most {AGENT_REASON_MAX} characters");
+            }
+            let entries = self.ledger.read_all()?;
+            let waiting = entries
+                .iter()
+                .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent")
+                .filter(|p| !entries.iter().any(|e| matches!(e.body.kind.as_str(), "applied" | "apply_failed") && e.body.data["proposal"] == json!(p.body.seq)))
+                .count();
+            if waiting >= AGENT_WAITING_MAX {
+                bail!("refused: {waiting} of the agent's proposals are waiting for a person already (at most {AGENT_WAITING_MAX})");
+            }
         }
         self.refuse_unledgered_head()?;
         if let Some(base) = base {
@@ -876,14 +942,16 @@ impl Broker {
         // could change between two reads.
         let copy = self.state_dir.join("proposing.diff");
         fs::write(&copy, &diff)?;
-        let files = self.repo.diff_files(&copy).and_then(|files| {
+        let checked = self.repo.diff_files(&copy).and_then(|files| {
             self.check_user_data(&copy, &files)?;
             // The agent's proposals: only what its list allows (ADR-041), judged by what changes.
             let refused = if actor == Actor::Agent { self.agent_refusal(&copy, &files)? } else { None };
-            Ok((files, refused))
+            // What it does, as git writes it: what a person is shown before applying it.
+            let effect = self.repo.proposal_effect(&copy)?;
+            Ok((files, refused, effect))
         });
         let _ = fs::remove_file(&copy);
-        let (files, refused) = files?;
+        let (files, refused, effect) = checked?;
         if files.is_empty() {
             bail!("diff changes no files");
         }
@@ -892,17 +960,6 @@ impl Broker {
         let tier = policy::tier_for_paths(&files);
         policy::check_allowed(actor, tier)?;
         if let Some(why) = refused {
-            // On the record, not only turned away: who tried what, and why not (the diff's hash, not
-            // the diff — a refusal is not a proposal).
-            self.ledger.append(NewEntry {
-                actor: actor.to_string(),
-                approved_by: None,
-                kind: "refused".into(),
-                tier: policy::tier_for_paths(&files).to_string(),
-                tainted,
-                reason: reason.into(),
-                data: json!({ "files": files, "diff_sha256": hex::encode(Sha256::digest(diff.as_bytes())), "why": why }),
-            })?;
             bail!("refused: {why}");
         }
         self.ledger.append(NewEntry {
@@ -916,6 +973,7 @@ impl Broker {
                 "files": files,
                 "diff_sha256": hex::encode(Sha256::digest(diff.as_bytes())),
                 "diff": diff,
+                "effect": effect,
                 "base": base,
             }),
         })
@@ -1395,6 +1453,14 @@ impl Broker {
         let tier = policy::tier_for_paths(&files);
         let actor = if p.body.actor == "agent" { Actor::Agent } else { Actor::User };
         policy::check_allowed(actor, tier)?;
+        // The agent's list as it is now, not as it was when it proposed: the limits may have been
+        // narrowed since (the audit of ADR-041).
+        if actor == Actor::Agent {
+            if let Some(why) = self.agent_refusal(&tmp, &files)? {
+                let _ = fs::remove_file(&tmp);
+                bail!("refused: the agent's limits no longer allow this — {why}");
+            }
+        }
 
         let next_seq = self.ledger.read_all()?.len() as u64 + 1;
         let msg = format!(

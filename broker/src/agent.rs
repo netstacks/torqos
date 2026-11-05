@@ -83,7 +83,8 @@ fn inside(setting: &[String], allowed: &[String]) -> bool {
     }
     allowed.iter().any(|a| {
         let a: Vec<&str> = a.split('.').collect();
-        !a.is_empty() && a[0] != NEVER && a.iter().all(|s| !s.is_empty()) && setting.len() >= a.len() && a.iter().zip(setting).all(|(x, y)| *x == y)
+        // A bare `system` is two trees at once (torqcli's, and NixOS's system.activationScripts): never.
+        !a.is_empty() && a[0] != NEVER && a != ["system"] && a.iter().all(|s| !s.is_empty()) && setting.len() >= a.len() && a.iter().zip(setting).all(|(x, y)| *x == y)
     })
 }
 
@@ -179,6 +180,7 @@ mod tests {
 
     #[test]
     fn an_empty_or_odd_entry_allows_nothing() {
+        assert!(refusal(&limits(&[], &["system"]), &[t("nixos/system.json", Some(json!({})), Some(json!({"activationScripts": {"x": "id"}})))]).is_some(), "a bare system");
         for bad in ["", ".", "services.", ".openssh"] {
             assert!(refusal(&limits(&[], &[bad]), &[t("nixos/services.json", Some(json!({})), Some(json!({"openssh": {"enable": true}})))]).is_some(), "{bad:?}");
         }

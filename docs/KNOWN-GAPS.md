@@ -438,7 +438,13 @@ Its §5 lists claims without a test.
    - A caller that reads too slowly (the reply queue) is not yet exercised by a test; nor is
      a switch that changes `torq-broker.socket` while an instance runs.
 
-6zg. **The agent's account, first step (ADR-041)** — open ends:
+6zg. **The agent's account, first step (ADR-041).** Fixed from its adversarial review (2026-11-05): a
+   person is shown what a proposal *does* — the diff git writes of its result, recorded by the broker
+   when it is proposed — never the proposer's text, which git can apply differently (lines past a
+   hunk's count); every refusal of the agent's is ledgered, the forbidden ones and the diffs that do
+   not apply included, at most 30 an hour; its reasons at most 200 characters, at most 20 of its
+   proposals waiting; its list checked again at apply; paths given to git literally; a bare `system`
+   refused. Open ends:
    - **Running a tool as the agent** (Claude Code, the owner's wish) is designed, not built: `torq
      agent run [--share <dir>] -- <command>` (ADR-041, 5). Until then a person can run one as the
      account by hand (`sudo -u torq-agent …`, an administrator's), with nothing of their own shared.
@@ -450,3 +456,6 @@ Its §5 lists claims without a test.
    - **The list is by setting, not by what a setting does.** `services.openssh` allows every option
      under it — `services.openssh.extraConfig` included. Listing a subtree is trusting the agent
      with all of it; the narrower the list, the safer.
+   - **`tainted` is the proposer's word.** The agent marks its own proposals as having read untrusted
+     content; a proposal without the mark proves nothing. It should come from the session that runs
+     the agent (M5), not from the agent.

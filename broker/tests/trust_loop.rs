@@ -2227,3 +2227,65 @@ fn the_agent_proposes_only_what_its_list_allows_and_a_refusal_is_ledgered() {
     assert!(err.contains("services.nginx.enable"), "{err}");
     b.ledger.verify().unwrap();
 }
+
+/// The audit of ADR-041, its 1: a diff's text can say one thing while `git apply` does another
+/// (lines past a hunk's count are ignored). What is recorded to show a person is what git does.
+#[test]
+fn what_a_person_is_shown_is_what_git_does() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let smuggled = write_diff(dir.path(), "s.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"nmap\"]\n-[\"nmap\"]\n+[\"htop\"]\n");
+    let p = b.propose_on(Some(&head), &smuggled, "htop for casey", Actor::Agent, false).unwrap();
+    let effect = p.body.data["effect"].as_str().unwrap();
+    assert!(effect.contains("+[\"nmap\"]") && !effect.contains("htop"), "{effect}");
+    b.apply(p.body.seq, "casey", false).unwrap();
+    assert_eq!(fs::read_to_string(b.repo.root().join("users/casey/packages.json")).unwrap().trim(), "[\"nmap\"]", "what was shown is what landed");
+}
+
+/// Its 2 and 3: every refusal of the agent's is on the record (the forbidden ones, a diff that does
+/// not apply), within limits that keep it from filling the ledger.
+#[test]
+fn every_refusal_of_the_agents_is_ledgered_within_limits() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let count = |b: &Broker| b.ledger.read_all().unwrap().iter().filter(|e| e.body.kind == "refused").count();
+    let policy = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/policy/new.toml\n@@ -0,0 +1 @@\n+x = 1\n");
+    let e = format!("{:#}", b.propose_on(Some(&head), &policy, "loosen", Actor::Agent, false).unwrap_err());
+    assert!(e.contains("forbidden"), "{e}");
+    assert_eq!(count(&b), 1, "a forbidden attempt is on the record");
+    let broken = write_diff(dir.path(), "b.diff", "--- a/nothing.json\n+++ b/nothing.json\n@@ -1 +1 @@\n-x\n+y\n");
+    assert!(b.propose_on(Some(&head), &broken, "nothing", Actor::Agent, false).is_err());
+    assert_eq!(count(&b), 2, "so is a diff that does not apply");
+    // A person's refusal is not the agent's record.
+    assert!(b.propose_on(Some(&head), &broken, "nothing", Actor::User, false).is_err());
+    assert_eq!(count(&b), 2);
+    // A long reason: refused (and ledgered, shortened).
+    let ok = write_diff(dir.path(), "ok.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let long = "x".repeat(torq_broker::AGENT_REASON_MAX + 1);
+    assert!(format!("{:#}", b.propose_on(Some(&head), &ok, &long, Actor::Agent, false).unwrap_err()).contains("at most"));
+    let last = b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!(last.body.reason.chars().count(), torq_broker::AGENT_REASON_MAX);
+    // At most so many waiting at once.
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &ok, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    assert!(format!("{:#}", b.propose_on(Some(&head), &ok, "one more", Actor::Agent, false).unwrap_err()).contains("waiting"));
+    // And refusals ledgered at most so many an hour: the rest turned away without an entry each.
+    for _ in 0..torq_broker::AGENT_REFUSALS_AN_HOUR + 5 {
+        let _ = b.propose_on(Some(&head), &policy, "again", Actor::Agent, false);
+    }
+    assert_eq!(count(&b), torq_broker::AGENT_REFUSALS_AN_HOUR);
+    b.ledger.verify().unwrap();
+}
+
+/// Its 6: the agent's list as it is when a person applies, not as it was when it proposed.
+#[test]
+fn the_agents_list_is_checked_again_at_apply() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let ok = write_diff(dir.path(), "ok.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let p = b.propose_on(Some(&head), &ok, "htop", Actor::Agent, false).unwrap();
+    let narrowed = b.with_agent_limits(&torq_broker::agent::Limits::default());
+    let err = format!("{:#}", narrowed.apply(p.body.seq, "casey", false).unwrap_err());
+    assert!(err.contains("no longer allow"), "{err}");
+}

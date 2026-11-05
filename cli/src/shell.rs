@@ -184,7 +184,14 @@ impl Machine for Real<'_> {
         let (tier, tainted) = (body["tier"].as_str().unwrap_or("system").to_string(), body["tainted"].as_bool().unwrap_or(false));
         let files: Vec<String> = body["data"]["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(|f| history::one_line(f, 80)).collect();
         let by = body["data"]["caller"].as_str().or(body["actor"].as_str()).unwrap_or("?");
-        let diff: String = body["data"]["diff"].as_str().unwrap_or_default().lines().map(|l| format!("  {}\n", history::clean(l))).collect();
+        // What the change does, as the broker had git write it when it was proposed — never the
+        // proposer's own text, which can say one thing while git does another (the audit of ADR-041).
+        let effect = match (body["data"]["effect"].as_str(), body["actor"].as_str()) {
+            (Some(e), _) => e,
+            (None, Some("agent")) => bail!("not applied: #{seq} was proposed before the broker recorded what a change does; the agent proposes it again"),
+            (None, _) => body["data"]["diff"].as_str().unwrap_or_default(),
+        };
+        let diff: String = effect.lines().map(|l| format!("  {}\n", history::clean(l))).collect();
         let what = format!(
             "Proposal #{seq} \"{}\" (by {}, {})\n  files: {}\n{diff}",
             history::one_line(body["reason"].as_str().unwrap_or_default(), 60),

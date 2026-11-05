@@ -90,10 +90,9 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl show -p ConditionResult torq-broker-init | grep -qx ConditionResult=no")
         machine.succeed(f"git -C {repo} status --porcelain | grep -q stray.nix")
         machine.succeed(f"rm {repo}/stray.nix")
-
-    with subtest("agent proposes, user approves, change lands"):
+    with subtest("a proposal, approved, lands (what the agent may propose: tests/agent.nix)"):
         head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
-        out = machine.succeed(f"torq-broker propose --actor agent --base {head} "
+        out = machine.succeed(f"torq-broker propose --actor user --base {head} "
                               "--diff /etc/torq-test/night-light.diff --reason 'Night light'")
         assert "proposal #2" in out, out
         machine.succeed("torq-broker apply 2 --approved-by tester")

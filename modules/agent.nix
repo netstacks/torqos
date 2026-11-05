@@ -16,7 +16,7 @@ in
       description = "The people whose packages (`users <name> packages`) the agent may propose: the owner, by default.";
     };
     settings = lib.mkOption {
-      type = lib.types.listOf (lib.types.strMatching "[A-Za-z0-9_-]+(\\.[A-Za-z0-9_\"-]+)*");
+      type = lib.types.listOf (lib.types.strMatching "[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*");
       default = [ ];
       example = [ "services.openssh" "environment.systemPackages" "system.host" ];
       description = ''
@@ -25,6 +25,10 @@ in
         it, and ledgers the refusal. None, by default: the agent proposes packages and nothing else.
         `torq.*` is never the agent's, listed or not (its own limits are there), and nor are config
         files, `flake.nix` or the lock.
+\n        `system.<name>` means both torqcli's own settings (`system host-name`, `system packages`:
+        `system.host`, `system.packages`) and NixOS's `system.*` options of that name — list the
+        narrowest one. A bare `system` is refused: it would allow `system.activationScripts`, code
+        run as root.
       '';
     };
   };
@@ -33,6 +37,10 @@ in
     assertions = [{
       assertion = lib.all (s: lib.head (lib.splitString "." s) != "torq") cfg.mayPropose.settings;
       message = "torq.agent.mayPropose.settings: torq.* is never the agent's (its own limits are there).";
+    }
+    {
+      assertion = !(builtins.elem "system" cfg.mayPropose.settings);
+      message = "torq.agent.mayPropose.settings: a bare `system` would let the agent propose system.activationScripts (code run as root); list the setting itself (system.host, …).";
     }];
 
     # A static system user: the broker names its caller from /etc/passwd, where a DynamicUser is not.
