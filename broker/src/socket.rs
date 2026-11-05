@@ -266,6 +266,10 @@ mod tests {
     #[test]
     fn a_persons_own_settings_are_theirs() {
         let mine = change(Tier::User, &["users/sam/packages.json"]);
+        // No root shell over the socket, for anyone: break-glass is sudo's, with who sudo says it is.
+        for uid in [1000, 1001] {
+            assert!(matches!(gate(&who(uid), "break-glass", None, None), Gate::Refused(_)), "{uid}");
+        }
         assert_eq!(gate(&who(1001), "apply", Some(&mine), None), Gate::Open);
         assert_eq!(gate(&who(1001), "revert", Some(&mine), None), Gate::Open);
         // Someone else's are not: an administrator, with their password; anyone else, refused (6a).

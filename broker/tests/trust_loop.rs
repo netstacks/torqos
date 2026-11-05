@@ -1508,7 +1508,7 @@ fn commit_confirmed_then_confirm() {
     assert_eq!(Confirmable::link(&m.profile), SYS1, "the boot default is untouched: a reboot rolls back");
     // Built, then the rollback scheduled, and only then activated: never the new system without a timer.
     let log = m.log();
-    let sched = format!("schedule {} 600 /nix/store/old-broker/bin/torq-broker ", a.body.seq);
+    let sched = format!("schedule {seq} 600 /nix/store/old-broker/bin/torq-broker ");
     let (b, s, act) = (log.find("build").unwrap(), log.find(&sched).unwrap(), log.find(&format!("activate {SYS2}")).unwrap());
     assert!(b < s && s < act, "{log}");
     assert!(log[s..].lines().next().unwrap().ends_with(" UTC"), "a wall-clock deadline: {log}");
@@ -2445,4 +2445,32 @@ fn ledger_appends_at_once_leave_one_chain() {
     }).collect();
     threads.into_iter().for_each(|t| t.join().unwrap());
     assert_eq!(torq_broker::ledger::Ledger::open(&path).verify().unwrap(), 80);
+}
+
+/// An entry that lands while a commit confirmed builds (break-glass takes no operation's lock) must
+/// not disarm its timer: the rollback is what saves a change that cut off a remote machine.
+#[test]
+fn break_glass_during_a_build_leaves_the_commit_confirmed_timer_armed() {
+    let build = format!("{} --repo DIR/none --state-dir DIR/state break-glass --by alice --reason mid-build > /dev/null; {BUILD}", env!("CARGO_BIN_EXE_torq-broker"));
+    let m = Confirmable::new_with(&build, ACTIVATE, SCHEDULE);
+    let anchor = m.b.repo.head().unwrap();
+    let seq = m.propose_theme();
+    let a = m.b.apply_confirmed(seq, "casey", false, 1).unwrap();
+    assert_eq!(a.body.seq, seq + 2, "the entry landed mid-build: {}", m.log());
+    // What the timer was told, as the timer would say it.
+    let named: u64 = m.log().lines().find_map(|l| l.strip_prefix("schedule ")?.split(' ').next()?.parse().ok()).unwrap();
+    let r = m.b.expire_confirm(Some(named), false).unwrap().expect("rolled back");
+    assert_eq!(r.body.kind, "rolled_back");
+    m.assert_back(&anchor);
+}
+
+/// Before a machine's ledger begins, an entry would be #1, and setup would take it for set up.
+#[test]
+fn break_glass_is_refused_before_the_ledger_begins() {
+    let (dir, repo) = config_dir();
+    let b = Broker::new(&repo, dir.path().join("state"), "true");
+    assert!(format!("{:#}", b.break_glass("alice", "why").unwrap_err()).contains("not set up"));
+    assert!(b.ledger.read_all().unwrap().is_empty());
+    b.init().unwrap();
+    assert_eq!(b.ledger.read_all().unwrap()[0].body.kind, "init");
 }

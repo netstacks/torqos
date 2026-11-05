@@ -80,6 +80,19 @@ impl Ledger {
     }
 
     pub fn read_all(&self) -> Result<Vec<Entry>> {
+        let _held = self.shared();
+        self.read_unlocked()
+    }
+
+    /// Hold off writers while the guard lives (a line is never seen half written). For a moment only,
+    /// never across the network: `append` waits for it. None: nothing has been written yet.
+    pub fn shared(&self) -> Option<fs::File> {
+        let f = fs::File::open(self.path.with_extension("lock")).ok()?;
+        f.lock_shared().ok()?;
+        Some(f)
+    }
+
+    fn read_unlocked(&self) -> Result<Vec<Entry>> {
         if !self.path.exists() {
             return Ok(vec![]);
         }
@@ -119,7 +132,7 @@ impl Ledger {
         }
         let guard = OpenOptions::new().write(true).create(true).truncate(false).open(self.path.with_extension("lock"))?;
         guard.lock().context("locking the ledger")?;
-        let entries = self.read_all()?;
+        let entries = self.read_unlocked()?;
         verify_entries(&entries)?;
         let (seq, prev_hash) = match entries.last() {
             Some(last) => (last.body.seq + 1, last.hash.clone()),
@@ -149,7 +162,7 @@ impl Ledger {
         let entry = Entry { body, hash };
 
         let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
-        writeln!(f, "{}", serde_json::to_string(&entry)?)?;
+        f.write_all(format!("{}\n", serde_json::to_string(&entry)?).as_bytes())?;
         f.sync_all()?;
         Ok(entry)
     }

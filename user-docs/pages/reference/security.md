@@ -28,6 +28,17 @@
 The owner can use `sudo`, as on any Linux, and a root shell can go around TorqOS. TorqOS does not try
 to forbid that; it makes it visible instead, through the alarms and the ledger's hash chain.
 
+**Strict mode** is the stronger choice, off by default: `set torq security strict enable true`. Then
+`sudo` runs nothing you could get a shell from, and the one way to a root shell is
+`torq break-glass "why"`. It asks your password every time, writes who and why into the ledger, sends
+that to your remote if you have one, and only then opens the shell. Daily work needs no `sudo`: `torqcli`
+does not use it.
+
+Before turning it on, know what it costs. If the ledger cannot be written, on a full disk for example,
+there is no shell and no fallback: the way back is the machine's console, starting an older
+generation from before strict mode if one is left, and otherwise booting from other media. No account
+may be in a group that amounts to root, such as `docker`; the commit is refused until it is out.
+
 ## Checking a release yourself
 
 See [Install → Check the download](../start/install.md#2-check-the-download). You need only OpenSSH

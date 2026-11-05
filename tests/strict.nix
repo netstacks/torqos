@@ -6,6 +6,20 @@
 let
   devHash = "$6$torqsocketsalt$Z7RLey3l5vKGfukhfuZYYM/EjWNo7QM8.65r88XmZ9z3/jBCY.NAnH7RwYpiLoE2fedxUd/I7UFcKDX1KEXDg/";
 in
+# What strict mode refuses to be built with: read from the assertions, not from a failed evaluation
+# (which any mistake here would also be).
+assert
+  let
+    failed = extra: (import "${pkgs.path}/nixos/lib/eval-config.nix" {
+      system = pkgs.stdenv.hostPlatform.system;
+      modules = [ self.nixosModules.default { torq.user = "dev"; torq.security.strict.enable = true; } extra ];
+    }).config.assertions;
+    says = text: l: pkgs.lib.any (a: !a.assertion && pkgs.lib.hasInfix text a.message) l;
+  in
+  !(says "without break-glass" (failed { }))
+  && says "without break-glass" (failed { users.users.dev.extraGroups = [ "docker" ]; })
+  && says "without break-glass" (failed { users.groups.disk.members = [ "dev" ]; })
+  && says "not with dev mode" (failed { torq.dev.enable = true; });
 pkgs.testers.runNixOSTest {
   name = "torq-strict";
 
@@ -48,60 +62,120 @@ pkgs.testers.runNixOSTest {
     def last():
         return json.loads(machine.succeed("torq-broker log --json --brief | tail -1"))
 
-    with subtest("sudo runs TorqOS's commands, and nothing else"):
+    def count():
+        return machine.succeed("torq-broker log --json --brief | wc -l").strip()
+
+    def as_dev(cmd):
+        return "su - dev -c " + shlex.quote(cmd)
+
+    def term(name, cmd):
+        machine.succeed(as_dev(f"tmux new-session -d -s {name} -x 150 -y 40 {shlex.quote(cmd)}"))
+
+    def keys(name, *text):
+        machine.succeed(as_dev(f"tmux send-keys -t {name} {' '.join(shlex.quote(t) for t in text)} Enter"))
+
+    def shown(name, text, timeout=60):
+        machine.wait_until_succeeds(as_dev(f"tmux capture-pane -p -t {name}") + f" | grep -qF {shlex.quote(text)}", timeout=timeout)
+
+    def on_screen(name):
+        return machine.succeed(as_dev(f"tmux capture-pane -p -t {name}"))
+
+    def ended(rc, code):
+        machine.wait_until_succeeds(f"test \"$(cat {rc})\" = {code}", timeout=30)
+
+    with subtest("sudo grants break-glass and the agent's launcher, and nothing else"):
         # What sudo grants, from sudo itself: a refusal alone would pass for any reason at all.
         code, out = sudo("-l")
         assert code == 0, out
         granted = out.split("may run the following commands")[1]
+        assert granted.count("/nix/store/") == 2, out
         assert "torq-break-glass" in granted and "torq-agent-run" in granted, out
-        assert "torq-broker" not in granted and " ALL\n" not in granted.replace("(root)", ""), out
         for cmd in ["bash -c id", "true", "cat /etc/shadow", "su -", "env bash", "torq-broker verify", "torq-broker password --user root --hash-file /etc/shadow", "/run/current-system/sw/bin/torq-broker log"]:
             code, out = sudo(cmd)
-            assert code != 0, (cmd, out)
-        # What a person needs needs no sudo; polkit does not make wheel root.
-        machine.succeed("su - dev -c 'torqcli show system ledger'")
-        machine.fail("grep -r wheel /etc/polkit-1/rules.d")
+            assert code != 0 and "not allowed" in out, (cmd, out)
+        # What a person needs needs no sudo, the agent's program still starts, and polkit's
+        # administrator is root.
+        machine.succeed(as_dev("torqcli show system ledger"))
+        assert machine.succeed(as_dev("torq agent run -- id -un")).strip() == "torq-agent"
+        machine.succeed("grep -Rq 'unix-user:0' /etc/polkit-1/rules.d")
+        machine.fail("grep -R wheel /etc/polkit-1/rules.d")
         # The agent's account has no way at all.
         machine.fail("su -s /bin/sh torq-agent -c 'sudo -n true'")
         out = machine.fail("su -s /bin/sh torq-agent -c 'torq break-glass anything' 2>&1")
-        assert "no root shell" in out or "sudo" in out, out
+        assert "no root shell" in out, out
 
     with subtest("no reason, no shell"):
-        out = machine.fail("su - dev -c 'torq break-glass' 2>&1")
+        out = machine.fail(as_dev("torq break-glass") + " 2>&1")
         assert "usage" in out, out
+        n = count()
+        code, out = sudo("$(readlink -f /run/current-system/sw/bin/torq-break-glass)")
+        assert code != 0 and "say why" in out, out
+        assert count() == n
 
     with subtest("break-glass: its entry first, and on the remote, before the shell opens"):
-        n = machine.succeed("torq-broker log --json --brief | wc -l").strip()
-        machine.succeed("su - dev -c \"tmux new-session -d -s g -x 150 -y 40 'torq break-glass the disk is full; sleep 600'\"")
-        machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t g' | grep -qi 'password'", timeout=60)
+        n = count()
+        term("g", "torq break-glass the disk is full; sleep 600")
+        shown("g", "password for dev")
         # Nothing yet: the password comes first.
-        assert machine.succeed("torq-broker log --json --brief | wc -l").strip() == n
-        machine.succeed(f"su - dev -c 'tmux send-keys -t g {pw} Enter'")
-        machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t g' | grep -q 'Root shell, on the record'", timeout=60)
+        assert count() == n
+        keys("g", pw)
+        shown("g", "Root shell, on the record")
         e = last()
         assert e["kind"] == "break_glass" and e["approved_by"] == "dev" and e["reason"] == "the disk is full", e
         got = gitserver.succeed("git -c safe.directory='*' -C /home/git/config.git cat-file blob refs/heads/torq-ledger:ledger.jsonl")
-        assert json.loads(got.splitlines()[-1])["kind"] == "break_glass", "on the remote before the shell"
+        assert json.loads(got.splitlines()[-1])["kind"] == "break_glass", "on the remote"
         # And it is a root shell.
-        machine.succeed("su - dev -c \"tmux send-keys -t g 'id -u > /tmp/who' Enter\"")
+        keys("g", "id -u > /tmp/who")
         machine.wait_until_succeeds("test \"$(cat /tmp/who)\" = 0", timeout=30)
-        machine.succeed("su - dev -c \"tmux send-keys -t g exit Enter\"")
-        out = machine.succeed("su - dev -c 'torqcli show system ledger'")
+        keys("g", "exit")
+        out = machine.succeed(as_dev("torqcli show system ledger"))
         assert "Root shell opened: the disk is full" in out, out
 
-    with subtest("the remote out of reach: asked, and the shell only on yes; the entry goes with the next push"):
+    with subtest("its password every time: the shell before does not stand for this one"):
+        term("k", "torq break-glass one; torq break-glass two; sleep 600")
+        shown("k", "password for dev")
+        keys("k", pw)
+        shown("k", "Root shell, on the record")
+        keys("k", "exit")
+        machine.wait_until_succeeds(as_dev("tmux capture-pane -p -t k") + " | grep -c 'password for dev' | grep -qx 2", timeout=30)
+        assert last()["reason"] == "one", "the second is not recorded until its password is given"
+        keys("k", pw)
+        machine.wait_until_succeeds("torq-broker log --json --brief | tail -1 | grep -q '\"two\"'", timeout=30)
+        shown("k", "Root shell, on the record")
+        keys("k", "exit")
+
+    with subtest("a reason may begin with a dash, and is the record's text"):
+        term("d", "torq break-glass --rebuild-cmd=x; sleep 600")
+        shown("d", "password for dev")
+        keys("d", pw)
+        shown("d", "Root shell, on the record")
+        assert last()["reason"] == "--rebuild-cmd=x", last()
+        keys("d", "exit")
+
+    with subtest("the remote out of reach: the entry stands, and the shell opens only on yes"):
         gitserver.succeed("systemctl stop sshd")
-        machine.succeed("su - dev -c \"tmux new-session -d -s h -x 150 -y 40 'torq break-glass network down; sleep 600'\"")
-        machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t h' | grep -qi 'password'", timeout=60)
-        machine.succeed(f"su - dev -c 'tmux send-keys -t h {pw} Enter'")
-        machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t h' | grep -q 'Open the root shell all the same'", timeout=120)
-        assert last()["reason"] == "network down", last()
-        machine.succeed("su - dev -c 'tmux send-keys -t h no Enter'")
-        machine.wait_until_succeeds("! su - dev -c 'tmux capture-pane -p -t h' | grep -q 'Root shell, on the record'", timeout=10)
+        for name, answer, code in [("h", "no", "rc=1"), ("e", None, "rc=1")]:
+            redirect = " < /dev/null" if answer is None else ""
+            term(name, f"torq break-glass network down {name}{redirect}; echo rc=$? > /tmp/rc-{name}; sleep 600")
+            shown(name, "password for dev")
+            keys(name, pw)
+            shown(name, "Open the root shell all the same", timeout=120) if answer else None
+            if answer:
+                keys(name, answer)
+            ended(f"/tmp/rc-{name}", code)
+            assert last()["reason"] == f"network down {name}", last()
+            assert "Root shell, on the record" not in on_screen(name)
+        term("y", "torq break-glass network down y; sleep 600")
+        shown("y", "password for dev")
+        keys("y", pw)
+        shown("y", "Open the root shell all the same", timeout=120)
+        keys("y", "yes")
+        shown("y", "Root shell, on the record")
+        keys("y", "exit")
         gitserver.succeed("systemctl start sshd")
         gitserver.wait_for_unit("sshd.service")
         machine.succeed("torq-broker push")
         got = gitserver.succeed("git -c safe.directory='*' -C /home/git/config.git cat-file blob refs/heads/torq-ledger:ledger.jsonl")
-        assert "network down" in got
+        assert "network down h" in got and "network down y" in got
   '';
 }

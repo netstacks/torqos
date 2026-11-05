@@ -17,7 +17,9 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    remote — the default — what follows still holds. **`verify` cannot detect truncation of the newest entries, and the chain is unkeyed** (second
    audit, H2): it is sha256 over each entry and the one before, so a writer of the file (root)
    can rewrite the history and recompute the chain; it does not cross-check git `Ledger-Entry`
-   trailers against the ledger, and commits are not signed (L1). What it does catch: an edited,
+   trailers against the ledger (a trailer can be one short, since an entry from break-glass may land
+   during an apply: cross-check by the entry's `data.commit`), and commits are not signed (L1). What it
+   does catch: an edited,
    added or removed field or entry (an added field passed before the audit of 2026-10-31).
    Planned (M3): sign the entries and commits with a broker key, anchor the head hash.
 3. **Path-based tiers cannot see semantic escalation inside system-tier files** — e.g.
@@ -543,9 +545,17 @@ Its §5 lists claims without a test.
 
 6zj. **Strict mode and break-glass (ADR-035).** Open:
    - **No ledger, no shell, by the owner's decision (2026-11-05: "I prefer secure over back doors").**
-     If the entry cannot be written (a full disk, a broken ledger) break-glass refuses, and with strict
-     mode on sudo offers nothing else: the way in is then the machine's console, at the boot menu.
-     This is a limit accepted, not a gap to close: do not add a fallback shell.
+     If the entry cannot be written (a full disk; a broken ledger, which a power cut in the middle of
+     an append could leave) break-glass refuses, and with strict mode on sudo offers nothing else.
+     This is a limit accepted, not a gap to close: do not add a fallback shell. The way back is the
+     console: an older generation from before strict mode, if one is left (they are limited and
+     collected, and an adopted machine may have none), and otherwise external media.
+   - **An older generation is also a way round.** A person at the console who boots a generation from
+     before strict mode has its sudo, and root with no entry. `status` reports the drift afterwards;
+     nothing is ledgered. Physical access is outside what strict mode claims; measured boot is its answer.
+   - **"Yes" at the question leaves the entry on this machine alone.** A person who cuts the network,
+     answers yes and edits the ledger as root leaves the remote no trace of that shell. The remote's
+     check sees a rewritten ledger only if it has already seen the entry.
    - **What the shell does is not recorded,** only that it opened, who opened it and why.
    - **It keeps root rare, not absent.** A person with the password can still commit a configuration
      that runs anything as root: that is a change, ledgered, and it is meant to work.

@@ -10,19 +10,28 @@
 let
   cfg = config.torq.security.strict;
   broker = lib.getExe config.torq.broker.package;
+  # Membership is root by another name (a container with / mounted, the raw disk): the group is
+  # ledgered, each use would not be.
+  rootGroups = [ "docker" "podman" "lxd" "incus-admin" "libvirtd" "disk" ];
+  inRootGroup = lib.unique (
+    lib.attrNames (lib.filterAttrs (_: u: lib.intersectLists rootGroups u.extraGroups != [ ]) config.users.users)
+    ++ lib.concatMap (g: config.users.groups.${g}.members or [ ]) rootGroups
+  );
   # As root, through sudo (the person's password): the record, then the shell.
   breakGlass = pkgs.writeShellApplication {
     name = "torq-break-glass";
     runtimeInputs = [ pkgs.coreutils ];
     text = ''
+      [ "$(id -u)" = 0 ] || { echo "torq-break-glass: run it with torq break-glass" >&2; exit 1; }
       by=''${SUDO_USER:?torq-break-glass: run it with torq break-glass}
-      reason=''${1:?torq-break-glass: says why}
+      [ $# -gt 0 ] || { echo "torq-break-glass: say why" >&2; exit 1; }
+      reason=$*
       code=0
-      ${broker} break-glass --by "$by" --reason "$reason" || code=$?
+      ${broker} break-glass --by "$by" --reason="$reason" || code=$?
       case "$code" in
         0) ;;
         3)
-          echo "The entry is in this machine's ledger, not yet off it: it goes with the next push." >&2
+          echo "The entry is in this machine's ledger, not yet off it: the next push takes it, within 15 minutes." >&2
           read -r -p "Open the root shell all the same? (yes / no) " go
           [ "$go" = yes ] || exit 1
           ;;
@@ -50,12 +59,20 @@ in
     (lib.mkIf config.torq.broker.enable { environment.systemPackages = [ breakGlass ]; })
 
     (lib.mkIf cfg.enable {
-      assertions = [{
+      assertions = [
+      {
+        assertion = inRootGroup == [ ];
+        message = "torq.security.strict: ${lib.concatStringsSep ", " inRootGroup} would have root without break-glass (a member of ${lib.concatStringsSep ", " rootGroups} needs no sudo): take them out of it first.";
+      }
+      {
         assertion = !config.torq.dev.enable;
         message = "torq.security.strict: not with dev mode (torq.dev.enable), which is passwordless sudo for building TorqOS.";
-      }];
+      }
+      ];
       # Not by another door: polkit, wherever it comes on, takes root alone for an administrator.
       security.polkit.adminIdentities = [ "unix-user:0" ];
+      # Its password every time: a shell is never opened on the last command's.
+      security.sudo.extraConfig = "Defaults!${breakGlass}/bin/torq-break-glass timestamp_timeout=0\n";
       security.sudo.extraRules = lib.mkForce [
         { users = [ "root" ]; commands = [{ command = "ALL"; options = [ "SETENV" ]; }]; }
         {

@@ -718,9 +718,11 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   agent's launcher. Not the broker, though this ADR said "TorqOS's own commands": torqcli needs no
   sudo (ADR-040), and the broker's commands under sudo are root's own (it reads any file named to
   it, and sets passwords), so a rule naming it was a quiet way round. Polkit's administrator is root
-  alone. `torq break-glass "<why>"` asks the person's password, writes the entry, pushes it, and only
+  alone, and no one may be in a group that is root by another name (docker, disk …). `torq break-glass
+  "<why>"` asks the person's password every time, writes the entry, pushes it, and only
   then opens the shell; if the remote cannot be reached it says so and asks. The ledger has its own
-  lock, held for one append, so a stuck switch cannot keep the entry out. If the ledger cannot be
+  lock, held for one append, so a stuck switch cannot keep the entry out; since an entry can then land
+  during an apply, its timer names the proposal, never a number predicted. If the ledger cannot be
   written there is no shell, and no fallback: the owner's decision, "I prefer secure over back doors".
 
 ## ADR-036 — The config repo's remote: the machine is a URL
@@ -960,7 +962,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   4. **sudo stays the recovery door, and says so.** `sudo torq-broker …` keeps working for dev mode
      and recovery (a broken socket, a broken PAM), its entries ledgered as `via sudo` with the
      invoking user sudo reports (`SUDO_UID`) — what root says about itself, marked as such. Strict
-     mode (ADR-035, later in M3) then limits sudoers to it and `torq break-glass`.
+     mode (ADR-035) was built narrower than this: `torq break-glass` and the agent's launcher, not the
+     broker (ADR-035, amended).
   5. **Built from maintained parts.** systemd socket activation (no listener code of TorqOS's
      own); PAM through a maintained Rust binding (its `unsafe` is the binding's, not TorqOS's
      crates', as rustix's is — ADR-020); `SO_PEERCRED` through rustix. torqcli marks itself

@@ -241,7 +241,7 @@ in
           This machine is managed by TorqOS. Its configuration is ${cfg.configRepo}, and only
           torq-broker changes it, so that every change is ledgered and can be undone:
             torqcli                     (configure; set …; commit — software, services, settings)
-            sudo torq-broker propose --diff change.diff --reason "..."   (anything else)
+            sudo torq-broker propose --diff change.diff --reason "..."   (anything else; not in strict mode)
           Do not build /etc/nixos or any other configuration yourself: it would replace
           this whole system with a stock NixOS one, outside the ledger.
         '';
@@ -322,7 +322,8 @@ in
     # The broker's door (ADR-040): a socket anyone may connect to, because who may do what is
     # decided inside — by the caller's uid, from the kernel (SO_PEERCRED), and the change's tier.
     # Each connection is one `torq-broker serve`, as root, its standard input and output the
-    # connection. torqcli needs no sudo; `sudo torq-broker` stays the recovery door.
+    # connection. torqcli needs no sudo; `sudo torq-broker` stays the recovery door, but for strict
+    # mode, where sudo does not run it (modules/strict.nix): there the door is break-glass.
     systemd.sockets.torq-broker = {
       description = "TorqOS change broker";
       wantedBy = [ "sockets.target" ];
