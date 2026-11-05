@@ -607,6 +607,17 @@ impl Broker {
         walk().unwrap_or_else(|e| differs(format!("the remote's ledger cannot be read: {e:#}")))
     }
 
+    /// The remote's `incoming` configuration, fetched into the config repo (`request system pull`
+    /// then loads it into a candidate): its commit, or None. Nothing is applied.
+    pub fn fetch_incoming(&self) -> Result<Option<String>> {
+        let r = self.remote()?.context("no remote is set: nothing to pull from")?;
+        if !r.key().exists() {
+            bail!("no key for the remote yet: request system remote key");
+        }
+        let _l = Lock::acquire(&self.state_dir)?;
+        self.repo.fetch_incoming(&r.url, &r.ssh_command())
+    }
+
     /// A person clears the remote's alarm, having looked into it: ledgered, and the next push checks
     /// the remote's whole history again (an alarm that is still true is raised again).
     pub fn clear_remote_alarm(&self, approved_by: &str) -> Result<Entry> {

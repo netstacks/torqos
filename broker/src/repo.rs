@@ -4,6 +4,10 @@
 pub const REMOTE_LEDGER: &str = "refs/heads/torq-ledger";
 /// How long one git call to the remote may take, at most, in seconds.
 pub const NET_SECONDS: u64 = 60;
+/// Where on the remote a configuration waits for this machine to take it (`request system pull`):
+/// never `main`, which only the machine writes — a commit made here from it is not that commit, and
+/// `main` is never forced.
+pub const INCOMING: &str = "refs/heads/incoming";
 
 use anyhow::{bail, Context, Result};
 use std::ffi::OsStr;
@@ -167,6 +171,18 @@ impl Repo {
         }
         self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--no-recurse-submodules", "--", url, &format!("+{REMOTE_LEDGER}:refs/torq/remote-ledger")])?;
         Ok(Some(self.git(&["rev-parse", "refs/torq/remote-ledger^{commit}"])?.trim().to_string()))
+    }
+
+    /// The remote's `incoming` branch — what a person (or another machine, a pull request) put there
+    /// for this machine to take — fetched as `refs/torq/incoming`: its commit (None: there is none).
+    /// Only fetched: what is in it reaches the machine as a person's commit, or not at all.
+    pub fn fetch_incoming(&self, url: &str, ssh_command: &str) -> Result<Option<String>> {
+        let refs = self.git_net(ssh_command, &["ls-remote", "--", url, INCOMING])?;
+        if refs.trim().is_empty() {
+            return Ok(None);
+        }
+        self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--no-recurse-submodules", "--", url, &format!("+{INCOMING}:refs/torq/incoming")])?;
+        Ok(Some(self.git(&["rev-parse", "refs/torq/incoming^{commit}"])?.trim().to_string()))
     }
 
     /// Whether the remote's ledger history is one line — no merge anywhere in it: a merge would let a

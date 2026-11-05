@@ -769,6 +769,14 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   **What it is, honestly:** the alarm on the machine is root's to rewrite, as the ledger is. The
   check root cannot reach is the remote's `torq-ledger` branch, protected there (no force-push, no
   deletion, linear history), read from anywhere.
+- **Amended (2026-11-05): pull** (`tests/remote.nix`). `request system pull` loads the remote's
+  `incoming` branch — never `main`, which only the machine writes: a commit made here from what was
+  pulled is not that commit, and `main` is never forced — into the candidate: its settings and
+  config files, not this machine's hardware file (hardware does not travel), not its software
+  (`flake.nix`, `flake.lock`: `request system update` is how software changes). The broker only
+  fetches it (`fetch-incoming`, a read for anyone); the person reads `show | compare` and commits,
+  or not. Nothing from the remote is applied by any other path. `incoming` is where a person, another
+  tool or a pull request puts what this machine should take; it stays there after.
 
 ## ADR-037 — Applications: a ladder, every rung declared (proposed)
 - **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small

@@ -127,7 +127,7 @@ Order matters: the socket first, because everything after keys on identity.
 - [x] The agent's account `torq-agent` and the allow-list at the broker (ADR-041, on `main` 2026-11-05; `torq agent run` too). *Test:* `torq-agent`
       proposing a system path, a config file, a `users/<other>` file — each refused and ledgered.
       **⏹ adversarial.**
-- [~] The remote: settings, push after apply, ledger as a ref, `verify` against it (built on `remote`), `request
+- [x] The remote: settings, push after apply, ledger as a ref, `verify` against it, `request
       system pull` as a proposal. *Test:* a VM with a bare remote: a rewritten local ledger is an
       alarm; a remote commit lands in the candidate and nowhere else. **⏹ review:** nothing from
       the remote is ever applied unasked — find the path that would.

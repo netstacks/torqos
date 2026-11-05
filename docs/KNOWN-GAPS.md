@@ -511,3 +511,7 @@ Its §5 lists claims without a test.
      is to remove `remote/known_hosts` as root and clear the alarm.
    - **Not yet tested in a VM:** a commit confirmed rolled back with a remote (unit reasoning only).
    - **The key's creation is not ledgered** (`remote-key`); only the URL, a setting, is.
+   - **Pull (`request system pull`)** takes the remote's `incoming` branch, settings and config files
+     only. `incoming` is not cleared after: a second pull of it loads nothing new (the candidate is
+     the configuration in effect). `show system remote` does not yet say whether `incoming` has
+     something this machine has not taken.

@@ -125,7 +125,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "fetch-incoming"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no

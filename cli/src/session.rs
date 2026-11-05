@@ -64,6 +64,8 @@ pub trait Machine {
     fn remote_key(&self) -> Result<String>;
     /// `request system remote clear`: clear the remote's alarm (as `me`, with their password).
     fn remote_clear(&self, me: &str) -> Result<String>;
+    /// The remote's incoming branch, fetched into the config repo: its commit (None: there is none).
+    fn fetch_incoming(&self) -> Result<Option<String>>;
     /// `request system apply <n>`: show proposal <n>, ask, apply it (as `me`).
     fn apply_proposal(&self, seq: u64, me: &str) -> Result<String>;
     /// Propose `diff` against `base` and stop there (the agent's commit, ADR-041): the proposal's number.
@@ -930,6 +932,7 @@ impl<'a> Session<'a> {
             syntax::Request::Apply { proposal } => self.machine.apply_proposal(proposal, &self.me),
             syntax::Request::RemoteKey => self.machine.remote_key(),
             syntax::Request::RemoteClear => self.machine.remote_clear(&self.me),
+            syntax::Request::Pull => self.pull(),
             syntax::Request::Update { all } => self.update(all),
             syntax::Request::SoftwareRollback { n } => self.software_rollback(n),
         }
@@ -985,6 +988,54 @@ impl<'a> Session<'a> {
         let Some(rev) = crate::software::release_commit(lock, &repo) else { return Ok(String::new()) };
         self.machine.check_release(&repo, &rev)?;
         Ok(self.said(&format!("TorqOS release {}: signed by the TorqOS release key.", short(&rev))))
+    }
+
+    /// `request system pull` (ADR-036): the configuration waiting on the remote — its `incoming`
+    /// branch — into the candidate, to read (`show | compare`) and commit, or not. Its settings and
+    /// its config files; never this machine's hardware file (hardware does not travel), never its
+    /// software (`flake.nix`, `flake.lock`: `request system update` is how software changes).
+    /// Nothing is applied: the commit is the person's, as any other.
+    fn pull(&mut self) -> Result<String> {
+        const HARDWARE: &str = "hardware-configuration.nix";
+        let Some(id) = self.machine.fetch_incoming()? else {
+            return Ok(self.said("The remote has no incoming configuration (its branch `incoming`): nothing to pull."));
+        };
+        let base = self.repo.head()?;
+        let before = self.pending()?;
+        let mut c = Candidate::from_repo(&self.repo, &self.schema, &id)?;
+        c.base = base.clone();
+        // This machine's hardware, where it is attached here, and nowhere else.
+        let here = Candidate::from_repo(&self.repo, &self.schema, &base)?;
+        for files in c.attached.values_mut() {
+            files.remove(HARDWARE);
+        }
+        c.attached.retain(|_, f| !f.is_empty());
+        for place in here.attached.iter().filter(|(_, f)| f.contains(HARDWARE)).map(|(p, _)| p) {
+            c.attached.entry(place.clone()).or_default().insert(HARDWARE.to_string());
+        }
+        // The remote's config files, where they differ from this machine's; this machine's that the
+        // remote has not, gone.
+        let theirs: std::collections::BTreeSet<&String> = crate::attach::files(&c.attached).filter(|f| f.as_str() != HARDWARE).collect();
+        for f in &theirs {
+            let remote = self.repo.file_at(&id, f)?.map(String::from_utf8).transpose().with_context(|| format!("{f}: not text"))?;
+            if remote != self.repo.file_at(&base, f)?.map(String::from_utf8).transpose()? {
+                c.nix.insert(f.to_string(), remote);
+            }
+        }
+        for f in crate::attach::files(&here.attached).filter(|f| f.as_str() != HARDWARE && !theirs.contains(f)) {
+            c.nix.insert(f.clone(), None);
+        }
+        self.candidate = Some(c);
+        self.save()?;
+        let after = self.pending()?;
+        let what = match (before, after) {
+            (_, 0) => "it is the same as the configuration in effect".to_string(),
+            (_, n) => format!("{} from the configuration in effect (`show | compare` lists them; `commit` makes it the machine's)", changes(n)),
+        };
+        Ok(self.said(&format!(
+            "Loaded the remote's incoming configuration ({}): {what}. This machine's hardware file and software are kept.",
+            short(&id)
+        )))
     }
 
     /// `request system software rollback <n>`: commit n's software into the candidate.
@@ -1986,6 +2037,8 @@ mod tests {
         release_checks: RefCell<Vec<String>>,
         /// What the configuration warns of, when checked.
         warnings: Vec<String>,
+        /// The commit `fetch_incoming` answers.
+        incoming: Option<String>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>> {
@@ -2071,6 +2124,9 @@ mod tests {
         }
         fn remote(&self) -> Result<String> {
             Ok("no remote\n".into())
+        }
+        fn fetch_incoming(&self) -> Result<Option<String>> {
+            Ok(self.incoming.clone())
         }
         fn remote_clear(&self, me: &str) -> Result<String> {
             Ok(format!("cleared for {me}\\n"))
@@ -3349,6 +3405,37 @@ mod tests {
         for huge in ["rollback 18446744073709551615", "run show system rollback 18446744073709551615"] {
             assert!(format!("{:#}", s.exec(huge).unwrap_err()).contains("configuration numbers go from 0 to 10000"), "{huge}");
         }
+    }
+
+    /// ADR-036: a pull loads the remote's incoming configuration into the candidate — its settings
+    /// and config files — and keeps this machine's hardware file and software; nothing is committed.
+    #[test]
+    fn a_pull_loads_the_remotes_configuration_but_not_its_hardware() {
+        let d = repo();
+        sh(d.path(), "printf '{ \"\": \"hardware-configuration.nix\" }\\n' > config-files.json && echo '{ local = 1; }' > hardware-configuration.nix \
+            && git add -A && git commit -qm attach \
+            && git checkout -q -b incoming && printf '{ \"host-name\": \"three\" }\\n' > system/host.json \
+            && echo '{ remote = 1; }' > hardware-configuration.nix && echo '{ extra = 1; }' > extra.nix \
+            && printf '{ \"\": [\"hardware-configuration.nix\", \"extra.nix\"] }\\n' > config-files.json && git add -A && git commit -qm incoming \
+            && git checkout -q main");
+        let id = String::from_utf8(std::process::Command::new("git").args(["-C"]).arg(d.path()).args(["rev-parse", "incoming"]).output().unwrap().stdout).unwrap().trim().to_string();
+        let m = Fake { incoming: Some(id.clone()), ..Fake::default() };
+        let mut s = session(d.path(), None, &m);
+        let out = run(&mut s, &["request system pull"]);
+        assert!(out.contains(&format!("Loaded the remote's incoming configuration ({})", short(&id))) && out.contains("hardware file and software are kept"), "{out}");
+        let c = s.candidate().unwrap().clone();
+        assert!(c.attached[""].contains("extra.nix") && c.attached[""].contains("hardware-configuration.nix"), "{:?}", c.attached);
+        assert_eq!(c.nix.get("extra.nix"), Some(&Some("{ extra = 1; }\n".to_string())));
+        assert!(!c.nix.contains_key("hardware-configuration.nix"), "the hardware file is this machine's");
+        assert!(c.lock.is_none() && c.source.is_none(), "the software is this machine's");
+        s.exec("configure").unwrap();
+        let compare = s.exec("show | compare").unwrap();
+        assert!(compare.contains("+   hostName three;") && !compare.contains("remote = 1"), "{compare}");
+        assert!(m.commits.borrow().is_empty(), "nothing is committed");
+        // No incoming branch: said, nothing loaded.
+        let m = Fake::default();
+        let mut s = session(d.path(), None, &m);
+        assert!(run(&mut s, &["request system pull"]).contains("nothing to pull"));
     }
 
     #[test]

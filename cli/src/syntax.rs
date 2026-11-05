@@ -124,6 +124,8 @@ pub enum Request {
     RemoteKey,
     /// Clear the remote's alarm (ADR-036), ledgered.
     RemoteClear,
+    /// The remote's incoming configuration into the candidate (ADR-036).
+    Pull,
     /// The newest TorqOS (`all`: every input) into the candidate.
     Update { all: bool },
     /// An earlier configuration's software into the candidate.
@@ -237,6 +239,7 @@ pub fn render(op: &Op) -> String {
             Request::Apply { proposal } => format!("request system apply {proposal}"),
             Request::RemoteKey => "request system remote key".into(),
             Request::RemoteClear => "request system remote clear".into(),
+            Request::Pull => "request system pull".into(),
             Request::Update { all: false } => "request system update".into(),
             Request::Update { all: true } => "request system update all".into(),
             Request::SoftwareRollback { n } => format!("request system software rollback {n}"),
@@ -328,6 +331,7 @@ mod tests {
             (Mode::Operational, Op::Request(Request::Apply { proposal: 12 })),
             (Mode::Operational, Op::Request(Request::RemoteKey)),
             (Mode::Operational, Op::Request(Request::RemoteClear)),
+            (Mode::Operational, Op::Request(Request::Pull)),
             (Mode::Operational, Op::Request(Request::Update { all: true })),
             (Mode::Operational, Op::Request(Request::SoftwareRollback { n: 2 })),
             (Mode::Operational, Op::Exit),

@@ -168,7 +168,7 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
 - [~] **The agent's account** (built 2026-11-05, ADR-041, `tests/agent.nix`; running Claude Code as it next; adversarial review before `main`): `torq-agent`, unprivileged, sandboxed, no sudo, no shell; what it may
       propose a default-deny allow-list at the broker, by identity (KNOWN-GAPS 6m); config files
       refused to it outright.
-- [~] **The config repo's remote** (ADR-036; push and anchor built 2026-11-05, `tests/remote.nix`; pull next): `torq remote …` settings; push after every applied
+- [x] **The config repo's remote** (ADR-036; push, anchor and pull built 2026-11-05, `tests/remote.nix`): `torq remote …` settings; push after every applied
       change, the ledger as `refs/torq/ledger`; `verify` against the remote's head (KNOWN-GAPS 2);
       `show system remote`, `request system pull` as a proposal into the candidate; the credential
       in the broker's state, scoped to one repo. Default stays local (ADR-004).

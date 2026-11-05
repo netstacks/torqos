@@ -55,6 +55,7 @@ enum Cmd {
     Push,
     RemoteShow,
     RemoteClear { approved_by: String },
+    FetchIncoming,
 }
 
 /// The command line, declared with clap's builder (its derive macros write an `allow(dead_code)`,
@@ -159,6 +160,7 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("remote-key").about("The machine's key for the config repo's remote (ADR-036): made the first time, kept after; its public half printed, to add to the repository as a deploy key with write access."))
         .subcommand(Command::new("push").about("Push the configuration and the ledger to the remote now (after every change it is pushed anyway; this is the timer's retry): the remote's ledger checked first."))
         .subcommand(Command::new("remote").about("The remote: its URL, the last push, what its ledger said of this one then, and its alarm, if any."))
+        .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
         .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
         .subcommand(Command::new("serve").about(
             "Answer one request on the socket (torq-broker.socket hands it the connection as standard input and output): the caller from the kernel (SO_PEERCRED), what it may do by its account and the change's tier, a system change's password through PAM (ADR-040).",
@@ -204,6 +206,7 @@ fn parse_cli() -> Cli {
         "push" => Cmd::Push,
         "remote" => Cmd::RemoteShow,
         "remote-clear" => Cmd::RemoteClear { approved_by: by(sub) },
+        "fetch-incoming" => Cmd::FetchIncoming,
         other => unreachable!("clap knows no subcommand {other}"),
     };
     Cli {
@@ -335,6 +338,14 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 std::process::exit(1);
             }
         },
+        Cmd::FetchIncoming => {
+            let id = b.fetch_incoming()?;
+            if json {
+                println!("{}", json!({ "incoming": id }));
+            } else {
+                println!("{}", id.as_deref().map_or("the remote has no incoming branch".to_string(), |c| format!("incoming: {c} (refs/torq/incoming)")));
+            }
+        }
         Cmd::RemoteClear { approved_by } => {
             let e = b.clear_remote_alarm(&approved_by)?;
             if json {

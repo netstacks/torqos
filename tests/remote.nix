@@ -125,6 +125,19 @@ pkgs.testers.runNixOSTest {
         change(6)
         assert last()["ok"] and last().get("main") is None, last()
         machine.succeed("torq-broker status")
+
+    with subtest("a pull loads what waits on the remote into a candidate, and applies nothing"):
+        head, entries = machine.succeed(f"git -C {repo} rev-parse HEAD").strip(), local_ledger()
+        as_git("rm -rf work && git clone -q ~/config.git work && cd work && git checkout -q -b incoming origin/main"
+               " && echo '{\"n\": 99}' > desktop.json && git -c user.name=x -c user.email=x@x commit -qam incoming && git push -q origin incoming")
+        incoming = as_git("git -C config.git rev-parse refs/heads/incoming").strip()
+        # Fetched — by anyone, over the socket: a read — and nothing on the machine changes.
+        out = machine.succeed("su - dev -c 'torqcli request system pull'")
+        assert f"Loaded the remote's incoming configuration ({incoming[:12]})" in out or "Loaded the remote's incoming configuration" in out, out
+        assert machine.succeed(f"git -C {repo} rev-parse refs/torq/incoming").strip() == incoming
+        assert machine.succeed(f"git -C {repo} rev-parse HEAD").strip() == head, "nothing applied"
+        assert local_ledger() == entries, "nothing ledgered"
+        machine.succeed(f"git -C {repo} show HEAD:desktop.json | grep -vq 99")
     with subtest("set beside the history in a merge, by root: an alarm"):
         machine.succeed("cp /var/lib/torq/state/ledger.jsonl /tmp/ledger.good")
         machine.succeed("head -n -2 /tmp/ledger.good > /var/lib/torq/state/ledger.jsonl")

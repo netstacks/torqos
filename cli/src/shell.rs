@@ -183,6 +183,16 @@ impl Machine for Real<'_> {
         Ok(out)
     }
 
+    fn fetch_incoming(&self) -> Result<Option<String>> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["fetch-incoming"])?, &log)?, "request system pull")?;
+        let id = v["incoming"].as_str().map(String::from);
+        if id.as_ref().is_some_and(|c| c.len() != 40 || !c.bytes().all(|b| b.is_ascii_hexdigit())) {
+            bail!("the broker's answer is not a commit");
+        }
+        Ok(id)
+    }
+
     fn remote_clear(&self, me: &str) -> Result<String> {
         let log = run::start_log()?;
         let v = done(run::broker_json(broker(self.cli, &["remote-clear", "--approved-by", me])?, &log)?, "request system remote clear")?;
