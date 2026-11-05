@@ -95,7 +95,9 @@ fn pending_confirm(entries: &[Entry]) -> Option<PendingConfirm> {
     let seq = a.body.seq;
     let settled = entries
         .iter()
-        .any(|e| matches!(e.body.kind.as_str(), "confirmed" | "rolled_back") && e.body.data["applied"] == json!(seq));
+        // After it: an entry older than the change cannot settle it (a ledger someone else wrote could
+        // hold one for a number yet to come).
+        .any(|e| e.body.seq > seq && matches!(e.body.kind.as_str(), "confirmed" | "rolled_back") && e.body.data["applied"] == json!(seq));
     if settled {
         return None;
     }
@@ -653,6 +655,9 @@ impl Broker {
     /// public half, for the person to add to the repository. A host key pinned by an adoption given
     /// up is forgotten: this one starts from nothing.
     pub fn adopt_key(&self, url: &str, host: &str) -> Result<String> {
+        if !self.ledger.read_all()?.is_empty() || self.repo.is_initialised() {
+            bail!("this machine already has a configuration: only a new one adopts");
+        }
         let r = remote::Remote::new(url, &self.state_dir)?;
         r.forget_host()?;
         r.public_key(host)
@@ -712,17 +717,29 @@ impl Broker {
         let head = stage.commit_of("refs/heads/main")?;
         for (mode, path) in stage.tree_paths(&head)? {
             if policy::tier_for_path(&path) == Tier::Forbidden {
-                bail!("the repository holds {path:?}, which no configuration may: refused");
+                bail!("the repository holds {path:?}, which an adopted configuration may not: refused");
             }
-            if matches!(path.as_str(), "hardware-configuration.nix" | "flake.nix" | "flake.lock" | "config-files.json") && mode != "100644" {
+            // Regular files only: Nix reads through a link, so a link could hold a setting this check
+            // never sees — and a configuration has no need of one.
+            if mode != "100644" && mode != "100755" {
                 bail!("the repository's {path} is not a plain file: refused");
             }
         }
-        let json = |p: &str| stage.text_at_most(&head, p, MAX_SETTING).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).unwrap_or_default();
-        let torq = json("nixos/torq.json");
+        // Settings the console reports on, read strictly: what cannot be read is a refusal, never "off".
+        let setting = |p: &str| -> Result<serde_json::Value> {
+            match stage.size_at(&head, p) {
+                None => Ok(serde_json::Value::Null),
+                Some(n) if n > MAX_SETTING => bail!("the repository's {p} is larger than a setting: refused"),
+                Some(_) => {
+                    let t = stage.text_at_most(&head, p, MAX_SETTING).with_context(|| format!("reading the repository's {p}"))?;
+                    serde_json::from_str(&t).with_context(|| format!("the repository's {p} is not JSON this machine can read: refused"))
+                }
+            }
+        };
+        let torq = setting("nixos/torq.json")?;
         let user = torq["user"].as_str().filter(|u| policy::user_name_ok(u)).context("the repository names no owner")?.to_string();
         // This machine's hardware file must be read: attached at the top, as a new machine's is.
-        let attached = json("config-files.json");
+        let attached = setting("config-files.json")?;
         let names = |v: &serde_json::Value| -> Vec<String> {
             match v {
                 serde_json::Value::String(s) => vec![s.clone()],
@@ -734,22 +751,35 @@ impl Broker {
             bail!("the repository's configuration does not read a hardware file: refused");
         }
         let files: Vec<String> = attached.as_object().into_iter().flat_map(|o| o.values()).flat_map(names).filter(|f| f != "hardware-configuration.nix").collect();
+        let users = setting("nixos/users.json")?;
+        let keyed: Vec<String> = users["users"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, u)| ["keys", "keyFiles"].iter().any(|k| u["openssh"]["authorizedKeys"][k].as_array().is_some_and(|l| !l.is_empty())))
+            .map(|(n, _)| n.clone())
+            .collect();
+        // Every way the tree turns SSH on: NixOS's option, its alias, and the old list.
+        let services = setting("nixos/services.json")?;
+        let old_list = setting("services.json")?;
+        let ssh = services["openssh"]["enable"] == json!(true)
+            || services["sshd"]["enable"] == json!(true)
+            || old_list.as_array().is_some_and(|l| l.iter().any(|s| matches!(s.as_str(), Some("ssh" | "openssh" | "sshd"))));
+        let host = setting("system/host.json")?["host-name"].as_str().unwrap_or("?").to_string();
         if ledgered_commit(&list).as_deref() != Some(head.as_str()) {
             bail!("the repository's main is not the commit its ledger ends at");
         }
-        let users = json("nixos/users.json");
-        let keyed: Vec<String> = users["users"].as_object().into_iter().flatten().filter(|(_, u)| u["openssh"]["authorizedKeys"]["keys"].as_array().is_some_and(|k| !k.is_empty())).map(|(n, _)| n.clone()).collect();
         Ok(Adoptable {
             url: url.to_string(),
             user,
-            host: json("system/host.json")["host-name"].as_str().unwrap_or("?").to_string(),
+            host,
             remote: torq["remote"]["url"].as_str().map(String::from),
             entries,
             changes: list.iter().filter(|e| matches!(e.body.kind.as_str(), "applied" | "reverted" | "repaired" | "adopted")).count(),
-            head: head.clone(),
+            head,
             tip,
             host_key: None,
-            ssh: json("nixos/services.json")["openssh"]["enable"].as_bool().unwrap_or(false),
+            ssh,
             keyed,
             files,
         })
@@ -765,6 +795,8 @@ impl Broker {
             bail!("this machine already has a configuration: only a new one adopts");
         }
         let lock = Lock::acquire(&self.state_dir)?;
+        // What a setup cut short left is not this adoption's: the repo is absent (checked above).
+        let _ = self.clear_setup();
         if switch_running() {
             bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then adopt");
         }
@@ -812,7 +844,11 @@ impl Broker {
             kind: "adopted".into(),
             tier: Tier::System.to_string(),
             tainted: false,
-            reason: format!("This machine adopted {} (its hardware file and software its own)", a.host.chars().filter(|c| !c.is_control()).take(63).collect::<String>()),
+            reason: format!(
+                "This machine adopted {} (its hardware file and software its own){}",
+                a.host.chars().filter(|c| !c.is_control()).take(63).collect::<String>(),
+                if switched.is_ok() { "" } else { "; the switch reported a problem: show system alarms, and restart if it still runs the image" }
+            ),
             data: self.with_system(json!({ "commit": commit, "url": url, "from": a.head })),
         })?;
         // Done: from here nothing may undo it. What is left is housekeeping.

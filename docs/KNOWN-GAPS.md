@@ -526,6 +526,11 @@ Its §5 lists claims without a test.
      host on first contact is pinned, and can accept any key and serve a forged repository: the
      console shows the host key's fingerprint and the commits to compare, and only that person's
      comparing stops it. Pinned host keys for common hosts, or the old ledger's hash typed in, would.
+     Each retry trusts first contact again (a changed key shows once as an error, then is re-pinned).
+   - **The summary reports the tree's SSH settings, not everything.** Other settings and attached
+     files can turn SSH on or do anything else: the console says so. Only an evaluation of the whole
+     configuration, shown before the question, would be complete.
+   - **The staging fetch has a time limit, no size limit**, and the checks after it none of time.
    - **The trust is the deploy key.** Whoever can add a key to the repository decides what a new
      machine becomes; commits are not signed yet, so nothing on the machine can tell a repository
      rewritten by its host from the owner's. The ledger's checks show it is consistent, not whose.

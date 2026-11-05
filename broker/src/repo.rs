@@ -196,6 +196,11 @@ impl Repo {
         Ok(())
     }
 
+    /// The size of a file of commit `rev` (None: it has none).
+    pub fn size_at(&self, rev: &str, path: &str) -> Option<u64> {
+        self.git(&["cat-file", "-s", &format!("{rev}:{path}")]).ok()?.trim().parse().ok()
+    }
+
     /// A file of commit `rev` as text, if it is at most `max` bytes (None: none, or larger).
     pub fn text_at_most(&self, rev: &str, path: &str, max: u64) -> Option<String> {
         let object = format!("{rev}:{path}");

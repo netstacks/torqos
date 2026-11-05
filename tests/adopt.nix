@@ -112,6 +112,7 @@ pkgs.testers.runNixOSTest {
         on_console(second, "machine first, owner alice")
         on_console(second, "the remote's host key SHA256:")
         on_console(second, "will run on this machine as root")
+        on_console(second, "Its SSH setting: not on")
         on_console(second, "own hardware file and software")
         second.fail("test -s /var/lib/torq/state/ledger.jsonl")
         on_console(second, "alice's password (on this machine):")

@@ -191,6 +191,11 @@ pub fn run() -> Result<()> {
                 }
             }
         } else {
+            // An adoption given up leaves nothing: not its staged copy, not the host key it pinned.
+            for f in ["/var/lib/torq/state/remote/known_hosts", "/var/lib/torq/state/adopt-ledger.jsonl"] {
+                let _ = std::fs::remove_file(f);
+            }
+            let _ = std::fs::remove_dir_all("/var/lib/torq/state/adopt.git");
             let a = ask()?;
             let done = apply(&a);
             (a.user, done, "TorqOS is set up (change #1 in its history)")
@@ -261,21 +266,27 @@ fn adopt_questions() -> Result<Option<Adopting>> {
     };
     let text = |k: &str| crate::history::one_line(found[k].as_str().unwrap_or("?"), 80);
     let (host, user, head, tip) = (text("host"), text("user"), text("head"), text("tip"));
-    if let Err(e) = valid_user(&user).and_then(|()| valid_host(&host)) {
+    if let Err(e) = valid_user(&user) {
         println!("  The repository's configuration is not one to adopt: {}", crate::history::clean(&format!("{e:#}")));
         return Ok(None);
     }
-    let list = |k: &str| found[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| crate::history::one_line(s, 40)).collect::<Vec<_>>().join(", ")).filter(|s| !s.is_empty());
+    // At most a few of a list, so that the rest of this stays on the screen.
+    let list = |k: &str| {
+        let all: Vec<String> = found[k].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(|s| crate::history::one_line(s, 40)).collect();
+        let more = all.len().saturating_sub(6);
+        (!all.is_empty()).then(|| format!("{}{}", all[..all.len().min(6)].join(", "), if more > 0 { format!(", and {more} more") } else { String::new() }))
+    };
     println!(
         "\n  machine {host}, owner {user}, {} changes in its history ({} ledger entries)\n  its configuration commit {}, its ledger commit {}",
         found["changes"].as_u64().unwrap_or(0),
         found["entries"].as_u64().unwrap_or(0),
-        &head[..head.len().min(12)],
-        &tip[..tip.len().min(12)]
+        head,
+        tip
     );
     println!("  the remote's host key {}", crate::history::one_line(found["host_key"].as_str().unwrap_or("(none pinned)"), 120));
     println!("  Compare these with the old machine's, or the host's published key: whoever answered first is who this reads.");
-    println!("\n  This configuration will run on this machine as root. It turns SSH {}.", if found["ssh"].as_bool().unwrap_or(false) { "on" } else { "off" });
+    println!("\n  This configuration will run on this machine as root: any of its settings and files can do anything.");
+    println!("  Its SSH setting: {}.", if found["ssh"].as_bool().unwrap_or(false) { "on" } else { "not on (other settings or files could still turn it on)" });
     if let Some(k) = list("keyed") {
         println!("  SSH keys of: {k}");
     }
@@ -342,7 +353,7 @@ fn adopt(a: &Adopting) -> Result<()> {
     };
     if !ok {
         let log = std::process::Command::new(JOURNALCTL).args(["-u", BROKER_UNIT, "-o", "cat", "-n", "12", "--no-pager"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-        bail!("the adopted configuration did not build:\n{}", log.trim_end().lines().map(crate::history::clean).collect::<Vec<_>>().join("\n"));
+        bail!("the repository was not adopted:\n{}", log.trim_end().lines().map(crate::history::clean).collect::<Vec<_>>().join("\n"));
     }
     Ok(())
 }

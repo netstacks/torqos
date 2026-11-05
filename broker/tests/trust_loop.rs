@@ -2359,13 +2359,40 @@ fn a_hostile_repository_is_refused_before_anything_is_adopted() {
     for (name, step, why) in [
         ("link", "rm hardware-configuration.nix && ln -s /etc/shadow hardware-configuration.nix", "not a plain file"),
         ("lock", "ln -s ../state/remote/key flake.lock", "not a plain file"),
-        ("attrs", "echo '* -diff' > .gitattributes", "no configuration may"),
-        ("policy", "mkdir policy && echo x > policy/tiers.toml", "no configuration may"),
+        ("attrs", "echo '* -diff' > .gitattributes", "may not"),
+        ("policy", "mkdir policy && echo x > policy/tiers.toml", "may not"),
+        // A link anywhere (Nix reads through it, this check would not): a setting hidden from the console.
+        ("linked", "ln -s other.json nixos/services.json && echo '{\"openssh\":{\"enable\":true}}' > nixos/other.json", "not a plain file"),
+        // What cannot be read is refused, never reported as off.
+        ("huge", "head -c 2000000 /dev/zero | tr '\\0' ' ' > nixos/services.json", "larger than a setting"),
+        ("broken", "echo '{ not json' > nixos/services.json", "not JSON this machine can read"),
         ("noread", "echo '{}' > config-files.json", "does not read a hardware file"),
         ("moved", "echo x > stray.txt", "is not the commit its ledger ends at"),
     ] {
         let e = format!("{:#}", new_machine.check_stage(&stage_with(name, step, &ledger), url).unwrap_err());
         assert!(e.contains(why), "{name}: {e}");
+    }
+    // Every way the tree turns SSH on is reported: the option, its alias, the old list. (A step leaves
+    // main ahead of the ledger, so each ledger here is one that ends at that commit.)
+    for (name, step) in [
+        ("sshd", "echo '{\"sshd\":{\"enable\":true}}' > nixos/services.json"),
+        ("openssh", "echo '{\"openssh\":{\"enable\":true}}' > nixos/services.json"),
+        ("oldlist", "echo '[\"ssh\"]' > services.json"),
+    ] {
+        let work = dir.path().join(format!("ssh-{name}"));
+        sh(dir.path(), &format!("cp -r {} {}", repo.display(), work.display()));
+        sh(&work, &format!("{step} && git add -A && git -c user.name=t -c user.email=t@t commit -qm step"));
+        let head = String::from_utf8(Command::new("git").arg("-C").arg(&work).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_string();
+        let l = dir.path().join(format!("{name}.jsonl"));
+        fs::copy(&ledger, &l).unwrap();
+        torq_broker::ledger::Ledger::open(&l).append(torq_broker::ledger::NewEntry {
+            actor: "user".into(), approved_by: Some("alice".into()), kind: "applied".into(), tier: "system".into(), tainted: false, reason: "ssh".into(),
+            data: serde_json::json!({ "commit": head }),
+        }).unwrap();
+        let stage = dir.path().join(format!("ssh-{name}.git"));
+        sh(dir.path(), &format!("git clone -q --bare {} {}", work.display(), stage.display()));
+        sh(&stage, &format!("b=$(git hash-object -w {}) && t=$(printf '100644 blob %s\\tledger.jsonl\\n' $b | git mktree) && c=$(git -c user.name=t -c user.email=t@t commit-tree $t -m l) && git update-ref refs/torq/remote-ledger $c", l.display()));
+        assert!(new_machine.check_stage(&Repo::new(stage), url).unwrap().ssh, "{name}");
     }
     // A ledger with a commit confirmed waiting would drive the boot's rollback: refused.
     let waiting = dir.path().join("waiting.jsonl");
