@@ -1524,7 +1524,7 @@ fn ledgered_commit(entries: &[history::Entry]) -> Option<String> {
     entries
         .iter()
         .rev()
-        .filter(|e| matches!(e.kind.as_str(), "init" | "applied" | "reverted" | "interrupted" | "repaired" | "rolled_back"))
+        .filter(|e| matches!(e.kind.as_str(), "init" | "adopted" | "applied" | "reverted" | "interrupted" | "repaired" | "rolled_back"))
         .find_map(|e| e.data["commit"].as_str().map(String::from))
 }
 
@@ -1534,7 +1534,7 @@ fn configurations_of(entries: &[history::Entry], count: usize, clock: &history::
     entries
         .iter()
         .rev()
-        .filter(|e| matches!(e.kind.as_str(), "init" | "applied" | "reverted" | "rolled_back"))
+        .filter(|e| matches!(e.kind.as_str(), "init" | "adopted" | "applied" | "reverted" | "rolled_back"))
         .filter_map(|e| {
             let id = e.data["commit"].as_str()?;
             let who = e.approved_by.clone().filter(|w| !w.is_empty()).unwrap_or_else(|| e.actor.clone());

@@ -131,7 +131,7 @@ Order matters: the socket first, because everything after keys on identity.
       system pull` as a proposal. *Test:* a VM with a bare remote: a rewritten local ledger is an
       alarm; a remote commit lands in the candidate and nowhere else. **⏹ review:** nothing from
       the remote is ever applied unasked — find the path that would.
-- [ ] Adopt at setup. *Test:* two VMs: the second, pointed at the first's repo, is the first
+- [~] Adopt at setup (built on `adopt`). *Test:* two VMs: the second, pointed at the first's repo, is the first
       (same tree, its own hardware file, its own password). **⏹ review.**
 - [ ] Strict mode and `torq break-glass`. *Test:* a shell leaves a ledger entry before it opens;
       `sudo bash` is refused. **⏹ adversarial:** get root without an entry.

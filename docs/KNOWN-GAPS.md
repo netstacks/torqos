@@ -520,3 +520,14 @@ Its §5 lists claims without a test.
    - **The pulled configuration is evaluated before the commit question** — as on any commit, by
      the person's torqcli (`nix eval`, pure): its Nix may build what it imports (import from
      derivation) before anyone says yes. It cannot reach root.
+
+6zi. **Adopt at setup (ADR-036).** Open:
+   - **The trust is the deploy key.** Whoever can add a key to the repository decides what a new
+     machine becomes; commits are not signed yet, so nothing on the machine can tell a repository
+     rewritten by its host from the owner's. The ledger's checks show it is consistent, not whose.
+   - **Only the owner's password is asked.** Other people in the configuration have none on the new
+     machine until `request system password`.
+   - **A broker that dies mid-adopt** after the switch and before the ledger goes in leaves the new
+     system running with no ledger (setup's own record of a cut-short setup does not cover adopt).
+   - **`torq.dev.enable` and every other setting travel** with the configuration: adopting a dev
+     machine makes a dev machine. The summary does not call it out.

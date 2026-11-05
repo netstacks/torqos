@@ -56,6 +56,9 @@ enum Cmd {
     RemoteShow,
     RemoteClear { approved_by: String },
     FetchIncoming,
+    AdoptKey { url: String },
+    AdoptInspect { url: String },
+    Adopt { url: String, own: PathBuf },
 }
 
 /// The command line, declared with clap's builder (its derive macros write an `allow(dead_code)`,
@@ -160,6 +163,9 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("remote-key").about("The machine's key for the config repo's remote (ADR-036): made the first time, kept after; its public half printed, to add to the repository as a deploy key with write access."))
         .subcommand(Command::new("push").about("Push the configuration and the ledger to the remote now (after every change it is pushed anyway; this is the timer's retry): the remote's ledger checked first."))
         .subcommand(Command::new("remote").about("The remote: its URL, the last push, what its ledger said of this one then, and its alarm, if any."))
+        .subcommand(Command::new("adopt-key").about("First-boot setup: this machine's key for a repository it is about to adopt (ADR-036), made the first time.").arg(Arg::new("url").long("url").required(true)))
+        .subcommand(Command::new("adopt-inspect").about("First-boot setup: fetch the repository into a staging copy and check it (its ledger one line, every push extending the last, its chain whole, main the commit it ends at); changes nothing of the machine.").arg(Arg::new("url").long("url").required(true)))
+        .subcommand(Command::new("adopt").about("First-boot setup: become the machine the repository holds: its history and ledger, this machine's hardware file and software (the files in --own) as a new commit, built, switched to, ledgered.").arg(Arg::new("url").long("url").required(true)).arg(Arg::new("own").long("own").required(true).value_parser(value_parser!(PathBuf))))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
         .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
         .subcommand(Command::new("serve").about(
@@ -207,6 +213,9 @@ fn parse_cli() -> Cli {
         "remote" => Cmd::RemoteShow,
         "remote-clear" => Cmd::RemoteClear { approved_by: by(sub) },
         "fetch-incoming" => Cmd::FetchIncoming,
+        "adopt-key" => Cmd::AdoptKey { url: s(sub, "url").unwrap_or_default() },
+        "adopt-inspect" => Cmd::AdoptInspect { url: s(sub, "url").unwrap_or_default() },
+        "adopt" => Cmd::Adopt { url: s(sub, "url").unwrap_or_default(), own: p(sub, "own").unwrap_or_default() },
         other => unreachable!("clap knows no subcommand {other}"),
     };
     Cli {
@@ -338,6 +347,22 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 std::process::exit(1);
             }
         },
+        Cmd::AdoptKey { url } => {
+            let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+            let key = b.adopt_key(&url, host.trim())?;
+            println!("{}", if json { json!({ "public_key": key }).to_string() } else { key });
+        }
+        Cmd::AdoptInspect { url } => {
+            let a = b.adopt_inspect(&url)?;
+            println!("{}", if json { serde_json::to_string(&a)? } else { format!("{a:?}") });
+        }
+        Cmd::Adopt { url, own } => {
+            let e = b.adopt(&url, &own)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
         Cmd::FetchIncoming => {
             let id = b.fetch_incoming()?;
             if json {

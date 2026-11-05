@@ -185,6 +185,50 @@ impl Repo {
         Ok(Some(self.git(&["rev-parse", "refs/torq/incoming^{commit}"])?.trim().to_string()))
     }
 
+    /// A staging repository for adopting (ADR-036): bare, holding the remote's `main` and ledger.
+    pub fn stage_from(&self, url: &str, ssh_command: &str) -> Result<()> {
+        let _ = std::fs::remove_dir_all(&self.root);
+        let ok = crate::config::command("git").args(["init", "-q", "--bare"]).arg(&self.root).status().context("running git init")?.success();
+        if !ok {
+            bail!("git init failed for {}", self.root.display());
+        }
+        self.git_net(ssh_command, &["fetch", "--no-tags", "--quiet", "--no-recurse-submodules", "--no-auto-gc", "--no-auto-maintenance", "--", url, "+refs/heads/main:refs/heads/main", &format!("+{REMOTE_LEDGER}:refs/torq/remote-ledger")])?;
+        Ok(())
+    }
+
+    /// A file of commit `rev` as text (None: it has none).
+    pub fn text_at(&self, rev: &str, path: &str) -> Option<String> {
+        self.git(&["cat-file", "blob", &format!("{rev}:{path}")]).ok()
+    }
+
+    /// The commit `name` points to.
+    pub fn commit_of(&self, name: &str) -> Result<String> {
+        Ok(self.git(&["rev-parse", &format!("{name}^{{commit}}")])?.trim().to_string())
+    }
+
+    /// Become a working copy of the staging repository at `stage` (`main`, its history), this
+    /// directory holding at most what is about to be replaced; the ledger's ref taken too, and no
+    /// remote left behind (the broker names its remote itself).
+    pub fn clone_stage(&self, stage: &Path) -> Result<()> {
+        let _ = std::fs::remove_dir_all(&self.root);
+        let ok = crate::config::command("git").args(["clone", "-q", "--no-hardlinks", "--branch", "main", "--"]).arg(stage).arg(&self.root).status().context("running git clone")?.success();
+        if !ok {
+            bail!("git clone of the staged repository failed");
+        }
+        let stage = path::absolute(stage)?.to_string_lossy().into_owned();
+        self.git(&["fetch", "-q", "--", &stage, "+refs/torq/remote-ledger:refs/torq/remote-ledger"])?;
+        self.git(&["remote", "remove", "origin"])?;
+        Ok(())
+    }
+
+    /// Commit the working tree as it is: its changes, with `message`. The new HEAD.
+    pub fn commit_all(&self, message: &str) -> Result<String> {
+        self.git(&["add", "-A"])?;
+        self.git(&["commit", "-q", "--allow-empty", "-m", message])?;
+        self.sync()?;
+        self.head()
+    }
+
     /// Whether the remote's ledger history is one line — no merge anywhere in it: a merge would let a
     /// rewrite sit beside the history it rewrites (the review of ADR-036, H1).
     pub fn ledger_history_linear(&self, tip: &str) -> Result<bool> {

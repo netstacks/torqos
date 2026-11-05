@@ -781,6 +781,17 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   not from a remote whose ledger disagrees. **What travels:** everything but the hardware *file* —
   boot and file-system *settings*, and config files that set them, come with it, shown in the
   compare; read them.
+- **Amended (2026-11-05): adopt** (`tests/adopt.nix`; the owner's choice). First-boot setup asks: a new
+  machine, or from a repository? The new machine makes its key and shows it; the person adds it to the
+  repository — only someone who can administer it can, and that, not a signature, is the trust: the
+  broker does not sign its commits yet (signing, and checking it here, is its own item). The
+  broker fetches into a staging repository and checks it: the ledger one line, each push extending
+  the one before, the chain whole, `main` the commit it ends at; setup shows the machine, owner and
+  changes, asks the owner's password (it is not in the repository) and asks before anything
+  changes. An adopted machine **continues** the old one: its repo history and ledger, then one
+  commit putting in this machine's hardware file and the image's software (`flake.nix`, `flake.lock`:
+  a repository's may name a source that was the old machine's own), and one entry, `adopted`. So the
+  remote's ledger stays this one's start, and pushing goes on.
 
 ## ADR-037 — Applications: a ladder, every rung declared (proposed)
 - **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small

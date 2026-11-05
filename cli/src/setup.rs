@@ -173,21 +173,156 @@ pub fn run() -> Result<()> {
         let _ = std::fs::remove_dir_all(repo);
         let _ = std::fs::remove_dir_all(BUILD_CACHE);
         println!("\n{}\n", welcome());
-        let a = ask()?;
-        match apply(&a) {
+        const HOW: &str = "How should this machine start?\n  1  as a new machine\n  2  from a repository: become the machine it holds";
+        println!("{HOW}");
+        // Shown again with the question, if the console is taken over (`asked`).
+        let heading = || format!("{}\n\n{HOW}", welcome());
+        let adopting = until(|| line_under(&heading, "Start", "1"), |c| match c {
+            "1" => Ok(false),
+            "2" => Ok(true),
+            _ => bail!("1 or 2"),
+        })?;
+        let (user, done, what) = if adopting {
+            match adopt_questions()? {
+                None => continue,
+                Some(a) => {
+                    let done = adopt(&a);
+                    (a.user, done, "TorqOS has adopted the repository's configuration: its history goes on here")
+                }
+            }
+        } else {
+            let a = ask()?;
+            let done = apply(&a);
+            (a.user, done, "TorqOS is set up (change #1 in its history)")
+        };
+        match done {
             Ok(()) => {
-                println!("\nTorqOS is set up (change #1 in its history). Log in as {}.\n", a.user);
+                println!("\n{what}. Log in as {user}.\n");
                 // The console's login prompt, now that there is someone to log in.
                 let _ = std::process::Command::new("/run/current-system/sw/bin/systemctl").args(["start", "--no-block", "getty@tty1.service"]).status();
                 return Ok(());
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(repo);
-                let _ = std::fs::remove_file(Path::new(PASSWORDS).join(&a.user));
+                let _ = std::fs::remove_file(Path::new(PASSWORDS).join(&user));
                 println!("\nSetup did not finish: {e:#}\nNothing was kept; starting over.");
             }
         }
     }
+}
+
+/// What adopting a repository asked (ADR-036).
+struct Adopting {
+    url: String,
+    host: String,
+    user: String,
+    hash: String,
+}
+
+/// The broker, as root, for one answer (`--json`): its JSON, or what it said went wrong.
+fn broker_says(args: &[&str]) -> Result<serde_json::Value> {
+    let out = std::process::Command::new(BROKER).arg("--json").args(args).output().context("running the broker")?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    if !out.status.success() {
+        bail!("{}", v["error"].as_str().map(String::from).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    Ok(v)
+}
+
+/// Which repository, this machine's key for it, what it holds, and the owner's password. None: the
+/// person went back.
+fn adopt_questions() -> Result<Option<Adopting>> {
+    let (url, key) = loop {
+        let url = line("The repository's SSH URL (git@host:path; nothing to go back)", "")?;
+        if url.is_empty() {
+            return Ok(None);
+        }
+        match broker_says(&["adopt-key", "--url", &url]) {
+            Ok(v) => break (url, v["public_key"].as_str().unwrap_or_default().to_string()),
+            Err(e) => println!("  {e:#}"),
+        }
+    };
+    println!("\nThis machine's key:\n\n{key}\n\nAdd it to the repository as a deploy key, with write access: only someone who can\nadminister the repository can, and that is what says this machine may be it.");
+    let found = loop {
+        line("Press Enter when it is added", "")?;
+        println!("  Reading the repository and checking its ledger ...");
+        match broker_says(&["adopt-inspect", "--url", &url]) {
+            Ok(v) => break v,
+            Err(e) => {
+                println!("  {e:#}");
+                if line("Try again? (yes / no)", "yes")? != "yes" {
+                    return Ok(None);
+                }
+            }
+        }
+    };
+    let text = |k: &str| crate::history::one_line(found[k].as_str().unwrap_or("?"), 80);
+    let (host, user) = (text("host"), text("user"));
+    valid_user(&user)?;
+    println!("\n  machine {host}, owner {user}, {} changes in its history", found["entries"].as_u64().unwrap_or(0));
+    match found["remote"].as_str() {
+        Some(r) if r == url => {}
+        Some(r) => println!("  ! It pushes to another remote: {}", crate::history::one_line(r, 100)),
+        None => println!("  ! It names no remote: this machine will not push there until `torq remote url` is set."),
+    }
+    println!("  This machine's own hardware file and software take the place of the repository's.");
+    let hash = loop {
+        let p = secret(&format!("{user}'s password (on this machine)"))?;
+        if p.chars().count() < 8 {
+            println!("  At least 8 characters, please.");
+            continue;
+        }
+        if secret("Password again")? != p {
+            println!("  They differ; once more.");
+            continue;
+        }
+        break hash(&p)?;
+    };
+    if line("Become this machine? (yes / no)", "yes")? != "yes" {
+        return Ok(None);
+    }
+    Ok(Some(Adopting { url, host, user, hash }))
+}
+
+/// The password, this machine's own files, and the broker to do the rest (as `apply` hands over).
+fn adopt(a: &Adopting) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let image = Path::new(IMAGE);
+    let source = std::fs::canonicalize(image.join("source")).context("the image's own TorqOS")?;
+    let system = match std::env::consts::ARCH {
+        "aarch64" => "aarch64-linux",
+        "x86_64" => "x86_64-linux",
+        other => bail!("TorqOS is not built for {other}"),
+    };
+    let hardware = hardware_file(image, &Path::new("/").join(crate::install::DETECTED));
+    // This machine's hardware file and software: as a new machine's, whatever the answers.
+    let answers = Answers { host: a.host.clone(), zone: "UTC".into(), user: a.user.clone(), hash: String::new(), remote: Remote::No, key: None };
+    let mine = files(&answers, &source.join("templates/config"), image, &hardware, &source.to_string_lossy(), system)?;
+    let own = Path::new("/run/torq-adopt");
+    let _ = std::fs::remove_dir_all(own);
+    std::fs::DirBuilder::new().mode(0o700).create(own)?;
+    for (rel, bytes) in mine.iter().filter(|(r, _)| matches!(r.as_str(), "hardware-configuration.nix" | "flake.nix" | "flake.lock")) {
+        std::fs::write(own.join(rel), bytes).with_context(|| format!("writing {rel}"))?;
+    }
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(PASSWORDS)?;
+    let file = Path::new(PASSWORDS).join(&a.user);
+    let _ = std::fs::remove_file(&file);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?;
+    writeln!(f, "{}", a.hash)?;
+    println!();
+    let ok = {
+        let _p = crate::run::Progress::start("Building this machine's system and switching to it");
+        std::process::Command::new(SYSTEMD_RUN)
+            .args(["--wait", "--collect", "--quiet", &format!("--unit={BROKER_UNIT}"), "--property=StandardOutput=journal", "--property=StandardError=journal", BROKER, "adopt", "--url", &a.url, "--own", "/run/torq-adopt"])
+            .status()
+            .context("running the broker")?
+            .success()
+    };
+    if !ok {
+        let log = std::process::Command::new(JOURNALCTL).args(["-u", BROKER_UNIT, "-o", "cat", "-n", "12", "--no-pager"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        bail!("the adopted configuration did not build:\n{}", log.trim_end());
+    }
+    Ok(())
 }
 
 fn ask() -> Result<Answers> {

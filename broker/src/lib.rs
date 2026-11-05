@@ -162,6 +162,20 @@ pub struct Interrupted {
     pub target: u64,
 }
 
+/// A repository a new machine could adopt (ADR-036), as `adopt_inspect` found it.
+#[derive(Debug, serde::Serialize)]
+pub struct Adoptable {
+    pub url: String,
+    pub host: String,
+    pub user: String,
+    /// The remote its configuration names, if any.
+    pub remote: Option<String>,
+    pub entries: usize,
+    pub head: String,
+    /// The ledger commit checked.
+    pub tip: String,
+}
+
 /// How the machine compares with its ledger. See `Broker::status`.
 #[derive(Debug)]
 pub struct Status {
@@ -431,7 +445,7 @@ fn ledgered_commit(entries: &[Entry]) -> Option<String> {
     entries
         .iter()
         .rev()
-        .filter(|e| matches!(e.body.kind.as_str(), "init" | "applied" | "reverted" | "interrupted" | "repaired" | "rolled_back"))
+        .filter(|e| matches!(e.body.kind.as_str(), "init" | "adopted" | "applied" | "reverted" | "interrupted" | "repaired" | "rolled_back"))
         .find_map(|e| e.body.data.get("commit").and_then(|v| v.as_str()).map(String::from))
 }
 
@@ -623,6 +637,109 @@ impl Broker {
         let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(self.state_dir.join("fetch.lock"))?;
         lock.try_lock().map_err(|_| anyhow::anyhow!("another fetch from the remote is running: try again when it is done"))?;
         self.repo.fetch_incoming(&r.url, &r.ssh_command())
+    }
+
+    /// The machine's key for a remote it is about to adopt from (first-boot setup, ADR-036): its
+    /// public half, for the person to add to the repository. Nothing else changes.
+    pub fn adopt_key(&self, url: &str, host: &str) -> Result<String> {
+        remote::Remote::new(url, &self.state_dir)?.public_key(host)
+    }
+
+    /// Fetch the repository at `url` into a staging repository and check it — its ledger one line,
+    /// each push extending the one before, the hash chain whole, and `main` the commit it ends at —
+    /// changing nothing of the machine: what it is, for a person to read before adopting it.
+    pub fn adopt_inspect(&self, url: &str) -> Result<Adoptable> {
+        if !self.ledger.read_all()?.is_empty() || self.repo.is_initialised() {
+            bail!("this machine already has a configuration: only a new one adopts");
+        }
+        let r = remote::Remote::new(url, &self.state_dir)?;
+        if !r.key().exists() {
+            bail!("no key for the remote yet");
+        }
+        let stage = Repo::new(self.state_dir.join("adopt.git"));
+        stage.stage_from(url, &r.ssh_command())?;
+        let tip = stage.commit_of("refs/torq/remote-ledger")?;
+        if !stage.ledger_history_linear(&tip)? {
+            bail!("the repository's ledger history has a merge in it: refused");
+        }
+        let mut prev: Option<String> = None;
+        for c in stage.ledger_commits(None, &tip)? {
+            let text = stage.ledger_at(&c)?;
+            if let remote::Anchor::Differs { why } = remote::anchor(prev.as_deref(), &text) {
+                bail!("the repository's ledger was rewritten along the way: {why}");
+            }
+            prev = Some(text);
+        }
+        let text = prev.context("the repository has no ledger")?;
+        let file = self.state_dir.join("adopt-ledger.jsonl");
+        fs::write(&file, &text)?;
+        let staged = Ledger::open(&file);
+        let entries = staged.verify().context("the repository's ledger does not verify")?;
+        let head = stage.commit_of("refs/heads/main")?;
+        if ledgered_commit(&staged.read_all()?).as_deref() != Some(head.as_str()) {
+            bail!("the repository's main is not the commit its ledger ends at");
+        }
+        let json = |p: &str| stage.text_at(&head, p).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).unwrap_or_default();
+        let torq = json("nixos/torq.json");
+        let user = torq["user"].as_str().filter(|u| policy::user_name_ok(u)).context("the repository names no owner")?.to_string();
+        Ok(Adoptable {
+            url: url.to_string(),
+            user,
+            host: json("system/host.json")["host-name"].as_str().unwrap_or("?").to_string(),
+            remote: torq["remote"]["url"].as_str().map(String::from),
+            entries,
+            head,
+            tip,
+        })
+    }
+
+    /// Become the machine the repository at `url` holds (ADR-036): its history and its ledger, then
+    /// this machine's own hardware file and software (`own`: a directory with hardware-configuration.nix,
+    /// flake.nix, flake.lock) as a new commit — built and switched to, then ledgered as `adopted`. The
+    /// ledger goes in last: a failure leaves the machine new, for setup to start again.
+    pub fn adopt(&self, url: &str, own: &Path) -> Result<Entry> {
+        let a = self.adopt_inspect(url)?;
+        let lock = Lock::acquire(&self.state_dir)?;
+        if switch_running() {
+            bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then adopt");
+        }
+        let r = remote::Remote::new(url, &self.state_dir)?;
+        let stage = self.state_dir.join("adopt.git");
+        let undo = || {
+            let _ = fs::remove_dir_all(self.repo.root());
+        };
+        let head = (|| -> Result<String> {
+            self.repo.clone_stage(&stage)?;
+            for f in ["hardware-configuration.nix", "flake.nix", "flake.lock"] {
+                fs::copy(own.join(f), self.repo.root().join(f)).with_context(|| format!("putting this machine's {f} in"))?;
+            }
+            self.repo.commit_all("This machine adopts this configuration: its hardware file and software\n\nActor: user\nTier: system")
+        })()
+        .inspect_err(|_| undo())?;
+        let built = self.build_system(&lock, &head).inspect_err(|_| undo()).context("the adopted configuration did not build: nothing was adopted")?;
+        let switched = self.rebuild(&lock, &head);
+        if let Err(e) = &switched {
+            let took = self.running_system().as_deref() == Some(built.as_str()) || self.next_boot().as_deref() == Some(built.as_str());
+            if !took {
+                undo();
+                bail!("the switch failed, and the machine still runs and starts the image: nothing was adopted ({e:#})");
+            }
+        }
+        // The old machine's history is this one's: in, whole, and this adoption on top of it.
+        fs::copy(self.state_dir.join("adopt-ledger.jsonl"), self.ledger.path()).context("installing the ledger")?;
+        let e = self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: None,
+            kind: "adopted".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: format!("This machine adopted {} (its hardware file and software its own)", a.host),
+            data: self.with_system(json!({ "commit": head, "url": url, "from": a.head })),
+        })?;
+        r.set_verified(&a.tip)?;
+        let _ = fs::remove_dir_all(&stage);
+        let _ = fs::remove_file(self.state_dir.join("adopt-ledger.jsonl"));
+        Ok(e)
     }
 
     /// A person clears the remote's alarm, having looked into it: ledgered, and the next push checks

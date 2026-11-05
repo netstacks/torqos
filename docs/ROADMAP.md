@@ -172,7 +172,7 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
       change, the ledger as `refs/torq/ledger`; `verify` against the remote's head (KNOWN-GAPS 2);
       `show system remote`, `request system pull` as a proposal into the candidate; the credential
       in the broker's state, scoped to one repo. Default stays local (ADR-004).
-- [ ] **Adopt at setup**: "a fresh machine, or from a repository?" — the owner's key enrolled,
+- [x] **Adopt at setup** (ADR-036, `tests/adopt.nix`; trust by the deploy key, signing later): "a fresh machine, or from a repository?" — the owner's key enrolled,
       HEAD's signature checked, this machine's hardware file kept, the owner's password asked,
       change #1. A VM test: a machine rebuilt from another's repo is that machine.
 - [ ] **Strict mode and `torq break-glass`** (ADR-035): sudoers limited to TorqOS's commands; a root
