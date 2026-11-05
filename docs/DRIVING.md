@@ -15,7 +15,7 @@ Three rules that cover most of what goes wrong:
    `path:` source builds whatever is on disk, committed or not.
 4. **The tests run here.** `nix flake check` on torq5, green, before anything merges to `main` —
    not GitHub's CI, which runs only for pull requests, by hand and at each release (ADR-030,
-   amended). aarch64 is built at each release; nothing tests it day to day.
+   amended). aarch64 is set aside until x86_64 is stable: not built, not tested.
 
 ## The loop, for one piece of work
 
@@ -80,7 +80,7 @@ torqcli -c "request system update; configure; show | compare; commit comment \"M
 ```
 
 Read the prompt: `[edit system software]` only. If the machine misbehaves: `rollback 1`.
-Push `main`; CI runs both architectures — aarch64 is only tested there (ADR-030).
+Push `main` (no CI runs on a push: the full check ran here, rule 4).
 
 ### 7. Record
 Tick the ROADMAP line, with the date and the test's name in italics as the others are. If the

@@ -82,7 +82,7 @@ machine stays thin. `nix develop` for a shell, or `nix develop --command …` fo
 nix develop --command bash -c 'cd broker && cargo test'   # incl. ledger tamper detection
 nix develop --command bash -c 'cd cli    && cargo test'   # the grammar, candidate, tree
 
-# Nix — x86_64 here; aarch64 is CI's (ADR-030), assume nothing about it locally
+# Nix — x86_64 only: aarch64 is neither built nor tested during development (ADR-030, amended)
 nix flake check                                   # eval + tree checks + VM tests
 nix build .#checks.x86_64-linux.trust-loop        # one VM test
 nix build .#checks.x86_64-linux.image             # boot, setup, a commit, a signed update
@@ -173,7 +173,7 @@ broker first.
   `nix flake check` green on 2026-11-04. **Next:** the owner's end-to-end ESXi install from the v0.2.0 ISO (CONTRIBUTING.md,
   "Releasing" for later ones); then M3, starting with the socket broker (A2 with it). The repo is public since 2026-11-04 (rulesets on `main` and `v*`, SECURITY.md).
 - **Development moved to `torq5`** (ADR-030), an x86_64 ESXi VM with KVM, 64 GB and 1 TB; the
-  aarch64 UTM VM on the M4 Mac is retired and aarch64 is CI's alone. `docs/DEV-SETUP.md` is
+  aarch64 UTM VM on the M4 Mac is retired, and aarch64 waits for a stable x86_64 release. `docs/DEV-SETUP.md` is
   written for this host. Tests here: **broker 118, torqcli 241** (`cargo test` in `nix develop`,
   also run in the Nix build sandbox).
 - **M2 is essentially done** — images (qcow2 + ESXi VMDK, both arches), first-boot setup,
@@ -223,7 +223,7 @@ broker first.
 - Host **`torq5`**, an x86_64 VM on a VMware ESXi server (ADR-030), user **`viper`** (the template
   no longer names a user; `torq user` in the config repo's `nixos/torq.json` is the one place,
   since S3d). 8 vCPU, 64 GB, 1 TB, nested virtualisation on — so `/dev/kvm` is there and the VM
-  tests run at native speed. **aarch64 is CI's**: there is no arm64 machine to develop on, so
+  tests run at native speed. **aarch64 is set aside** until x86_64 is stable (no arm64 machine; not built in CI either), so
   assume nothing about it locally.
 - It is a **normal install** — made from a release image (2026-11-02), then updated to the signed
   releases repo — with two ledgered, reversible commits on top, both applied on 2026-11-03:

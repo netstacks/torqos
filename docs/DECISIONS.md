@@ -456,7 +456,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   host; the Mac/UTM instructions are in git history.
 - **Amended (2026-11-05, the owner):** during development the tests run here, not on every push:
   `nix flake check` on torq5 before each merge to `main`. CI's `test` runs for pull requests, by
-  hand, and as the first step of every release; aarch64 is built there at each release.
+  hand, and as the first step of every release. And aarch64 is set aside: no images until x86_64
+  has a stable release (the flake still defines it; image.yml's matrix has it commented out).
 
 ## ADR-031 — The ISO installer writes the image, and detects the hardware
 - **Context:** M2's last piece is TorqOS on real hardware: an ISO to boot from a USB stick that

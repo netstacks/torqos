@@ -1,8 +1,9 @@
-# The TorqOS images (docs/INSTALL.md), x86_64 and aarch64, each built on a runner of its own
-# architecture: the qcow2 (UTM, QEMU, Proxmox), the VMDK (VMware ESXi) and the ISO installer (real
-# hardware, ADR-031), kept a day as the run's artifacts with their checksums. Run by hand (Actions →
-# image → Run workflow, or `gh workflow run image.yml`), and as a step of every release
-# (release.yml).
+# The TorqOS images (docs/INSTALL.md): the qcow2 (UTM, QEMU, Proxmox), the VMDK (VMware ESXi) and
+# the ISO installer (real hardware, ADR-031), kept a day as the run's artifacts with their
+# checksums. x86_64 only while TorqOS is in development (the owner, 2026-11-05): aarch64 returns once
+# x86_64 has a stable release, and the flake still builds it (`nix build .#packages.aarch64-linux.image`).
+# Run by hand (Actions → image → Run workflow, or `gh workflow run image.yml`), and as a step of every
+# release (release.yml).
 name: image
 
 on:
@@ -20,7 +21,8 @@ jobs:
       matrix:
         include:
           - { system: x86_64-linux, runner: ubuntu-latest }
-          - { system: aarch64-linux, runner: ubuntu-24.04-arm }
+          # aarch64, back with the first stable x86_64 release (it has no KVM: its disk build emulates):
+          # - { system: aarch64-linux, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
@@ -43,7 +45,7 @@ jobs:
       - name: User namespaces as on NixOS
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      # NixOS makes the disk in a small VM, a build that asks for `kvm`. The arm64 runner has no KVM:
+      # NixOS makes the disk in a small VM, a build that asks for `kvm`. (The arm64 runner, when it is back, has no KVM:
       # its VM falls back to emulation (QEMU's accel=kvm:tcg), slower but the same disk. The x86_64
       # runner has KVM.
       - uses: cachix/install-nix-action@v31
