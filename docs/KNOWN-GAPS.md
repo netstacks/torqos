@@ -16,9 +16,9 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    the remote holds every ledger pushed, and this one must extend the newest (`status`). Without a
    remote — the default — what follows still holds. **`verify` cannot detect truncation of the newest entries, and the chain is unkeyed** (second
    audit, H2): it is sha256 over each entry and the one before, so a writer of the file (root)
-   can rewrite the history and recompute the chain; it does not cross-check git `Ledger-Entry`
-   trailers against the ledger (a trailer can be one short, since an entry from break-glass or a restore may land
-   during an apply: cross-check by the entry's `data.commit`), and commits are not signed (L1). What it
+   can rewrite the history and recompute the chain; `status` checks each change against its commit (who approved it, which
+   proposal; by the entry's `commit`, as the `Ledger-Entry` trailer can be one short, an entry from
+   break-glass or a restore landing during an apply), so one rewritten alone is seen; both rewritten
    does catch: an edited,
    added or removed field or entry (an added field passed before the audit of 2026-10-31).
    Planned (M3): sign the entries and commits with a broker key, anchor the head hash.
@@ -255,13 +255,13 @@ is 6p, N18 is 6 (below).
 | N1 | **high:** a `_`-named `nixos/*.json` file (`_type`, `contents`) gets past the fence | fixed: a file there is named after a top-level NixOS option, never `_` (modules/nixos-settings.nix; tree: nixos-fence-underscore-file) |
 | N2 | **high:** `users extraUsers` (NixOS's alias) gets past the password rule; root can get a password | fixed: the aliases are fenced (settings-fence.nix `aliases`); an assertion keeps root without a password, a config file included (tree: nixos-fence-alias-users, config-root-password) |
 | M2 / N12 | A missing boot profile is not a problem to `status`; `repair` counts it as fine | open (apply/restore half fixed) |
-| M3 | A password change can take effect without its ledger entry; no fsync of the folder | open — one transaction |
+| M3 | A password change can take effect without its ledger entry; no fsync of the folder | fixed: the entry first, `password_failed` after it if the change fails, the folder synced. Stopped between the two, the ledger says too much, never too little |
 | M4 / N13 | Outside-switch checks are a moment's; `confirm` has none (nor the unledgered-HEAD check) | open |
 | L1 | Proposal file names printed unescaped | fixed: escaped as everything the broker shows |
 | L2 | `XDG_STATE_HOME` taken without an owner check | open |
 | L3 | A save file may hold a file and its deletion marker | open |
 | L4 | Nested `top` without limit | fixed: a command is never inside itself (`top top` refused; the grammar's `Walked::next`, for `?` too) |
-| N3 | A torn ledger append (power cut, full disk) stops every broker command, recovery too | open — write-ahead copy, repaired and ledgered |
+| N3 | A torn ledger append (power cut, full disk) stops every broker command, recovery too | fixed: a last line with no end is read past, kept beside the ledger, and mended at the next entry, the next start or the next push (`ledger_mended`). A whole line that does not verify is an edit, and is never mended |
 | N4 | `propose --reason` may hold newlines: forged git trailers | fixed: a reason is one line, no control characters (refused at propose; torqcli sends one clean line) |
 | N5 | Only torq-broker-init is sandboxed; SECURITY-MODEL says all are | open — sandbox the root units, fix the sentence |
 | N6 | `systemd tmpfiles` and `environment.etc."nixos/*"` reach the broker's inputs and the /etc/nixos guard | open — fence them |
@@ -545,8 +545,8 @@ Its §5 lists claims without a test.
 
 6zj. **Strict mode and break-glass (ADR-035).** Open:
    - **No ledger, no shell, by the owner's decision (2026-11-05: "I prefer secure over back doors").**
-     If the entry cannot be written (a full disk; a broken ledger, which a power cut in the middle of
-     an append could leave) break-glass refuses, and with strict mode on sudo offers nothing else.
+     If the entry cannot be written (a full disk; a ledger edited or damaged: a power cut's torn line is
+     mended, N3) break-glass refuses, and with strict mode on sudo offers nothing else.
      This is a limit accepted, not a gap to close: do not add a fallback shell. The way back is the
      console: an older generation from before strict mode, if one is left (they are limited and
      collected, and an adopted machine may have none), and otherwise external media.

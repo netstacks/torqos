@@ -96,12 +96,65 @@ impl Ledger {
         Some(f)
     }
 
+    /// The ledger's whole lines. A last line with no newline is an append a power cut or a full disk
+    /// stopped: every line is written whole, newline last, and synced before its operation goes on,
+    /// so that operation did not finish, and the line is not an entry. It stays out of what is read,
+    /// and goes for good at the next `append` or `mend` (ledgered). A whole line that does not verify
+    /// is another thing, an edit, and is never mended.
     fn text(&self) -> Result<String> {
-        if !self.path.exists() {
-            return Ok(String::new());
-        }
-        fs::read_to_string(&self.path).with_context(|| format!("opening ledger {}", self.path.display()))
+        Ok(self.split()?.0)
     }
+
+    /// The whole lines, and the torn tail after them.
+    fn split(&self) -> Result<(String, Vec<u8>)> {
+        if !self.path.exists() {
+            return Ok((String::new(), Vec::new()));
+        }
+        let mut bytes = fs::read(&self.path).with_context(|| format!("opening ledger {}", self.path.display()))?;
+        let keep = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+        let tail = bytes.split_off(keep);
+        Ok((String::from_utf8(bytes).context("the ledger is not text")?, tail))
+    }
+
+    /// A torn last line, set aside beside the ledger, and an entry to say so. What pushes the ledger
+    /// calls this first: a remote that has seen a torn line would never match again. None: nothing torn.
+    pub fn mend(&self) -> Result<Option<Entry>> {
+        let _guard = self.exclusive()?;
+        self.mend_locked()
+    }
+
+    fn mend_locked(&self) -> Result<Option<Entry>> {
+        let (text, tail) = self.split()?;
+        if tail.is_empty() {
+            return Ok(None);
+        }
+        let kept = self.path.with_extension(format!("torn-{}", chrono::Utc::now().timestamp_millis()));
+        fs::write(&kept, &tail).with_context(|| format!("keeping the torn line in {}", kept.display()))?;
+        let f = OpenOptions::new().write(true).open(&self.path)?;
+        f.set_len(text.len() as u64).context("cutting the torn line off")?;
+        f.sync_all()?;
+        let digest = hex::encode(Sha256::digest(&tail));
+        self.append_locked(NewEntry {
+            actor: "broker".into(),
+            approved_by: None,
+            kind: "ledger_mended".into(),
+            tier: "system".into(),
+            tainted: false,
+            reason: format!("The ledger's last line was cut short ({} bytes), and removed", tail.len()),
+            data: serde_json::json!({ "bytes": tail.len(), "sha256": digest, "kept": kept.file_name().and_then(|n| n.to_str()) }),
+        })
+        .map(Some)
+    }
+
+    fn exclusive(&self) -> Result<fs::File> {
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let guard = OpenOptions::new().write(true).create(true).truncate(false).open(self.path.with_extension("lock"))?;
+        guard.lock().context("locking the ledger")?;
+        Ok(guard)
+    }
+
 
     fn parse(text: &str) -> Result<Vec<Entry>> {
         let mut out = vec![];
@@ -132,11 +185,13 @@ impl Ledger {
     pub fn append(&self, new: NewEntry) -> Result<Entry> {
         // One writer at a time, and for milliseconds: separate from the broker's lock, which an
         // operation holds for minutes, so that `torq break-glass` is recorded while a switch is stuck.
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let guard = OpenOptions::new().write(true).create(true).truncate(false).open(self.path.with_extension("lock"))?;
-        guard.lock().context("locking the ledger")?;
+        // A torn line goes first: a power cut must not cost the ledger, and every way back with it.
+        let _guard = self.exclusive()?;
+        self.mend_locked()?;
+        self.append_locked(new)
+    }
+
+    fn append_locked(&self, new: NewEntry) -> Result<Entry> {
         let entries = Self::parse(&self.text()?)?;
         verify_entries(&entries)?;
         let (seq, prev_hash) = match entries.last() {

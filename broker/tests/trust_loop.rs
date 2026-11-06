@@ -2185,12 +2185,15 @@ fn a_password_is_kept_outside_the_repo_and_ledgered_without_it() {
     for (user, bad) in [("casey", "plaintext"), ("casey", "$6$a:b"), ("casey", "$6$a\nroot:$6$x"), ("../x", hash), ("Casey", hash), ("root", hash), ("sshd", hash), ("nixbld1", hash), ("nobody", hash)] {
         assert!(b.set_password(user, bad, "casey").is_err(), "{user} {bad:?}");
     }
-    // Not set in the running system (no such account): nothing kept, nothing ledgered.
+    // Not set in the running system (no such account): nothing kept, and the ledger says it failed.
     let failing = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_passwords(&pw, "false").with_people(&people);
     let before = b.ledger.read_all().unwrap().len();
     assert!(failing.set_password("casey", "$6$other$hash", "casey").is_err());
     assert_eq!(fs::read_to_string(pw.join("casey")).unwrap(), format!("{hash}\n"), "kept as it was");
-    assert!(b.ledger.read_all().unwrap().len() == before);
+    // On the record first, so a change is never silent: the attempt, then that it failed.
+    let after = b.ledger.read_all().unwrap();
+    assert_eq!(after.len(), before + 2);
+    assert_eq!((after[before].body.kind.as_str(), after[before + 1].body.kind.as_str()), ("password", "password_failed"));
 }
 
 /// ADR-041: what the agent may propose is a default-deny list, judged by what the change does, and
@@ -2537,4 +2540,74 @@ fn no_restore_while_a_commit_confirmed_waits() {
     m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
     let e = format!("{:#}", m.b.restore_data(seq, "/home/alice/a", "casey").unwrap_err());
     assert!(e.contains("commit confirmed is waiting"), "{e}");
+}
+
+/// N3: a power cut in the middle of an append left a line with no end, and every command after it,
+/// recovery too, refused. Read past, set aside, and ledgered; a whole line that does not verify is an
+/// edit, and is never mended.
+#[test]
+fn a_torn_last_line_is_mended_and_an_edit_is_not() {
+    use std::io::Write;
+    let torn = |bytes: &[u8]| {
+        let (dir, repo) = config_dir();
+        let b = Broker::new(&repo, dir.path().join("state"), "true");
+        b.init().unwrap();
+        let mut f = fs::OpenOptions::new().append(true).open(b.ledger.path()).unwrap();
+        f.write_all(bytes).unwrap();
+        (dir, b)
+    };
+    let cut = br#"{"seq":2,"ts":"2026-11-06T00:00:00Z","actor":"us"#;
+    // Cut short, cut in the middle of a character, and the zeros a file system can leave.
+    for tail in [&cut[..], "{\"reason\":\"é".as_bytes().split_last().unwrap().1, &[0u8; 64][..]] {
+        let (dir, b) = torn(tail);
+        // Read past: what looks at the ledger sees what was finished.
+        assert_eq!(b.ledger.verify().unwrap(), 1, "{tail:?}");
+        // Mended at the next entry, whoever writes it: break-glass, the way back, above all.
+        let (e, _) = b.break_glass("alice", "after the power cut").unwrap();
+        let all = b.ledger.read_all().unwrap();
+        assert_eq!((all[1].body.kind.as_str(), all[1].body.actor.as_str(), e.body.seq), ("ledger_mended", "broker", 3));
+        assert_eq!(all[1].body.data["bytes"], tail.len());
+        b.ledger.verify().unwrap();
+        // And kept: what the line said is for a person to read.
+        let kept = dir.path().join("state").join(all[1].body.data["kept"].as_str().unwrap());
+        assert_eq!(fs::read(kept).unwrap(), tail);
+    }
+    // At a start, by itself.
+    let (_dir, b) = torn(cut);
+    b.init().unwrap();
+    assert_eq!(b.ledger.read_all().unwrap()[1].body.kind, "ledger_mended");
+    assert!(b.ledger.mend().unwrap().is_none(), "nothing torn now");
+    // A whole line that is not an entry is an edit: refused, not removed.
+    let (_dir, b) = torn(b"{\"seq\":2}\n");
+    assert!(b.ledger.verify().is_err());
+    assert!(b.break_glass("alice", "why").is_err());
+    assert!(b.ledger.mend().unwrap().is_none());
+    // An edit before a torn line stays an edit: mending does not make it right.
+    let (_dir, b) = torn(b"{\"seq\":2}\n{\"cut");
+    assert!(b.break_glass("alice", "why").is_err());
+}
+
+/// The ledger and the repository each say who approved what: rewriting one alone is seen. By the entry's
+/// commit, so an entry landing during an apply, and a rolled-back commit, raise nothing.
+#[test]
+fn the_ledger_is_checked_against_the_repository() {
+    let m = Confirmable::new();
+    let p = m.propose_theme();
+    let a = m.b.apply(p, "casey", false).unwrap();
+    let r = m.b.revert(a.body.seq, "casey").unwrap();
+    assert_eq!(m.b.status().unwrap().disagreements, Vec::<String>::new());
+    // Rolled back: its commit gone from history is no disagreement.
+    let p = m.propose_theme();
+    let c = m.b.apply_confirmed(p, "casey", false, 1).unwrap();
+    m.b.expire_confirm(Some(c.body.seq), false).unwrap().expect("rolled back");
+    assert_eq!(m.b.status().unwrap().disagreements, Vec::<String>::new());
+    // The commit rewritten to say someone else approved it.
+    let commit = r.body.data["commit"].as_str().unwrap();
+    let msg = git(&m.b, &["log", "-1", "--format=%B", commit]).replace("Approved-By: casey", "Approved-By: mallory");
+    let tree = git(&m.b, &["rev-parse", &format!("{commit}^{{tree}}")]);
+    let parent = git(&m.b, &["rev-parse", &format!("{commit}^")]);
+    let forged = git(&m.b, &["-c", "user.name=m", "-c", "user.email=m@m", "commit-tree", tree.trim(), "-p", parent.trim(), "-m", msg.trim()]);
+    git(&m.b, &["update-ref", "refs/heads/main", forged.trim()]);
+    let d = m.b.status().unwrap().disagreements;
+    assert!(d.iter().any(|x| x.contains(&format!("#{}", r.body.seq)) && x.contains("not in the machine")), "{d:?}");
 }

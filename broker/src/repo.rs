@@ -216,6 +216,20 @@ impl Repo {
         self.text_at_most(commit, "ledger.jsonl", max).with_context(|| format!("the ledger at {commit} is missing, or larger than {max} bytes"))
     }
 
+    /// Each commit of the machine's history, with who its message says approved it and which proposal it
+    /// carries: what the ledger is checked against (`Broker::commits_disagree`).
+    pub fn commit_trailers(&self) -> Result<std::collections::HashMap<String, (String, String)>> {
+        let format = "--format=%H%x09%(trailers:key=Approved-By,valueonly,separator=)%x09%(trailers:key=Proposal,valueonly,separator=)";
+        let out = self.git(&["log", "HEAD", format])?;
+        Ok(out
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                Some((f.next()?.to_string(), (f.next()?.to_string(), f.next()?.to_string())))
+            })
+            .collect())
+    }
+
     /// Every path of commit `rev`'s tree, with its mode (100644, 100755, 120000 a link, 160000 …).
     pub fn tree_paths(&self, rev: &str) -> Result<Vec<(String, String)>> {
         let out = self.git(&["ls-tree", "-r", "-z", rev])?;

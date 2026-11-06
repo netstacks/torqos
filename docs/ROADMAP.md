@@ -179,7 +179,7 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
       shell only after a ledger entry, anchored. A VM test that a shell leaves its entry.
 - [x] **Data snapshots before each system change** (ADR-038) on btrfs, in new images; restored by a person, with `request system snapshot restore`. The
       backup and offering data at `rollback` are not built.
-- [ ] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
+- [x] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
       the `Ledger-Entry` trailer cross-check.
 
 ### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038)

@@ -217,6 +217,9 @@ pub struct Adoptable {
 #[derive(Debug)]
 pub struct Status {
     pub ledger: std::result::Result<usize, String>,
+    /// Where the ledger and the repository disagree about a change: each must be rewritten to agree
+    /// with the other, and a rewrite of one is seen here.
+    pub disagreements: Vec<String>,
     /// The config repo's HEAD; None if git cannot read it.
     pub head: Option<String>,
     /// Uncommitted changes in the config repo (only the broker writes it).
@@ -260,6 +263,7 @@ impl Status {
         if let Err(e) = &self.ledger {
             p.push(format!("ledger: {e}"));
         }
+        p.extend(self.disagreements.iter().map(|d| format!("the ledger and the repository disagree: {d}")));
         // The remote (ADR-036). What a person reads here is this machine's own record: root can
         // rewrite it as it can the ledger. The check that root cannot reach is the remote itself —
         // its ledger branch, read from anywhere.
@@ -549,6 +553,7 @@ impl Broker {
     pub fn sync_remote(&self) -> Result<Option<remote::Pushed>> {
         let Some(r) = self.remote()? else { return Ok(None) };
         let Some(_lock) = Lock::try_acquire(&self.state_dir)? else { return Ok(None) };
+        self.ledger.mend().context("mending the ledger before a push")?;
         let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let before = r.last();
         let last_ok = before.as_ref().and_then(|p| if p.ok { Some(p.at.clone()) } else { p.last_ok.clone() });
@@ -1140,6 +1145,34 @@ impl Broker {
         self.facts(busy)
     }
 
+    /// Each change the ledger says was made, against the repository's commit for it: there, approved
+    /// by the same person, of the same proposal. By the entry's own `commit`, not the `Ledger-Entry`
+    /// trailer, which an entry landing during an apply can leave one short. In HEAD's history, not just
+    /// somewhere in the repository: a rewrite of `main` leaves the old commits behind. A commit rolled
+    /// back is out of history on purpose.
+    fn commits_disagree(&self, entries: &[Entry]) -> Vec<String> {
+        const SAID: usize = 5;
+        let Ok(commits) = self.repo.commit_trailers() else { return Vec::new() };
+        let gone: std::collections::HashSet<u64> = entries.iter().filter(|e| e.body.kind == "rolled_back").filter_map(|e| e.body.data["applied"].as_u64()).collect();
+        entries
+            .iter()
+            .filter(|e| matches!(e.body.kind.as_str(), "applied" | "reverted") && !gone.contains(&e.body.seq))
+            .filter_map(|e| {
+                let seq = e.body.seq;
+                let commit = e.body.data["commit"].as_str()?;
+                let Some((by, proposal)) = commits.get(commit) else {
+                    return Some(format!("#{seq} names commit {commit}, which is not in the machine's history"));
+                };
+                if e.body.approved_by.as_deref() != Some(by.as_str()) {
+                    return Some(format!("#{seq} says {} approved it, its commit says {by:?}", e.body.approved_by.as_deref().unwrap_or("no one")));
+                }
+                let wanted = e.body.data["proposal"].as_u64().map(|p| p.to_string());
+                (wanted.is_some() && wanted.as_deref() != Some(proposal.as_str())).then(|| format!("#{seq} applied proposal #{}, its commit says {proposal:?}", wanted.unwrap_or_default()))
+            })
+            .take(SAID)
+            .collect()
+    }
+
     /// The comparison itself, for a caller that already holds the lock (or knows it is busy).
     fn facts(&self, busy: Option<String>) -> Result<Status> {
         let ledger = self.ledger.verify().map_err(|e| format!("{e:#}"));
@@ -1165,6 +1198,7 @@ impl Broker {
             remote: self.remote().ok().flatten().and_then(|r| r.last()),
             remote_alarm: self.remote().ok().flatten().and_then(|r| r.alarm()),
             remote_refused: self.remote().err().map(|e| format!("{e:#}")),
+            disagreements: self.commits_disagree(&entries),
             ledger,
             head: self.repo.head().ok(),
             dirty: self.repo.ensure_clean().is_err() && self.repo.head().is_ok(),
@@ -1332,6 +1366,34 @@ impl Broker {
         if !policy::password_hash_ok(hash) {
             bail!("not a password hash this machine reads (SHA-512 or yescrypt crypt)");
         }
+        // On the record first: stopped between here and the change, the ledger says a little too much,
+        // and never too little. A password that changed with nothing to say so is the worse way round.
+        let entry = self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(by.into()),
+            kind: "password".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: format!("Password changed for {user}"),
+            data: json!({ "user": user }),
+        })?;
+        if let Err(e) = self.store_password(user, hash) {
+            self.ledger.append(NewEntry {
+                actor: "broker".into(),
+                approved_by: Some(by.into()),
+                kind: "password_failed".into(),
+                tier: Tier::System.to_string(),
+                tainted: false,
+                reason: format!("The password was not changed for {user}, after all"),
+                data: json!({ "user": user, "entry": entry.body.seq, "error": format!("{e:#}").chars().filter(|c| !c.is_control()).take(300).collect::<String>() }),
+            })?;
+            return Err(e);
+        }
+        Ok(entry)
+    }
+
+    /// A new hash in the running system, then kept where every later build finds it.
+    fn store_password(&self, user: &str, hash: &str) -> Result<()> {
         // At once: the running system's own tool. It fails for an account this machine does not have.
         let mut words = self.password_cmd.split_whitespace();
         let mut cmd = config::command(words.next().unwrap_or("chpasswd"));
@@ -1342,29 +1404,23 @@ impl Broker {
         if !out.status.success() {
             bail!("the password was not set: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
-        // Kept: written whole (a new file, then renamed over the old), private to the system.
-        {
-            use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.passwords_dir)?;
-            let part = self.passwords_dir.join(format!(".{user}.new"));
-            let _ = std::fs::remove_file(&part);
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?;
-            f.write_all(format!("{hash}\n").as_bytes())?;
-            f.sync_all()?;
-            std::fs::rename(&part, self.passwords_dir.join(user))?;
-        }
-        self.ledger.append(NewEntry {
-            actor: "user".into(),
-            approved_by: Some(by.into()),
-            kind: "password".into(),
-            tier: Tier::System.to_string(),
-            tainted: false,
-            reason: format!("Password changed for {user}"),
-            data: json!({ "user": user }),
-        })
+        // Kept: written whole (a new file, then renamed over the old), private to the system, and the
+        // folder synced: a rename is only as lasting as its directory.
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.passwords_dir)?;
+        let part = self.passwords_dir.join(format!(".{user}.new"));
+        let _ = std::fs::remove_file(&part);
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?;
+        f.write_all(format!("{hash}\n").as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&part, self.passwords_dir.join(user))?;
+        fs::File::open(&self.passwords_dir)?.sync_all().context("syncing the passwords' folder")?;
+        Ok(())
     }
 
     pub fn init(&self) -> Result<()> {
+        // A power cut's torn line goes before anyone looks: this runs at every start.
+        self.ledger.mend().context("mending the ledger")?;
         // A first-boot setup cut short after its switch: finished here, at the new system's start
         // (torq-broker-init). While setup itself holds the lock — its own switch starts this unit —
         // there is nothing to do: setup finishes, or its record stays for the next start.
@@ -2519,6 +2575,7 @@ mod tests {
     fn status(pending: Option<PendingConfirm>, overdue: bool, next_boot: &str) -> Status {
         Status {
             ledger: Ok(3),
+            disagreements: vec![],
             head: Some("c".into()),
             dirty: false,
             ledgered_commit: Some("c".into()),
