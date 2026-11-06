@@ -1,28 +1,26 @@
-# The image's disk: NixOS's image builder makes it whole, boot loader and all, on ext4, the only file
+# The image's disk: NixOS's image builder (through its option: ADR-039 keeps nixpkgs' tree out of reach)
+# makes it whole, boot loader and all, on ext4, the only file
 # system it partitions; a second step copies that root onto btrfs and keeps its EFI partition as it
 # is. btrfs for snapshots of data (ADR-038). The layout is hosts/image/hardware-configuration.nix's.
-{ config, lib, pkgs, modulesPath, ... }:
+{ config, lib, pkgs, ... }:
 
 let
-  built = import (modulesPath + "/../lib/make-disk-image.nix") {
-    inherit lib config pkgs;
-    format = "raw";
-    partitionTableType = "efi";
-    diskSize = "auto";
-    additionalSpace = "512M";
-    baseName = "built";
-  };
+  built = config.system.build.images.qemu-efi;
   vm = pkgs.vmTools.override {
     rootModules = [ "virtio_pci" "virtio_mmio" "virtio_blk" "virtio_balloon" "virtio_rng" "ext4" "virtiofs" "crc32c" "btrfs" "vfat" "nls_cp437" "nls_iso8859-1" ];
   };
 in
 {
+  # The builder's module says ext4 for the disk it makes; the system on it says btrfs, as it will be.
+  image.modules.qemu-efi = { lib, ... }: { fileSystems."/".fsType = lib.mkForce "btrfs"; };
+
   system.build.torqDisk = vm.runInLinuxVM (pkgs.runCommand "torqos-disk"
     {
       memSize = 4096;
       nativeBuildInputs = [ pkgs.btrfs-progs pkgs.util-linux pkgs.qemu-utils pkgs.coreutils ];
       preVM = ''
-        src=${built}/built.img
+        ${pkgs.qemu-utils}/bin/qemu-img convert -f qcow2 -O raw ${built}/*.qcow2 built.raw
+        src=built.raw
         # Room for btrfs's metadata, more than ext4's.
         size=$(( $(stat -c %s "$src") * 5 / 4 ))
         ${pkgs.qemu-utils}/bin/qemu-img create -f raw disk.raw $size
