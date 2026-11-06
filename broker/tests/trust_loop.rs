@@ -2704,5 +2704,11 @@ fn a_ledger_rewritten_alone_is_seen_and_a_person_can_say_they_looked() {
     assert_eq!(e.body.data["entries"], serde_json::json!([a.body.seq]));
     assert_eq!(m.b.status().unwrap().disagreements, Vec::<String>::new());
     assert!(m.b.acknowledge_disagreements("casey").is_err(), "nothing left to acknowledge");
+    // Something else wrong with the same entry is new: said, whatever was looked into before.
+    let looked = fs::read(&path).unwrap();
+    fs::write(&path, rewrite("mallory", p + 40)).unwrap();
+    let d = m.b.status().unwrap().disagreements;
+    assert!(d.iter().any(|x| x.contains("says mallory approved it")), "{d:?}");
+    fs::write(&path, looked).unwrap();
     fs::write(&path, real).unwrap();
 }

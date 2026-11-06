@@ -268,8 +268,8 @@ impl Status {
         p
     }
 
-    /// What a rebuild could put right: the machine against its ledger. Not what the record itself says of
-    /// itself, which no rebuild touches.
+    /// The machine against its ledger, and its remote. Not what the record says of
+    /// itself, which `repair` has no business rebuilding for.
     pub fn drift(&self) -> Vec<String> {
         if self.busy.is_some() {
             return Vec::new();
@@ -898,8 +898,7 @@ impl Broker {
             }
         }
         // The old machine's history is this one's: in, whole, and this adoption on top of it.
-        fs::copy(self.state_dir.join("adopt-ledger.jsonl"), self.ledger.path()).context("installing the ledger")?;
-        fs::File::open(self.ledger.path()).and_then(|l| l.sync_all()).context("installing the ledger")?;
+        self.ledger.install(&fs::read(self.state_dir.join("adopt-ledger.jsonl")).context("reading the staged ledger")?).context("installing the ledger")?;
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: None,
@@ -1191,17 +1190,13 @@ impl Broker {
     /// Each entry that disagrees, and how, that no one has looked at (`acknowledge_disagreements`).
     fn disagreeing(&self, entries: &[Entry]) -> Result<Vec<(u64, String)>> {
         let commits = self.repo.commit_trailers()?;
-        let settled = |kind: &str, key: &str| -> std::collections::HashSet<u64> {
-            entries.iter().filter(|e| e.body.kind == kind).flat_map(|e| match &e.body.data[key] {
-                serde_json::Value::Array(l) => l.iter().filter_map(|v| v.as_u64()).collect::<Vec<_>>(),
-                v => v.as_u64().into_iter().collect(),
-            }).collect()
-        };
-        let gone = settled("rolled_back", "applied");
-        let seen = settled("disagreement_acknowledged", "entries");
+        // Only of what came before them: a ledger from elsewhere cannot settle what is yet to happen.
+        let gone: std::collections::HashSet<u64> = entries.iter().filter(|e| e.body.kind == "rolled_back").filter_map(|e| e.body.data["applied"].as_u64().filter(|a| *a < e.body.seq)).collect();
+        // What was looked into, word for word: a different disagreement about the same entry is new.
+        let seen: std::collections::HashSet<&str> = entries.iter().filter(|e| e.body.kind == "disagreement_acknowledged").flat_map(|e| e.body.data["said"].as_array().into_iter().flatten()).filter_map(|s| s.as_str()).collect();
         Ok(entries
             .iter()
-            .filter(|e| matches!(e.body.kind.as_str(), "applied" | "reverted") && !gone.contains(&e.body.seq) && !seen.contains(&e.body.seq))
+            .filter(|e| matches!(e.body.kind.as_str(), "applied" | "reverted") && !gone.contains(&e.body.seq))
             .filter_map(|e| {
                 let seq = e.body.seq;
                 let commit = e.body.data["commit"].as_str()?;
@@ -1214,6 +1209,7 @@ impl Broker {
                 let wanted = e.body.data["proposal"].as_u64().map(|p| p.to_string());
                 (wanted.is_some() && wanted.as_deref() != Some(proposal.as_str())).then(|| (seq, format!("#{seq} applied proposal #{}, its commit says {proposal:?}", wanted.unwrap_or_default())))
             })
+            .filter(|(_, said)| !seen.contains(said.as_str()))
             .collect())
     }
 
@@ -1447,7 +1443,7 @@ impl Broker {
         })?;
         let Err((running, e)) = self.store_password(user, hash) else { return Ok(entry) };
         let reason = if running {
-            format!("The password for {user} is set in the running system but may not be kept: a later build may bring the old one back")
+            format!("The password for {user} is set in the running system but may not be kept: the next start or build may bring the old one back")
         } else {
             format!("The password was not changed for {user}, after all")
         };

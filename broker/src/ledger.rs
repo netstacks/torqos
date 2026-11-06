@@ -96,10 +96,10 @@ impl Ledger {
         Some(f)
     }
 
-    /// The ledger's whole lines. A last line with no newline is an append a power cut or a full disk
+    /// The ledger's whole lines. A last line with no newline is, almost always, an append a power cut or a full disk
     /// stopped: every line is written whole, newline last, and synced before its operation goes on,
-    /// so that operation did not finish, and the line is not an entry. It stays out of what is read,
-    /// and goes for good at the next `append` or `mend` (ledgered). A whole line that does not verify
+    /// so that operation did not finish. It stays out of what is read,
+    /// and is settled at the next `append` or `mend` (`mend_locked` says how). A whole line that does not verify
     /// is another thing, an edit, and is never mended.
     pub fn text(&self) -> Result<String> {
         Ok(self.split()?.0)
@@ -125,7 +125,14 @@ impl Ledger {
 
     /// Whether a torn line is waiting, for `status`: nothing mends it until something writes.
     pub fn torn(&self) -> bool {
+        let _held = self.shared();
         self.split().is_ok_and(|(_, tail)| !tail.is_empty())
+    }
+
+    /// A whole ledger from elsewhere, at once (a machine adopting another's): all of it, or none.
+    pub fn install(&self, bytes: &[u8]) -> Result<()> {
+        let _guard = self.exclusive()?;
+        self.write_durably(&self.path, bytes)
     }
 
     fn mend_locked(&self) -> Result<Option<Entry>> {

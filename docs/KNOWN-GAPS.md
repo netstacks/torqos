@@ -257,7 +257,7 @@ is 6p, N18 is 6 (below).
 | N1 | **high:** a `_`-named `nixos/*.json` file (`_type`, `contents`) gets past the fence | fixed: a file there is named after a top-level NixOS option, never `_` (modules/nixos-settings.nix; tree: nixos-fence-underscore-file) |
 | N2 | **high:** `users extraUsers` (NixOS's alias) gets past the password rule; root can get a password | fixed: the aliases are fenced (settings-fence.nix `aliases`); an assertion keeps root without a password, a config file included (tree: nixos-fence-alias-users, config-root-password) |
 | M2 / N12 | A missing boot profile is not a problem to `status`; `repair` counts it as fine | open (apply/restore half fixed) |
-| M3 | A password change can take effect without its ledger entry; no fsync of the folder | fixed: the entry first, `password_failed` after it if the change fails, saying whether the running system has it; the folder synced. Stopped between the two, the ledger says too much, never too little |
+| M3 | A password change can take effect without its ledger entry; no fsync of the folder | fixed: the entry first, `password_failed` after it if the change fails, saying whether the running system has it; the folder synced. Stopped between the two, the ledger says too much, never too little. A crash after the running system has it and before it is kept leaves no `password_failed`, and the next start or build brings the old one back |
 | M4 / N13 | Outside-switch checks are a moment's; `confirm` has none (nor the unledgered-HEAD check) | open |
 | L1 | Proposal file names printed unescaped | fixed: escaped as everything the broker shows |
 | L2 | `XDG_STATE_HOME` taken without an owner check | open |
@@ -549,6 +549,7 @@ Its §5 lists claims without a test.
    - **No ledger, no shell, by the owner's decision (2026-11-05: "I prefer secure over back doors").**
      If the entry cannot be written (a full disk; a ledger edited or damaged: a power cut's torn line is
      mended, N3) break-glass refuses, and with strict mode on sudo offers nothing else.
+     A torn line on a nearly full disk counts: mending needs room for a copy of the ledger.
      This is a limit accepted, not a gap to close: do not add a fallback shell. The way back is the
      console: an older generation from before strict mode, if one is left (they are limited and
      collected, and an adopted machine may have none), and otherwise external media.

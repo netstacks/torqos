@@ -577,6 +577,8 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                         "interrupted": s.interrupted,
                         "unrestored": s.unrestored,
                         "pending_confirm": s.pending_confirm,
+                        "disagreements": s.disagreements,
+                        "torn": s.torn,
                     })
                 );
                 std::process::exit(if s.busy.is_some() { 75 } else if problems.is_empty() { 0 } else { 1 });
