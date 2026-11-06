@@ -495,9 +495,10 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set time timeZone"), "Europe/Be")), ["Europe/Belfast", "Europe/Belgrade", "Europe/Berlin"]);
         assert!(choices(&s, Mode::Configuration, &w("set nonsense"), "").is_empty());
         // Config files: `config` at a place, then a file.
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd"), "c")), ["config"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd"), "c")), ["config", "configFile"]);
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set serv httpd config"), "")), ["<file>"], "the word, abbreviated place or not: not the option");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("set services httpd config"), "")), ["<file>"]);
-        assert!(choices(&s, Mode::Configuration, &w("show services httpd"), "c").is_empty(), "show has no config to attach");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("show services httpd"), "c")), ["configFile"], "show has no config to attach");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("file"), "")), ["delete", "edit", "list", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("load"), "")), ["merge", "override", "set"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "l")), ["load"]);

@@ -223,6 +223,17 @@
       }
     },
     {
+      "help": "Override the configuration file used by Apache. By default, NixOS generates one automatically.",
+      "loc": [
+        "services",
+        "httpd",
+        "configFile"
+      ],
+      "type": {
+        "name": "path"
+      }
+    },
+    {
       "help": "Whether to enable the Apache HTTP Server.",
       "loc": [
         "services",
