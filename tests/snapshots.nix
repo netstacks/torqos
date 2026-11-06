@@ -24,7 +24,8 @@ pkgs.testers.runNixOSTest {
     torq.snapshots.keep = 3;
     # The image's layout, mounted at boot as an installed machine's is, so snapshots come on by
     # themselves. A test VM's disk starts empty: laid out in the initrd, before anything mounts it.
-    virtualisation.emptyDiskImages = [ 2048 ];
+    # The data, and the record's own, small: so that the first fills while the second has room.
+    virtualisation.emptyDiskImages = [ 2048 64 ];
     virtualisation.fileSystems =
       let
         subvolume = name: { device = "/dev/vdb"; fsType = "btrfs"; options = [ "subvol=${name}" ]; };
@@ -32,23 +33,24 @@ pkgs.testers.runNixOSTest {
       {
         "/home" = subvolume "@home" // { neededForBoot = true; };
         "/var/lib" = subvolume "@var-lib" // { neededForBoot = true; };
-        "/var/lib/torq" = subvolume "@var-lib-torq" // { neededForBoot = true; };
+        "/var/lib/torq" = { device = "/dev/vdc"; fsType = "ext4"; neededForBoot = true; };
         "/.snapshots" = subvolume "@snapshots";
       };
-    boot.initrd.systemd.initrdBin = [ pkgs.btrfs-progs ];
+    boot.initrd.systemd.initrdBin = [ pkgs.btrfs-progs pkgs.e2fsprogs ];
     boot.initrd.systemd.services.lay-out-disk = {
       unitConfig.DefaultDependencies = false;
-      requires = [ "dev-vdb.device" ];
-      after = [ "dev-vdb.device" ];
+      requires = [ "dev-vdb.device" "dev-vdc.device" ];
+      after = [ "dev-vdb.device" "dev-vdc.device" ];
       before = [ "initrd-fs.target" "sysroot-home.mount" "sysroot-var-lib.mount" "sysroot-var-lib-torq.mount" ];
       requiredBy = [ "sysroot-home.mount" "sysroot-var-lib.mount" "sysroot-var-lib-torq.mount" ];
       # Once: the initrd reloads systemd on its way, and a finished one-shot would run again.
       serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
       script = ''
         mkfs.btrfs -q -L data /dev/vdb
+        mkfs.ext4 -q -L torq /dev/vdc
         mkdir -p /top
         mount -t btrfs /dev/vdb /top
-        for s in @home @var-lib @var-lib-torq @snapshots; do btrfs -q subvolume create /top/$s; done
+        for s in @home @var-lib @snapshots; do btrfs -q subvolume create /top/$s; done
         chmod 700 /top/@snapshots
         umount /top
       '';
@@ -294,6 +296,17 @@ pkgs.testers.runNixOSTest {
         assert "keep 5" in out, out
         out = machine.fail(as_user("dev", "torqcli -c 'configure; set torq broker rebuildCommand x'") + " 2>&1")
         assert "not settable" in out, out
+
+    with subtest("a disk filled by another account leaves the record room (the audit of M3, M2)"):
+        # As the agent, in the home it has: until nothing more goes in.
+        machine.succeed("su -s /bin/sh torq-agent -c 'dd if=/dev/zero of=/var/lib/torq-agent/fill bs=1M status=none' || true")
+        machine.fail("su -s /bin/sh torq-agent -c 'echo x > /var/lib/torq-agent/more'")
+        # The record is written all the same: an entry, and a person's change.
+        n = int(machine.succeed("torq-broker log --json --brief | wc -l"))
+        machine.succeed("torq-broker break-glass --by dev --reason 'the disk is full'")
+        assert last()["kind"] == "break_glass", last()
+        assert int(machine.succeed("torq-broker log --json --brief | wc -l")) == n + 1
+        machine.succeed("rm /var/lib/torq-agent/fill")
 
     with subtest("a person's own changes push nothing out; only the newest are kept"):
         before = machine.succeed("ls /.snapshots")

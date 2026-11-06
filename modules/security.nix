@@ -48,7 +48,7 @@ in
     passwordLockout.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Five wrong passwords at sudo, su or passwd lock the account there for ten minutes, as at the broker's own check (ADR-040): a program running as a person cannot guess their password without limit. Counted in ${faillockDir}, root's alone (`faillock --dir ${faillockDir} --user <name> --reset`, as root, to clear it).";
+      description = "Five wrong passwords at sudo or passwd lock the account there for ten minutes, as at the broker's own check (ADR-040): a program running as a person cannot guess their password without limit. Counted in ${faillockDir}, root's alone (`faillock --dir ${faillockDir} --user <name> --reset`, as root, to clear it).";
     };
 
     secureBoot.enable = lib.mkOption {
@@ -91,9 +91,22 @@ in
     (lib.mkIf cfg.passwordLockout.enable {
       systemd.tmpfiles.settings."10-torq-faillock".${faillockDir}.d = { mode = "0700"; user = "root"; group = "root"; };
       security.pam.services.sudo = lockout;
-      security.pam.services.su = lockout;
+      # su is root's alone (below): it never asks a password, so it has none to count.
       security.pam.services.passwd = lockout;
     })
+
+    # su is root's alone. Root's own password is locked, so su only ever let one person become another,
+    # and every attempt spent the target's five wrong guesses: any account could lock the owner out of
+    # sudo, break-glass and every system change, as often as it liked (the audit of M3, M3). A person
+    # becomes another by being them; root still uses su as ever (pam_rootok, before this). Refused before
+    # any password is asked, so nothing is guessed, and nothing counted.
+    {
+      security.pam.services.su.rules.auth.torq-root-only = {
+        order = 10250;
+        control = "requisite";
+        modulePath = "${pkgs.pam}/lib/security/pam_deny.so";
+      };
+    }
 
     (lib.mkIf (cfg.lockdown != "none") {
       boot.kernelParams = [ "lockdown=${cfg.lockdown}" ];

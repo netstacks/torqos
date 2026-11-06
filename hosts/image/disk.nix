@@ -17,12 +17,12 @@ in
   system.build.torqDisk = vm.runInLinuxVM (pkgs.runCommand "torqos-disk"
     {
       memSize = 4096;
-      nativeBuildInputs = [ pkgs.btrfs-progs pkgs.util-linux pkgs.qemu-utils pkgs.coreutils ];
+      nativeBuildInputs = [ pkgs.btrfs-progs pkgs.e2fsprogs pkgs.util-linux pkgs.qemu-utils pkgs.coreutils ];
       preVM = ''
         ${pkgs.qemu-utils}/bin/qemu-img convert -f qcow2 -O raw ${built}/*.qcow2 built.raw
         src=built.raw
         # Room for btrfs's metadata, more than ext4's.
-        size=$(( $(stat -c %s "$src") * 5 / 4 ))
+        size=$(( $(stat -c %s "$src") * 5 / 4 + (1024 << 20) ))
         ${pkgs.qemu-utils}/bin/qemu-img create -f raw disk.raw $size
         diskImage=disk.raw
         QEMU_OPTS="$QEMU_OPTS -drive file=$src,if=virtio,format=raw,readonly=on,cache=unsafe"
@@ -36,22 +36,24 @@ in
     # The drive named by runInLinuxVM is vda; the built image vdb, read only.
     esp_start=$(cat /sys/class/block/vdb1/start)
     esp_size=$(cat /sys/class/block/vdb1/size)
-    printf 'label: gpt\nstart=%s, size=%s, type=U\ntype=L\n' "$esp_start" "$esp_size" | sfdisk --quiet /dev/vda
+    # The ESP as built; the record's own (1 GiB, before the root, which grows into the rest); the root.
+    printf 'label: gpt\nstart=%s, size=%s, type=U\nsize=1GiB, type=L\ntype=L\n' "$esp_start" "$esp_size" | sfdisk --quiet /dev/vda
     udevadm settle 2>/dev/null || true
     partx -u /dev/vda 2>/dev/null || true
     dd if=/dev/vdb1 of=/dev/vda1 bs=1M status=none
-    mkfs.btrfs -q -L nixos /dev/vda2
+    mkfs.ext4 -q -L torq -m 0 /dev/vda2
+    mkfs.btrfs -q -L nixos /dev/vda3
     mkdir -p /top /new /old
-    mount -t btrfs /dev/vda2 /top
-    for s in @ @home @var-lib @var-lib-torq @snapshots; do btrfs -q subvolume create /top/$s; done
+    mount -t btrfs /dev/vda3 /top
+    for s in @ @home @var-lib @snapshots; do btrfs -q subvolume create /top/$s; done
     umount /top
-    mount -t btrfs -o subvol=@ /dev/vda2 /new
+    mount -t btrfs -o subvol=@ /dev/vda3 /new
     mkdir -p /new/home /new/var/lib /new/.snapshots
-    mount -t btrfs -o subvol=@home /dev/vda2 /new/home
-    mount -t btrfs -o subvol=@var-lib /dev/vda2 /new/var/lib
+    mount -t btrfs -o subvol=@home /dev/vda3 /new/home
+    mount -t btrfs -o subvol=@var-lib /dev/vda3 /new/var/lib
     mkdir -p /new/var/lib/torq
-    mount -t btrfs -o subvol=@var-lib-torq /dev/vda2 /new/var/lib/torq
-    mount -t btrfs -o subvol=@snapshots /dev/vda2 /new/.snapshots
+    mount -t ext4 /dev/vda2 /new/var/lib/torq
+    mount -t btrfs -o subvol=@snapshots /dev/vda3 /new/.snapshots
     chmod 700 /new/.snapshots
     mount -t ext4 -o ro,noload /dev/vdb2 /old
     cp -a /old/. /new/

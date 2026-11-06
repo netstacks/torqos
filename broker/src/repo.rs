@@ -156,8 +156,8 @@ impl Repo {
     /// Push the configuration (HEAD) as the remote's `main` — never forced. Apart from the ledger: a
     /// `main` the remote refuses (another history there) must not keep the ledger from it (the second
     /// review of ADR-036).
-    pub fn push_main(&self, url: &str, ssh_command: &str) -> Result<()> {
-        self.git_net(ssh_command, &["push", "--porcelain", "--no-recurse-submodules", "--", url, "HEAD:refs/heads/main"])?;
+    pub fn push_main(&self, url: &str, ssh_command: &str, rev: &str) -> Result<()> {
+        self.git_net(ssh_command, &["push", "--porcelain", "--no-recurse-submodules", "--", url, &format!("{rev}:refs/heads/main")])?;
         Ok(())
     }
 

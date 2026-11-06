@@ -172,7 +172,7 @@ pkgs.testers.runNixOSTest {
             + str(image_bytes) + " / 512 ))"
         )
         # The ISO has no /mnt: a mount point of the test's own.
-        installer.succeed("mkdir -p /tmp/root && mount -o ro,subvol=@var-lib-torq /dev/vda2 /tmp/root")
+        installer.succeed("mkdir -p /tmp/root && mount -o ro LABEL=torq /tmp/root")
         hw = installer.succeed("cat /tmp/root/install/hardware-configuration.nix")
         installer.succeed("umount /tmp/root")
         assert "qemu-guest.nix" in hw and "by-label/nixos" in hw, hw
@@ -192,11 +192,14 @@ pkgs.testers.runNixOSTest {
         # Grown at boot (boot.growPartition, the file system's autoResize), from the image's 6 GB.
         installed.wait_until_succeeds("test $(df --output=size -B1 / | tail -1) -gt 10000000000", timeout=120)
         # One btrfs file system, each subvolume where it belongs, and the record not under /var/lib's.
-        for mount, subvol in [("/", "@"), ("/home", "@home"), ("/var/lib", "@var-lib"), ("/var/lib/torq", "@var-lib-torq"), ("/.snapshots", "@snapshots")]:
+        for mount, subvol in [("/", "@"), ("/home", "@home"), ("/var/lib", "@var-lib"), ("/.snapshots", "@snapshots")]:
             got = installed.succeed(f"findmnt -no FSTYPE,OPTIONS --mountpoint {mount}").strip()
             assert got.startswith("btrfs") and f"subvol=/{subvol}" in got, (mount, got)
         assert installed.succeed("stat -c %a /.snapshots").strip() == "700"
         assert installed.succeed("stat -c %a /var/lib/torq").strip() == "755"
+        # The record on a file system of its own: room whoever fills the rest (the audit of M3, M2).
+        assert installed.succeed("findmnt -no FSTYPE,SOURCE --mountpoint /var/lib/torq").split()[0] == "ext4"
+        assert installed.succeed("findmnt -no SOURCE --mountpoint /var/lib/torq") != installed.succeed("findmnt -no SOURCE --mountpoint /var/lib")
         # What the image carried came across: the system, the users' database, the detected hardware.
         installed.succeed("test -e /nix/var/nix/profiles/system && test -e /var/lib/nixos/uid-map")
         installed.succeed("test -s /var/lib/torq/install/hardware-configuration.nix")

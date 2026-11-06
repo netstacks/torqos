@@ -18,8 +18,8 @@ const BIN: &str = "/run/current-system/sw/bin";
 /// Where, inside the new disk's root, first-boot setup finds the hardware detected here.
 pub const DETECTED: &str = "var/lib/torq/install/hardware-configuration.nix";
 const WELCOME: &str = "Welcome to the TorqOS installer. It puts TorqOS on one of this machine's disks, erasing everything on it.";
-/// The subvolume of `/var/lib/torq` on the new disk (hosts/installer/file-systems.nix).
-const TORQ_SUBVOLUME: &std::ffi::CStr = c"subvol=@var-lib-torq";
+/// The label of `/var/lib/torq`'s own file system on the new disk (hosts/installer/file-systems.nix).
+const TORQ_LABEL: &str = "torq";
 
 /// The image's root file system's label (hosts/image/hardware-configuration.nix).
 const ROOT_LABEL: &str = "nixos";
@@ -424,7 +424,7 @@ fn install(image: &Path, bytes: u64, sha: &str) -> Result<String> {
 /// with a file system labelled the same — an earlier NixOS's root, another ESP — could be the one
 /// it starts from, or grows, or puts its boot loader on. Refused until that disk is out or cleared.
 fn others_labelled(d: &Disk) -> Result<()> {
-    for want in [ROOT_LABEL, BOOT_LABEL] {
+    for want in [ROOT_LABEL, BOOT_LABEL, TORQ_LABEL] {
         // Probed now, not from blkid's cache.
         let o = Command::new(format!("{BIN}/blkid")).args(["-c", "/dev/null", "-o", "device", "-t", &format!("LABEL={want}")]).stdin(Stdio::null()).output().context("running blkid")?;
         let found = labelled(o.status.code(), &String::from_utf8_lossy(&o.stdout), &String::from_utf8_lossy(&o.stderr), want)?;
@@ -662,20 +662,20 @@ fn detect(d: &Disk) -> Result<()> {
         settle();
     }
     settle();
-    // The image's root, by its label, among this disk's partitions only: each checked to be one
+    // The record's file system, by its label, among this disk's partitions only: each checked to be one
     // of the disk written, and from then on used as what was opened, not by its name.
     let root = (1..=16)
         .map(|n| format!("/dev/{}", partition(&d.name, n)))
         .filter(|p| Path::new(p).exists())
         .filter_map(|p| std::fs::File::open(&p).ok())
-        .find(|f| devno(f).and_then(|now| part_of(d, &now, Path::new("/sys"))).is_ok() && label(&fd_path(f)).as_deref() == Some(ROOT_LABEL))
-        .with_context(|| format!("TorqOS's root file system is not on {} after writing it", d.name))?;
+        .find(|f| devno(f).and_then(|now| part_of(d, &now, Path::new("/sys"))).is_ok() && label(&fd_path(f)).as_deref() == Some(TORQ_LABEL))
+        .with_context(|| format!("TorqOS's record file system is not on {} after writing it", d.name))?;
     let detected = tool("nixos-generate-config", &["--show-hardware-config", "--no-filesystems"])?;
     let file = hardware_file(&detected, &read_meta("file-systems.nix")?)?;
     let mnt = tempfile::tempdir().context("a place to mount the new disk")?;
     let at = mnt.path().to_path_buf();
     // The kernel mounts the partition opened above, through its open file.
-    rustix::mount::mount(fd_path(&root).as_str(), &at, "btrfs", rustix::mount::MountFlags::empty(), Some(TORQ_SUBVOLUME))
+    rustix::mount::mount(fd_path(&root).as_str(), &at, "ext4", rustix::mount::MountFlags::empty(), None)
         .with_context(|| format!("mounting TorqOS's root file system from {} at {}", d.name, at.display()))?;
     let wrote = (|| -> Result<()> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};

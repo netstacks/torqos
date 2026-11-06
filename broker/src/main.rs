@@ -344,7 +344,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. }
             | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. }
     );
-    let _push = writes.then_some(PushAfter(&b));
+    let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
     match cli.cmd {
         Cmd::Serve => unreachable!("served before the settings are read"),
         Cmd::RemoteKey => {
@@ -652,10 +652,14 @@ fn printable_text(s: &str) -> String {
 }
 
 /// Pushes to the remote when dropped: after a command that writes the ledger, however it ended.
-struct PushAfter<'a>(&'a Broker);
+/// The broker, and how long its ledger was: a command that wrote nothing has nothing to send (a
+/// refused proposal, over and over, was a way to keep the network and the lock busy: the audit of M3, M1).
+struct PushAfter<'a>(&'a Broker, usize);
 
 impl Drop for PushAfter<'_> {
     fn drop(&mut self) {
-        let _ = self.0.sync_remote();
+        if self.0.ledger.read_all().map_or(true, |l| l.len() != self.1) {
+            let _ = self.0.sync_remote();
+        }
     }
 }

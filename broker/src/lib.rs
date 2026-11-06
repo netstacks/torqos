@@ -259,7 +259,7 @@ impl Status {
     /// or that it could not be checked because an operation is running (`busy`).
     pub fn problems(&self) -> Vec<String> {
         let mut p = self.drift();
-        if self.busy.is_none() {
+        {
             p.extend(self.disagreements.iter().map(|d| format!("the ledger and the repository disagree: {d}")));
             if self.torn {
                 p.push("the ledger's last line was cut short (a power cut?): the next change or push removes it, and says so".into());
@@ -271,9 +271,6 @@ impl Status {
     /// The machine against its ledger, and its remote. Not what the record says of
     /// itself, which `repair` has no business rebuilding for.
     pub fn drift(&self) -> Vec<String> {
-        if self.busy.is_some() {
-            return Vec::new();
-        }
         let mut p = Vec::new();
         if let Err(e) = &self.ledger {
             p.push(format!("ledger: {e}"));
@@ -304,6 +301,11 @@ impl Status {
             if let Some(why) = last.main.as_deref().filter(|w| w.starts_with("the remote's main")) {
                 p.push(format!("{why} — the ledger is pushed; the configuration there is behind"));
             }
+        }
+        // The rest compares the machine with its record, which an operation is changing: meaningless while
+        // one runs. What the record says of itself, above, holds all the same.
+        if self.busy.is_some() {
+            return p;
         }
         if let Some(i) = &self.interrupted {
             p.push(format!("the {} of #{} was interrupted: run `torq-broker reconcile --approved-by <name>`", i.op, i.target));
@@ -362,13 +364,18 @@ impl Lock {
     /// collides with one must not fail for it. A real operation holds it for minutes; after a few
     /// seconds, refuse and say who has it.
     fn acquire(dir: &Path) -> Result<Self> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        Self::acquire_named(dir, "broker.lock", 3)
+    }
+
+    /// `name`, waited for up to `secs`.
+    fn acquire_named(dir: &Path, name: &str, secs: u64) -> Result<Self> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         loop {
-            if let Some(l) = Self::try_acquire(dir)? {
+            if let Some(l) = Self::try_named(dir, name)? {
                 return Ok(l);
             }
             if std::time::Instant::now() >= deadline {
-                return Err(Busy(Self::busy(dir)).into());
+                return Err(Busy(if name == "broker.lock" { Self::busy(dir) } else { format!("{} is held", dir.join(name).display()) }).into());
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -376,8 +383,12 @@ impl Lock {
 
     /// The lock, or None while another operation holds it.
     fn try_acquire(dir: &Path) -> Result<Option<Self>> {
+        Self::try_named(dir, "broker.lock")
+    }
+
+    fn try_named(dir: &Path, name: &str) -> Result<Option<Self>> {
         fs::create_dir_all(dir)?;
-        let p = dir.join("broker.lock");
+        let p = dir.join(name);
         OpenOptions::new().write(true).create(true).truncate(false).open(&p)?;
         // Read-only: the fd is handed to the rebuild as stdin, and nothing should write into it.
         let f = fs::File::open(&p)?;
@@ -566,7 +577,14 @@ impl Broker {
     /// pushes when it is done). Out of reach: recorded; the change stands.
     pub fn sync_remote(&self) -> Result<Option<remote::Pushed>> {
         let Some(r) = self.remote()? else { return Ok(None) };
-        let Some(_lock) = Lock::try_acquire(&self.state_dir)? else { return Ok(None) };
+        // One push at a time, under a lock of its own: what waits on the network is no operation's, and
+        // holding the broker's across it let any account's requests keep every check busy (the audit of
+        // M3, M1). Three exchanges of 60 s each at most: another push still running then is a stuck one.
+        let _push = match Lock::acquire_named(&self.state_dir, "push.lock", 200) {
+            Ok(l) => l,
+            Err(e) if e.downcast_ref::<Busy>().is_some() => return Ok(None),
+            Err(e) => return Err(e),
+        };
         let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let before = r.last();
         let last_ok = before.as_ref().and_then(|p| if p.ok { Some(p.at.clone()) } else { p.last_ok.clone() });
@@ -625,12 +643,24 @@ impl Broker {
         r.set_verified(&commit)?;
         // Then `main` — never while it may yet be rewound: a commit confirmed waiting (its rollback),
         // an operation unfinished (its reconcile), a setup not yet done; never forced.
-        let main = if pending_confirm(&entries).is_some() {
-            Some("not pushed while a commit confirmed waits (it may yet be rolled back)".to_string())
-        } else if self.read_pending()?.is_some() || self.setup_path().exists() {
-            Some("not pushed while an operation is unfinished".to_string())
-        } else {
-            self.repo.push_main(&r.url, &ssh).err().map(|e| format!("the remote's main did not take this configuration: {e:#}"))
+        // The commit is chosen under the broker's lock, where no operation is half done, and pushed after
+        // it is let go: a commit settled then is one no rollback rewinds.
+        let settled = match Lock::acquire(&self.state_dir) {
+            Err(e) if e.downcast_ref::<Busy>().is_some() => Err("not pushed while an operation runs (the next push takes it)".to_string()),
+            Err(e) => return Err(e),
+            Ok(_l) => {
+                if pending_confirm(&self.ledger.read_all()?).is_some() {
+                    Err("not pushed while a commit confirmed waits (it may yet be rolled back)".to_string())
+                } else if self.read_pending()?.is_some() || self.setup_path().exists() {
+                    Err("not pushed while an operation is unfinished".to_string())
+                } else {
+                    Ok(self.repo.head()?)
+                }
+            }
+        };
+        let main = match settled {
+            Err(why) => Some(why),
+            Ok(rev) => self.repo.push_main(&r.url, &ssh, &rev).err().map(|e| format!("the remote's main did not take this configuration: {e:#}")),
         };
         let p = remote::Pushed { at: now(), ok: true, error: None, main, entries: entries.len(), anchor: Some(anchor), last_ok: Some(now()), failing_since: None };
         r.record(&p)?;
@@ -1220,7 +1250,13 @@ impl Broker {
     /// Compare the machine with its ledger. Read-only, but under the lock: during an operation the
     /// comparison would be meaningless, so it reports `busy` instead.
     pub fn status(&self) -> Result<Status> {
-        let lock = Lock::try_acquire(&self.state_dir)?; // held until the comparison is done
+        // Waiting as an operation does: a stream of quick ones (refused proposals, say) must not make
+        // every check "busy" and so silent (the audit of M3, M1). Busy means a real operation.
+        let lock = match Lock::acquire(&self.state_dir) {
+            Ok(l) => Some(l),
+            Err(e) if e.downcast_ref::<Busy>().is_some() => None,
+            Err(e) => return Err(e),
+        };
         let busy = lock.is_none().then(|| Lock::busy(&self.state_dir));
         self.facts(busy)
     }

@@ -342,8 +342,8 @@ in
     '';
     system.activationScripts.etc.deps = lib.mkIf cfg.guardEtcNixos [ "torq-guard-etc-nixos" ];
     assertions = lib.mkMerge [ [{
-      assertion = !config.torq.snapshots.enable || lib.all (m: (config.fileSystems.${m}.fsType or "") == "btrfs") [ "/home" "/var/lib" "/var/lib/torq" "/.snapshots" ];
-      message = "torq.snapshots: /home, /var/lib, /var/lib/torq and /.snapshots must each be a btrfs subvolume: /var/lib/torq above all, or every snapshot of /var/lib would hold the ledger and the password hashes. Without that layout, set torq.snapshots.enable = false.";
+      assertion = !config.torq.snapshots.enable || (lib.all (m: (config.fileSystems.${m}.fsType or "") == "btrfs") [ "/home" "/var/lib" "/.snapshots" ] && config.fileSystems ? "/var/lib/torq" && config.fileSystems."/var/lib/torq".device != config.fileSystems."/var/lib".device);
+      message = "torq.snapshots: /home, /var/lib and /.snapshots must each be a btrfs subvolume, and /var/lib/torq a file system of its own: otherwise every snapshot of /var/lib would hold the ledger and the password hashes, and filling the disk would leave the record no room. Without that layout, set torq.snapshots.enable = false.";
     }] (lib.mkIf cfg.guardEtcNixos [{
       # With a mutable /etc overlay, moving the old file aside leaves a whiteout that hides the stub.
       assertion = !(config.system.etc.overlay.enable or false);

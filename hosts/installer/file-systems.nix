@@ -17,7 +17,9 @@ in
   # Activation reads and writes them: new accounts' homes, the users' database, the password hashes.
   fileSystems."/home" = subvolume "@home" // { neededForBoot = true; };
   fileSystems."/var/lib" = subvolume "@var-lib" // { neededForBoot = true; };
-  fileSystems."/var/lib/torq" = subvolume "@var-lib-torq" // { neededForBoot = true; };
+  # A file system of its own, root's alone: the record has room whoever fills the rest (the audit of M3,
+  # M2), and no snapshot of /var/lib holds it.
+  fileSystems."/var/lib/torq" = { device = "/dev/disk/by-label/torq"; fsType = "ext4"; neededForBoot = true; };
   fileSystems."/.snapshots" = subvolume "@snapshots";
   fileSystems."/boot" = {
     device = "/dev/disk/by-label/ESP";

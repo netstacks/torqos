@@ -245,17 +245,20 @@ pkgs.testers.runNixOSTest {
         machine.fail("su - dev -c 'faillock --dir /run/torq/faillock --user dev --reset'")
         machine.succeed("faillock --dir /run/torq/faillock --user dev --reset")
         assert sudo("Torq-sock-2210") == 0, "unlocked by root"
-        # su still works with the right password (through a terminal, as su asks), and counts a wrong one.
+        # su is root's alone: another account cannot spend dev's guesses, nor guess them (the audit of
+        # M3, M3). Refused before any password is asked: the count does not move.
         def su(pw, mark):
             machine.execute(f"rm -f /tmp/su-{mark}")
             machine.execute(f"su - sam -c {shlex.quote(f'sh /etc/torq-test/su-as-dev {shlex.quote(pw)} {mark}')}")
             return machine.execute(f"test -e /tmp/su-{mark}")[0] == 0
-        assert su("Torq-sock-2210", "right"), "su with the right password"
-        assert not su("guess", "wrong"), "su with a wrong one"
-        assert int(machine.succeed("faillock --dir /run/torq/faillock --user dev | grep -c '^[0-9]'").strip()) >= 1
-        machine.succeed("faillock --dir /run/torq/faillock --user dev --reset")
+        for i in range(7):
+            assert not su("guess", f"wrong{i}")
+        assert not su("Torq-sock-2210", "right"), "not even with the right password"
+        assert machine.succeed("faillock --dir /run/torq/faillock --user dev | grep -c '^[0-9]' || true").strip() == "0"
+        assert sudo("Torq-sock-2210") == 0, "dev's own doors still open"
+        machine.succeed("su - dev -c true")
 
-        for svc in ["sudo", "su", "passwd"]:
+        for svc in ["sudo", "passwd"]:
             stack = machine.succeed(f"grep -E '^auth' /etc/pam.d/{svc}")
             assert "pam_faillock.so preauth dir=/run/torq/faillock deny=5" in stack and "authfail dir=/run/torq/faillock" in stack, (svc, stack)
             assert "pam_faillock.so required" not in stack.replace("  ", " "), stack
