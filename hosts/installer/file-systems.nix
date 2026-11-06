@@ -1,13 +1,24 @@
 # The TorqOS image's disk (hosts/image/hardware-configuration.nix, its file systems and growing),
 # as the hardware file the installer leaves for a machine installed from the ISO names it, beside
-# that machine's detected hardware (ADR-031, cli/src/install.rs).
+# that machine's detected hardware (ADR-031, cli/src/install.rs). One btrfs file system (ADR-038):
+# `/home` and `/var/lib` are snapshotted; `/var/lib/torq`, the ledger, the configuration and the password
+# hashes, is a subvolume of its own, so no snapshot of `/var/lib` holds it: restoring data must never
+# rewind the record.
 { ... }:
-{
-  fileSystems."/" = {
+let
+  subvolume = name: {
     device = "/dev/disk/by-label/nixos";
-    autoResize = true;
-    fsType = "ext4";
+    fsType = "btrfs";
+    options = [ "subvol=${name}" ];
   };
+in
+{
+  fileSystems."/" = subvolume "@" // { autoResize = true; };
+  fileSystems."/home" = subvolume "@home";
+  # Activation reads them: the users' database, and the password hashes.
+  fileSystems."/var/lib" = subvolume "@var-lib" // { neededForBoot = true; };
+  fileSystems."/var/lib/torq" = subvolume "@var-lib-torq" // { neededForBoot = true; };
+  fileSystems."/.snapshots" = subvolume "@snapshots";
   fileSystems."/boot" = {
     device = "/dev/disk/by-label/ESP";
     fsType = "vfat";

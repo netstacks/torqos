@@ -24,7 +24,7 @@ let
     inherit system;
     modules = [ ../hosts/image { torq.setup.source = self.sourceInfo; } instrumented ];
   };
-  payload = import ../hosts/installer/payload.nix { inherit pkgs; image = image.config.system.build.images.qemu-efi; };
+  payload = import ../hosts/installer/payload.nix { inherit pkgs; image = image.config.system.build.torqDisk; };
   installer = self.lib.mkSystem {
     inherit system;
     modules = [ ../hosts/installer { torq.installer.payload = payload; } instrumented ];
@@ -33,7 +33,8 @@ let
 
   # The image's file systems, as the hardware file must name them (hosts/image/hardware-configuration.nix).
   want = builtins.toJSON {
-    root = { inherit (image.config.fileSystems."/") device fsType autoResize; };
+    root = { inherit (image.config.fileSystems."/") device fsType autoResize options; };
+    subvolumes = map (m: { inherit m; inherit (image.config.fileSystems.${m}) options neededForBoot; }) [ "/home" "/var/lib" "/var/lib/torq" "/.snapshots" ];
     boot = { inherit (image.config.fileSystems."/boot") device fsType; };
     grow = image.config.boot.growPartition;
   };
@@ -173,8 +174,8 @@ pkgs.testers.runNixOSTest {
             + str(image_bytes) + " / 512 ))"
         )
         # The ISO has no /mnt: a mount point of the test's own.
-        installer.succeed("mkdir -p /tmp/root && mount -o ro /dev/vda2 /tmp/root")
-        hw = installer.succeed("cat /tmp/root/var/lib/torq/install/hardware-configuration.nix")
+        installer.succeed("mkdir -p /tmp/root && mount -o ro,subvol=@var-lib-torq /dev/vda2 /tmp/root")
+        hw = installer.succeed("cat /tmp/root/install/hardware-configuration.nix")
         installer.succeed("umount /tmp/root")
         assert "qemu-guest.nix" in hw and "by-label/nixos" in hw, hw
         # The boot menu the disk starts with cannot have its entries edited (modules/security.nix;
@@ -192,6 +193,15 @@ pkgs.testers.runNixOSTest {
         on_console(installed, "Welcome to TorqOS. This machine has no configuration yet")
         # Grown at boot (boot.growPartition, the file system's autoResize), from the image's 4.5 GB.
         installed.wait_until_succeeds("test $(df --output=size -B1 / | tail -1) -gt 10000000000", timeout=120)
+        # One btrfs file system, each subvolume where it belongs, and the record not under /var/lib's.
+        for mount, subvol in [("/", "@"), ("/home", "@home"), ("/var/lib", "@var-lib"), ("/var/lib/torq", "@var-lib-torq"), ("/.snapshots", "@snapshots")]:
+            got = installed.succeed(f"findmnt -no FSTYPE,OPTIONS --mountpoint {mount}").strip()
+            assert got.startswith("btrfs") and f"subvol=/{subvol}" in got, (mount, got)
+        assert installed.succeed("stat -c %a /.snapshots").strip() == "700"
+        assert installed.succeed("stat -c %a /var/lib/torq").strip() == "755"
+        # What the image carried came across: the system, the users' database, the detected hardware.
+        installed.succeed("test -e /nix/var/nix/profiles/system && test -e /var/lib/nixos/uid-map")
+        installed.succeed("test -s /var/lib/torq/install/hardware-configuration.nix")
 
     with subtest("the hardware setup takes is valid NixOS, with the image's file systems"):
         got = installed.succeed(
@@ -199,7 +209,8 @@ pkgs.testers.runNixOSTest {
             + shlex.quote(
                 'let c = (import ${self.inputs.nixpkgs}/nixos/lib/eval-config.nix { system = "${system}"; '
                 'modules = [ /var/lib/torq/install/hardware-configuration.nix { boot.loader.grub.enable = false; system.stateVersion = "26.05"; } ]; }).config; in '
-                '{ root = { inherit (c.fileSystems."/") device fsType autoResize; }; boot = { inherit (c.fileSystems."/boot") device fsType; }; '
+                '{ root = { inherit (c.fileSystems."/") device fsType autoResize options; }; boot = { inherit (c.fileSystems."/boot") device fsType; }; '
+                'subvolumes = map (m: { inherit m; inherit (builtins.getAttr m c.fileSystems) options neededForBoot; }) [ "/home" "/var/lib" "/var/lib/torq" "/.snapshots" ]; '
                 'grow = c.boot.growPartition; virtio = builtins.elem "virtio_pci" c.boot.initrd.availableKernelModules; }'
             )
         )

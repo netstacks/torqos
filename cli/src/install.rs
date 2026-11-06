@@ -18,6 +18,9 @@ const BIN: &str = "/run/current-system/sw/bin";
 /// Where, inside the new disk's root, first-boot setup finds the hardware detected here.
 pub const DETECTED: &str = "var/lib/torq/install/hardware-configuration.nix";
 const WELCOME: &str = "Welcome to the TorqOS installer. It puts TorqOS on one of this machine's disks, erasing everything on it.";
+/// The subvolume of `/var/lib/torq` on the new disk (hosts/installer/file-systems.nix).
+const TORQ_SUBVOLUME: &std::ffi::CStr = c"subvol=@var-lib-torq";
+
 /// The image's root file system's label (hosts/image/hardware-configuration.nix).
 const ROOT_LABEL: &str = "nixos";
 /// Its boot partition's (the same file).
@@ -672,11 +675,11 @@ fn detect(d: &Disk) -> Result<()> {
     let mnt = tempfile::tempdir().context("a place to mount the new disk")?;
     let at = mnt.path().to_path_buf();
     // The kernel mounts the partition opened above, through its open file.
-    rustix::mount::mount(fd_path(&root).as_str(), &at, "ext4", rustix::mount::MountFlags::empty(), None)
+    rustix::mount::mount(fd_path(&root).as_str(), &at, "btrfs", rustix::mount::MountFlags::empty(), Some(TORQ_SUBVOLUME))
         .with_context(|| format!("mounting TorqOS's root file system from {} at {}", d.name, at.display()))?;
     let wrote = (|| -> Result<()> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        let p = at.join(DETECTED);
+        let p = at.join(DETECTED.strip_prefix("var/lib/torq/").context("where the hardware goes")?);
         std::fs::DirBuilder::new().recursive(true).mode(0o755).create(p.parent().context("its folder")?)?;
         let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o644).open(&p)?;
         f.write_all(file.as_bytes())?;

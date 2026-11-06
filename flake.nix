@@ -20,7 +20,7 @@
       imageAs = pkgs: ext: args:
         let
           system = pkgs.stdenv.hostPlatform.system;
-          whole = self.nixosConfigurations."image-${system}".config.system.build.images.qemu-efi;
+          whole = self.nixosConfigurations."image-${system}".config.system.build.torqDisk;
         in
         pkgs.runCommand "torqos-${ext}-${system}" { nativeBuildInputs = [ pkgs.qemu-utils ]; } ''
           mkdir $out
@@ -29,7 +29,7 @@
       # The image as the ISO installer carries it (ADR-031, hosts/installer/payload.nix).
       payload = pkgs: import ./hosts/installer/payload.nix {
         inherit pkgs;
-        image = self.nixosConfigurations."image-${pkgs.stdenv.hostPlatform.system}".config.system.build.images.qemu-efi;
+        image = self.nixosConfigurations."image-${pkgs.stdenv.hostPlatform.system}".config.system.build.torqDisk;
       };
     in
     {
@@ -40,7 +40,7 @@
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
       })) (forSystems linuxSystems (pkgs: {
         # The TorqOS image (docs/INSTALL.md): a disk to download and boot; first-boot setup on its
-        # console. NixOS's image builder makes it whole; qemu-img writes it in the form a platform
+        # console. Made by hosts/image/disk.nix; qemu-img writes it in the form a platform
         # takes. `nix build .#image`: a qcow2, compressed (a download a third the size or less; UTM,
         # QEMU and Proxmox run it as it is). `nix build .#image-vmdk`: the same disk for VMware ESXi
         # (a sparse VMDK, which `vmkfstools -i` makes the host's own disk).
