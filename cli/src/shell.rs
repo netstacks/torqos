@@ -225,11 +225,11 @@ impl Machine for Real<'_> {
         let log = run::start_log()?;
         let seq = change.to_string();
         let v = done(run::broker_json(broker(self.cli, &["restore-data", &seq, "--path", path, "--approved-by", me])?, &log)?, "request system snapshot restore")?;
+        let kept = v["data"]["set_aside"].as_str().map_or(String::new(), |a| format!(" What was there is at {}.", history::one_line(a, 120)));
         Ok(format!(
-            "{} is back as it was before #{change} (ledger #{}). What was there is at {}. A service using it should be restarted.\n",
+            "{} is back as it was before #{change} (ledger #{}).{kept} A service using it should be restarted.\n",
             history::one_line(path, 120),
-            v["seq"].as_u64().unwrap_or(0),
-            history::one_line(v["data"]["set_aside"].as_str().unwrap_or("?"), 120)
+            v["seq"].as_u64().unwrap_or(0)
         ))
     }
 

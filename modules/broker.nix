@@ -11,21 +11,22 @@ let
       label=$1
       case "$label" in "" | *[!0-9]*) echo "torq-snapshot: a label is digits" >&2; exit 2 ;; esac
       dir=/.snapshots/$label
-      mkdir -m 700 "$dir"
       forget() {
         for s in "$1"/*; do
           [ -e "$s" ] && btrfs -q subvolume delete "$s"
         done
         rmdir "$1"
       }
+      # Room first: a disk too full for this one still gives up its oldest. Oldest first: labels are
+      # times. One that will not go is said and stops nothing: this snapshot is what counts.
+      find /.snapshots -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -printf '%f\n' | sort -n | head -n -${toString (cfg.snapshots.keep - 1)} | while read -r old; do
+        forget "/.snapshots/$old" || echo "torq-snapshot: $old would not go" >&2
+      done
+      mkdir -m 700 "$dir"
       if ! { btrfs -q subvolume snapshot -r /home "$dir/home" && btrfs -q subvolume snapshot -r /var/lib "$dir/var-lib"; }; then
         forget "$dir" || true
         exit 1
       fi
-      # Oldest first: labels are times.
-      find /.snapshots -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -n | head -n -${toString cfg.snapshots.keep} | while read -r old; do
-        forget "/.snapshots/$old"
-      done
     '';
   };
 in
@@ -110,14 +111,14 @@ in
         default = (config.fileSystems."/.snapshots".fsType or "") == "btrfs";
         defaultText = lib.literalExpression ''config.fileSystems."/.snapshots".fsType == "btrfs"'';
         description = ''
-          Snapshot `/home` and `/var/lib` before each change, read only, in `/.snapshots` (ADR-038). On by
+          Snapshot `/home` and `/var/lib` before each system change, read only, in `/.snapshots` (ADR-038). On by
           itself on a disk laid out for it, as the image's and the ISO's are; an ext4 machine has none.
         '';
       };
       keep = lib.mkOption {
         type = lib.types.ints.positive;
         default = 10;
-        description = "How many to keep, newest first: what they hold stays on the disk, deleted or not, until they go.";
+        description = "How many to keep, newest first: what they hold stays on the disk, deleted or not, until they go. Only system changes take one, so only an administrator moves them on.";
       };
     };
     activateCommand = lib.mkOption {
@@ -158,6 +159,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+
     environment.systemPackages = [ cfg.package ];
 
     systemd.tmpfiles.rules = [
@@ -328,11 +330,14 @@ in
       done
     '';
     system.activationScripts.etc.deps = lib.mkIf cfg.guardEtcNixos [ "torq-guard-etc-nixos" ];
-    assertions = lib.mkIf cfg.guardEtcNixos [{
+    assertions = lib.mkMerge [ [{
+      assertion = !cfg.snapshots.enable || lib.all (m: (config.fileSystems.${m}.fsType or "") == "btrfs") [ "/home" "/var/lib" "/var/lib/torq" "/.snapshots" ];
+      message = "torq.broker.snapshots: /home, /var/lib, /var/lib/torq and /.snapshots must each be a btrfs subvolume: /var/lib/torq above all, or every snapshot of /var/lib would hold the ledger and the password hashes.";
+    }] (lib.mkIf cfg.guardEtcNixos [{
       # With a mutable /etc overlay, moving the old file aside leaves a whiteout that hides the stub.
       assertion = !(config.system.etc.overlay.enable or false);
       message = "torq.broker.guardEtcNixos does not support system.etc.overlay yet.";
-    }];
+    }]) ];
 
     # Initialise repo + ledger once a config flake has been placed in the repo directory.
     # Runs exactly once: after that, only the broker writes to the repo. Re-running it on every

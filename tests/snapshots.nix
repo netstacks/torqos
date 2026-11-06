@@ -1,5 +1,5 @@
 # NixOS VM test: snapshots of the data (ADR-038). A btrfs disk laid out as the image's, its subvolumes
-# put in place before the broker starts. A snapshot before each change, read only and root's alone;
+# mounted at boot. A snapshot before each system change, read only and root's alone;
 # the ledger never in one; a restore that runs as the folder's owner, so a link a person planted
 # leads nowhere they could not go; what was there kept; every restore in the ledger.
 { pkgs, self }:
@@ -17,12 +17,42 @@ pkgs.testers.runNixOSTest {
     users.users.root.hashedPasswordFile = lib.mkForce null;
     users.users.dev.hashedPasswordFile = lib.mkForce null;
     users.users.dev.hashedPassword = devHash;
-    users.users.bob = { isNormalUser = true; };
+    users.users.bob = { isNormalUser = true; group = "users"; };
     users.users.svc = { isSystemUser = true; group = "svc"; };
     users.groups.svc = { };
     torq.broker.rebuildCommand = "true";
-    torq.broker.snapshots = { enable = true; keep = 3; };
+    torq.broker.snapshots.keep = 3;
+    # The image's layout, mounted at boot as an installed machine's is, so snapshots come on by
+    # themselves. A test VM's disk starts empty: laid out in the initrd, before anything mounts it.
     virtualisation.emptyDiskImages = [ 2048 ];
+    virtualisation.fileSystems =
+      let
+        subvolume = name: { device = "/dev/vdb"; fsType = "btrfs"; options = [ "subvol=${name}" ]; };
+      in
+      {
+        "/home" = subvolume "@home" // { neededForBoot = true; };
+        "/var/lib" = subvolume "@var-lib" // { neededForBoot = true; };
+        "/var/lib/torq" = subvolume "@var-lib-torq" // { neededForBoot = true; };
+        "/.snapshots" = subvolume "@snapshots";
+      };
+    boot.initrd.systemd.initrdBin = [ pkgs.btrfs-progs ];
+    boot.initrd.systemd.services.lay-out-disk = {
+      unitConfig.DefaultDependencies = false;
+      requires = [ "dev-vdb.device" ];
+      after = [ "dev-vdb.device" ];
+      before = [ "initrd-fs.target" "sysroot-home.mount" "sysroot-var-lib.mount" "sysroot-var-lib-torq.mount" ];
+      requiredBy = [ "sysroot-home.mount" "sysroot-var-lib.mount" "sysroot-var-lib-torq.mount" ];
+      # Once: the initrd reloads systemd on its way, and a finished one-shot would run again.
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+      script = ''
+        mkfs.btrfs -q -L data /dev/vdb
+        mkdir -p /top
+        mount -t btrfs /dev/vdb /top
+        for s in @home @var-lib @var-lib-torq @snapshots; do btrfs -q subvolume create /top/$s; done
+        chmod 700 /top/@snapshots
+        umount /top
+      '';
+    };
     environment.systemPackages = [ pkgs.jq pkgs.tmux pkgs.btrfs-progs pkgs.git ];
   };
 
@@ -33,21 +63,14 @@ pkgs.testers.runNixOSTest {
     repo = "/var/lib/torq/config"
 
     with subtest("a disk laid out as the image's"):
-        machine.succeed(
-            "mkfs.btrfs -q -L data /dev/vdb && mkdir -p /top && mount /dev/vdb /top && "
-            "for s in @home @var-lib @var-lib-torq @snapshots; do btrfs -q subvolume create /top/$s; done && "
-            "cp -a /home/. /top/@home/ && cp -a /var/lib/. /top/@var-lib/ && chmod 700 /top/@snapshots && umount /top && "
-            "mount -o subvol=@home /dev/vdb /home && mount -o subvol=@var-lib /dev/vdb /var/lib && "
-            "mkdir -p /var/lib/torq /.snapshots && mount -o subvol=@var-lib-torq /dev/vdb /var/lib/torq && "
-            "mount -o subvol=@snapshots /dev/vdb /.snapshots && chmod 755 /var/lib/torq"
-        )
+        machine.succeed("mountpoint -q /var/lib/torq && mountpoint -q /var/lib && mountpoint -q /home && mountpoint -q /.snapshots")
         machine.succeed(f"mkdir -p {repo} && echo '{{}}' > {repo}/desktop.json && touch {repo}/flake.nix && torq-broker init")
 
     def broker(args):
         return json.loads(machine.succeed(f"torq-broker --json {args}").strip().splitlines()[-1])
 
     def change(n):
-        machine.succeed(f"cd {repo} && cp -r . /tmp/c{n} && cd /tmp/c{n} && echo '{{\"n\": {n}}}' > desktop.json && git diff > /tmp/c{n}.diff")
+        machine.succeed(f"cd {repo} && rm -rf /tmp/c{n} && cp -r . /tmp/c{n} && cd /tmp/c{n} && echo '{{\"n\": {n}}}' > desktop.json && git diff > /tmp/c{n}.diff")
         p = broker(f"propose --diff /tmp/c{n}.diff --reason change-{n}")["seq"]
         return broker(f"apply {p} --approved-by dev")
 
@@ -99,6 +122,9 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("stat -c %U:%a /var/lib/svcdata").strip().startswith("svc:")
         assert machine.succeed(f"cat /var/lib/svcdata.before-{label}/db").strip() == "v2-migrated"
 
+    def last():
+        return json.loads(machine.succeed("torq-broker log --json --brief | tail -1"))
+
     with subtest("a planted link goes nowhere its owner could not go"):
         # In the snapshot: refused. Live, where the path is to be written: followed as bob, not root.
         machine.succeed(as_user("bob", "mkdir -p trap && echo ok > trap/f && ln -s /etc trap/etc"))
@@ -111,6 +137,64 @@ pkgs.testers.runNixOSTest {
         assert rc != "done=0", out
         assert machine.succeed("sha256sum /etc/shadow /etc/passwd") == before, "root's files untouched"
         machine.fail("test -e /etc/f")
+        # It failed, and the ledger says so, with what bob's link was put back as it stood.
+        e = last()
+        assert e["kind"] == "data_restored" and e["data"]["error"], e
+        assert machine.succeed("readlink /home/bob/trap").strip() == "/etc"
+
+    with subtest("the owner holds a pipe, nothing of the snapshot"):
+        machine.succeed(as_user("bob", "mkdir -p big && dd if=/dev/urandom of=big/x bs=1M count=300 status=none"))
+        c = change(6)
+        machine.succeed(as_user("bob", "rm -rf big"))
+        machine.succeed("(for i in $(seq 1 400); do for p in $(pgrep -u bob -x tar); do readlink /proc/$p/fd/0; done; sleep 0.02; done) > /tmp/fds 2>/dev/null &")
+        rc, out = restore(c["seq"], "/home/bob/big")
+        assert rc == "done=0", out
+        fds = machine.succeed("sleep 9; sort -u /tmp/fds").split()
+        assert fds and all(f.startswith("pipe:") for f in fds), fds
+
+    with subtest("what would hang, what is gone, what stands alone"):
+        machine.succeed(as_user("bob", "mkfifo pipe"))
+        machine.succeed("echo row > /var/lib/alone.db && chown svc:svc /var/lib/alone.db && chmod 640 /var/lib/alone.db")
+        machine.succeed("mkdir -p /var/lib/gone && echo there > /var/lib/gone/f && chown -R svc:svc /var/lib/gone && chmod 750 /var/lib/gone")
+        # bob once kept a program set-group-id, in a group he has since left.
+        machine.succeed("cp /run/current-system/sw/bin/id /home/bob/sid && chown bob:wheel /home/bob/sid && chmod 2755 /home/bob/sid")
+        d = change(7)
+        rc, out = restore(d["seq"], "/home/bob/pipe")
+        assert rc != "done=0" and "neither a file nor a folder" in out, out
+        machine.succeed("torq-broker --json status")
+        # A folder deleted whole comes back: the main case.
+        machine.succeed("rm -rf /var/lib/gone")
+        rc, out = restore(d["seq"], "/var/lib/gone")
+        assert rc == "done=0", out
+        assert machine.succeed("stat -c %U:%a /var/lib/gone").strip() == "svc:750"
+        assert machine.succeed("cat /var/lib/gone/f").strip() == "there"
+        assert last()["data"]["set_aside"] is None, last()
+        # A file directly under /var/lib: a file again, not a folder at its name.
+        machine.succeed("echo damaged > /var/lib/alone.db")
+        rc, out = restore(d["seq"], "/var/lib/alone.db")
+        assert rc == "done=0", out
+        assert machine.succeed("stat -c %F:%U:%a /var/lib/alone.db").strip() == "regular file:svc:640"
+        assert machine.succeed("cat /var/lib/alone.db").strip() == "row"
+        # And again: its set-aside is in a folder of root's, so a clear refusal, changing nothing.
+        rc, out = restore(d["seq"], "/var/lib/alone.db")
+        assert rc != "done=0" and "already there" in out, out
+        assert machine.succeed("cat /var/lib/alone.db").strip() == "row"
+        # Set-id bits never come back, nor the group bob has left: bob's primary group now.
+        machine.succeed("rm /home/bob/sid")
+        rc, out = restore(d["seq"], "/home/bob/sid")
+        assert rc == "done=0", out
+        got = machine.succeed("stat -c %a:%G /home/bob/sid").strip()
+        assert got == "755:users", got
+
+    with subtest("whose folder it is decides, and root's is not restored"):
+        machine.succeed("mkdir -p /var/lib/rootdata && echo r > /var/lib/rootdata/f")
+        machine.succeed("mkdir -p /var/lib/moved && chown svc:svc /var/lib/moved")
+        f = change(8)
+        rc, out = restore(f["seq"], "/var/lib/rootdata")
+        assert rc != "done=0" and "folder of root's" in out, out
+        machine.succeed("chown bob /var/lib/moved")
+        rc, out = restore(f["seq"], "/var/lib/moved")
+        assert rc != "done=0" and "changed hands" in out, out
 
     with subtest("what may not be restored, and by whom"):
         for path, why in [("/var/lib/torq/state/ledger.jsonl", "machine's own"), ("/etc/shadow", "below /home and /var/lib"), ("/home/bob/../../etc", "no `..`")]:
@@ -122,13 +206,19 @@ pkgs.testers.runNixOSTest {
         out = machine.fail(f"su -s /bin/sh torq-agent -c 'torqcli request system snapshot restore {b['seq']} /home/bob/docs' 2>&1")
         assert "a person applies" in out, out
 
-    with subtest("only the newest are kept"):
-        for n in [3, 4, 5]:
+    with subtest("a person's own changes push nothing out; only the newest are kept"):
+        before = machine.succeed("ls /.snapshots")
+        machine.succeed("printf -- '--- /dev/null\\n+++ b/users/bob/packages.json\\n@@ -0,0 +1 @@\\n+[\"hello\"]\\n' > /tmp/own.diff")
+        p = broker("propose --diff /tmp/own.diff --reason own")["seq"]
+        e = broker(f"apply {p} --approved-by bob")
+        assert e["tier"] == "user" and "snapshot" not in e["data"], e
+        assert machine.succeed("ls /.snapshots") == before
+        for n in [10, 11, 12]:
             change(n)
         assert len(machine.succeed("ls /.snapshots").split()) == 3
         machine.fail(f"test -e /.snapshots/{label}")
         out = machine.succeed(as_user("dev", "torqcli show system snapshots"))
-        assert "change-1" not in out and "change-5" in out, out
+        assert "change-1 " not in out and "change-12" in out, out
         machine.succeed("torq-broker verify")
   '';
 }

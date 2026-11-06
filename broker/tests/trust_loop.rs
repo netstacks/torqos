@@ -2494,27 +2494,47 @@ fn break_glass_is_refused_before_the_ledger_begins() {
     assert_eq!(b.ledger.read_all().unwrap()[0].body.kind, "init");
 }
 
-/// ADR-038: a snapshot before each change, named in its entry; one that fails is said, and stops nothing.
+/// ADR-038: a snapshot before each system change, named in its entry; one that fails is said and stops
+/// nothing. Not for a person's own settings: anyone could then push everyone's restore points out.
 #[test]
-fn a_change_records_its_snapshot_and_a_failed_one_stops_nothing() {
+fn a_system_change_records_its_snapshot_and_a_failed_one_stops_nothing() {
     let m = Confirmable::new();
     let seen = m.dir.path().join("taken");
-    let b = Broker::new(m.b.repo.root(), m.dir.path().join("state"), "true").with_snapshots(format!("echo {{label}} >> {}", seen.display()));
-    let d = write_diff(m.dir.path(), "theme.diff", THEME);
-    let p = b.propose(&d, "Light theme", Actor::User, false).unwrap().body.seq;
+    let state = m.dir.path().join("state");
+    let system = write_diff(m.dir.path(), "sys.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
+    let b = Broker::new(m.b.repo.root(), &state, "true").with_snapshots(format!("echo {{label}} >> {}", seen.display()));
+    // A person's own: none.
+    let own = write_diff(m.dir.path(), "own.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"hello\"]\n");
+    let p = b.propose(&own, "Hello", Actor::User, false).unwrap().body.seq;
+    let a = b.apply(p, "casey", false).unwrap();
+    assert_eq!(a.body.tier, "user");
+    assert!(a.body.data.get("snapshot").is_none() && !seen.exists(), "{:?}", a.body.data);
+    // A system change: taken before the entry was written, and its revert takes one too.
+    let p = b.propose(&system, "SSH on", Actor::User, false).unwrap().body.seq;
     let a = b.apply(p, "casey", false).unwrap();
     let label = a.body.data["snapshot"]["label"].as_str().unwrap().to_string();
-    assert_eq!(fs::read_to_string(&seen).unwrap().trim(), label, "taken before the entry was written");
+    assert_eq!(fs::read_to_string(&seen).unwrap().trim(), label);
     let r = b.revert(a.body.seq, "casey").unwrap();
     assert!(r.body.data["snapshot"]["label"].is_string(), "{:?}", r.body.data);
     // None configured: nothing in the entry.
-    let p = m.propose_theme();
-    assert!(m.b.apply(p, "casey", false).unwrap().body.data.get("snapshot").is_none());
-    m.b.revert(m.b.ledger.read_all().unwrap().last().unwrap().body.seq, "casey").unwrap();
+    let p = m.b.propose(&system, "SSH on", Actor::User, false).unwrap().body.seq;
+    let a = m.b.apply(p, "casey", false).unwrap();
+    assert!(a.body.data.get("snapshot").is_none());
+    m.b.revert(a.body.seq, "casey").unwrap();
     // It fails: the change goes through, and the entry says why there is none.
-    let b = Broker::new(m.b.repo.root(), m.dir.path().join("state"), "true").with_snapshots("false");
-    let p = b.propose(&d, "Light theme", Actor::User, false).unwrap().body.seq;
+    let b = Broker::new(m.b.repo.root(), &state, "true").with_snapshots("false");
+    let p = b.propose(&system, "SSH on", Actor::User, false).unwrap().body.seq;
     let a = b.apply(p, "casey", false).unwrap();
     assert!(a.body.data["snapshot"]["error"].as_str().unwrap().contains("snapshot command failed"), "{:?}", a.body.data);
     b.ledger.verify().unwrap();
+}
+
+/// A restore holds the lock as long as its copy takes: not while a rollback may need it.
+#[test]
+fn no_restore_while_a_commit_confirmed_waits() {
+    let m = Confirmable::new();
+    let seq = m.propose_theme();
+    m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    let e = format!("{:#}", m.b.restore_data(seq, "/home/alice/a", "casey").unwrap_err());
+    assert!(e.contains("commit confirmed is waiting"), "{e}");
 }

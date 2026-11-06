@@ -921,7 +921,7 @@ impl Broker {
     pub fn snapshots(&self) -> Result<Vec<Snapshot>> {
         let mut out = vec![];
         for e in self.ledger.read_all()?.iter().rev() {
-            let Some(label) = e.body.data["snapshot"]["label"].as_str() else { continue };
+            let Some(label) = e.body.data["snapshot"]["label"].as_str().filter(|l| snapshot::label_ok(l)) else { continue };
             if self.snapshot_dir.join(label).is_dir() {
                 out.push(Snapshot { change: e.body.seq, ts: e.body.ts.clone(), reason: e.body.reason.clone(), label: label.to_string() });
             }
@@ -929,46 +929,51 @@ impl Broker {
         Ok(out)
     }
 
-    /// Put `path` back as it was before change `seq` (ADR-038). As the owner of the folder it lies in,
-    /// never as root: a person's folder is theirs to fill with links, and a root copy into it would
-    /// go where they point. What is there now is set aside, not overwritten. Ledgered, whether it
-    /// worked or not: the data has been touched either way.
+    /// Put `path` back as it was before change `seq` (ADR-038). Written by the owner of the folder it
+    /// lies in, never by root: a person's folder is theirs to fill with links, and a root write into
+    /// it would go where they point. Read by root, into a pipe: the owner holds nothing of the
+    /// snapshot, which a descriptor would let them walk up. What is there now is set aside, and put
+    /// back if the copy fails. Ledgered, whether it worked or not.
     pub fn restore_data(&self, seq: u64, path: &str, by: &str) -> Result<Entry> {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::fs::MetadataExt;
         let _lock = Lock::acquire(&self.state_dir)?;
-        let label = self.ledger.get(seq)?.body.data["snapshot"]["label"].as_str().map(String::from).with_context(|| format!("change #{seq} has no snapshot"))?;
+        // A copy holds the lock for as long as it takes: not while a rollback may need it.
+        if pending_confirm(&self.ledger.read_all()?).is_some() {
+            bail!("a commit confirmed is waiting: confirm it or let it roll back first");
+        }
+        let entry = self.ledger.get(seq)?;
+        let label = entry.body.data["snapshot"]["label"].as_str().filter(|l| snapshot::label_ok(l)).map(String::from).with_context(|| format!("change #{seq} has no snapshot"))?;
         let (tree, parts) = snapshot::data_path(path)?;
+        let path = snapshot::written_out(tree, &parts);
         let from = self.snapshot_dir.join(&label).join(tree);
-        let top = snapshot::no_links(&from, &parts).with_context(|| format!("{path} as it was before #{seq}"))?;
-        let (uid, gid) = (top.uid(), top.gid());
+        let (top, last) = snapshot::no_links(&from, &parts).with_context(|| format!("{path} as it was before #{seq}"))?;
+        // A snapshot does not change, so what is read here stays so. A pipe would hang whoever opens it.
+        if !last.is_dir() && !last.is_file() {
+            bail!("{path} was neither a file nor a folder: not restored");
+        }
+        let uid = top.uid();
         if uid == 0 {
             bail!("{path} lies in a folder of root's: restoring it needs a root shell (torq break-glass)");
         }
-        let live_top = Path::new(path).components().take(if tree == "home" { 3 } else { 4 }).collect::<PathBuf>();
-        let live = fs::symlink_metadata(&live_top).with_context(|| format!("{} is not there: restore the folder itself first", live_top.display()))?;
-        if live.is_symlink() || live.uid() != uid {
-            bail!("{} has changed hands since the snapshot: not restored", live_top.display());
+        let gid = snapshot::primary_group(&fs::read_to_string("/etc/passwd").context("reading the accounts")?, uid).with_context(|| format!("no account has uid {uid} now, whose {path} this was"))?;
+        let whole = parts.len() == 1;
+        let live_top = snapshot::written_out(tree, &parts[..1]);
+        let live = match fs::symlink_metadata(&live_top) {
+            Ok(m) => Some(m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && whole => None,
+            Err(e) => return Err(e).with_context(|| format!("{live_top} is not there: restore that first")),
+        };
+        if live.as_ref().is_some_and(|m| m.is_symlink() || m.uid() != uid) {
+            bail!("{live_top} has changed hands since the snapshot: not restored");
         }
         let set_aside = format!("{path}.before-{label}");
-        let source = fs::File::open(from.join(parts.iter().collect::<PathBuf>())).with_context(|| format!("opening {path} in the snapshot"))?;
-        // The folder at the top sits in one of root's: root moves it, and leaves an empty one of the
-        // owner's. Nothing below `/home` or `/var/lib` itself is a person's to race.
-        let whole = parts.len() == 1;
-        if whole {
-            if fs::symlink_metadata(&set_aside).is_ok() {
-                bail!("{set_aside} is already there: move it first");
-            }
-            fs::rename(path, &set_aside).with_context(|| format!("setting {path} aside"))?;
-            fs::create_dir(path).context("a new folder")?;
-            std::os::unix::fs::chown(path, Some(uid), Some(gid)).context("giving it to its owner")?;
-            fs::set_permissions(path, fs::Permissions::from_mode(top.mode() & 0o7777)).context("its mode")?;
+        if whole && live.is_some() && fs::symlink_metadata(&set_aside).is_ok() {
+            bail!("{set_aside} is already there: move it first");
         }
-        let out = config::command("setpriv")
-            .args(["--reuid", &uid.to_string(), "--regid", &gid.to_string(), "--clear-groups", "--no-new-privs", "--", "sh", "-c", snapshot::COPY, "sh", path, if whole { "" } else { &set_aside }])
-            .stdin(source)
-            .output()
-            .context("running the copy")?;
-        let error = (!out.status.success()).then(|| String::from_utf8_lossy(&out.stderr).trim().to_string());
+        let had = fs::symlink_metadata(&path).is_ok();
+        let copy = snapshot::Copy { source: from.join(parts.iter().collect::<PathBuf>()), to: &path, set_aside: &set_aside, folder: last.is_dir(), mode: last.mode(), uid, gid, whole, had };
+        let done = copy.run();
+        let error = done.as_ref().err().map(|e| format!("{e:#}").chars().filter(|c| !c.is_control()).take(300).collect::<String>());
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(by.into()),
@@ -976,11 +981,9 @@ impl Broker {
             tier: Tier::System.to_string(),
             tainted: false,
             reason: format!("{path} put back as it was before #{seq}{}", if error.is_some() { ": it failed" } else { "" }),
-            data: json!({ "change": seq, "path": path, "label": label, "set_aside": set_aside, "error": error }),
+            data: json!({ "change": seq, "path": path, "label": label, "set_aside": had.then_some(&set_aside), "error": error }),
         })?;
-        if let Some(why) = error {
-            bail!("the copy failed, and {path} may be partly restored; what was there is at {set_aside}: {why}");
-        }
+        done.with_context(|| format!("{path} was not restored"))?;
         Ok(e)
     }
 
@@ -1093,9 +1096,11 @@ impl Broker {
     /// switched to something else outside the broker.
     /// Snapshot the data before a change, for its entry: its label, or why there is none. A failure
     /// stops nothing: a disk too full to snapshot is one a change may be needed to clear, and the
-    /// snapshot is a way back, not a guarantee. It is said, in the entry. Null: this machine has none.
-    fn take_snapshot(&self, lock: &Lock) -> serde_json::Value {
-        if self.snapshot_cmd.is_empty() {
+    /// snapshot is a way back, not a guarantee. It is said, in the entry. Null: this machine has none,
+    /// or the change is not one to take a snapshot for: only a system change, an administrator's with
+    /// their password. Taking one for a person's own settings would let anyone push the others out.
+    fn take_snapshot(&self, lock: &Lock, tier: &str) -> serde_json::Value {
+        if self.snapshot_cmd.is_empty() || tier != Tier::System.to_string() {
             return serde_json::Value::Null;
         }
         let label = chrono::Utc::now().timestamp_millis().to_string();
@@ -2079,7 +2084,7 @@ impl Broker {
         );
         let before = self.repo.head()?;
         self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
-        let snapshot = self.take_snapshot(&lock);
+        let snapshot = self.take_snapshot(&lock, &tier.to_string());
         let mut pending = Pending {
             version: PENDING_VERSION,
             op: "apply".into(),
@@ -2446,7 +2451,7 @@ impl Broker {
         );
         let before = self.repo.head()?;
         self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
-        let snapshot = self.take_snapshot(&lock);
+        let snapshot = self.take_snapshot(&lock, &a.body.tier);
         let mut pending = Pending {
             version: PENDING_VERSION,
             op: "revert".into(),

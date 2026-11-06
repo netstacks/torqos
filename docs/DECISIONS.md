@@ -878,14 +878,18 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Amended (2026-11-06): local snapshots built.** Every new machine is on btrfs: the image and the
   ISO, one layout, no choice at install. `/var/lib/torq` is a subvolume of its own, so no snapshot of
   `/var/lib` holds the ledger, the configuration or the password hashes: restoring data can never
-  rewind the record. Snapshots are read only and root's alone, the newest ten kept, the label in the
+  rewind the record. Snapshots are read only and root's alone, taken before each system change only (a
+  person's own settings would let anyone push the others out), the newest ten kept, the label in the
   change's entry. A snapshot that fails stops nothing and is said in the entry: a disk too full to
   snapshot may need a change to clear it, and a snapshot is a way back, not a guarantee.
   `rollback` does not bring data back by itself, as this ADR first had it: putting a live service's
   files back under it is a person's decision. `show system snapshots`, then `request system snapshot
-  restore <n> <path>`, an administrator's, with their password, ledgered. The copy runs as the owner of
-  the folder, never as root: a person's folder is theirs to fill with links, and a root copy into
-  it would go where they point. What was there is set aside, not overwritten. Machines already on ext4
+  restore <n> <path>`, an administrator's, with their password, ledgered. Root reads the snapshot into a
+  pipe and the owner of the folder writes it: the owner holds nothing of the snapshot, which a
+  descriptor would let them walk up, and root writes nothing into a folder of theirs:
+  it is theirs to fill with links, and a root copy into
+  it would go where they point. What was there is set aside, and put back if the copy fails. Set-id
+  bits never come back, and the group is the account's now. Machines already on ext4
   (torq5 among them) have no snapshots, and nothing moves them.
 
 ## ADR-039 — Upstreams: what TorqOS owes, and what it depends on

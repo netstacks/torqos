@@ -41,13 +41,13 @@ may be in a group that amounts to root, such as `docker`; the commit is refused 
 
 ## Your data, before each change
 
-A machine installed from TorqOS 0.3 on keeps a read-only snapshot of `/home` and `/var/lib` before each
-change, the newest ten. `show system snapshots` lists them, and `request system snapshot restore <n>
+A newly installed machine keeps a read-only snapshot of `/home` and `/var/lib` before each
+system change, the newest ten. `show system snapshots` lists them, and `request system snapshot restore <n>
 <path>` puts a path back as it was before change `n`. What is there now is set aside beside it, not
 lost. It asks an administrator's password and goes in the ledger. Stop a service before restoring its
 data, and start it again after.
 
-Something you delete stays in the snapshots until they age out, ten changes later. They hold your
+Something you delete stays in the snapshots until they age out, ten system changes later. They hold your
 files, not a backup of them: a failed disk takes them too. Machines installed on ext4 have none.
 
 ## Checking a release yourself

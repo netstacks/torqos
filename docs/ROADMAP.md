@@ -177,8 +177,8 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
       change #1. A VM test: a machine rebuilt from another's repo is that machine.
 - [x] **Strict mode and `torq break-glass`** (ADR-035): sudoers limited to TorqOS's commands; a root
       shell only after a ledger entry, anchored. A VM test that a shell leaves its entry.
-- [x] **Data snapshots before each commit** (ADR-038) on a snapshot-capable file system — the
-      installer's partition choice (ADR-031 follow-up); `rollback` offering the data.
+- [x] **Data snapshots before each system change** (ADR-038) on btrfs, in new images; restored by a person, with `request system snapshot restore`. The
+      backup and offering data at `rollback` are not built.
 - [ ] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
       the `Ledger-Entry` trailer cross-check.
 

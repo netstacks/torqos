@@ -563,10 +563,25 @@ Its §5 lists claims without a test.
 6zk. **Snapshots of the data (ADR-038).** Open:
    - **Root can delete them.** They keep what a person or a program deletes; a root shell can remove
      them too, as it can anything on the machine. The backup (not built) is what lives elsewhere.
-   - **What is deleted stays on the disk** until its snapshot goes, ten changes later: a person who
-     deletes a secret on purpose has not removed it from the machine, and it counts against the disk.
-   - **Folders of root's are not restored** (`/var/lib/systemd`, a service that runs as root): that
-     takes break-glass. A folder holding several owners' files comes back as far as its owner can read.
+   - **What is deleted stays on the disk** until its snapshot goes, ten system changes later: a person
+     who deletes a secret on purpose has not removed it from the machine, and it counts against the disk.
+   - **Only system changes take one.** A person's own settings do not, or anyone could push everyone's
+     restore points out without a password. So data lost between system changes may have no snapshot,
+     and an administrator's ten changes in a row do move the oldest on, whoever's data they held.
+   - **Folders of root's are not restored** (`/var/lib/systemd`, `/var/lib/private`, a service that runs
+     as root): that takes break-glass. A folder holding several owners' files comes back as far as its
+     owner can write it, all of it theirs.
+   - **A restore is a copy.** Set-id bits are dropped on purpose; extended attributes and ACLs are not
+     carried; it takes the space of what it brings back, and holds the broker's lock until it ends.
+   - **In a folder a person can write and does not own** (a 777 folder of a service's), they can swap
+     in a link and the owner's copy follows it, as that owner. An administrator chooses that path.
    - **A service is not stopped for its data.** A person stops it first; the command says to restart it.
+   - **A subvolume a person makes in their own home** is not in a snapshot of `/home`: its contents
+     are not kept, and nothing says so.
    - **Machines on ext4 have none,** torq5 among them, so this is tested in VMs and not lived with.
+   - **The image is not reproducible:** its btrfs and partition ids are random at build, and every
+     copy of one image shares them. Two disks from one image on one machine are the case `not_elsewhere`
+     already refuses to install into; booted, the first found wins.
+   - **CI's disk room is unproved.** The image now takes a further stage to build; the first release
+     build after this will say whether the runner has the space.
    - **Not built:** the declared backup, `request system restore`, and offering data at `rollback`.

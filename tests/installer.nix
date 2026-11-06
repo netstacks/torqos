@@ -33,9 +33,7 @@ let
 
   # The image's file systems, as the hardware file must name them (hosts/image/hardware-configuration.nix).
   want = builtins.toJSON {
-    root = { inherit (image.config.fileSystems."/") device fsType autoResize options; };
-    subvolumes = map (m: { inherit m; inherit (image.config.fileSystems.${m}) options neededForBoot; }) [ "/home" "/var/lib" "/var/lib/torq" "/.snapshots" ];
-    boot = { inherit (image.config.fileSystems."/boot") device fsType; };
+    mounts = builtins.mapAttrs (_: f: { inherit (f) device fsType options autoResize neededForBoot; }) image.config.fileSystems;
     grow = image.config.boot.growPartition;
   };
 
@@ -191,7 +189,7 @@ pkgs.testers.runNixOSTest {
     with subtest("the machine starts from the disk: grown to it, with first-boot setup on its console"):
         installed.start()
         on_console(installed, "Welcome to TorqOS. This machine has no configuration yet")
-        # Grown at boot (boot.growPartition, the file system's autoResize), from the image's 4.5 GB.
+        # Grown at boot (boot.growPartition, the file system's autoResize), from the image's 6 GB.
         installed.wait_until_succeeds("test $(df --output=size -B1 / | tail -1) -gt 10000000000", timeout=120)
         # One btrfs file system, each subvolume where it belongs, and the record not under /var/lib's.
         for mount, subvol in [("/", "@"), ("/home", "@home"), ("/var/lib", "@var-lib"), ("/var/lib/torq", "@var-lib-torq"), ("/.snapshots", "@snapshots")]:
@@ -202,6 +200,10 @@ pkgs.testers.runNixOSTest {
         # What the image carried came across: the system, the users' database, the detected hardware.
         installed.succeed("test -e /nix/var/nix/profiles/system && test -e /var/lib/nixos/uid-map")
         installed.succeed("test -s /var/lib/torq/install/hardware-configuration.nix")
+        # On by themselves on this disk, and the record not in one (the real layout, not a test's).
+        installed.succeed("sh -c \"$(sed -n 's/.*\"snapshot\":\"\([^\"]*\) {label}\".*/\\1/p' /etc/torq/broker.json) 123\"")
+        installed.succeed("test -d /.snapshots/123/home && test -d /.snapshots/123/var-lib/nixos")
+        assert installed.succeed("ls -A /.snapshots/123/var-lib/torq").strip() == "", "no snapshot holds the record"
 
     with subtest("the hardware setup takes is valid NixOS, with the image's file systems"):
         got = installed.succeed(
@@ -209,8 +211,7 @@ pkgs.testers.runNixOSTest {
             + shlex.quote(
                 'let c = (import ${self.inputs.nixpkgs}/nixos/lib/eval-config.nix { system = "${system}"; '
                 'modules = [ /var/lib/torq/install/hardware-configuration.nix { boot.loader.grub.enable = false; system.stateVersion = "26.05"; } ]; }).config; in '
-                '{ root = { inherit (c.fileSystems."/") device fsType autoResize options; }; boot = { inherit (c.fileSystems."/boot") device fsType; }; '
-                'subvolumes = map (m: { inherit m; inherit (builtins.getAttr m c.fileSystems) options neededForBoot; }) [ "/home" "/var/lib" "/var/lib/torq" "/.snapshots" ]; '
+                '{ mounts = builtins.mapAttrs (_: f: { inherit (f) device fsType options autoResize neededForBoot; }) c.fileSystems; '
                 'grow = c.boot.growPartition; virtio = builtins.elem "virtio_pci" c.boot.initrd.availableKernelModules; }'
             )
         )

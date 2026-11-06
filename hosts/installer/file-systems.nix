@@ -14,8 +14,8 @@ let
 in
 {
   fileSystems."/" = subvolume "@" // { autoResize = true; };
-  fileSystems."/home" = subvolume "@home";
-  # Activation reads them: the users' database, and the password hashes.
+  # Activation reads and writes them: new accounts' homes, the users' database, the password hashes.
+  fileSystems."/home" = subvolume "@home" // { neededForBoot = true; };
   fileSystems."/var/lib" = subvolume "@var-lib" // { neededForBoot = true; };
   fileSystems."/var/lib/torq" = subvolume "@var-lib-torq" // { neededForBoot = true; };
   fileSystems."/.snapshots" = subvolume "@snapshots";

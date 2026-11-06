@@ -1,6 +1,6 @@
 # The image's disk: NixOS's image builder makes it whole, boot loader and all, on ext4, the only file
 # system it partitions; a second step copies that root onto btrfs and keeps its EFI partition as it
-# is. btrfs for snapshots of data (ADR-038). The layout is hosts/image/file-systems.nix's.
+# is. btrfs for snapshots of data (ADR-038). The layout is hosts/image/hardware-configuration.nix's.
 { config, lib, pkgs, modulesPath, ... }:
 
 let
