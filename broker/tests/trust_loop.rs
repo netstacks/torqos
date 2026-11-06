@@ -2623,7 +2623,8 @@ fn a_password_set_but_not_kept_is_said_as_that() {
     let (dir, repo) = config_dir();
     let pw = dir.path().join("pw");
     let people = vec!["casey".to_string()];
-    let b = Broker::new(&repo, dir.path().join("state"), "true").with_passwords(&pw, "true").with_people(&people);
+    // `cat`, which reads what it is given: `true` exits first, and the write then fails, or not, by luck.
+    let b = Broker::new(&repo, dir.path().join("state"), "true").with_passwords(&pw, "cat").with_people(&people);
     b.init().unwrap();
     // A folder at the name: the rename fails, after the running system has it.
     fs::create_dir_all(pw.join("casey/x")).unwrap();
