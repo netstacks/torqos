@@ -131,12 +131,12 @@ Order matters: the socket first, because everything after keys on identity.
       system pull` as a proposal. *Test:* a VM with a bare remote: a rewritten local ledger is an
       alarm; a remote commit lands in the candidate and nowhere else. **⏹ review:** nothing from
       the remote is ever applied unasked — find the path that would.
-- [~] Adopt at setup (built on `adopt`). *Test:* two VMs: the second, pointed at the first's repo, is the first
+- [x] Adopt at setup. *Test:* two VMs: the second, pointed at the first's repo, is the first
       (same tree, its own hardware file, its own password). **⏹ review.**
-- [ ] Strict mode and `torq break-glass`. *Test:* a shell leaves a ledger entry before it opens;
+- [x] Strict mode and `torq break-glass`. *Test:* a shell leaves a ledger entry before it opens;
       `sudo bash` is refused. **⏹ adversarial:** get root without an entry.
-- [ ] Snapshots before each commit (needs the installer's btrfs choice). *Test:* a file deleted
-      by a commit's activation is back after `rollback 1`.
+- [x] Snapshots before each system change, on btrfs in new images. *Test:* a file deleted is back
+      after `request system snapshot restore` (a person's act, not `rollback`'s: ADR-038, amended).
 - [ ] **⏹ audit** — end of M3. This is the audit that matters most: after it, the security claims
       in SECURITY-MODEL should each name a test.
 
