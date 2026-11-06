@@ -72,6 +72,15 @@ pub struct Broker {
     remote: Option<String>,
 }
 
+/// `data`, with the snapshot taken for it, if there is one: a change that failed has one too, and it
+/// must stay reachable, as it holds a slot.
+fn with_snapshot(mut data: serde_json::Value, snapshot: &serde_json::Value) -> serde_json::Value {
+    if !snapshot.is_null() {
+        data["snapshot"] = snapshot.clone();
+    }
+    data
+}
+
 /// A snapshot of the data, and the change it was taken before (ADR-038).
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
@@ -932,12 +941,14 @@ impl Broker {
     /// Put `path` back as it was before change `seq` (ADR-038). Written by the owner of the folder it
     /// lies in, never by root: a person's folder is theirs to fill with links, and a root write into
     /// it would go where they point. Read by root, into a pipe: the owner holds nothing of the
-    /// snapshot, which a descriptor would let them walk up. What is there now is set aside, and put
-    /// back if the copy fails. Ledgered, whether it worked or not.
+    /// snapshot, which a descriptor would let them walk up. It goes to a name beside the target, and what
+    /// is live changes by a rename only once it is all there: a failure leaves it as it was, and what
+    /// was there is set aside, not overwritten. The broker's lock is for the checks alone: an owner can
+    /// stop their half of the copy, and that must stop no one else. Ledgered, whether it worked or not.
     pub fn restore_data(&self, seq: u64, path: &str, by: &str) -> Result<Entry> {
         use std::os::unix::fs::MetadataExt;
-        let _lock = Lock::acquire(&self.state_dir)?;
-        // A copy holds the lock for as long as it takes: not while a rollback may need it.
+        let lock = Lock::acquire(&self.state_dir)?;
+        // One thing at a time: a machine going back while its data does would leave a person guessing.
         if pending_confirm(&self.ledger.read_all()?).is_some() {
             bail!("a commit confirmed is waiting: confirm it or let it roll back first");
         }
@@ -971,7 +982,9 @@ impl Broker {
             bail!("{set_aside} is already there: move it first");
         }
         let had = fs::symlink_metadata(&path).is_ok();
-        let copy = snapshot::Copy { source: from.join(parts.iter().collect::<PathBuf>()), to: &path, set_aside: &set_aside, folder: last.is_dir(), mode: last.mode(), uid, gid, whole, had };
+        let stage = format!("{path}.restoring-{label}");
+        let copy = snapshot::Copy { source: from.join(parts.iter().collect::<PathBuf>()), to: &path, set_aside: &set_aside, stage: &stage, folder: last.is_dir(), mode: last.mode(), uid, gid, whole, had };
+        drop(lock);
         let done = copy.run();
         let error = done.as_ref().err().map(|e| format!("{e:#}").chars().filter(|c| !c.is_control()).take(300).collect::<String>());
         let e = self.ledger.append(NewEntry {
@@ -1099,8 +1112,9 @@ impl Broker {
     /// snapshot is a way back, not a guarantee. It is said, in the entry. Null: this machine has none,
     /// or the change is not one to take a snapshot for: only a system change, an administrator's with
     /// their password. Taking one for a person's own settings would let anyone push the others out.
+    /// Taken once the commit stands: a change that never got that far uses no slot.
     fn take_snapshot(&self, lock: &Lock, tier: &str) -> serde_json::Value {
-        if self.snapshot_cmd.is_empty() || tier != Tier::System.to_string() {
+        if self.snapshot_cmd.is_empty() || tier == Tier::User.to_string() || tier == Tier::Observe.to_string() {
             return serde_json::Value::Null;
         }
         let label = chrono::Utc::now().timestamp_millis().to_string();
@@ -2084,7 +2098,6 @@ impl Broker {
         );
         let before = self.repo.head()?;
         self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
-        let snapshot = self.take_snapshot(&lock, &tier.to_string());
         let mut pending = Pending {
             version: PENDING_VERSION,
             op: "apply".into(),
@@ -2102,6 +2115,7 @@ impl Broker {
         let commit = self.undo_failed_commit(&pending, self.repo.apply_and_commit(&tmp, &msg))?;
         let _ = fs::remove_file(&tmp);
         pending.commit = Some(commit.clone());
+        let snapshot = self.take_snapshot(&lock, &tier.to_string());
         self.write_pending(&pending)?;
 
         // Plain: rebuild and switch. Confirmed: build, schedule the rollback, and only then activate
@@ -2148,7 +2162,7 @@ impl Broker {
                     tier: tier.to_string(),
                     tainted: p.body.tainted,
                     reason: Self::failure_reason(if anchor.is_some() { "Commit confirmed" } else { "Rebuild" }, &before, restored),
-                    data: self.with_system(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored })),
+                    data: self.with_system(with_snapshot(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored }), &snapshot)),
                 })?;
                 self.clear_pending()?;
                 self.drop_build_link();
@@ -2157,10 +2171,7 @@ impl Broker {
             }
         };
 
-        let mut data = json!({ "proposal": proposal_seq, "commit": commit, "files": files });
-        if !snapshot.is_null() {
-            data["snapshot"] = snapshot;
-        }
+        let mut data = with_snapshot(json!({ "proposal": proposal_seq, "commit": commit, "files": files }), &snapshot);
         if let Some(c) = confirm_record {
             data["confirm"] = c;
         }
@@ -2451,7 +2462,6 @@ impl Broker {
         );
         let before = self.repo.head()?;
         self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
-        let snapshot = self.take_snapshot(&lock, &a.body.tier);
         let mut pending = Pending {
             version: PENDING_VERSION,
             op: "revert".into(),
@@ -2468,6 +2478,7 @@ impl Broker {
         self.write_pending(&pending)?;
         let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg))?;
         pending.commit = Some(new_commit.clone());
+        let snapshot = self.take_snapshot(&lock, &a.body.tier);
         self.write_pending(&pending)?;
         if let Err(e) = self.rebuild(&lock, &new_commit) {
             let restored = self.restore(&before, &lock)?;
@@ -2478,15 +2489,12 @@ impl Broker {
                 tier: a.body.tier.clone(),
                 tainted: false,
                 reason: Self::failure_reason("Revert rebuild", &before, restored),
-                data: self.with_system(json!({ "applied": applied_seq, "error": e.to_string(), "restored": restored })),
+                data: self.with_system(with_snapshot(json!({ "applied": applied_seq, "error": e.to_string(), "restored": restored }), &snapshot)),
             })?;
             self.clear_pending()?;
             return Err(e.context("revert aborted because the rebuild failed"));
         }
-        let mut data = json!({ "applied": applied_seq, "reverted_commit": commit, "commit": new_commit });
-        if !snapshot.is_null() {
-            data["snapshot"] = snapshot;
-        }
+        let data = with_snapshot(json!({ "applied": applied_seq, "reverted_commit": commit, "commit": new_commit }), &snapshot);
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(approved_by.into()),

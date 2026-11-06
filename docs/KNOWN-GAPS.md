@@ -572,7 +572,11 @@ Its §5 lists claims without a test.
      as root): that takes break-glass. A folder holding several owners' files comes back as far as its
      owner can write it, all of it theirs.
    - **A restore is a copy.** Set-id bits are dropped on purpose; extended attributes and ACLs are not
-     carried; it takes the space of what it brings back, and holds the broker's lock until it ends.
+     carried; it takes the space of what it brings back, and a person's `.restoring-` name beside the
+     target while it runs. If a machine stops mid-copy that name stays, and nothing is ledgered.
+   - **An owner can stall their own restore for as long as they like.** It blocks no one: the lock is
+     not held. The administrator's command waits; there is no time limit, since a large copy takes hours.
+   - **A device node in a folder fails the whole restore:** an owner cannot make one. What is live stays.
    - **In a folder a person can write and does not own** (a 777 folder of a service's), they can swap
      in a link and the owner's copy follows it, as that owner. An administrator chooses that path.
    - **A service is not stopped for its data.** A person stops it first; the command says to restart it.

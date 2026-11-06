@@ -845,7 +845,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 
 ## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it
 - **Status:** proposed, 2026-11-03; local snapshots accepted and built 2026-11-06 (the owner: btrfs in
-  new images), the backup and sync parts still proposed.
+  new images, snapshots on system changes only), the backup and sync parts still proposed.
 - **Context:** The repository rebuilds the machine, not the person's life on it. A laptop's data is
   five kinds: documents and media (catastrophic to lose); application settings (annoying);
   secrets — SSH and GPG keys, saved passwords, tokens (serious, and never in the repository);
@@ -888,7 +888,10 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   pipe and the owner of the folder writes it: the owner holds nothing of the snapshot, which a
   descriptor would let them walk up, and root writes nothing into a folder of theirs:
   it is theirs to fill with links, and a root copy into
-  it would go where they point. What was there is set aside, and put back if the copy fails. Set-id
+  it would go where they point. It goes to a name beside the target, private until done, and what is
+  live changes by a rename once it is all there: a failure leaves it as it was. What was there is set
+  aside, not overwritten. The broker's lock covers the checks and not the copy, so an owner who stops
+  their half stops no one else. Set-id
   bits never come back, and the group is the account's now. Machines already on ext4
   (torq5 among them) have no snapshots, and nothing moves them.
 

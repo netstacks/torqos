@@ -2,83 +2,88 @@
 //! and the folders they name hold what any account put there.
 use anyhow::{bail, Context, Result};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 
-/// Run as the owner, reading what root reads from the snapshot on standard input: a tar of a folder's
-/// contents, or a file's bytes. It sets aside what is there (unless root has: `$2` empty), writes, and
-/// on failure puts things back. Links in the way lead nowhere the owner could not go.
-const WRITE: &str = r#"set -eu
-d=$1 aside=$2 kind=$3 mode=$4
+/// Run as the owner: what root reads from the snapshot, on standard input, written to a name of its
+/// own beside the target: a tar of a folder's contents, or a file's bytes. Private until it is done:
+/// what comes back may be a secret. Links in the way lead nowhere the owner could not go.
+const STAGE: &str = r#"set -eu
+umask 077
+s=$1 kind=$2 mode=$3 new=$4
+mkdir -p -- "$(dirname -- "$s")"
+if [ "$kind" = folder ]; then
+  [ -z "$new" ] || mkdir -- "$s"
+  tar -x -p --no-same-owner -f - -C "$s"
+else
+  dd of="$s" bs=1M conv=sparse status=none
+  chmod -- "$mode" "$s"
+fi
+"#;
+
+/// Run as the owner, once both sides are done: what is there aside, what was staged in its place.
+const SWAP: &str = r#"set -eu
+d=$1 aside=$2 s=$3
 moved=
-if [ -n "$aside" ] && { [ -e "$d" ] || [ -L "$d" ]; }; then
+if [ -e "$d" ] || [ -L "$d" ]; then
   [ ! -e "$aside" ] && [ ! -L "$aside" ] || { echo "$aside is already there: move it first" >&2; exit 1; }
   mv -T -- "$d" "$aside"
   moved=1
 fi
-put() {
-  mkdir -p -- "$(dirname -- "$d")" || return 1
-  if [ "$kind" = folder ]; then
-    mkdir -p -- "$d" && tar -x -p --no-same-owner -f - -C "$d"
-  else
-    cat > "$d" && chmod -- "$mode" "$d"
-  fi
-}
-if ! put; then
-  [ -n "$aside" ] || exit 1
-  rm -rf -- "$d"
-  [ -z "$moved" ] || mv -T -- "$aside" "$d"
-  exit 1
-fi
+mv -T -- "$s" "$d" || { [ -z "$moved" ] || mv -T -- "$aside" "$d"; exit 1; }
 "#;
 
-/// One restore: what is read as root, and who writes it where.
+/// Run as the owner: what was staged goes. Read-only folders come back read only, and `rm` needs in.
+const CLEAN: &str = r#"chmod -R u+rwx -- "$1" 2>/dev/null
+rm -rf -- "$1"
+"#;
+
+/// How much of what a command says is kept: a deep tree's errors run to megabytes, in root's memory.
+const SAID: u64 = 4096;
+
+/// One restore: what is read as root, and who writes it where. What is live is touched only once
+/// all of it has been read and written, by a rename: a failure leaves it as it was.
 pub struct Copy<'a> {
     pub source: PathBuf,
     pub to: &'a str,
     pub set_aside: &'a str,
+    pub stage: &'a str,
     pub folder: bool,
     pub mode: u32,
     pub uid: u32,
     pub gid: u32,
-    /// `to` sits in a folder of root's: root moves what is there and makes the new one.
+    /// `to` sits in a folder of root's: root makes the stage, and does the swap.
     pub whole: bool,
     pub had: bool,
 }
 
 impl Copy<'_> {
     pub fn run(&self) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        // Never set-id: what a person once could run as a group they have left, or as someone else.
-        let mode = self.mode & 0o777;
-        if self.whole {
-            if self.had {
-                fs::rename(self.to, self.set_aside).with_context(|| format!("setting {} aside", self.to))?;
-            }
-            let made = (|| -> Result<()> {
-                if self.folder {
-                    fs::create_dir(self.to)?;
-                } else {
-                    fs::OpenOptions::new().write(true).create_new(true).open(self.to)?;
-                }
-                std::os::unix::fs::chown(self.to, Some(self.uid), Some(self.gid))?;
-                fs::set_permissions(self.to, fs::Permissions::from_mode(mode | 0o700))?;
-                Ok(())
-            })();
-            if let Err(e) = made.and_then(|()| self.stream(mode)) {
-                self.undo();
-                return Err(e);
-            }
-            return Ok(());
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        if fs::symlink_metadata(self.stage).is_ok() {
+            bail!("{} is already there: move it first", self.stage);
         }
-        self.stream(mode)
+        if self.whole {
+            if self.folder {
+                fs::DirBuilder::new().mode(0o700).create(self.stage)?;
+            } else {
+                fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(self.stage)?;
+            }
+            std::os::unix::fs::chown(self.stage, Some(self.uid), Some(self.gid))?;
+        }
+        if let Err(e) = self.stream().and_then(|()| self.swap()) {
+            self.clean();
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Root's reader and the owner's writer, joined by a pipe and nothing else.
-    fn stream(&self, mode: u32) -> Result<()> {
+    fn stream(&self) -> Result<()> {
         let mut read = if self.folder {
             let mut c = crate::config::command("tar");
-            c.args(["-c", "-f", "-", "--one-file-system", "--mode=u-s,g-s", "-C"]).arg(&self.source).arg(".");
+            c.args(["-c", "-S", "-f", "-", "--one-file-system", "--mode=u-s,g-s", "-C"]).arg(&self.source).arg(".");
             c
         } else {
             let mut c = crate::config::command("cat");
@@ -87,29 +92,62 @@ impl Copy<'_> {
         };
         let mut reader = read.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().context("reading the snapshot")?;
         let pipe = reader.stdout.take().context("the snapshot's pipe")?;
-        let aside = if self.whole { "" } else { self.set_aside };
-        let wrote = crate::config::command("setpriv")
-            .args(["--reuid", &self.uid.to_string(), "--regid", &self.gid.to_string(), "--clear-groups", "--no-new-privs", "--", "sh", "-c", WRITE, "sh"])
-            .args([self.to, aside, if self.folder { "folder" } else { "file" }, &format!("{mode:o}")])
-            .stdin(pipe)
-            .output()
-            .context("running the copy")?;
+        // Never set-id: what a person once could run as a group they have left, or as someone else.
+        let mode = format!("{:o}", self.mode & 0o777);
+        let wrote = self.as_owner(STAGE, &[self.stage, if self.folder { "folder" } else { "file" }, &mode, if self.whole { "" } else { "new" }], Stdio::from(pipe));
         let read_ok = reader.wait().context("reading the snapshot")?.success();
-        if !wrote.status.success() {
-            bail!("{}", String::from_utf8_lossy(&wrote.stderr).trim());
-        }
+        wrote?;
         if !read_ok {
             bail!("the snapshot could not be read whole");
         }
         Ok(())
     }
 
-    /// Back as it was, for a folder of root's: its parent is no one else's, and `remove_dir_all` follows no link.
-    fn undo(&self) {
-        let _ = if self.folder { fs::remove_dir_all(self.to) } else { fs::remove_file(self.to) };
-        if self.had {
-            let _ = fs::rename(self.set_aside, self.to);
+    fn swap(&self) -> Result<()> {
+        if !self.whole {
+            return self.as_owner(SWAP, &[self.to, self.set_aside, self.stage], Stdio::null());
         }
+        if self.had {
+            fs::rename(self.to, self.set_aside).with_context(|| format!("setting {} aside", self.to))?;
+        }
+        fs::rename(self.stage, self.to).inspect_err(|_| {
+            if self.had {
+                let _ = fs::rename(self.set_aside, self.to);
+            }
+        })?;
+        Ok(())
+    }
+
+    /// What was staged goes. In a folder of root's root removes it: `remove_dir_all` follows no link.
+    fn clean(&self) {
+        if !self.whole {
+            let _ = self.as_owner(CLEAN, &[self.stage], Stdio::null());
+        } else if self.folder {
+            let _ = fs::remove_dir_all(self.stage);
+        } else {
+            let _ = fs::remove_file(self.stage);
+        }
+    }
+
+    /// `script`, with no more than the owner's own rights. What it says is kept up to `SAID`.
+    fn as_owner(&self, script: &str, args: &[&str], stdin: Stdio) -> Result<()> {
+        let mut child = crate::config::command("setpriv")
+            .args(["--reuid", &self.uid.to_string(), "--regid", &self.gid.to_string(), "--clear-groups", "--no-new-privs", "--", "sh", "-c", script, "sh"])
+            .args(args)
+            .stdin(stdin)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("running the copy")?;
+        let mut said = Vec::new();
+        if let Some(mut err) = child.stderr.take() {
+            (&mut err).take(SAID).read_to_end(&mut said).context("reading what it said")?;
+            std::io::copy(&mut err, &mut std::io::sink()).context("reading what it said")?;
+        }
+        if !child.wait().context("running the copy")?.success() {
+            bail!("{}", String::from_utf8_lossy(&said).trim());
+        }
+        Ok(())
     }
 }
 

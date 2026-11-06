@@ -142,15 +142,51 @@ pkgs.testers.runNixOSTest {
         assert e["kind"] == "data_restored" and e["data"]["error"], e
         assert machine.succeed("readlink /home/bob/trap").strip() == "/etc"
 
-    with subtest("the owner holds a pipe, nothing of the snapshot"):
+    with subtest("the owner holds a pipe, nothing of the snapshot; and stopping it stops no one else"):
         machine.succeed(as_user("bob", "mkdir -p big && dd if=/dev/urandom of=big/x bs=1M count=300 status=none"))
         c = change(6)
         machine.succeed(as_user("bob", "rm -rf big"))
-        machine.succeed("(for i in $(seq 1 400); do for p in $(pgrep -u bob -x tar); do readlink /proc/$p/fd/0; done; sleep 0.02; done) > /tmp/fds 2>/dev/null &")
-        rc, out = restore(c["seq"], "/home/bob/big")
+        machine.succeed(as_user("dev", f"tmux new-session -d -s stall -x 170 -y 40 {shlex.quote(f'torqcli request system snapshot restore {c['seq']} /home/bob/big; echo done=$? > /tmp/rc-stall; sleep 600')}"))
+        machine.wait_until_succeeds(as_user("dev", "tmux capture-pane -p -t stall") + " | grep -q 'assword'", timeout=60)
+        machine.succeed(as_user("dev", f"tmux send-keys -t stall {pw} Enter"))
+        machine.wait_until_succeeds("pkill -STOP -u bob -x tar", timeout=60)
+        # Every descriptor and folder of the owner's process, while it is held still.
+        held = machine.succeed("for p in $(pgrep -u bob -x tar); do readlink /proc/$p/fd/* /proc/$p/cwd; done").split()
+        assert any(h.startswith("pipe:") for h in held), held
+        assert not any("/.snapshots" in h for h in held), held
+        # bob's process is stopped, in the middle of a restore: a change goes through all the same.
+        change(60)
+        machine.succeed("pkill -CONT -u bob -x tar")
+        machine.wait_until_succeeds("test \"$(cat /tmp/rc-stall)\" = done=0", timeout=120)
+        machine.succeed("test $(stat -c %s /home/bob/big/x) = 314572800")
+        machine.fail("ls -d /home/bob/big.restoring-*")
+
+    with subtest("a failed copy leaves what is live as it was, whatever it stopped on"):
+        # A device in the folder: tar cannot make one as bob. A read-only folder before it: what
+        # was staged has to be got rid of all the same.
+        machine.succeed(as_user("bob", "mkdir -p mixed/ro && echo old > mixed/keep && echo a > mixed/ro/a && chmod 555 mixed/ro"))
+        machine.succeed("mknod /home/bob/mixed/z-dev c 1 3")
+        g = change(61)
+        machine.succeed("rm /home/bob/mixed/z-dev")
+        machine.succeed(as_user("bob", "chmod 755 mixed/ro && echo new > mixed/keep"))
+        rc, out = restore(g["seq"], "/home/bob/mixed")
+        assert rc != "done=0", out
+        assert machine.succeed("cat /home/bob/mixed/keep").strip() == "new", "what is live did not change"
+        machine.fail("ls -d /home/bob/mixed.restoring-* /home/bob/mixed.before-*")
+        assert last()["data"]["error"], last()
+
+    with subtest("in a folder: a pipe comes back as one, set-id bits do not, and a secret stays one"):
+        machine.succeed(as_user("bob", "mkdir -p tree && mkfifo tree/pipe && cp /run/current-system/sw/bin/id tree/sid && chmod 4755 tree/sid"))
+        machine.succeed(as_user("bob", "mkdir -p -m 700 vault/in && echo s > vault/in/key && chmod 600 vault/in/key"))
+        h = change(62)
+        machine.succeed(as_user("bob", "rm -rf tree vault"))
+        rc, out = restore(h["seq"], "/home/bob/tree")
         assert rc == "done=0", out
-        fds = machine.succeed("sleep 9; sort -u /tmp/fds").split()
-        assert fds and all(f.startswith("pipe:") for f in fds), fds
+        assert machine.succeed("stat -c %F:%a /home/bob/tree/pipe /home/bob/tree/sid").split("\n")[1].endswith(":755")
+        machine.succeed("test -p /home/bob/tree/pipe")
+        rc, out = restore(h["seq"], "/home/bob/vault/in/key")
+        assert rc == "done=0", out
+        assert machine.succeed("stat -c %a /home/bob/vault /home/bob/vault/in /home/bob/vault/in/key").split() == ["700", "700", "600"]
 
     with subtest("what would hang, what is gone, what stands alone"):
         machine.succeed(as_user("bob", "mkfifo pipe"))
@@ -192,7 +228,11 @@ pkgs.testers.runNixOSTest {
         f = change(8)
         rc, out = restore(f["seq"], "/var/lib/rootdata")
         assert rc != "done=0" and "folder of root's" in out, out
-        machine.succeed("chown bob /var/lib/moved")
+        machine.succeed("mv /var/lib/moved /var/lib/moved2 && ln -s /etc /var/lib/moved")
+        rc, out = restore(f["seq"], "/var/lib/moved")
+        assert rc != "done=0" and "changed hands" in out, out
+        assert machine.succeed("readlink /var/lib/moved").strip() == "/etc"
+        machine.succeed("rm /var/lib/moved && mv /var/lib/moved2 /var/lib/moved && chown bob /var/lib/moved")
         rc, out = restore(f["seq"], "/var/lib/moved")
         assert rc != "done=0" and "changed hands" in out, out
 
