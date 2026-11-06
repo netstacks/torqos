@@ -51,6 +51,9 @@ pub struct Settings {
     /// The config repo's remote (ADR-036, `torq.remote.url`): SSH only. None: local, as ever.
     #[serde(default)]
     pub remote: Option<String>,
+    /// Take a snapshot of the data before a change (ADR-038): `{label}`. Empty: this machine does not.
+    #[serde(default)]
+    pub snapshot: String,
 }
 
 /// What the caller asked for, by flag or `TORQ_*` variable; None where nothing was given.
@@ -120,6 +123,7 @@ impl Settings {
             people: Vec::new(),
             agent: crate::agent::Limits::default(),
             remote: None,
+            snapshot: String::new(),
         }
     }
 
@@ -198,6 +202,7 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             people: defaults.people,
             agent: defaults.agent,
             remote: defaults.remote,
+            snapshot: defaults.snapshot,
         }),
     }
 }
@@ -268,6 +273,7 @@ mod tests {
             people: vec!["casey".into()],
             agent: crate::agent::Limits::default(),
             remote: None,
+            snapshot: String::new(),
         }
     }
     fn defaults() -> Settings {

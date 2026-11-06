@@ -2493,3 +2493,28 @@ fn break_glass_is_refused_before_the_ledger_begins() {
     b.init().unwrap();
     assert_eq!(b.ledger.read_all().unwrap()[0].body.kind, "init");
 }
+
+/// ADR-038: a snapshot before each change, named in its entry; one that fails is said, and stops nothing.
+#[test]
+fn a_change_records_its_snapshot_and_a_failed_one_stops_nothing() {
+    let m = Confirmable::new();
+    let seen = m.dir.path().join("taken");
+    let b = Broker::new(m.b.repo.root(), m.dir.path().join("state"), "true").with_snapshots(format!("echo {{label}} >> {}", seen.display()));
+    let d = write_diff(m.dir.path(), "theme.diff", THEME);
+    let p = b.propose(&d, "Light theme", Actor::User, false).unwrap().body.seq;
+    let a = b.apply(p, "casey", false).unwrap();
+    let label = a.body.data["snapshot"]["label"].as_str().unwrap().to_string();
+    assert_eq!(fs::read_to_string(&seen).unwrap().trim(), label, "taken before the entry was written");
+    let r = b.revert(a.body.seq, "casey").unwrap();
+    assert!(r.body.data["snapshot"]["label"].is_string(), "{:?}", r.body.data);
+    // None configured: nothing in the entry.
+    let p = m.propose_theme();
+    assert!(m.b.apply(p, "casey", false).unwrap().body.data.get("snapshot").is_none());
+    m.b.revert(m.b.ledger.read_all().unwrap().last().unwrap().body.seq, "casey").unwrap();
+    // It fails: the change goes through, and the entry says why there is none.
+    let b = Broker::new(m.b.repo.root(), m.dir.path().join("state"), "true").with_snapshots("false");
+    let p = b.propose(&d, "Light theme", Actor::User, false).unwrap().body.seq;
+    let a = b.apply(p, "casey", false).unwrap();
+    assert!(a.body.data["snapshot"]["error"].as_str().unwrap().contains("snapshot command failed"), "{:?}", a.body.data);
+    b.ledger.verify().unwrap();
+}

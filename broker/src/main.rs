@@ -315,6 +315,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_current_system(&s.current_system)
         .with_system_profile(&s.system_profile)
         .with_confirm_commands(&s.build, &s.activate, &s.boot, &s.schedule)
+        .with_snapshots(&s.snapshot)
         .with_people(&s.people)
         .with_agent_limits(&s.agent)
         .with_remote(s.remote.as_deref())

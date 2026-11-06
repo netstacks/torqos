@@ -2,6 +2,32 @@
 
 let
   cfg = config.torq.broker;
+  # Read only, and root's alone: what a snapshot holds is every person's files as they were, and
+  # keeping it from them is what lets it outlast what they, or a process of theirs, deletes.
+  snapshot = pkgs.writeShellApplication {
+    name = "torq-snapshot";
+    runtimeInputs = [ pkgs.btrfs-progs pkgs.coreutils pkgs.findutils ];
+    text = ''
+      label=$1
+      case "$label" in "" | *[!0-9]*) echo "torq-snapshot: a label is digits" >&2; exit 2 ;; esac
+      dir=/.snapshots/$label
+      mkdir -m 700 "$dir"
+      forget() {
+        for s in "$1"/*; do
+          [ -e "$s" ] && btrfs -q subvolume delete "$s"
+        done
+        rmdir "$1"
+      }
+      if ! { btrfs -q subvolume snapshot -r /home "$dir/home" && btrfs -q subvolume snapshot -r /var/lib "$dir/var-lib"; }; then
+        forget "$dir" || true
+        exit 1
+      fi
+      # Oldest first: labels are times.
+      find /.snapshots -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -n | head -n -${toString cfg.snapshots.keep} | while read -r old; do
+        forget "/.snapshots/$old"
+      done
+    '';
+  };
 in
 {
   # The config repo's remote (ADR-036): where the configuration and its ledger also live, pushed after
@@ -77,6 +103,22 @@ in
         Build a commit confirmed's system without activating it; prints its store path. `{link}` is
         a GC root the broker removes once the change settles.
       '';
+    };
+    snapshots = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = (config.fileSystems."/.snapshots".fsType or "") == "btrfs";
+        defaultText = lib.literalExpression ''config.fileSystems."/.snapshots".fsType == "btrfs"'';
+        description = ''
+          Snapshot `/home` and `/var/lib` before each change, read only, in `/.snapshots` (ADR-038). On by
+          itself on a disk laid out for it, as the image's and the ISO's are; an ext4 machine has none.
+        '';
+      };
+      keep = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 10;
+        description = "How many to keep, newest first: what they hold stays on the disk, deleted or not, until they go.";
+      };
     };
     activateCommand = lib.mkOption {
       type = lib.types.str;
@@ -207,6 +249,7 @@ in
         activate = cfg.activateCommand;
         boot = cfg.bootCommand;
         schedule = cfg.scheduleCommand;
+        snapshot = lib.optionalString cfg.snapshots.enable "${snapshot}/bin/torq-snapshot {label}";
         currentSystem = "/run/current-system";
         systemProfile = "/nix/var/nix/profiles/system";
         # The tools undo depends on, by store path first: a reviewed but mistaken change that drops

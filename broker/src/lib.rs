@@ -47,6 +47,7 @@ pub struct Broker {
     /// The `commit confirmed` commands (see config.rs for each).
     build_cmd: String,
     activate_cmd: String,
+    snapshot_cmd: String,
     boot_cmd: String,
     schedule_cmd: String,
     /// This broker's own executable, which the scheduled rollback runs: the store path of the
@@ -488,6 +489,7 @@ impl Broker {
             system_profile: PathBuf::from("/nix/var/nix/profiles/system"),
             build_cmd: config::BUILD.into(),
             activate_cmd: config::ACTIVATE.into(),
+            snapshot_cmd: String::new(),
             boot_cmd: config::BOOT.into(),
             schedule_cmd: config::SCHEDULE.into(),
             exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("torq-broker")),
@@ -973,6 +975,12 @@ impl Broker {
         self
     }
 
+    /// The command that snapshots the data before a change, with `{label}` (ADR-038). Empty: none.
+    pub fn with_snapshots(mut self, cmd: impl Into<String>) -> Self {
+        self.snapshot_cmd = cmd.into();
+        self
+    }
+
     pub fn with_system_profile(mut self, link: impl Into<PathBuf>) -> Self {
         self.system_profile = link.into();
         self
@@ -998,6 +1006,20 @@ impl Broker {
 
     /// Add the system the last rebuild switched to, so `status` can tell when the machine is later
     /// switched to something else outside the broker.
+    /// Snapshot the data before a change, for its entry: its label, or why there is none. A failure
+    /// stops nothing: a disk too full to snapshot is one a change may be needed to clear, and the
+    /// snapshot is a way back, not a guarantee. It is said, in the entry. Null: this machine has none.
+    fn take_snapshot(&self, lock: &Lock) -> serde_json::Value {
+        if self.snapshot_cmd.is_empty() {
+            return serde_json::Value::Null;
+        }
+        let label = chrono::Utc::now().timestamp_millis().to_string();
+        match self.run_command(lock, "snapshot", &self.snapshot_cmd, &[("label", &label)]) {
+            Ok(()) => json!({ "label": label }),
+            Err(e) => json!({ "error": format!("{e:#}") }),
+        }
+    }
+
     fn with_system(&self, mut data: serde_json::Value) -> serde_json::Value {
         data["system"] = self.running_system().into();
         data
@@ -1972,6 +1994,7 @@ impl Broker {
         );
         let before = self.repo.head()?;
         self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
+        let snapshot = self.take_snapshot(&lock);
         let mut pending = Pending {
             version: PENDING_VERSION,
             op: "apply".into(),
@@ -2045,6 +2068,9 @@ impl Broker {
         };
 
         let mut data = json!({ "proposal": proposal_seq, "commit": commit, "files": files });
+        if !snapshot.is_null() {
+            data["snapshot"] = snapshot;
+        }
         if let Some(c) = confirm_record {
             data["confirm"] = c;
         }
@@ -2335,6 +2361,7 @@ impl Broker {
         );
         let before = self.repo.head()?;
         self.repo.ensure_clean()?; // before recording anything: a failed commit is undone by a reset
+        let snapshot = self.take_snapshot(&lock);
         let mut pending = Pending {
             version: PENDING_VERSION,
             op: "revert".into(),
@@ -2366,6 +2393,10 @@ impl Broker {
             self.clear_pending()?;
             return Err(e.context("revert aborted because the rebuild failed"));
         }
+        let mut data = json!({ "applied": applied_seq, "reverted_commit": commit, "commit": new_commit });
+        if !snapshot.is_null() {
+            data["snapshot"] = snapshot;
+        }
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(approved_by.into()),
@@ -2373,7 +2404,7 @@ impl Broker {
             tier: a.body.tier.clone(),
             tainted: false,
             reason: format!("Undo: {}", a.body.reason),
-            data: self.with_system(json!({ "applied": applied_seq, "reverted_commit": commit, "commit": new_commit })),
+            data: self.with_system(data),
         })?;
         self.clear_pending()?;
         Ok(e)
