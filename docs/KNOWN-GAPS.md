@@ -17,7 +17,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    remote — the default — what follows still holds. **`verify` cannot detect truncation of the newest entries, and the chain is unkeyed** (second
    audit, H2): it is sha256 over each entry and the one before, so a writer of the file (root)
    can rewrite the history and recompute the chain; it does not cross-check git `Ledger-Entry`
-   trailers against the ledger (a trailer can be one short, since an entry from break-glass may land
+   trailers against the ledger (a trailer can be one short, since an entry from break-glass or a restore may land
    during an apply: cross-check by the entry's `data.commit`), and commits are not signed (L1). What it
    does catch: an edited,
    added or removed field or entry (an added field passed before the audit of 2026-10-31).
@@ -577,6 +577,11 @@ Its §5 lists claims without a test.
    - **An owner can stall their own restore for as long as they like.** It blocks no one: the lock is
      not held. The administrator's command waits; there is no time limit, since a large copy takes hours.
    - **A device node in a folder fails the whole restore:** an owner cannot make one. What is live stays.
+   - **Nothing holds a change off during a copy.** A commit confirmed may begin, or a rollback run, while
+     data comes back; a prune may delete the snapshot being read, and the restore then fails, what is
+     live untouched. The check for a waiting commit is at the start only.
+   - **Parents a restore has to make are the owner's alone (700),** whatever they were in the snapshot, and
+     stay after a failed copy: private, and to be opened up by hand. Restore the folder to get its modes.
    - **In a folder a person can write and does not own** (a 777 folder of a service's), they can swap
      in a link and the owner's copy follows it, as that owner. An administrator chooses that path.
    - **A service is not stopped for its data.** A person stops it first; the command says to restart it.

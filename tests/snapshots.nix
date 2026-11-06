@@ -149,9 +149,10 @@ pkgs.testers.runNixOSTest {
         machine.succeed(as_user("dev", f"tmux new-session -d -s stall -x 170 -y 40 {shlex.quote(f'torqcli request system snapshot restore {c['seq']} /home/bob/big; echo done=$? > /tmp/rc-stall; sleep 600')}"))
         machine.wait_until_succeeds(as_user("dev", "tmux capture-pane -p -t stall") + " | grep -q 'assword'", timeout=60)
         machine.succeed(as_user("dev", f"tmux send-keys -t stall {pw} Enter"))
-        machine.wait_until_succeeds("pkill -STOP -u bob -x tar", timeout=60)
-        # Every descriptor and folder of the owner's process, while it is held still.
-        held = machine.succeed("for p in $(pgrep -u bob -x tar); do readlink /proc/$p/fd/* /proc/$p/cwd; done").split()
+        # In a tight loop in the machine: a copy can be over between two of the driver's polls.
+        machine.succeed("timeout 60 sh -c 'until pkill -STOP -u bob -x tar; do sleep 0.01; done'")
+        # Every descriptor and folder of every process of the owner's, while it is held still.
+        held = machine.succeed("for p in $(pgrep -u bob); do readlink /proc/$p/fd/* /proc/$p/cwd; done").split()
         assert any(h.startswith("pipe:") for h in held), held
         assert not any("/.snapshots" in h for h in held), held
         # bob's process is stopped, in the middle of a restore: a change goes through all the same.
@@ -160,6 +161,24 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("test \"$(cat /tmp/rc-stall)\" = done=0", timeout=120)
         machine.succeed("test $(stat -c %s /home/bob/big/x) = 314572800")
         machine.fail("ls -d /home/bob/big.restoring-*")
+
+    with subtest("what appears during a copy is not overwritten"):
+        machine.succeed("mkdir -p /var/lib/svcbig && dd if=/dev/urandom of=/var/lib/svcbig/x bs=1M count=200 status=none && chown -R svc:svc /var/lib/svcbig")
+        w = change(63)
+        machine.succeed("rm -rf /var/lib/svcbig")
+        machine.succeed(as_user("dev", f"tmux new-session -d -s race -x 170 -y 40 {shlex.quote(f'torqcli request system snapshot restore {w['seq']} /var/lib/svcbig; echo done=$? > /tmp/rc-race; sleep 600')}"))
+        machine.wait_until_succeeds(as_user("dev", "tmux capture-pane -p -t race") + " | grep -q 'assword'", timeout=60)
+        machine.succeed(as_user("dev", f"tmux send-keys -t race {pw} Enter"))
+        machine.succeed("timeout 60 sh -c 'until pkill -STOP -u svc -x tar; do sleep 0.01; done'")
+        # Something of the service's starts up again while the copy waits, and writes its folder.
+        machine.succeed("mkdir /var/lib/svcbig && echo fresh > /var/lib/svcbig/new && chown -R svc:svc /var/lib/svcbig")
+        machine.succeed("pkill -CONT -u svc -x tar")
+        machine.wait_until_succeeds("grep -q done= /tmp/rc-race", timeout=120)
+        # It was set aside, whole, and the snapshot's is in its place: nothing lost either way.
+        assert machine.succeed("cat /tmp/rc-race").strip() == "done=0"
+        e = last()
+        assert e["data"]["set_aside"] and machine.succeed(f"cat {e['data']['set_aside']}/new").strip() == "fresh", e
+        machine.succeed("test $(stat -c %s /var/lib/svcbig/x) = 209715200")
 
     with subtest("a failed copy leaves what is live as it was, whatever it stopped on"):
         # A device in the folder: tar cannot make one as bob. A read-only folder before it: what

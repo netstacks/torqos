@@ -55,7 +55,6 @@ pub struct Copy<'a> {
     pub gid: u32,
     /// `to` sits in a folder of root's: root makes the stage, and does the swap.
     pub whole: bool,
-    pub had: bool,
 }
 
 impl Copy<'_> {
@@ -104,18 +103,28 @@ impl Copy<'_> {
     }
 
     fn swap(&self) -> Result<()> {
+        use rustix::fs::{renameat_with, RenameFlags, CWD};
+        use std::os::unix::fs::MetadataExt;
         if !self.whole {
             return self.as_owner(SWAP, &[self.to, self.set_aside, self.stage], Stdio::null());
         }
-        if self.had {
-            fs::rename(self.to, self.set_aside).with_context(|| format!("setting {} aside", self.to))?;
+        // As it stands now: a copy can take hours, and the checks before it are that old. Neither
+        // rename replaces anything: what has appeared meanwhile is someone's.
+        let there = match fs::symlink_metadata(self.to) {
+            Ok(m) if m.is_symlink() || m.uid() != self.uid => bail!("{} has changed hands during the copy: not restored", self.to),
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        };
+        let keep = |from: &str, to: &str| renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE);
+        if there {
+            keep(self.to, self.set_aside).with_context(|| format!("setting {} aside", self.to))?;
         }
-        fs::rename(self.stage, self.to).inspect_err(|_| {
-            if self.had {
-                let _ = fs::rename(self.set_aside, self.to);
+        keep(self.stage, self.to).map_err(anyhow::Error::from).with_context(|| format!("{} has appeared during the copy: not restored", self.to)).inspect_err(|_| {
+            if there {
+                let _ = keep(self.set_aside, self.to);
             }
-        })?;
-        Ok(())
+        })
     }
 
     /// What was staged goes. In a folder of root's root removes it: `remove_dir_all` follows no link.

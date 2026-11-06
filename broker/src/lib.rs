@@ -948,7 +948,8 @@ impl Broker {
     pub fn restore_data(&self, seq: u64, path: &str, by: &str) -> Result<Entry> {
         use std::os::unix::fs::MetadataExt;
         let lock = Lock::acquire(&self.state_dir)?;
-        // One thing at a time: a machine going back while its data does would leave a person guessing.
+        // Not on top of a change still in doubt: a machine going back while its data does would leave a
+        // person guessing. A check at the start, no more: nothing holds one off during the copy.
         if pending_confirm(&self.ledger.read_all()?).is_some() {
             bail!("a commit confirmed is waiting: confirm it or let it roll back first");
         }
@@ -981,12 +982,14 @@ impl Broker {
         if whole && live.is_some() && fs::symlink_metadata(&set_aside).is_ok() {
             bail!("{set_aside} is already there: move it first");
         }
-        let had = fs::symlink_metadata(&path).is_ok();
-        let stage = format!("{path}.restoring-{label}");
-        let copy = snapshot::Copy { source: from.join(parts.iter().collect::<PathBuf>()), to: &path, set_aside: &set_aside, stage: &stage, folder: last.is_dir(), mode: last.mode(), uid, gid, whole, had };
+        // Its own, for each run: nothing else makes two restores of one path keep apart.
+        let stage = format!("{path}.restoring-{label}-{}", std::process::id());
+        let copy = snapshot::Copy { source: from.join(parts.iter().collect::<PathBuf>()), to: &path, set_aside: &set_aside, stage: &stage, folder: last.is_dir(), mode: last.mode(), uid, gid, whole };
         drop(lock);
         let done = copy.run();
         let error = done.as_ref().err().map(|e| format!("{e:#}").chars().filter(|c| !c.is_control()).take(300).collect::<String>());
+        // What happened, not what was expected: the swap decides, on what is there by then.
+        let kept = done.is_ok() && fs::symlink_metadata(&set_aside).is_ok();
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(by.into()),
@@ -994,7 +997,7 @@ impl Broker {
             tier: Tier::System.to_string(),
             tainted: false,
             reason: format!("{path} put back as it was before #{seq}{}", if error.is_some() { ": it failed" } else { "" }),
-            data: json!({ "change": seq, "path": path, "label": label, "set_aside": had.then_some(&set_aside), "error": error }),
+            data: json!({ "change": seq, "path": path, "label": label, "set_aside": kept.then_some(&set_aside), "error": error }),
         })?;
         done.with_context(|| format!("{path} was not restored"))?;
         Ok(e)
