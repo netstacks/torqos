@@ -18,7 +18,8 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    audit, H2): it is sha256 over each entry and the one before, so a writer of the file (root)
    can rewrite the history and recompute the chain; `status` checks each change against its commit (who approved it, which
    proposal; by the entry's `commit`, as the `Ledger-Entry` trailer can be one short, an entry from
-   break-glass or a restore landing during an apply), so one rewritten alone is seen; both rewritten
+   break-glass or a restore landing during an apply), so one rewritten alone is seen. Both rewritten
+   together are not, and commits are not signed (L1). What it
    does catch: an edited,
    added or removed field or entry (an added field passed before the audit of 2026-10-31).
    Planned (M3): sign the entries and commits with a broker key, anchor the head hash.
