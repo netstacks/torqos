@@ -220,6 +220,8 @@ pub struct Status {
     /// Where the ledger and the repository disagree about a change: each must be rewritten to agree
     /// with the other, and a rewrite of one is seen here.
     pub disagreements: Vec<String>,
+    /// A torn last line is waiting: the next entry or push mends it.
+    pub torn: bool,
     /// The config repo's HEAD; None if git cannot read it.
     pub head: Option<String>,
     /// Uncommitted changes in the config repo (only the broker writes it).
@@ -256,6 +258,19 @@ impl Status {
     /// Everything that is not as the ledger says, worded for a person. Empty means all is well —
     /// or that it could not be checked because an operation is running (`busy`).
     pub fn problems(&self) -> Vec<String> {
+        let mut p = self.drift();
+        if self.busy.is_none() {
+            p.extend(self.disagreements.iter().map(|d| format!("the ledger and the repository disagree: {d}")));
+            if self.torn {
+                p.push("the ledger's last line was cut short (a power cut?): the next change or push removes it, and says so".into());
+            }
+        }
+        p
+    }
+
+    /// What a rebuild could put right: the machine against its ledger. Not what the record itself says of
+    /// itself, which no rebuild touches.
+    pub fn drift(&self) -> Vec<String> {
         if self.busy.is_some() {
             return Vec::new();
         }
@@ -263,7 +278,6 @@ impl Status {
         if let Err(e) = &self.ledger {
             p.push(format!("ledger: {e}"));
         }
-        p.extend(self.disagreements.iter().map(|d| format!("the ledger and the repository disagree: {d}")));
         // The remote (ADR-036). What a person reads here is this machine's own record: root can
         // rewrite it as it can the ledger. The check that root cannot reach is the remote itself —
         // its ledger branch, read from anywhere.
@@ -553,7 +567,6 @@ impl Broker {
     pub fn sync_remote(&self) -> Result<Option<remote::Pushed>> {
         let Some(r) = self.remote()? else { return Ok(None) };
         let Some(_lock) = Lock::try_acquire(&self.state_dir)? else { return Ok(None) };
-        self.ledger.mend().context("mending the ledger before a push")?;
         let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let before = r.last();
         let last_ok = before.as_ref().and_then(|p| if p.ok { Some(p.at.clone()) } else { p.last_ok.clone() });
@@ -568,6 +581,12 @@ impl Broker {
             last_ok: last_ok.clone(),
             failing_since: Some(failing_since.clone()),
         };
+        // Before anything reads it: a remote that had seen a torn line would never match again.
+        if let Err(e) = self.ledger.mend() {
+            let p = fail(format!("the ledger's last line is torn and could not be mended: {e:#}"), None);
+            r.record(&p)?;
+            return Ok(Some(p));
+        }
         if !r.key().exists() {
             let p = fail("no key yet: request system remote key".into(), None);
             r.record(&p)?;
@@ -592,7 +611,7 @@ impl Broker {
         let entries = self.ledger.read_all()?;
         let recorded = {
             let _held = self.ledger.shared();
-            self.repo.record_ledger(self.ledger.path(), entries.len(), r.verified().as_deref())
+            self.ledger.text().and_then(|text| self.repo.record_ledger(&text, entries.len(), r.verified().as_deref()))
         };
         let ledger = recorded.and_then(|c| self.repo.push_ledger(&r.url, &ssh).map(|()| c));
         let commit = match ledger {
@@ -659,7 +678,7 @@ impl Broker {
             }
             let local = {
                 let _held = self.ledger.shared();
-                fs::read_to_string(self.ledger.path()).unwrap_or_default()
+                self.ledger.text().unwrap_or_default()
             };
             let a = remote::anchor(prev.as_deref(), &local);
             if matches!(a, remote::Anchor::Agrees { .. }) {
@@ -745,6 +764,9 @@ impl Broker {
             prev = Some(text);
         }
         let text = prev.context("the repository has no ledger")?;
+        if !text.ends_with('\n') {
+            bail!("the repository's ledger ends in the middle of a line: refused");
+        }
         let file = self.state_dir.join("adopt-ledger.jsonl");
         fs::write(&file, &text)?;
         let staged = Ledger::open(&file);
@@ -877,6 +899,7 @@ impl Broker {
         }
         // The old machine's history is this one's: in, whole, and this adoption on top of it.
         fs::copy(self.state_dir.join("adopt-ledger.jsonl"), self.ledger.path()).context("installing the ledger")?;
+        fs::File::open(self.ledger.path()).and_then(|l| l.sync_all()).context("installing the ledger")?;
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: None,
@@ -1152,25 +1175,69 @@ impl Broker {
     /// back is out of history on purpose.
     fn commits_disagree(&self, entries: &[Entry]) -> Vec<String> {
         const SAID: usize = 5;
-        let Ok(commits) = self.repo.commit_trailers() else { return Vec::new() };
-        let gone: std::collections::HashSet<u64> = entries.iter().filter(|e| e.body.kind == "rolled_back").filter_map(|e| e.body.data["applied"].as_u64()).collect();
-        entries
+        let all = match self.disagreeing(entries) {
+            Ok(all) => all,
+            Err(e) if self.repo.head().is_ok() => return vec![format!("the machine's history cannot be read: {e:#}")],
+            Err(_) => return Vec::new(),
+        };
+        let more = all.len().saturating_sub(SAID);
+        let mut said: Vec<String> = all.into_iter().skip(more).map(|(_, d)| d).collect();
+        if more > 0 {
+            said.insert(0, format!("{more} more before these"));
+        }
+        said
+    }
+
+    /// Each entry that disagrees, and how, that no one has looked at (`acknowledge_disagreements`).
+    fn disagreeing(&self, entries: &[Entry]) -> Result<Vec<(u64, String)>> {
+        let commits = self.repo.commit_trailers()?;
+        let settled = |kind: &str, key: &str| -> std::collections::HashSet<u64> {
+            entries.iter().filter(|e| e.body.kind == kind).flat_map(|e| match &e.body.data[key] {
+                serde_json::Value::Array(l) => l.iter().filter_map(|v| v.as_u64()).collect::<Vec<_>>(),
+                v => v.as_u64().into_iter().collect(),
+            }).collect()
+        };
+        let gone = settled("rolled_back", "applied");
+        let seen = settled("disagreement_acknowledged", "entries");
+        Ok(entries
             .iter()
-            .filter(|e| matches!(e.body.kind.as_str(), "applied" | "reverted") && !gone.contains(&e.body.seq))
+            .filter(|e| matches!(e.body.kind.as_str(), "applied" | "reverted") && !gone.contains(&e.body.seq) && !seen.contains(&e.body.seq))
             .filter_map(|e| {
                 let seq = e.body.seq;
                 let commit = e.body.data["commit"].as_str()?;
                 let Some((by, proposal)) = commits.get(commit) else {
-                    return Some(format!("#{seq} names commit {commit}, which is not in the machine's history"));
+                    return Some((seq, format!("#{seq} names commit {commit}, which is not in the machine's history")));
                 };
                 if e.body.approved_by.as_deref() != Some(by.as_str()) {
-                    return Some(format!("#{seq} says {} approved it, its commit says {by:?}", e.body.approved_by.as_deref().unwrap_or("no one")));
+                    return Some((seq, format!("#{seq} says {} approved it, its commit says {by:?}", e.body.approved_by.as_deref().unwrap_or("no one"))));
                 }
                 let wanted = e.body.data["proposal"].as_u64().map(|p| p.to_string());
-                (wanted.is_some() && wanted.as_deref() != Some(proposal.as_str())).then(|| format!("#{seq} applied proposal #{}, its commit says {proposal:?}", wanted.unwrap_or_default()))
+                (wanted.is_some() && wanted.as_deref() != Some(proposal.as_str())).then(|| (seq, format!("#{seq} applied proposal #{}, its commit says {proposal:?}", wanted.unwrap_or_default())))
             })
-            .take(SAID)
-            .collect()
+            .collect())
+    }
+
+    /// A person has looked into what the ledger and the repository disagree on: said no more, and on
+    /// the record. A new disagreement is said as ever. Like clearing the remote's alarm, it decides
+    /// nothing about who was right.
+    pub fn acknowledge_disagreements(&self, approved_by: &str) -> Result<Entry> {
+        let _lock = Lock::acquire(&self.state_dir)?;
+        let entries = self.ledger.read_all()?;
+        let list = self.disagreeing(&entries)?;
+        if list.is_empty() {
+            bail!("the ledger and the repository agree: nothing to acknowledge");
+        }
+        let reason = format!("{} looked into {} disagreement(s) between the ledger and the repository", approved_by, list.len());
+        let (seqs, said): (Vec<u64>, Vec<String>) = list.into_iter().unzip();
+        self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(approved_by.into()),
+            kind: "disagreement_acknowledged".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason,
+            data: json!({ "entries": seqs, "said": said }),
+        })
     }
 
     /// The comparison itself, for a caller that already holds the lock (or knows it is busy).
@@ -1199,6 +1266,7 @@ impl Broker {
             remote_alarm: self.remote().ok().flatten().and_then(|r| r.alarm()),
             remote_refused: self.remote().err().map(|e| format!("{e:#}")),
             disagreements: self.commits_disagree(&entries),
+            torn: self.ledger.torn(),
             ledger,
             head: self.repo.head().ok(),
             dirty: self.repo.ensure_clean().is_err() && self.repo.head().is_ok(),
@@ -1238,7 +1306,7 @@ impl Broker {
             );
         }
         let before = self.facts(None)?;
-        if before.problems().is_empty() {
+        if before.drift().is_empty() {
             bail!("nothing to repair: the machine is as its ledger says");
         }
         // A manual nixos-rebuild does not take the broker lock: switching now would race it, and the
@@ -1273,7 +1341,7 @@ impl Broker {
                     "running_system": before.running_system,
                     "next_boot": before.next_boot,
                     "ledgered_system": before.ledgered_system,
-                    "problems": before.problems(),
+                    "problems": before.drift(),
                 },
             })),
         })?;
@@ -1377,49 +1445,65 @@ impl Broker {
             reason: format!("Password changed for {user}"),
             data: json!({ "user": user }),
         })?;
-        if let Err(e) = self.store_password(user, hash) {
-            self.ledger.append(NewEntry {
-                actor: "broker".into(),
-                approved_by: Some(by.into()),
-                kind: "password_failed".into(),
-                tier: Tier::System.to_string(),
-                tainted: false,
-                reason: format!("The password was not changed for {user}, after all"),
-                data: json!({ "user": user, "entry": entry.body.seq, "error": format!("{e:#}").chars().filter(|c| !c.is_control()).take(300).collect::<String>() }),
-            })?;
-            return Err(e);
-        }
-        Ok(entry)
+        let Err((running, e)) = self.store_password(user, hash) else { return Ok(entry) };
+        let reason = if running {
+            format!("The password for {user} is set in the running system but may not be kept: a later build may bring the old one back")
+        } else {
+            format!("The password was not changed for {user}, after all")
+        };
+        let said = self.ledger.append(NewEntry {
+            actor: "broker".into(),
+            approved_by: Some(by.into()),
+            kind: "password_failed".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason,
+            data: json!({ "user": user, "entry": entry.body.seq, "running": running, "error": format!("{e:#}").chars().filter(|c| !c.is_control()).take(300).collect::<String>() }),
+        });
+        Err(match said {
+            Ok(_) => e,
+            Err(l) => e.context(format!("and the ledger could not say so: {l:#}")),
+        })
     }
 
-    /// A new hash in the running system, then kept where every later build finds it.
-    fn store_password(&self, user: &str, hash: &str) -> Result<()> {
-        // At once: the running system's own tool. It fails for an account this machine does not have.
-        let mut words = self.password_cmd.split_whitespace();
-        let mut cmd = config::command(words.next().unwrap_or("chpasswd"));
-        cmd.args(words).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().context("setting the password")?;
-        child.stdin.take().context("setting the password")?.write_all(format!("{user}:{hash}\n").as_bytes())?;
-        let out = child.wait_with_output()?;
-        if !out.status.success() {
-            bail!("the password was not set: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        // Kept: written whole (a new file, then renamed over the old), private to the system, and the
-        // folder synced: a rename is only as lasting as its directory.
+    /// A new hash, written whole beside where it is kept, then set in the running system, then put in
+    /// place, so what can fail mostly fails first. The error says whether the running system has it.
+    fn store_password(&self, user: &str, hash: &str) -> std::result::Result<(), (bool, anyhow::Error)> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.passwords_dir)?;
         let part = self.passwords_dir.join(format!(".{user}.new"));
-        let _ = std::fs::remove_file(&part);
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?;
-        f.write_all(format!("{hash}\n").as_bytes())?;
-        f.sync_all()?;
-        std::fs::rename(&part, self.passwords_dir.join(user))?;
-        fs::File::open(&self.passwords_dir)?.sync_all().context("syncing the passwords' folder")?;
-        Ok(())
+        let staged = (|| -> Result<()> {
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.passwords_dir)?;
+            let _ = std::fs::remove_file(&part);
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?;
+            f.write_all(format!("{hash}\n").as_bytes())?;
+            f.sync_all()?;
+            Ok(())
+        })();
+        staged.map_err(|e| (false, e))?;
+        // At once: the running system's own tool. It fails for an account this machine does not have.
+        let set = (|| -> Result<()> {
+            let mut words = self.password_cmd.split_whitespace();
+            let mut cmd = config::command(words.next().unwrap_or("chpasswd"));
+            cmd.args(words).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+            let mut child = cmd.spawn().context("setting the password")?;
+            child.stdin.take().context("setting the password")?.write_all(format!("{user}:{hash}\n").as_bytes())?;
+            let out = child.wait_with_output()?;
+            if !out.status.success() {
+                bail!("the password was not set: {}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+            Ok(())
+        })();
+        if let Err(e) = set {
+            let _ = std::fs::remove_file(&part);
+            return Err((false, e));
+        }
+        // A rename is only as lasting as its directory.
+        let kept = std::fs::rename(&part, self.passwords_dir.join(user)).map_err(anyhow::Error::from).and_then(|()| Ok(fs::File::open(&self.passwords_dir)?.sync_all()?));
+        kept.context("keeping the password").map_err(|e| (true, e))
     }
 
     pub fn init(&self) -> Result<()> {
-        // A power cut's torn line goes before anyone looks: this runs at every start.
+        // Before setup goes on, or starts again: a power cut may be why it is here.
         self.ledger.mend().context("mending the ledger")?;
         // A first-boot setup cut short after its switch: finished here, at the new system's start
         // (torq-broker-init). While setup itself holds the lock — its own switch starts this unit —
@@ -2080,6 +2164,9 @@ impl Broker {
     }
 
     fn apply_inner(&self, proposal_seq: u64, approved_by: &str, confirm_tainted: bool, confirm: Option<u32>) -> Result<Entry> {
+        if !policy::user_name_ok(approved_by) {
+            bail!("{approved_by:?} is not a person's name");
+        }
         let lock = Lock::acquire(&self.state_dir)?;
         self.reconcile_locked(&lock, approved_by)?;
         self.refuse_unledgered_head()?;
@@ -2497,6 +2584,9 @@ impl Broker {
     /// Undo one applied change by a new commit that reverts it. (Not `rollback`: that word is kept
     /// for loading a whole earlier configuration, and for an unconfirmed `commit confirmed`.)
     pub fn revert(&self, applied_seq: u64, approved_by: &str) -> Result<Entry> {
+        if !policy::user_name_ok(approved_by) {
+            bail!("{approved_by:?} is not a person's name");
+        }
         let lock = Lock::acquire(&self.state_dir)?;
         self.reconcile_locked(&lock, approved_by)?;
         self.refuse_unledgered_head()?;
@@ -2576,6 +2666,7 @@ mod tests {
         Status {
             ledger: Ok(3),
             disagreements: vec![],
+            torn: false,
             head: Some("c".into()),
             dirty: false,
             ledgered_commit: Some("c".into()),

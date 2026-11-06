@@ -125,9 +125,8 @@ impl Repo {
     /// of `parent` — the remote's newest, when it has one, so that the chain is always the remote's
     /// and more (a local ref moved or lost cannot fork it: the review of ADR-036). Nothing new when
     /// the ledger is what `parent` holds.
-    pub fn record_ledger(&self, ledger: &Path, entries: usize, parent: Option<&str>) -> Result<String> {
-        let ledger = path::absolute(ledger)?.to_string_lossy().into_owned();
-        let blob = self.git(&["hash-object", "-w", "--", &ledger])?.trim().to_string();
+    pub fn record_ledger(&self, ledger: &str, entries: usize, parent: Option<&str>) -> Result<String> {
+        let blob = self.git_stdin(&["hash-object", "-w", "--stdin"], ledger)?.trim().to_string();
         let tree = self.git_stdin(&["mktree"], &format!("100644 blob {blob}\tledger.jsonl\n"))?.trim().to_string();
         if let Some(p) = parent {
             if self.git(&["rev-parse", &format!("{p}^{{tree}}")])?.trim() == tree {

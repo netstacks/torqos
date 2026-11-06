@@ -202,6 +202,12 @@ impl Machine for Real<'_> {
         ))
     }
 
+    fn acknowledge(&self, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["ledger-acknowledge", "--approved-by", me])?, &log)?, "request system ledger acknowledge")?;
+        Ok(format!("On the record (ledger #{}): what was said is said no more. A new disagreement is said as ever.\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
     fn snapshots(&self) -> Result<String> {
         let log = run::start_log()?;
         let v = done(run::broker_json(broker(self.cli, &["snapshots"])?, &log)?, "show system snapshots")?;

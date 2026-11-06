@@ -230,6 +230,8 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         "remote_cleared" => ("✓", clean(&e.reason)),
         "data_restored" => ("↺", clean(&e.reason)),
         "ledger_mended" => ("⚠", clean(&e.reason)),
+        "disagreement_acknowledged" => ("✓", clean(&e.reason)),
+        "password" => ("✓", clean(&e.reason)),
         "password_failed" => ("✗", clean(&e.reason)),
         "proposal" => ("·", format!("Proposed, not applied: {}", e.reason)),
         other => ("·", other.to_string()),

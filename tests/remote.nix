@@ -110,6 +110,14 @@ pkgs.testers.runNixOSTest {
         assert last()["ok"] and remote_ledger() == local_ledger(), last()
 
 
+    with subtest("a torn line never reaches the remote: mended before the push, the entry saying so"):
+        machine.succeed("printf '{\"seq\":99,\"cut' >> /var/lib/torq/state/ledger.jsonl")
+        machine.succeed("torq-broker push")
+        got = remote_ledger()
+        assert "\"seq\":99" not in got and got.endswith("\n"), got[-200:]
+        assert json.loads(got.splitlines()[-1])["kind"] == "ledger_mended", got[-300:]
+        machine.succeed("torq-broker verify")
+
     with subtest("a main of another history on the remote does not keep the ledger from it"):
         # (As a repository created with a README would have.)
         as_git = lambda cmd: gitserver.succeed(f"su - git -c {shlex.quote(cmd)}")

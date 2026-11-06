@@ -101,7 +101,7 @@ impl Ledger {
     /// so that operation did not finish, and the line is not an entry. It stays out of what is read,
     /// and goes for good at the next `append` or `mend` (ledgered). A whole line that does not verify
     /// is another thing, an edit, and is never mended.
-    fn text(&self) -> Result<String> {
+    pub fn text(&self) -> Result<String> {
         Ok(self.split()?.0)
     }
 
@@ -116,34 +116,85 @@ impl Ledger {
         Ok((String::from_utf8(bytes).context("the ledger is not text")?, tail))
     }
 
-    /// A torn last line, set aside beside the ledger, and an entry to say so. What pushes the ledger
-    /// calls this first: a remote that has seen a torn line would never match again. None: nothing torn.
+    /// A torn last line gone, and an entry to say so, its bytes in it. What pushes the ledger calls
+    /// this first: a remote that has seen a torn line would never match again. None: nothing to say.
     pub fn mend(&self) -> Result<Option<Entry>> {
         let _guard = self.exclusive()?;
         self.mend_locked()
     }
 
+    /// Whether a torn line is waiting, for `status`: nothing mends it until something writes.
+    pub fn torn(&self) -> bool {
+        self.split().is_ok_and(|(_, tail)| !tail.is_empty())
+    }
+
     fn mend_locked(&self) -> Result<Option<Entry>> {
+        const KEPT: usize = 8192;
         let (text, tail) = self.split()?;
         if tail.is_empty() {
             return Ok(None);
         }
-        let kept = self.path.with_extension(format!("torn-{}", chrono::Utc::now().timestamp_millis()));
-        fs::write(&kept, &tail).with_context(|| format!("keeping the torn line in {}", kept.display()))?;
-        let f = OpenOptions::new().write(true).open(&self.path)?;
-        f.set_len(text.len() as u64).context("cutting the torn line off")?;
-        f.sync_all()?;
-        let digest = hex::encode(Sha256::digest(&tail));
-        self.append_locked(NewEntry {
-            actor: "broker".into(),
-            approved_by: None,
-            kind: "ledger_mended".into(),
-            tier: "system".into(),
-            tainted: false,
-            reason: format!("The ledger's last line was cut short ({} bytes), and removed", tail.len()),
-            data: serde_json::json!({ "bytes": tail.len(), "sha256": digest, "kept": kept.file_name().and_then(|n| n.to_str()) }),
-        })
-        .map(Some)
+        // A ledger edited is left as it was found, for a person to look at, tail and all.
+        let entries = Self::parse(&text)?;
+        verify_entries(&entries)?;
+        // A whole entry, chained to the last, that lost its newline: it stands. Only what the hash
+        // cannot vouch for goes.
+        let whole = std::str::from_utf8(&tail).ok().and_then(|line| Self::parse(line).ok());
+        if let Some(line) = whole.filter(|l| l.len() == 1) {
+            if verify_entries(&[entries.as_slice(), line.as_slice()].concat()).is_ok() {
+                let mut f = OpenOptions::new().append(true).open(&self.path)?;
+                f.write_all(b"\n")?;
+                f.sync_all()?;
+                return Ok(None);
+            }
+        }
+        // Nothing yet but this: the machine's first entry must be its first, or setup takes it for
+        // set up. The bytes are kept beside the ledger, and it starts again.
+        if entries.is_empty() {
+            let kept = self.path.with_extension(format!("torn-{}", chrono::Utc::now().timestamp_millis()));
+            self.write_durably(&kept, &tail)?;
+            self.write_durably(&self.path, b"")?;
+            return Ok(None);
+        }
+        let entry = self.next_entry(
+            &entries,
+            NewEntry {
+                actor: "broker".into(),
+                approved_by: None,
+                kind: "ledger_mended".into(),
+                tier: "system".into(),
+                tainted: false,
+                reason: format!("The ledger's last line was cut short ({} bytes), and removed", tail.len()),
+                data: serde_json::json!({ "bytes": tail.len(), "sha256": hex::encode(Sha256::digest(&tail)), "tail": hex::encode(&tail[..tail.len().min(KEPT)]) }),
+            },
+        )?;
+        // At once: the ledger as it was, or mended with its record. Never between, on a full disk least of all.
+        let mut bytes = text.into_bytes();
+        bytes.extend_from_slice(format!("{}\n", serde_json::to_string(&entry)?).as_bytes());
+        self.write_durably(&self.path, &bytes)?;
+        Ok(Some(entry))
+    }
+
+    /// `to`, holding `bytes` or as it was: a new file, synced, renamed over it, and the folder synced.
+    fn write_durably(&self, to: &Path, bytes: &[u8]) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let part = to.with_extension("new");
+        let _ = fs::remove_file(&part);
+        let written = (|| -> Result<()> {
+            let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            fs::rename(&part, to)?;
+            Ok(())
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&part);
+        }
+        written.with_context(|| format!("writing {}", to.display()))?;
+        if let Some(dir) = to.parent() {
+            fs::File::open(dir)?.sync_all()?;
+        }
+        Ok(())
     }
 
     fn exclusive(&self) -> Result<fs::File> {
@@ -194,6 +245,18 @@ impl Ledger {
     fn append_locked(&self, new: NewEntry) -> Result<Entry> {
         let entries = Self::parse(&self.text()?)?;
         verify_entries(&entries)?;
+        let entry = self.next_entry(&entries, new)?;
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        f.write_all(format!("{}\n", serde_json::to_string(&entry)?).as_bytes())?;
+        f.sync_all()?;
+        Ok(entry)
+    }
+
+    /// The entry that follows `entries`.
+    fn next_entry(&self, entries: &[Entry], new: NewEntry) -> Result<Entry> {
         let (seq, prev_hash) = match entries.last() {
             Some(last) => (last.body.seq + 1, last.hash.clone()),
             None => (1, GENESIS_PREV.to_string()),
@@ -219,12 +282,7 @@ impl Ledger {
             prev_hash,
         };
         let hash = hash_body(&body)?;
-        let entry = Entry { body, hash };
-
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
-        f.write_all(format!("{}\n", serde_json::to_string(&entry)?).as_bytes())?;
-        f.sync_all()?;
-        Ok(entry)
+        Ok(Entry { body, hash })
     }
 
     pub fn verify(&self) -> Result<usize> {

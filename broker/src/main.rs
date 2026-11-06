@@ -55,6 +55,7 @@ enum Cmd {
     Push,
     RemoteShow,
     RemoteClear { approved_by: String },
+    Acknowledge { approved_by: String },
     FetchIncoming,
     BreakGlass { by: String, reason: String },
     Snapshots,
@@ -173,6 +174,7 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("snapshots").about("The snapshots of the data this machine still has (ADR-038)."))
         .subcommand(Command::new("restore-data").about("Put a path back as it was before a change (ADR-038): as its owner, what is there set aside, ledgered.").arg(seq()).arg(Arg::new("path").long("path").required(true)).arg(by()))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
+        .subcommand(Command::new("ledger-acknowledge").about("A person has looked into where the ledger and the repository disagree: said no more, and on the record.").arg(by()))
         .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
         .subcommand(Command::new("serve").about(
             "Answer one request on the socket (torq-broker.socket hands it the connection as standard input and output): the caller from the kernel (SO_PEERCRED), what it may do by its account and the change's tier, a system change's password through PAM (ADR-040).",
@@ -218,6 +220,7 @@ fn parse_cli() -> Cli {
         "push" => Cmd::Push,
         "remote" => Cmd::RemoteShow,
         "remote-clear" => Cmd::RemoteClear { approved_by: by(sub) },
+        "ledger-acknowledge" => Cmd::Acknowledge { approved_by: by(sub) },
         "fetch-incoming" => Cmd::FetchIncoming,
         "snapshots" => Cmd::Snapshots,
         "restore-data" => Cmd::RestoreData { seq: *sub.get_one::<u64>("seq").unwrap_or(&0), path: s(sub, "path").unwrap_or_default(), approved_by: by(sub) },
@@ -333,7 +336,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     let writes = matches!(
         cli.cmd,
         Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. }
-            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. }
     );
     let _push = writes.then_some(PushAfter(&b));
     match cli.cmd {
@@ -393,6 +396,10 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             } else {
                 println!("{}", id.as_deref().map_or("the remote has no incoming branch".to_string(), |c| format!("incoming: {c} (refs/torq/incoming)")));
             }
+        }
+        Cmd::Acknowledge { approved_by } => {
+            let e = b.acknowledge_disagreements(&approved_by)?;
+            println!("{}", serde_json::to_string(&e)?);
         }
         Cmd::RemoteClear { approved_by } => {
             let e = b.clear_remote_alarm(&approved_by)?;

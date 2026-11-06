@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 #![forbid(dead_code)]
 
-use torq_broker::{policy::Actor, repo::Repo, Broker};
+use torq_broker::{ledger::{Ledger, NewEntry}, policy::Actor, repo::Repo, Broker};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -2397,6 +2397,12 @@ fn a_hostile_repository_is_refused_before_anything_is_adopted() {
         sh(&stage, &format!("b=$(git hash-object -w {}) && t=$(printf '100644 blob %s\\tledger.jsonl\\n' $b | git mktree) && c=$(git -c user.name=t -c user.email=t@t commit-tree $t -m l) && git update-ref refs/torq/remote-ledger $c", l.display()));
         assert!(new_machine.check_stage(&Repo::new(stage), url).unwrap().ssh, "{name}");
     }
+    // A ledger that ends in the middle of a line: less than the remote holds, or something else.
+    let cutoff = dir.path().join("cutoff.jsonl");
+    let whole = fs::read(&ledger).unwrap();
+    fs::write(&cutoff, [&whole[..whole.len() - 1], b"x"].concat()).unwrap();
+    let e = format!("{:#}", new_machine.check_stage(&stage_with("cutoff", "", &cutoff), url).unwrap_err());
+    assert!(e.contains("middle of a line"), "{e}");
     // A ledger with a commit confirmed waiting would drive the boot's rollback: refused.
     let waiting = dir.path().join("waiting.jsonl");
     fs::copy(&ledger, &waiting).unwrap();
@@ -2460,6 +2466,7 @@ fn break_glass_during_a_build_leaves_the_commit_confirmed_timer_armed() {
     let seq = m.propose_theme();
     let a = m.b.apply_confirmed(seq, "casey", false, 1).unwrap();
     assert_eq!(a.body.seq, seq + 2, "the entry landed mid-build: {}", m.log());
+    assert_eq!(m.b.status().unwrap().disagreements, Vec::<String>::new(), "the trailer is one short: the commit is what counts");
     // What the timer was told, as the timer would say it.
     let named: u64 = m.log().lines().find_map(|l| l.strip_prefix("schedule ")?.split(' ').next()?.parse().ok()).unwrap();
     let r = m.b.expire_confirm(Some(named), false).unwrap().expect("rolled back");
@@ -2543,8 +2550,8 @@ fn no_restore_while_a_commit_confirmed_waits() {
 }
 
 /// N3: a power cut in the middle of an append left a line with no end, and every command after it,
-/// recovery too, refused. Read past, set aside, and ledgered; a whole line that does not verify is an
-/// edit, and is never mended.
+/// recovery too, refused. Read past, said by `status`, and gone at the next entry, its bytes in the
+/// entry that says so. A whole line that does not verify is an edit, and nothing touches it.
 #[test]
 fn a_torn_last_line_is_mended_and_an_edit_is_not() {
     use std::io::Write;
@@ -2559,32 +2566,79 @@ fn a_torn_last_line_is_mended_and_an_edit_is_not() {
     let cut = br#"{"seq":2,"ts":"2026-11-06T00:00:00Z","actor":"us"#;
     // Cut short, cut in the middle of a character, and the zeros a file system can leave.
     for tail in [&cut[..], "{\"reason\":\"é".as_bytes().split_last().unwrap().1, &[0u8; 64][..]] {
-        let (dir, b) = torn(tail);
-        // Read past: what looks at the ledger sees what was finished.
+        let (_dir, b) = torn(tail);
+        // Read past: what looks at the ledger sees what was finished, and is told.
         assert_eq!(b.ledger.verify().unwrap(), 1, "{tail:?}");
+        let s = b.status().unwrap();
+        assert!(s.problems().iter().any(|p| p.contains("cut short")) && !s.drift().iter().any(|p| p.contains("cut short")), "{:?}", s.problems());
         // Mended at the next entry, whoever writes it: break-glass, the way back, above all.
         let (e, _) = b.break_glass("alice", "after the power cut").unwrap();
         let all = b.ledger.read_all().unwrap();
         assert_eq!((all[1].body.kind.as_str(), all[1].body.actor.as_str(), e.body.seq), ("ledger_mended", "broker", 3));
         assert_eq!(all[1].body.data["bytes"], tail.len());
+        assert_eq!(all[1].body.data["tail"].as_str().unwrap(), hex::encode(tail), "what the line said is kept");
         b.ledger.verify().unwrap();
-        // And kept: what the line said is for a person to read.
-        let kept = dir.path().join("state").join(all[1].body.data["kept"].as_str().unwrap());
-        assert_eq!(fs::read(kept).unwrap(), tail);
+        assert!(!b.status().unwrap().problems().iter().any(|p| p.contains("cut short")));
     }
-    // At a start, by itself.
-    let (_dir, b) = torn(cut);
-    b.init().unwrap();
-    assert_eq!(b.ledger.read_all().unwrap()[1].body.kind, "ledger_mended");
-    assert!(b.ledger.mend().unwrap().is_none(), "nothing torn now");
-    // A whole line that is not an entry is an edit: refused, not removed.
+    // A whole line that is not an entry is an edit: refused, and left exactly as it was.
     let (_dir, b) = torn(b"{\"seq\":2}\n");
     assert!(b.ledger.verify().is_err());
     assert!(b.break_glass("alice", "why").is_err());
     assert!(b.ledger.mend().unwrap().is_none());
-    // An edit before a torn line stays an edit: mending does not make it right.
+    // An edit with a torn line after it: nothing removed, whatever asks. It is evidence.
     let (_dir, b) = torn(b"{\"seq\":2}\n{\"cut");
-    assert!(b.break_glass("alice", "why").is_err());
+    let before = fs::read(b.ledger.path()).unwrap();
+    assert!(b.ledger.mend().is_err() && b.break_glass("alice", "why").is_err());
+    assert_eq!(fs::read(b.ledger.path()).unwrap(), before);
+    // A whole entry that lost its newline stands: the hash vouches for it. It is not a power cut's.
+    let (_dir, b) = torn(b"");
+    let e = b.break_glass("alice", "kept").unwrap().0;
+    let whole = fs::read(b.ledger.path()).unwrap();
+    fs::write(b.ledger.path(), &whole[..whole.len() - 1]).unwrap();
+    assert!(b.ledger.mend().unwrap().is_none());
+    assert_eq!(fs::read(b.ledger.path()).unwrap(), whole);
+    assert_eq!(b.ledger.read_all().unwrap().last().unwrap().hash, e.hash);
+}
+
+/// A machine's first entry cut short: it must still start as a new machine, with `init` as its first
+/// entry, which setup and the agent's refusals go by. The torn bytes are kept beside the ledger.
+#[test]
+fn a_torn_first_line_leaves_a_new_machine() {
+    let (dir, repo) = config_dir();
+    let state = dir.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let b = Broker::new(&repo, &state, "true");
+    fs::write(b.ledger.path(), b"{\"seq\":1,\"ts").unwrap();
+    assert!(b.ledger.mend().unwrap().is_none());
+    assert_eq!(fs::read(b.ledger.path()).unwrap(), b"");
+    let kept: Vec<_> = fs::read_dir(&state).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains("torn-")).collect();
+    assert_eq!(fs::read(kept[0].path()).unwrap(), b"{\"seq\":1,\"ts");
+    b.init().unwrap();
+    assert_eq!(b.ledger.read_all().unwrap()[0].body.kind, "init");
+}
+
+/// The password set in the running system and then not kept: the ledger must not say it was not changed.
+#[test]
+fn a_password_set_but_not_kept_is_said_as_that() {
+    let (dir, repo) = config_dir();
+    let pw = dir.path().join("pw");
+    let people = vec!["casey".to_string()];
+    let b = Broker::new(&repo, dir.path().join("state"), "true").with_passwords(&pw, "true").with_people(&people);
+    b.init().unwrap();
+    // A folder at the name: the rename fails, after the running system has it.
+    fs::create_dir_all(pw.join("casey/x")).unwrap();
+    assert!(b.set_password("casey", "$6$other$hash", "casey").is_err());
+    let all = b.ledger.read_all().unwrap();
+    let last = all.last().unwrap();
+    assert_eq!((last.body.kind.as_str(), last.body.data["running"].as_bool()), ("password_failed", Some(true)));
+    assert!(last.body.reason.contains("set in the running system"), "{}", last.body.reason);
+    // Failing before the running system has it says the other thing.
+    fs::remove_dir_all(pw.join("casey")).unwrap();
+    let no = Broker::new(&repo, dir.path().join("state"), "true").with_passwords(&pw, "false").with_people(&people);
+    assert!(no.set_password("casey", "$6$other$hash", "casey").is_err());
+    let all = no.ledger.read_all().unwrap();
+    assert_eq!(all.last().unwrap().body.data["running"].as_bool(), Some(false));
+    assert!(!pw.join("casey").exists() && !pw.join(".casey.new").exists(), "nothing kept");
 }
 
 /// The ledger and the repository each say who approved what: rewriting one alone is seen. By the entry's
@@ -2610,4 +2664,45 @@ fn the_ledger_is_checked_against_the_repository() {
     git(&m.b, &["update-ref", "refs/heads/main", forged.trim()]);
     let d = m.b.status().unwrap().disagreements;
     assert!(d.iter().any(|x| x.contains(&format!("#{}", r.body.seq)) && x.contains("not in the machine")), "{d:?}");
+}
+
+/// The ledger rewritten alone, chain and all, as root could: the repository still says otherwise. And
+/// a person who has looked says so, on the record, and it is said no more until there is something new.
+#[test]
+fn a_ledger_rewritten_alone_is_seen_and_a_person_can_say_they_looked() {
+    let m = Confirmable::new();
+    let p = m.propose_theme();
+    let a = m.b.apply(p, "casey", false).unwrap();
+    let path = m.b.ledger.path().to_path_buf();
+    let rewrite = |approved: &str, proposal: u64| {
+        let forged = path.with_extension("forged");
+        let _ = fs::remove_file(&forged);
+        let l = Ledger::open(&forged);
+        for e in m.b.ledger.read_all().unwrap() {
+            let mut b = e.body;
+            if b.seq == a.body.seq {
+                b.approved_by = Some(approved.into());
+                b.data["proposal"] = proposal.into();
+            }
+            l.append(NewEntry { actor: b.actor, approved_by: b.approved_by, kind: b.kind, tier: b.tier, tainted: b.tainted, reason: b.reason, data: b.data }).unwrap();
+        }
+        fs::read(&forged).unwrap()
+    };
+    let real = fs::read(&path).unwrap();
+    fs::write(&path, rewrite("mallory", p)).unwrap();
+    m.b.ledger.verify().unwrap();
+    let d = m.b.status().unwrap().disagreements;
+    assert!(d.iter().any(|x| x.contains("says mallory approved it")), "{d:?}");
+    fs::write(&path, rewrite("casey", p + 40)).unwrap();
+    let s = m.b.status().unwrap();
+    assert!(s.disagreements.iter().any(|x| x.contains("its commit says")), "{:?}", s.disagreements);
+    // No rebuild puts this right: it is not the machine's drift, and repair says there is nothing to do.
+    assert!(s.drift().is_empty() && !s.problems().is_empty());
+    assert!(format!("{:#}", m.b.repair("casey").unwrap_err()).contains("nothing to repair"));
+    // Looked into: said no more, on the record.
+    let e = m.b.acknowledge_disagreements("casey").unwrap();
+    assert_eq!(e.body.data["entries"], serde_json::json!([a.body.seq]));
+    assert_eq!(m.b.status().unwrap().disagreements, Vec::<String>::new());
+    assert!(m.b.acknowledge_disagreements("casey").is_err(), "nothing left to acknowledge");
+    fs::write(&path, real).unwrap();
 }

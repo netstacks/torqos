@@ -121,6 +121,8 @@ pub enum Request {
     Revert { change: u64 },
     /// Apply a proposal someone else made (the agent's: ADR-041), after showing it and asking.
     Apply { proposal: u64 },
+    /// Say no more of where the ledger and the repository disagree, on the record.
+    LedgerAcknowledge,
     /// Put a path back as it was before a change (ADR-038).
     RestoreData { change: u64, path: String },
     /// This machine's key for the remote (ADR-036), made the first time.
@@ -242,6 +244,7 @@ pub fn render(op: &Op) -> String {
             Request::Revert { change } => format!("request system revert {change}"),
             Request::Apply { proposal } => format!("request system apply {proposal}"),
             Request::RestoreData { change, path } => format!("request system snapshot restore {change} {path}"),
+            Request::LedgerAcknowledge => "request system ledger acknowledge".into(),
             Request::RemoteKey => "request system remote key".into(),
             Request::RemoteClear => "request system remote clear".into(),
             Request::Pull => "request system pull".into(),
@@ -336,6 +339,7 @@ mod tests {
             (Mode::Operational, Op::Request(Request::Revert { change: 12 })),
             (Mode::Operational, Op::Request(Request::Apply { proposal: 12 })),
             (Mode::Operational, Op::Request(Request::RestoreData { change: 12, path: "/home/alice/a".into() })),
+            (Mode::Operational, Op::Request(Request::LedgerAcknowledge)),
             (Mode::Operational, Op::Request(Request::RemoteKey)),
             (Mode::Operational, Op::Request(Request::RemoteClear)),
             (Mode::Operational, Op::Request(Request::Pull)),

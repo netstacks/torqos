@@ -62,6 +62,8 @@ pub trait Machine {
     fn remote(&self) -> Result<String>;
     /// `request system remote key`: this machine's key for the remote, made the first time.
     fn remote_key(&self) -> Result<String>;
+    /// `request system ledger acknowledge` (as `me`, with their password).
+    fn acknowledge(&self, me: &str) -> Result<String>;
     /// `show system snapshots`: the snapshots of the data still here.
     fn snapshots(&self) -> Result<String>;
     /// `request system snapshot restore`: put a path back (as `me`, with their password).
@@ -937,6 +939,7 @@ impl<'a> Session<'a> {
             syntax::Request::Apply { proposal } => self.machine.apply_proposal(proposal, &self.me),
             syntax::Request::RemoteKey => self.machine.remote_key(),
             syntax::Request::RemoteClear => self.machine.remote_clear(&self.me),
+            syntax::Request::LedgerAcknowledge => self.machine.acknowledge(&self.me),
             syntax::Request::RestoreData { change, path } => self.machine.restore_data(change, &path, &self.me),
             syntax::Request::Pull => self.pull(),
             syntax::Request::Update { all } => self.update(all),
@@ -2141,6 +2144,9 @@ mod tests {
         }
         fn remote_clear(&self, me: &str) -> Result<String> {
             Ok(format!("cleared for {me}\\n"))
+        }
+        fn acknowledge(&self, me: &str) -> Result<String> {
+            Ok(format!("acknowledged by {me}\n"))
         }
         fn snapshots(&self) -> Result<String> {
             Ok("no snapshots\n".into())

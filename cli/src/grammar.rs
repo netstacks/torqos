@@ -256,6 +256,7 @@ static SHOW_SYSTEM: &[Node] = &[
 
 static REQUEST_SYSTEM: &[Node] = &[
     fixed("apply", "Apply a change someone else proposed (the agent's): it shows it and asks first", In::Op).then(&[value(Value::Change, "The proposal's number, from show system proposals").whole(|r| Ok(Op::Request(Request::Apply { proposal: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
+    fixed("ledger", "The ledger", In::Op).then(&[fixed("acknowledge", "You have looked into where it and the repository disagree: say no more of it (ledgered; a new one is said as ever)", In::Op).whole(|_| Ok(Op::Request(Request::LedgerAcknowledge)))]),
     fixed("password", "Change a person's password (yours, or <user>'s)", In::Op).whole(password).then(&[value(Value::User, "Whose (yours, if none)").whole(password)]),
     fixed("pull", "Load the configuration waiting on the remote (its incoming branch) into the candidate: nothing changes until you commit it", In::Op).whole(|_| Ok(Op::Request(Request::Pull))),
     fixed("remote", "The configuration's remote", In::Op).then(&[fixed("clear", "Clear its alarm, having looked into it (ledgered; raised again if still true)", In::Op).whole(|_| Ok(Op::Request(Request::RemoteClear))), fixed("key", "This machine's key for it, to add to the repository as a deploy key (made the first time)", In::Op).whole(|_| Ok(Op::Request(Request::RemoteKey)))]),
