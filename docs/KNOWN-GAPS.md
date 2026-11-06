@@ -601,3 +601,8 @@ Its §5 lists claims without a test.
    - **A deleted snapshot is not wiped:** its blocks are free, not overwritten, so a secret in one is out of
      reach of the file system, not of someone reading the raw disk.
    - **Not built:** the declared backup, `request system restore`, and offering data at `rollback`.
+
+6zl. **The audit of M3 (2026-11-06).** Its one high finding, that a proposal's gate read the tier it was
+   proposed with while `apply` used what the diff did at HEAD, is fixed: the socket refuses a proposal
+   with no `--base`, and `apply` refuses one that no longer does what was judged, ledgered as
+   `apply_refused`. Its medium findings are open, and being worked through.

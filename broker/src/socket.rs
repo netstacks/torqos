@@ -187,6 +187,11 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
     let mut a = args.to_vec();
     match cmd {
         "propose" => {
+            // What the gate sees of a proposal is what it does on the commit it was judged on: without one,
+            // a diff can be nothing at that commit and something at the next (the audit of M3, H1).
+            if !args.iter().any(|x| x == "--base" || x.starts_with("--base=")) {
+                bail!("a proposal needs --base, the commit it was prepared against");
+            }
             a.extend(["--actor".into(), if who.agent { "agent".into() } else { "user".into() }]);
             a.extend(["--diff".into(), diff.context("a proposal needs its diff, in the request")?.into()]);
         }
@@ -337,8 +342,9 @@ mod tests {
     fn identity_is_added_not_taken() {
         let a = with_identity(&["apply".into(), "3".into()], "apply", &who(1001), None, None).unwrap();
         assert_eq!(a, ["apply", "3", "--approved-by", "sam"]);
-        let p = with_identity(&["propose".into(), "--reason".into(), "x".into()], "propose", &who(990), Some("/run/d"), None).unwrap();
-        assert_eq!(p, ["propose", "--reason", "x", "--actor", "agent", "--diff", "/run/d"]);
+        assert!(with_identity(&["propose".into(), "--reason".into(), "x".into()], "propose", &who(1000), Some("/run/d"), None).is_err(), "no base");
+        let p = with_identity(&["propose".into(), "--base=c".into(), "--reason".into(), "x".into()], "propose", &who(990), Some("/run/d"), None).unwrap();
+        assert_eq!(p, ["propose", "--base=c", "--reason", "x", "--actor", "agent", "--diff", "/run/d"]);
         assert!(with_identity(&["propose".into()], "propose", &who(1000), None, None).is_err(), "a proposal brings its diff");
     }
 

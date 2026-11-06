@@ -2282,6 +2282,28 @@ impl Broker {
         let tier = policy::tier_for_paths(&files);
         let actor = if p.body.actor == "agent" { Actor::Agent } else { Actor::User };
         policy::check_allowed(actor, tier)?;
+        // What was judged is what is applied. The gate decided on the proposal's tier and files, as they
+        // were on the commit it was made on, and a diff means what it does at HEAD: nothing there can be
+        // something here (the audit of M3, H1). Refused, never judged again: a proposal is to be made anew.
+        let said: std::collections::BTreeSet<&str> = p.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).collect();
+        let does: std::collections::BTreeSet<&str> = files.iter().map(String::as_str).collect();
+        if said != does || p.body.tier != tier.to_string() {
+            let _ = fs::remove_file(&tmp);
+            let why = format!("proposal {proposal_seq} no longer does what it was judged on: it said {} ({}), and would now change {} ({tier}); propose it again", said.into_iter().collect::<Vec<_>>().join(" "), p.body.tier, does.into_iter().collect::<Vec<_>>().join(" "));
+            // Once each: a person repeating this adds nothing to the record.
+            if self.find_child("apply_refused", "proposal", proposal_seq)?.is_none() {
+                self.ledger.append(NewEntry {
+                    actor: "broker".into(),
+                    approved_by: Some(approved_by.into()),
+                    kind: "apply_refused".into(),
+                    tier: Tier::System.to_string(),
+                    tainted: false,
+                    reason: why.chars().filter(|c| !c.is_control()).take(300).collect(),
+                    data: json!({ "proposal": proposal_seq }),
+                })?;
+            }
+            bail!("refused: {why}");
+        }
         // The agent's list as it is now, not as it was when it proposed: the limits may have been
         // narrowed since (the audit of ADR-041).
         if actor == Actor::Agent {

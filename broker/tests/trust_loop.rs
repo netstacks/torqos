@@ -2751,3 +2751,33 @@ fn a_snapshot_by_hand_and_one_deleted() {
     assert!(format!("{:#}", none.snapshot_now("casey").unwrap_err()).contains("does not take snapshots"));
     assert!(format!("{:#}", none.delete_snapshot(e.body.seq, "casey").unwrap_err()).contains("does not take snapshots"));
 }
+
+/// The audit of M3, H1: a diff that is nothing to another's file at one commit and something at the
+/// next. Its own folder at the gate, and written over theirs at apply, with no password. Whatever the
+/// socket requires, apply refuses a proposal that no longer does what was judged.
+#[test]
+fn a_proposal_that_now_does_more_than_was_judged_is_refused() {
+    let (dir, repo) = config_dir();
+    let list = "[\n  \"hello\",\n  \"jq\",\n  \"tree\"\n]\n";
+    for who in ["dev", "sam"] {
+        fs::create_dir_all(repo.join("users").join(who)).unwrap();
+        fs::write(repo.join("users").join(who).join("packages.json"), list).unwrap();
+    }
+    let b = Broker::new(&repo, dir.path().join("state"), "true");
+    b.init().unwrap();
+    let crafted = write_diff(dir.path(), "crafted.diff", "diff --git a/users/dev/packages.json b/users/dev/packages.json\ndeleted file mode 100644\n--- a/users/dev/packages.json\n+++ /dev/null\n@@ -1,5 +0,0 @@\n-[\n-  \"hello\",\n-  \"jq\",\n-  \"tree\"\n-]\ndiff --git a/users/sam/packages.json b/users/dev/packages.json\nsimilarity index 100%\ncopy from users/sam/packages.json\ncopy to users/dev/packages.json\ndiff --git a/users/sam/packages.json b/users/sam/packages.json\n--- a/users/sam/packages.json\n+++ b/users/sam/packages.json\n@@ -4,2 +4,2 @@\n-  \"tree\"\n+  \"tmux\"\n ]\n");
+    let p = b.propose(&crafted, "mine", Actor::User, false).unwrap();
+    assert_eq!(p.body.tier, "user", "as the gate reads it: {:?}", p.body.data["files"]);
+    // The configuration moves on, by a change of the proposer's own.
+    let own = write_diff(dir.path(), "own.diff", "--- a/users/sam/packages.json\n+++ b/users/sam/packages.json\n@@ -2,3 +2,3 @@\n   \"hello\",\n-  \"jq\",\n+  \"vim\",\n   \"tree\"\n");
+    let o = b.propose(&own, "mine too", Actor::User, false).unwrap().body.seq;
+    b.apply(o, "sam", false).unwrap();
+    let e = format!("{:#}", b.apply(p.body.seq, "sam", false).unwrap_err());
+    assert!(e.contains("no longer does what it was judged on"), "{e}");
+    assert_eq!(fs::read_to_string(repo.join("users/dev/packages.json")).unwrap(), list, "the other person's list");
+    assert_eq!(kinds(&b).iter().filter(|k| *k == "apply_refused").count(), 1);
+    // Again and again: nothing more on the record, and still refused.
+    assert!(b.apply(p.body.seq, "sam", false).is_err());
+    assert_eq!(kinds(&b).iter().filter(|k| *k == "apply_refused").count(), 1);
+    b.ledger.verify().unwrap();
+}

@@ -156,8 +156,13 @@ pkgs.testers.runNixOSTest {
         code, v = answer(ask("dev", {"args": ["--json", "apply", str(p["seq"])], "password": "Torq-sock-2210"}))
         assert code == 0, (code, v)
 
+    with subtest("a proposal says what it was prepared against: nothing else is judged"):
+        # Without it a diff can be nothing to another's file at one commit and something at the next.
+        code, v = answer(ask("sam", {"args": ["--json", "propose", "--reason=x"], "diff": own_diff("sam")}))
+        assert code != 0 and "--base" in v["error"], (code, v)
+
     with subtest("a service's account proposes nothing; a caller that sends nothing is let go"):
-        code, v = answer(ask("nobody", {"args": ["--json", "propose", "--reason=x"], "diff": own_diff("nobody")}))
+        code, v = answer(ask("nobody", {"args": ["--json", "propose", f"--base={head()}", "--reason=x"], "diff": own_diff("nobody")}))
         assert code == 1 and "not a person's account" in v["error"], (code, v)
         code, v = answer(ask("nobody", {"args": ["--json", "verify"]}))
         assert code == 0, (code, v)
