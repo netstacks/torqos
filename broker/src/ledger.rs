@@ -377,6 +377,39 @@ mod tests {
         assert!(l.append(new("third")).is_err(), "must refuse to append to a broken chain");
     }
 
+    /// The chain itself (the audit of M3, M6): an entry edited and its own hash made right again is
+    /// caught by the next one's `prev_hash`, which no longer names it.
+    #[test]
+    fn an_entry_rehashed_after_an_edit_breaks_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ledger.jsonl");
+        let l = Ledger::open(&p);
+        for r in ["one", "two", "three"] {
+            l.append(new(r)).unwrap();
+        }
+        let mut all = l.read_all().unwrap();
+        all[1].body.reason = "edited".into();
+        all[1].hash = hash_body(&all[1].body).unwrap();
+        let text: String = all.iter().map(|e| format!("{}\n", serde_json::to_string(e).unwrap())).collect();
+        fs::write(&p, text).unwrap();
+        let err = format!("{:#}", l.verify().unwrap_err());
+        assert!(err.contains("seq 3") && err.contains("prev_hash"), "{err}");
+    }
+
+    /// An edit is never mended, even one that parses: an entry rehashed wrong, with a torn line after.
+    #[test]
+    fn an_edit_that_parses_is_not_mended() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ledger.jsonl");
+        let l = Ledger::open(&p);
+        l.append(new("one")).unwrap();
+        l.append(new("two")).unwrap();
+        let text = fs::read_to_string(&p).unwrap().replace("\"two\"", "\"TWO\"") + "{\"seq\":3,\"cut";
+        fs::write(&p, &text).unwrap();
+        assert!(l.mend().is_err());
+        assert_eq!(fs::read_to_string(&p).unwrap(), text, "left as it was found");
+    }
+
     /// From the audit of 2026-10-31: a field added to an entry (not one the hash covers, as it hashed
     /// only what it read) was dropped on reading, so the entry verified. Any field, anywhere.
     #[test]

@@ -41,8 +41,8 @@ pkgs.testers.runNixOSTest {
       unitConfig.DefaultDependencies = false;
       requires = [ "dev-vdb.device" "dev-vdc.device" ];
       after = [ "dev-vdb.device" "dev-vdc.device" ];
-      before = [ "initrd-fs.target" "sysroot-home.mount" "sysroot-var-lib.mount" "sysroot-var-lib-torq.mount" ];
-      requiredBy = [ "sysroot-home.mount" "sysroot-var-lib.mount" "sysroot-var-lib-torq.mount" ];
+      before = [ "initrd-fs.target" "sysroot-home.mount" "sysroot-var-lib.mount" "sysroot-var-lib-torq.mount" "systemd-fsck@dev-vdc.service" ];
+      requiredBy = [ "sysroot-home.mount" "sysroot-var-lib.mount" "sysroot-var-lib-torq.mount" "systemd-fsck@dev-vdc.service" ];
       # Once: the initrd reloads systemd on its way, and a finished one-shot would run again.
       serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
       script = ''
@@ -307,6 +307,21 @@ pkgs.testers.runNixOSTest {
         assert last()["kind"] == "break_glass", last()
         assert int(machine.succeed("torq-broker log --json --brief | wc -l")) == n + 1
         machine.succeed("rm /var/lib/torq-agent/fill")
+
+    with subtest("a store path changed in place is found, and said (the audit of M3, M5)"):
+        machine.succeed("torq-broker verify-store")
+        machine.succeed("torq-broker status")
+        p = machine.succeed("readlink -f $(command -v torq-snapshot 2>/dev/null || ls -d /nix/store/*-torq-snapshot | head -1)").strip()
+        p = "/".join(p.split("/")[:4])
+        machine.succeed("mount -o remount,rw /nix/store 2>&1 || mount -o bind,remount,rw /nix/store")
+        machine.succeed(f"chmod u+w {p}/bin/torq-snapshot && echo '# changed' >> {p}/bin/torq-snapshot")
+        machine.fail("torq-broker verify-store")
+        out = machine.fail("torq-broker status")
+        assert "changed after they were built" in out and p in out, out
+        out = machine.succeed(as_user("dev", "torqcli show system alarms || true"))
+        assert "changed after they were built" in out, out
+        machine.succeed(f"sed -i '$d' {p}/bin/torq-snapshot")
+        machine.succeed("torq-broker verify-store && torq-broker status")
 
     with subtest("a person's own changes push nothing out; only the newest are kept"):
         before = machine.succeed("ls /.snapshots")

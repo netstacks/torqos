@@ -70,6 +70,13 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
         }
     }
 
+    if let Some(list) = v["store_modified"].as_array().filter(|l| !l.is_empty()) {
+        found.push((format!("The system's files were changed after they were built ({} of them, in the store).", list.len()), Fix::Repair));
+    }
+    // The one the design most wants seen: this machine's history and its copy elsewhere disagree.
+    if let Some(why) = v["remote_alarm"]["why"].as_str() {
+        found.push((format!("This machine's history and the copy on its remote disagree: {} (show system remote; once looked into, request system remote clear).", one_line(why, 160)), Fix::Person));
+    }
     // The record against itself: no rebuild puts these right, so neither is offered one.
     if let Some(list) = v["disagreements"].as_array().filter(|l| !l.is_empty()) {
         found.push((format!("The history and the configuration's commits disagree: {} (look into it, then: request system ledger acknowledge).", list.iter().filter_map(|d| d.as_str()).map(|d| one_line(d, 120)).collect::<Vec<_>>().join("; ")), Fix::Person));
@@ -80,7 +87,7 @@ pub fn render(v: &Value, last: Option<&str>, repo: &str, ui: &Ui) -> Report {
 
     // The broker knows of a problem this command cannot name (a newer broker, say): never all-well.
     if found.is_empty() && v["ok"] != true {
-        found.push(("TorqOS found a problem this command can't describe (see: torq-broker status).".into(), Fix::Person));
+        found.push(("TorqOS found a problem this command can't describe: an administrator can read it with show system remote and show system ledger, or the journal of torq-status.".into(), Fix::Person));
     }
     if found.is_empty() {
         let text = if v["checked_running_system"] == true {
@@ -154,6 +161,18 @@ mod tests {
 
 
     /// The record against itself: named, with what to do, and no rebuild offered for it.
+
+    /// The remote's alarm is named where a person looks (the audit of M3, L1).
+    #[test]
+    fn the_remotes_alarm_is_named() {
+        let mut v = ok();
+        v["ok"] = json!(false);
+        v["remote_alarm"] = json!({ "at": "2026-11-06T00:00:00Z", "why": "the remote's ledger was rewritten" });
+        let r = render(&v, None, "/var/lib/torq/config", &Ui::plain());
+        let text = r.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!((r.exit, r.fix), (1, Fix::Person));
+        assert!(text.contains("copy on its remote disagree") && text.contains("rewritten") && text.contains("request system remote clear"), "{text}");
+    }
     #[test]
     fn what_a_rebuild_does_not_touch() {
         let mut v = ok();

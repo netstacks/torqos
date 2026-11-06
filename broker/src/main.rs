@@ -59,6 +59,7 @@ enum Cmd {
     FetchIncoming,
     BreakGlass { by: String, reason: String },
     Snapshots,
+    VerifyStore,
     RestoreData { seq: u64, path: String, approved_by: String },
     SnapshotTake { approved_by: String },
     SnapshotDelete { seq: u64, approved_by: String },
@@ -175,6 +176,7 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("break-glass").about("A root shell is about to open (torq break-glass, ADR-035): who and why into the ledger, and to the remote if there is one. Exits 3 if the remote has not got it.").arg(Arg::new("by").long("by").required(true)).arg(Arg::new("reason").long("reason").required(true)))
         .subcommand(Command::new("snapshot-take").about("A snapshot of the data now (ADR-038), ledgered.").arg(by()))
         .subcommand(Command::new("snapshot-delete").about("The snapshot of a change gone (ADR-038): on the record first.").arg(seq()).arg(by()))
+        .subcommand(Command::new("verify-store").about("Check the running system's store paths against what the store recorded when each was built (the audit of M3, M5); kept for status."))
         .subcommand(Command::new("snapshots").about("The snapshots of the data this machine still has (ADR-038)."))
         .subcommand(Command::new("restore-data").about("Put a path back as it was before a change (ADR-038): as its owner, what is there set aside, ledgered.").arg(seq()).arg(Arg::new("path").long("path").required(true)).arg(by()))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
@@ -227,6 +229,7 @@ fn parse_cli() -> Cli {
         "ledger-acknowledge" => Cmd::Acknowledge { approved_by: by(sub) },
         "fetch-incoming" => Cmd::FetchIncoming,
         "snapshots" => Cmd::Snapshots,
+        "verify-store" => Cmd::VerifyStore,
         "snapshot-take" => Cmd::SnapshotTake { approved_by: by(sub) },
         "snapshot-delete" => Cmd::SnapshotDelete { seq: *sub.get_one::<u64>("seq").unwrap_or(&0), approved_by: by(sub) },
         "restore-data" => Cmd::RestoreData { seq: *sub.get_one::<u64>("seq").unwrap_or(&0), path: s(sub, "path").unwrap_or_default(), approved_by: by(sub) },
@@ -391,6 +394,13 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             }
         }
         Cmd::Snapshots => println!("{}", serde_json::to_string(&b.snapshots()?)?),
+        Cmd::VerifyStore => {
+            let c = b.verify_store()?;
+            println!("{}", serde_json::to_string(&c)?);
+            if !c.modified.is_empty() {
+                std::process::exit(1);
+            }
+        }
         Cmd::SnapshotTake { approved_by } => println!("{}", serde_json::to_string(&b.snapshot_now(&approved_by)?)?),
         Cmd::SnapshotDelete { seq, approved_by } => println!("{}", serde_json::to_string(&b.delete_snapshot(seq, &approved_by)?)?),
         Cmd::RestoreData { seq, path, approved_by } => {
@@ -471,11 +481,20 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 if tainted { " · TAINTED" } else { "" });
             // (Names as the proposal wrote them: escaped as everything shown is, audit of 2026-11-01, L1.)
             println!("files: {}", printable(&e.body.data["files"].to_string()));
-            println!("\n{}", printable_text(e.body.data["diff"].as_str().unwrap_or_default()));
+            println!("\n{}", printable_text(&b.proposal_text(&e, "diff").unwrap_or_default()));
             println!("approve with: torq-broker apply {} --approved-by <name>", e.body.seq);
         }
         Cmd::Show { seq } => {
-            let e = b.ledger.get(seq)?;
+            let mut e = b.ledger.get(seq)?;
+            // A proposal's diff and what it does, from beside the ledger, as if they were in it: what a
+            // person reads is what was proposed (N19).
+            if e.body.kind == "proposal" {
+                for what in ["diff", "effect"] {
+                    if let Ok(t) = b.proposal_text(&e, what) {
+                        e.body.data[what] = t.into();
+                    }
+                }
+            }
             if json {
                 return print_entry(&e);
             }
@@ -587,6 +606,8 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                         "pending_confirm": s.pending_confirm,
                         "disagreements": s.disagreements,
                         "torn": s.torn,
+                        "store_modified": s.store_modified,
+                        "remote_alarm": s.remote_alarm.as_ref().map(|a| json!({ "at": a.at, "why": a.why })),
                     })
                 );
                 std::process::exit(if s.busy.is_some() { 75 } else if problems.is_empty() { 0 } else { 1 });

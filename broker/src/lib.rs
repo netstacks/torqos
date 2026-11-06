@@ -81,6 +81,14 @@ fn with_snapshot(mut data: serde_json::Value, snapshot: &serde_json::Value) -> s
     data
 }
 
+/// What the last check of the running system's store paths found (`Broker::verify_store`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreCheck {
+    pub at: String,
+    pub paths: usize,
+    pub modified: Vec<String>,
+}
+
 /// A snapshot of the data, and the change it was taken before (ADR-038).
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
@@ -145,6 +153,8 @@ pub const MAX_CONFIRM_MINUTES: u32 = 24 * 60;
 
 /// The largest diff a proposal may be (it is ledgered whole): 4 MiB, far beyond any configuration.
 pub const MAX_DIFF: u64 = 4 << 20;
+/// The agent's, smaller: a change it proposes is a person's to read (the audit of M3, M4).
+pub const AGENT_MAX_DIFF: u64 = 1 << 20;
 /// The agent's limits on the ledger (the audit of ADR-041): its reasons, its proposals waiting at
 /// once, its refusals ledgered in an hour.
 pub const AGENT_REASON_MAX: usize = 200;
@@ -222,6 +232,9 @@ pub struct Status {
     pub disagreements: Vec<String>,
     /// A torn last line is waiting: the next entry or push mends it.
     pub torn: bool,
+    /// Store paths of the running system whose contents are not what the store recorded for them: the
+    /// last daily check's (`verify-store`), or none if there has been none.
+    pub store_modified: Vec<String>,
     /// The config repo's HEAD; None if git cannot read it.
     pub head: Option<String>,
     /// Uncommitted changes in the config repo (only the broker writes it).
@@ -301,6 +314,9 @@ impl Status {
             if let Some(why) = last.main.as_deref().filter(|w| w.starts_with("the remote's main")) {
                 p.push(format!("{why} — the ledger is pushed; the configuration there is behind"));
             }
+        }
+        if !self.store_modified.is_empty() {
+            p.push(format!("the system's files in the store were changed after they were built ({}): `repair` puts them back", self.store_modified.iter().take(3).cloned().collect::<Vec<_>>().join(", ")));
         }
         // The rest compares the machine with its record, which an operation is changing: meaningless while
         // one runs. What the record says of itself, above, holds all the same.
@@ -629,7 +645,8 @@ impl Broker {
         let entries = self.ledger.read_all()?;
         let recorded = {
             let _held = self.ledger.shared();
-            self.ledger.text().and_then(|text| self.repo.record_ledger(&text, entries.len(), r.verified().as_deref()))
+            let texts = self.proposal_texts(&entries);
+            self.ledger.text().and_then(|text| self.repo.record_ledger(&text, &texts, entries.len(), r.verified().as_deref()))
         };
         let ledger = recorded.and_then(|c| self.repo.push_ledger(&r.url, &ssh).map(|()| c));
         let commit = match ledger {
@@ -793,6 +810,12 @@ impl Broker {
             }
             prev = Some(text);
         }
+        // Its proposals' texts, beside its ledger (N19): each its hash's, none larger than a diff may be.
+        for (name, size) in stage.ledger_text_sizes(&tip)? {
+            if size > MAX_DIFF * 4 || name.len() != 64 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+                bail!("the repository's ledger keeps proposals/{name:?}, which is not a proposal's text: refused");
+            }
+        }
         let text = prev.context("the repository has no ledger")?;
         if !text.ends_with('\n') {
             bail!("the repository's ledger ends in the middle of a line: refused");
@@ -925,6 +948,14 @@ impl Broker {
             if !took {
                 undo();
                 bail!("the switch failed, and the machine still runs and starts the image: nothing was adopted ({e:#})");
+            }
+        }
+        // Its proposals' texts, each checked against its name, the hash its entries hold.
+        let stage = Repo::new(&stage_path);
+        for (name, _) in stage.ledger_text_sizes(&a.tip)? {
+            let text = stage.ledger_text(&a.tip, &name)?;
+            if self.keep_proposal_text(&text)? != name {
+                bail!("the repository's proposals/{name} is not what its name says: nothing was adopted");
             }
         }
         // The old machine's history is this one's: in, whole, and this adoption on top of it.
@@ -1330,6 +1361,46 @@ impl Broker {
         })
     }
 
+    /// The running system's store paths, each hashed against what the store recorded when it was
+    /// built: a path changed in place after it was built (the store remounted writable, by root) is
+    /// not one any rebuild looks at again, as it is already there (the audit of M3, M5). Run daily, and
+    /// by `repair`; what it found is kept for `status`. What root also rewrites, the store's own record
+    /// of the hashes, this does not see.
+    pub fn verify_store(&self) -> Result<StoreCheck> {
+        let system = self.running_system().context("the running system cannot be read")?;
+        let out = config::command("nix-store").args(["--query", "--requisites", &system]).stderr(Stdio::inherit()).output().context("listing the running system's store paths")?;
+        if !out.status.success() {
+            bail!("listing the running system's store paths failed");
+        }
+        let paths: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
+        let mut modified = Vec::new();
+        for p in &paths {
+            let o = config::command("nix-store").args(["--verify-path", p]).stdout(Stdio::null()).stderr(Stdio::null()).status().context("verifying a store path")?;
+            if !o.success() {
+                modified.push(p.clone());
+            }
+        }
+        let c = StoreCheck { at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), paths: paths.len(), modified };
+        fs::write(self.state_dir.join("store-check.json"), serde_json::to_vec(&c)?)?;
+        Ok(c)
+    }
+
+    fn store_check(&self) -> Option<StoreCheck> {
+        serde_json::from_slice(&fs::read(self.state_dir.join("store-check.json")).ok()?).ok()
+    }
+
+    /// Put changed store paths back as they were built: from the cache, or built again.
+    fn repair_store(&self, modified: &[String]) -> Result<()> {
+        if modified.is_empty() {
+            return Ok(());
+        }
+        let ok = config::command("nix-store").arg("--repair-path").args(modified).stdin(Stdio::null()).stdout(Stdio::null()).status().context("repairing store paths")?.success();
+        if !ok {
+            bail!("the store paths could not all be repaired: {}", modified.join(", "));
+        }
+        Ok(())
+    }
+
     /// The comparison itself, for a caller that already holds the lock (or knows it is busy).
     fn facts(&self, busy: Option<String>) -> Result<Status> {
         let ledger = self.ledger.verify().map_err(|e| format!("{e:#}"));
@@ -1357,6 +1428,7 @@ impl Broker {
             remote_refused: self.remote().err().map(|e| format!("{e:#}")),
             disagreements: self.commits_disagree(&entries),
             torn: self.ledger.torn(),
+            store_modified: self.store_check().map(|c| c.modified).unwrap_or_default(),
             ledger,
             head: self.repo.head().ok(),
             dirty: self.repo.ensure_clean().is_err() && self.repo.head().is_ok(),
@@ -1404,7 +1476,12 @@ impl Broker {
         if switch_running() {
             bail!("a system switch ({SWITCH_UNIT}) is still running; wait for it to finish, then repair");
         }
-        let rebuilt = self.rebuild(&lock, &head).is_ok();
+        // What a rebuild does not look at again: store paths it already has, changed in place.
+        let store = self.repair_store(&before.store_modified);
+        let rebuilt = self.rebuild(&lock, &head).is_ok() && store.is_ok();
+        if store.is_ok() && !before.store_modified.is_empty() {
+            let _ = self.verify_store();
+        }
         // A switch sets the running system and the next boot alike; if they differ afterwards,
         // something else changed one of them, and this was not a repair.
         // A switch started meanwhile would set both alike, so look for one too; and a profile that
@@ -1743,6 +1820,63 @@ impl Broker {
         Ok(())
     }
 
+    /// Where a proposal's diff and what it does are kept: beside the ledger, by their hash, so the
+    /// ledger stays small however big they are (the audit of M3, M4; N19). The remote gets them with
+    /// the ledger (`sync_remote`).
+    fn proposals_dir(&self) -> PathBuf {
+        self.state_dir.join("proposals")
+    }
+
+    /// `text`, kept by its hash; the hash.
+    fn keep_proposal_text(&self, text: &str) -> Result<String> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let sha = hex::encode(Sha256::digest(text.as_bytes()));
+        let dir = self.proposals_dir();
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        let to = dir.join(&sha);
+        if to.exists() {
+            return Ok(sha);
+        }
+        let part = dir.join(format!(".{sha}.new"));
+        let _ = fs::remove_file(&part);
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&part, &to)?;
+        fs::File::open(&dir)?.sync_all()?;
+        Ok(sha)
+    }
+
+    /// A proposal's `diff` or `effect`: in its entry, as the ledger once kept them, or beside it by
+    /// hash, checked against the hash the entry holds.
+    pub fn proposal_text(&self, e: &Entry, what: &str) -> Result<String> {
+        if let Some(t) = e.body.data[what].as_str() {
+            return Ok(t.to_string());
+        }
+        let sha = e.body.data[format!("{what}_sha256")].as_str().filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())).with_context(|| format!("proposal #{} names no {what}", e.body.seq))?;
+        let text = fs::read_to_string(self.proposals_dir().join(sha)).with_context(|| format!("proposal #{}'s {what} is not kept here", e.body.seq))?;
+        if hex::encode(Sha256::digest(text.as_bytes())) != sha {
+            bail!("proposal #{}'s {what} is not what its entry names: it was changed", e.body.seq);
+        }
+        Ok(text)
+    }
+
+    /// Every proposal's texts the ledger names and this machine keeps: what goes to the remote with it.
+    pub fn proposal_texts(&self, entries: &[Entry]) -> Vec<(String, String)> {
+        let mut out = std::collections::BTreeMap::new();
+        for e in entries.iter().filter(|e| e.body.kind == "proposal") {
+            for what in ["diff", "effect"] {
+                if e.body.data[what].is_string() {
+                    continue;
+                }
+                if let (Some(sha), Ok(t)) = (e.body.data[format!("{what}_sha256")].as_str(), self.proposal_text(e, what)) {
+                    out.insert(sha.to_string(), t);
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
     fn propose_locked(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         self.refuse_if_interrupted()?;
         // An agent always says what it prepared its change against: without a base, a diff applies on
@@ -1797,6 +1931,14 @@ impl Broker {
         let mut diff = String::new();
         std::io::Read::read_to_string(&mut std::io::Read::take(fs::File::open(diff_path)?, MAX_DIFF + 1), &mut diff)
             .with_context(|| format!("reading diff {}", diff_path.display()))?;
+        if actor == Actor::Agent && diff.len() as u64 > AGENT_MAX_DIFF {
+            bail!("refused: the diff is {} bytes; the agent's are at most {AGENT_MAX_DIFF}", diff.len());
+        }
+        // A diff begins with one: text before its first header is no part of the change, git passes it
+        // by, and what it is for is to be kept (the audit of M3, M4).
+        if !(diff.starts_with("diff --git ") || diff.starts_with("--- ")) {
+            bail!("refused: a diff begins with its first file's header (diff --git or ---), nothing before it");
+        }
         if diff.len() as u64 > MAX_DIFF {
             bail!("refused: the diff grew past {MAX_DIFF} bytes while it was read");
         }
@@ -1833,9 +1975,8 @@ impl Broker {
             reason: reason.into(),
             data: json!({
                 "files": files,
-                "diff_sha256": hex::encode(Sha256::digest(diff.as_bytes())),
-                "diff": diff,
-                "effect": effect,
+                "diff_sha256": self.keep_proposal_text(&diff)?,
+                "effect_sha256": self.keep_proposal_text(&effect)?,
                 "base": base,
             }),
         })
@@ -2305,14 +2446,14 @@ impl Broker {
                  re-run with explicit per-step confirmation (--confirm-tainted)"
             );
         }
-        let diff = p.body.data["diff"].as_str().context("proposal has no diff")?;
+        let diff = self.proposal_text(&p, "diff")?;
         if let Some(base) = p.body.data["base"].as_str() {
             self.refuse_stale_base(base)?;
         }
 
         // Re-validate against the current repo state (it may have changed since proposing).
         let tmp = self.state_dir.join(format!("proposal-{proposal_seq}.diff"));
-        fs::write(&tmp, diff)?;
+        fs::write(&tmp, &diff)?;
         let files = self.repo.diff_files(&tmp)?;
         self.check_user_data(&tmp, &files)?;
         let tier = policy::tier_for_paths(&files);
@@ -2779,6 +2920,7 @@ mod tests {
             ledger: Ok(3),
             disagreements: vec![],
             torn: false,
+            store_modified: vec![],
             head: Some("c".into()),
             dirty: false,
             ledgered_commit: Some("c".into()),

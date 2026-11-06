@@ -125,9 +125,20 @@ impl Repo {
     /// of `parent` — the remote's newest, when it has one, so that the chain is always the remote's
     /// and more (a local ref moved or lost cannot fork it: the review of ADR-036). Nothing new when
     /// the ledger is what `parent` holds.
-    pub fn record_ledger(&self, ledger: &str, entries: usize, parent: Option<&str>) -> Result<String> {
+    pub fn record_ledger(&self, ledger: &str, texts: &[(String, String)], entries: usize, parent: Option<&str>) -> Result<String> {
         let blob = self.git_stdin(&["hash-object", "-w", "--stdin"], ledger)?.trim().to_string();
-        let tree = self.git_stdin(&["mktree"], &format!("100644 blob {blob}\tledger.jsonl\n"))?.trim().to_string();
+        let mut listing = format!("100644 blob {blob}\tledger.jsonl\n");
+        // Proposals' diffs and effects, by hash (N19): the ledger names them, the remote keeps them too.
+        if !texts.is_empty() {
+            let mut sub = String::new();
+            for (sha, text) in texts {
+                let b = self.git_stdin(&["hash-object", "-w", "--stdin"], text)?.trim().to_string();
+                sub.push_str(&format!("100644 blob {b}\t{sha}\n"));
+            }
+            let t = self.git_stdin(&["mktree"], &sub)?.trim().to_string();
+            listing.push_str(&format!("040000 tree {t}\tproposals\n"));
+        }
+        let tree = self.git_stdin(&["mktree"], &listing)?.trim().to_string();
         if let Some(p) = parent {
             if self.git(&["rev-parse", &format!("{p}^{{tree}}")])?.trim() == tree {
                 self.git(&["update-ref", "refs/torq/ledger", p])?;
@@ -287,6 +298,25 @@ impl Repo {
     }
 
     /// The ledger a ledger commit holds.
+    /// The proposals' texts a ledger commit keeps (N19): each name, and its size.
+    pub fn ledger_text_sizes(&self, commit: &str) -> Result<Vec<(String, u64)>> {
+        let out = self.git(&["ls-tree", "-l", "-z", commit, "proposals/"])?;
+        Ok(out
+            .split('\0')
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| {
+                let (meta, path) = l.split_once('\t')?;
+                let size = meta.split_whitespace().nth(3)?.parse().ok()?;
+                Some((path.strip_prefix("proposals/")?.to_string(), size))
+            })
+            .collect())
+    }
+
+    /// One of them.
+    pub fn ledger_text(&self, commit: &str, name: &str) -> Result<String> {
+        self.git(&["cat-file", "blob", &format!("{commit}:proposals/{name}")])
+    }
+
     pub fn ledger_at(&self, commit: &str) -> Result<String> {
         self.git(&["cat-file", "blob", &format!("{commit}:ledger.jsonl")])
     }

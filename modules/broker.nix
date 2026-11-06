@@ -213,6 +213,20 @@ in
         exit 0
       '';
     };
+    # Daily: the running system's store paths against what the store recorded when each was built. A path
+    # changed in place is one no rebuild looks at again (the audit of M3, M5); `status` says so, and
+    # `repair` puts it back.
+    systemd.services.torq-verify-store = {
+      description = "Check the running system's store paths against the store's record of them";
+      restartIfChanged = false;
+      serviceConfig = { Type = "oneshot"; Nice = 19; IOSchedulingClass = "idle"; };
+      script = "${lib.getExe cfg.package} verify-store > /dev/null || true";
+    };
+    systemd.timers.torq-verify-store = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = { OnBootSec = "20min"; OnUnitActiveSec = "1d"; RandomizedDelaySec = "1h"; };
+    };
+
     systemd.timers.torq-status = {
       wantedBy = [ "timers.target" ];
       timerConfig = {

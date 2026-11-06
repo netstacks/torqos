@@ -986,7 +986,10 @@ fn log_neutralises_control_characters_and_brief_drops_diffs() {
     let brief = String::from_utf8(run_cli(dir.path(), "true", &["log", "--json", "--brief"]).stdout).unwrap();
     assert!(!brief.contains("\"diff\":"), "{brief}");
     let full = String::from_utf8(run_cli(dir.path(), "true", &["log", "--json"]).stdout).unwrap();
-    assert!(full.contains("\"diff\":"));
+    // Diffs are beside the ledger now (N19): the entry names them by hash, and `show` reads them.
+    assert!(full.contains("\"diff_sha256\":") && !full.contains("\"diff\":"), "{full}");
+    let shown = String::from_utf8(run_cli(dir.path(), "true", &["--json", "show", "2"]).stdout).unwrap();
+    assert!(shown.contains("\"diff\":"), "{shown}");
 }
 
 /// `show` is where a person reviews an agent's change: a bidi override in the diff ("Trojan Source")
@@ -2239,7 +2242,7 @@ fn what_a_person_is_shown_is_what_git_does() {
     let head = b.repo.head().unwrap();
     let smuggled = write_diff(dir.path(), "s.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"nmap\"]\n-[\"nmap\"]\n+[\"htop\"]\n");
     let p = b.propose_on(Some(&head), &smuggled, "htop for casey", Actor::Agent, false).unwrap();
-    let effect = p.body.data["effect"].as_str().unwrap();
+    let effect = &b.proposal_text(&p, "effect").unwrap();
     assert!(effect.contains("+[\"nmap\"]") && !effect.contains("htop"), "{effect}");
     b.apply(p.body.seq, "casey", false).unwrap();
     assert_eq!(fs::read_to_string(b.repo.root().join("users/casey/packages.json")).unwrap().trim(), "[\"nmap\"]", "what was shown is what landed");
@@ -2397,6 +2400,11 @@ fn a_hostile_repository_is_refused_before_anything_is_adopted() {
         sh(&stage, &format!("b=$(git hash-object -w {}) && t=$(printf '100644 blob %s\\tledger.jsonl\\n' $b | git mktree) && c=$(git -c user.name=t -c user.email=t@t commit-tree $t -m l) && git update-ref refs/torq/remote-ledger $c", l.display()));
         assert!(new_machine.check_stage(&Repo::new(stage), url).unwrap().ssh, "{name}");
     }
+    // A chain that does not verify: an entry's reason changed, and its hash with it.
+    let broken = dir.path().join("broken.jsonl");
+    fs::write(&broken, fs::read_to_string(&ledger).unwrap().replacen("\"init\"", "\"init\"", 1).replacen("Config repository initialised", "Config repository INITIALISED", 1)).unwrap();
+    let e = format!("{:#}", new_machine.check_stage(&stage_with("unchained", "", &broken), url).unwrap_err());
+    assert!(e.contains("does not verify"), "{e}");
     // A ledger that ends in the middle of a line: less than the remote holds, or something else.
     let cutoff = dir.path().join("cutoff.jsonl");
     let whole = fs::read(&ledger).unwrap();
@@ -2780,4 +2788,56 @@ fn a_proposal_that_now_does_more_than_was_judged_is_refused() {
     assert!(b.apply(p.body.seq, "sam", false).is_err());
     assert_eq!(kinds(&b).iter().filter(|k| *k == "apply_refused").count(), 1);
     b.ledger.verify().unwrap();
+}
+
+/// The audit of M3, M4 (and N19): a proposal's diff and effect are kept beside the ledger by their
+/// hash, so the ledger stays small; padding before a diff is refused; the agent's are smaller; and a
+/// diff changed where it is kept is refused at apply, not applied.
+#[test]
+fn diffs_beside_the_ledger_and_no_padding() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let big: String = (0..20_000).map(|i| format!("+line {i}\n")).collect();
+    let d = write_diff(dir.path(), "big.diff", &format!("--- /dev/null\n+++ b/users/casey/notes.txt\n@@ -0,0 +1,20000 @@\n{big}"));
+    let p = b.propose_on(Some(&head), &d, "notes", Actor::User, false).unwrap();
+    let line = fs::read_to_string(b.ledger.path()).unwrap().lines().last().unwrap().len();
+    assert!(line < 2000, "the entry is {line} bytes: the diff is not in it");
+    assert!(b.proposal_text(&p, "diff").unwrap().contains("+line 19999"));
+    // Padding: refused, whoever sends it.
+    let padded = write_diff(dir.path(), "pad.diff", &format!("{}\n--- /dev/null\n+++ b/users/casey/x.txt\n@@ -0,0 +1 @@\n+x\n", "x".repeat(1000)));
+    for actor in [Actor::User, Actor::Agent] {
+        let e = format!("{:#}", b.propose_on(Some(&head), &padded, "pad", actor, false).unwrap_err());
+        assert!(e.contains("nothing before it"), "{e}");
+    }
+    // The agent's: at most a megabyte.
+    let huge: String = (0..200_000).map(|i| format!("+line {i}\n")).collect();
+    let d = write_diff(dir.path(), "huge.diff", &format!("--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1,200000 @@\n{huge}"));
+    assert!(format!("{:#}", b.propose_on(Some(&head), &d, "huge", Actor::Agent, false).unwrap_err()).contains("at most"));
+    // Changed where it is kept: refused at apply.
+    let sha = p.body.data["diff_sha256"].as_str().unwrap();
+    let kept = dir.path().join("state/proposals").join(sha);
+    fs::write(&kept, fs::read_to_string(&kept).unwrap().replace("+line 5\n", "+line five\n")).unwrap();
+    assert!(format!("{:#}", b.apply(p.body.seq, "casey", false).unwrap_err()).contains("was changed"));
+}
+
+/// The numbers the agent is held to, as numbers: changing one is a decision, not a refactor (the
+/// audit of M3, M6).
+#[test]
+fn the_agents_limits_are_these_numbers() {
+    use torq_broker::{AGENT_MAX_DIFF, AGENT_REASON_MAX, AGENT_REFUSALS_AN_HOUR, AGENT_WAITING_MAX, MAX_DIFF};
+    assert_eq!((AGENT_REASON_MAX, AGENT_WAITING_MAX, AGENT_REFUSALS_AN_HOUR), (200, 20, 30));
+    assert_eq!((MAX_DIFF, AGENT_MAX_DIFF), (4 << 20, 1 << 20));
+}
+
+/// A commit confirmed is settled only by an entry after it: one before, naming its number in advance,
+/// settles nothing (the audit of M3, M6).
+#[test]
+fn an_entry_before_a_commit_confirmed_does_not_settle_it() {
+    let m = Confirmable::new();
+    let seq = m.propose_theme();
+    let next = m.b.ledger.read_all().unwrap().len() as u64 + 2;
+    m.b.ledger.append(torq_broker::ledger::NewEntry { actor: "user".into(), approved_by: None, kind: "confirmed".into(), tier: "system".into(), tainted: false, reason: "early".into(), data: serde_json::json!({ "applied": next }) }).unwrap();
+    let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
+    assert_eq!(a.body.seq, next);
+    assert!(m.b.status().unwrap().pending_confirm.is_some(), "still waiting");
 }
