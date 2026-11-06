@@ -21,7 +21,7 @@ pkgs.testers.runNixOSTest {
     users.users.svc = { isSystemUser = true; group = "svc"; };
     users.groups.svc = { };
     torq.broker.rebuildCommand = "true";
-    torq.broker.snapshots.keep = 3;
+    torq.snapshots.keep = 3;
     # The image's layout, mounted at boot as an installed machine's is, so snapshots come on by
     # themselves. A test VM's disk starts empty: laid out in the initrd, before anything mounts it.
     virtualisation.emptyDiskImages = [ 2048 ];
@@ -264,6 +264,36 @@ pkgs.testers.runNixOSTest {
         assert "not an administrator" in out, out
         out = machine.fail(f"su -s /bin/sh torq-agent -c 'torqcli request system snapshot restore {b['seq']} /home/bob/docs' 2>&1")
         assert "a person applies" in out, out
+
+    with subtest("by hand: one taken, and one deleted; settings in the tree"):
+        def as_person(cmd):
+            machine.succeed(as_user("dev", f"tmux new-session -d -s h -x 170 -y 40 {shlex.quote(f'torqcli {cmd}; echo done=$? > /tmp/rc-h; sleep 600')}"))
+            machine.wait_until_succeeds(as_user("dev", "tmux capture-pane -p -t h") + " | grep -q 'assword'", timeout=60)
+            machine.succeed("rm -f /tmp/rc-h")
+            machine.succeed(as_user("dev", f"tmux send-keys -t h {pw} Enter"))
+            machine.wait_until_succeeds("test -e /tmp/rc-h", timeout=60)
+            machine.succeed(as_user("dev", "tmux kill-session -t h"))
+            return machine.succeed("cat /tmp/rc-h").strip()
+        assert as_person("request system snapshot take") == "done=0"
+        t = last()
+        assert t["kind"] == "snapshot_taken" and t["approved_by"] == "dev", t
+        lbl = t["data"]["snapshot"]["label"]
+        machine.succeed(f"test -d /.snapshots/{lbl}/home")
+        assert f"#{t['seq']}" in machine.succeed(as_user("dev", "torqcli show system snapshots"))
+        assert as_person(f"request system snapshot delete {t['seq']}") == "done=0"
+        machine.fail(f"test -e /.snapshots/{lbl}")
+        assert last()["kind"] == "snapshot_deleted", last()
+        assert f"#{t['seq']}" not in machine.succeed(as_user("dev", "torqcli show system snapshots"))
+        # Not a person's without the group, nor the agent's, and no one's without a password.
+        out = machine.fail(as_user("bob", "torqcli request system snapshot take") + " 2>&1")
+        assert "not an administrator" in out, out
+        out = machine.fail("su -s /bin/sh torq-agent -c 'torqcli request system snapshot delete 1' 2>&1")
+        assert "a person applies" in out, out
+        # In the tree, as any setting; what the broker runs for it stays out of reach.
+        out = machine.succeed(as_user("dev", "torqcli -c 'configure; set torq snapshots keep 5; show | compare'"))
+        assert "keep 5" in out, out
+        out = machine.fail(as_user("dev", "torqcli -c 'configure; set torq broker rebuildCommand x'") + " 2>&1")
+        assert "not settable" in out, out
 
     with subtest("a person's own changes push nothing out; only the newest are kept"):
         before = machine.succeed("ls /.snapshots")

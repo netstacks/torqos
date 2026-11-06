@@ -171,7 +171,7 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         },
         // Their own password: the current one first, as passwd asks.
         "password" if user == Some(who.name.as_str()) => Gate::Password,
-        "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" | "ledger-acknowledge" => admins_only(),
+        "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" => admins_only(),
         other => Gate::Refused(format!("`{other}` is not run over the socket (it is the machine's own, as root)")),
     }
 }
@@ -194,7 +194,7 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--hash-file".into(), hash.context("a password needs its hash, in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
         }
-        "apply" | "revert" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" => a.extend(["--approved-by".into(), who.name.clone()]),
+        "apply" | "revert" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" => a.extend(["--approved-by".into(), who.name.clone()]),
         _ => {}
     }
     Ok(a)
@@ -269,6 +269,11 @@ mod tests {
         // No root shell over the socket, for anyone: break-glass is sudo's, with who sudo says it is.
         for uid in [1000, 1001] {
             assert!(matches!(gate(&who(uid), "break-glass", None, None), Gate::Refused(_)), "{uid}");
+            // A person without the group is refused; an administrator gives their password.
+            for cmd in ["snapshot-take", "snapshot-delete", "restore-data"] {
+                assert_eq!(gate(&who(1000), cmd, None, None), Gate::Password, "{cmd}");
+                assert!(matches!(gate(&who(1001), cmd, None, None), Gate::Refused(_)), "{cmd}");
+            }
         }
         assert_eq!(gate(&who(1001), "apply", Some(&mine), None), Gate::Open);
         assert_eq!(gate(&who(1001), "revert", Some(&mine), None), Gate::Open);

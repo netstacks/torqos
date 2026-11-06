@@ -2713,3 +2713,41 @@ fn a_ledger_rewritten_alone_is_seen_and_a_person_can_say_they_looked() {
     fs::write(&path, looked).unwrap();
     fs::write(&path, real).unwrap();
 }
+
+/// By hand: one taken is listed and named by its entry; one deleted is on the record first, whatever
+/// becomes of the deleting. On a machine with none, each says so and writes nothing.
+#[test]
+fn a_snapshot_by_hand_and_one_deleted() {
+    let (dir, repo) = config_dir();
+    let (state, snaps) = (dir.path().join("state"), dir.path().join("snaps"));
+    fs::create_dir_all(&snaps).unwrap();
+    let cmd = format!("case {{action}} in take) mkdir {0}/{{label}} ;; delete) rm -r {0}/{{label}} ;; esac", snaps.display());
+    let b = Broker::new(&repo, &state, "true").with_snapshots(cmd).with_snapshot_dir(&snaps);
+    b.init().unwrap();
+    let e = b.snapshot_now("casey").unwrap();
+    assert_eq!((e.body.kind.as_str(), e.body.approved_by.as_deref()), ("snapshot_taken", Some("casey")));
+    let list = b.snapshots().unwrap();
+    assert_eq!((list.len(), list[0].change), (1, e.body.seq));
+    let d = b.delete_snapshot(e.body.seq, "casey").unwrap();
+    assert_eq!(d.body.kind, "snapshot_deleted");
+    assert!(b.snapshots().unwrap().is_empty());
+    assert!(format!("{:#}", b.delete_snapshot(e.body.seq, "casey").unwrap_err()).contains("already gone"));
+    assert!(format!("{:#}", b.delete_snapshot(1, "casey").unwrap_err()).contains("has no snapshot"));
+    // It will not go: what was said stands, and what happened is said after it.
+    let keep = Broker::new(&repo, &state, "true").with_snapshots(format!("case {{action}} in take) mkdir {0}/{{label}} ;; delete) false ;; esac", snaps.display())).with_snapshot_dir(&snaps);
+    let e = keep.snapshot_now("casey").unwrap();
+    assert!(keep.delete_snapshot(e.body.seq, "casey").is_err());
+    let all = keep.ledger.read_all().unwrap();
+    let [.., said, failed] = all.as_slice() else { panic!() };
+    assert_eq!((said.body.kind.as_str(), failed.body.kind.as_str()), ("snapshot_deleted", "snapshot_delete_failed"));
+    assert!(failed.body.reason.contains("still there"), "{}", failed.body.reason);
+    // A snapshot that fails is no entry.
+    let n = keep.ledger.read_all().unwrap().len();
+    let bad = Broker::new(&repo, &state, "true").with_snapshots("false").with_snapshot_dir(&snaps);
+    assert!(format!("{:#}", bad.snapshot_now("casey").unwrap_err()).contains("no snapshot was taken"));
+    assert_eq!(bad.ledger.read_all().unwrap().len(), n);
+    // None here at all.
+    let none = Broker::new(&repo, &state, "true");
+    assert!(format!("{:#}", none.snapshot_now("casey").unwrap_err()).contains("does not take snapshots"));
+    assert!(format!("{:#}", none.delete_snapshot(e.body.seq, "casey").unwrap_err()).contains("does not take snapshots"));
+}

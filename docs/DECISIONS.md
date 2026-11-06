@@ -894,6 +894,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   their half stops no one else. Set-id
   bits never come back, and the group is the account's now. Machines already on ext4
   (torq5 among them) have no snapshots, and nothing moves them.
+  `torq snapshots keep` and `enable` are a person's, in the tree: a system change, never the agent's; what the
+  broker runs for them stays fenced. `request system snapshot take` and `delete <n>` are an administrator's,
+  with their password. A delete removes a way back, so its entry comes first, as a password's does.
 
 ## ADR-039 — Upstreams: what TorqOS owes, and what it depends on
 - **Context:** TorqOS redistributes images made of other people's software: nixpkgs and NixOS's

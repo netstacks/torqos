@@ -50,6 +50,11 @@ data, and start it again after.
 Something you delete stays in the snapshots until they age out, ten system changes later. They hold your
 files, not a backup of them: a failed disk takes them too. Machines installed on ext4 have none.
 
+To change how they work: `set torq snapshots keep 20`, or `set torq snapshots enable false`, in configuration
+mode. `request system snapshot take` takes one now, before work you may think better of, and
+`request system snapshot delete <n>` removes one, for the room or for what is in it: that goes in the ledger
+first, and there is no undoing it.
+
 ## Checking a release yourself
 
 See [Install → Check the download](../start/install.md#2-check-the-download). You need only OpenSSH

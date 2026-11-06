@@ -208,6 +208,20 @@ impl Machine for Real<'_> {
         Ok(format!("On the record (ledger #{}): what was said is said no more. A new disagreement is said as ever.\n", v["seq"].as_u64().unwrap_or(0)))
     }
 
+    fn snapshot_take(&self, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["snapshot-take", "--approved-by", me])?, &log)?, "request system snapshot take")?;
+        let seq = v["seq"].as_u64().unwrap_or(0);
+        Ok(format!("A snapshot of the data, as #{seq}: request system snapshot restore {seq} <path> brings a path back.\n"))
+    }
+
+    fn snapshot_delete(&self, change: u64, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let seq = change.to_string();
+        let v = done(run::broker_json(broker(self.cli, &["snapshot-delete", &seq, "--approved-by", me])?, &log)?, "request system snapshot delete")?;
+        Ok(format!("The snapshot from before #{change} is deleted (ledger #{}).\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
     fn snapshots(&self) -> Result<String> {
         let log = run::start_log()?;
         let v = done(run::broker_json(broker(self.cli, &["snapshots"])?, &log)?, "show system snapshots")?;

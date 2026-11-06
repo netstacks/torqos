@@ -60,6 +60,8 @@ enum Cmd {
     BreakGlass { by: String, reason: String },
     Snapshots,
     RestoreData { seq: u64, path: String, approved_by: String },
+    SnapshotTake { approved_by: String },
+    SnapshotDelete { seq: u64, approved_by: String },
     AdoptKey { url: String },
     AdoptInspect { url: String },
     Adopt { url: String, own: PathBuf, head: String, tip: String, user: String },
@@ -171,6 +173,8 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("adopt-inspect").about("First-boot setup: fetch the repository into a staging copy and check it (its ledger one line, every push extending the last, its chain whole, main the commit it ends at); changes nothing of the machine.").arg(Arg::new("url").long("url").required(true)))
         .subcommand(Command::new("adopt").about("First-boot setup: become the machine the repository holds: its history and ledger, this machine's hardware file and software (the files in --own) as a new commit, built, switched to, ledgered.").arg(Arg::new("url").long("url").required(true)).arg(Arg::new("own").long("own").required(true).value_parser(value_parser!(PathBuf))).arg(Arg::new("head").long("head").required(true)).arg(Arg::new("tip").long("tip").required(true)).arg(Arg::new("user").long("user").required(true)))
         .subcommand(Command::new("break-glass").about("A root shell is about to open (torq break-glass, ADR-035): who and why into the ledger, and to the remote if there is one. Exits 3 if the remote has not got it.").arg(Arg::new("by").long("by").required(true)).arg(Arg::new("reason").long("reason").required(true)))
+        .subcommand(Command::new("snapshot-take").about("A snapshot of the data now (ADR-038), ledgered.").arg(by()))
+        .subcommand(Command::new("snapshot-delete").about("The snapshot of a change gone (ADR-038): on the record first.").arg(seq()).arg(by()))
         .subcommand(Command::new("snapshots").about("The snapshots of the data this machine still has (ADR-038)."))
         .subcommand(Command::new("restore-data").about("Put a path back as it was before a change (ADR-038): as its owner, what is there set aside, ledgered.").arg(seq()).arg(Arg::new("path").long("path").required(true)).arg(by()))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
@@ -223,6 +227,8 @@ fn parse_cli() -> Cli {
         "ledger-acknowledge" => Cmd::Acknowledge { approved_by: by(sub) },
         "fetch-incoming" => Cmd::FetchIncoming,
         "snapshots" => Cmd::Snapshots,
+        "snapshot-take" => Cmd::SnapshotTake { approved_by: by(sub) },
+        "snapshot-delete" => Cmd::SnapshotDelete { seq: *sub.get_one::<u64>("seq").unwrap_or(&0), approved_by: by(sub) },
         "restore-data" => Cmd::RestoreData { seq: *sub.get_one::<u64>("seq").unwrap_or(&0), path: s(sub, "path").unwrap_or_default(), approved_by: by(sub) },
         "break-glass" => Cmd::BreakGlass { by: s(sub, "by").unwrap_or_default(), reason: s(sub, "reason").unwrap_or_default() },
         "adopt-key" => Cmd::AdoptKey { url: s(sub, "url").unwrap_or_default() },
@@ -336,7 +342,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     let writes = matches!(
         cli.cmd,
         Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. }
-            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. }
     );
     let _push = writes.then_some(PushAfter(&b));
     match cli.cmd {
@@ -385,6 +391,8 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             }
         }
         Cmd::Snapshots => println!("{}", serde_json::to_string(&b.snapshots()?)?),
+        Cmd::SnapshotTake { approved_by } => println!("{}", serde_json::to_string(&b.snapshot_now(&approved_by)?)?),
+        Cmd::SnapshotDelete { seq, approved_by } => println!("{}", serde_json::to_string(&b.delete_snapshot(seq, &approved_by)?)?),
         Cmd::RestoreData { seq, path, approved_by } => {
             let e = b.restore_data(seq, &path, &approved_by)?;
             println!("{}", serde_json::to_string(&e)?);

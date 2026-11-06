@@ -229,6 +229,8 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         "refused" => ("✗", format!("Refused: {}", clean(&e.reason))),
         "remote_cleared" => ("✓", clean(&e.reason)),
         "data_restored" => ("↺", clean(&e.reason)),
+        "snapshot_taken" | "snapshot_deleted" => ("✓", clean(&e.reason)),
+        "snapshot_delete_failed" => ("✗", clean(&e.reason)),
         "ledger_mended" => ("⚠", clean(&e.reason)),
         "disagreement_acknowledged" => ("✓", clean(&e.reason)),
         "password" => ("✓", clean(&e.reason)),

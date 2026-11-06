@@ -965,6 +965,64 @@ impl Broker {
         Ok(out)
     }
 
+    /// A snapshot now, before work a person thinks better of (ADR-038): ledgered, so it is listed and
+    /// can be restored from as any other. It counts towards what is kept.
+    pub fn snapshot_now(&self, approved_by: &str) -> Result<Entry> {
+        let lock = Lock::acquire(&self.state_dir)?;
+        if self.snapshot_cmd.is_empty() {
+            bail!("this machine does not take snapshots: its disk is not laid out for them, or `torq snapshots enable` is off");
+        }
+        let snapshot = self.take_snapshot(&lock, &Tier::System.to_string());
+        if let Some(why) = snapshot["error"].as_str() {
+            bail!("no snapshot was taken: {why}");
+        }
+        self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(approved_by.into()),
+            kind: "snapshot_taken".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: "A snapshot of the data, by hand".into(),
+            data: json!({ "snapshot": snapshot }),
+        })
+    }
+
+    /// The snapshot of change `seq` gone, for the room or for what is in it. On the record first, as a
+    /// password is: this is the one thing here that removes a way back, and that is never silent.
+    pub fn delete_snapshot(&self, seq: u64, approved_by: &str) -> Result<Entry> {
+        let lock = Lock::acquire(&self.state_dir)?;
+        if self.snapshot_cmd.is_empty() {
+            bail!("this machine does not take snapshots: nothing to delete");
+        }
+        let label = self.ledger.get(seq)?.body.data["snapshot"]["label"].as_str().filter(|l| snapshot::label_ok(l)).map(String::from).with_context(|| format!("change #{seq} has no snapshot"))?;
+        if !self.snapshot_dir.join(&label).is_dir() {
+            bail!("the snapshot of #{seq} has already gone");
+        }
+        let entry = self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(approved_by.into()),
+            kind: "snapshot_deleted".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: format!("The snapshot from before #{seq} deleted"),
+            data: json!({ "change": seq, "label": label }),
+        })?;
+        if let Err(e) = self.run_command(&lock, "snapshot", &self.snapshot_cmd, &[("action", "delete"), ("label", &label)]) {
+            let gone = !self.snapshot_dir.join(&label).exists();
+            self.ledger.append(NewEntry {
+                actor: "broker".into(),
+                approved_by: Some(approved_by.into()),
+                kind: "snapshot_delete_failed".into(),
+                tier: Tier::System.to_string(),
+                tainted: false,
+                reason: format!("The snapshot from before #{seq} was not deleted{}", if gone { "" } else { ": some or all of it is still there" }),
+                data: json!({ "change": seq, "label": label, "entry": entry.body.seq, "error": format!("{e:#}").chars().filter(|c| !c.is_control()).take(300).collect::<String>() }),
+            })?;
+            return Err(e);
+        }
+        Ok(entry)
+    }
+
     /// Put `path` back as it was before change `seq` (ADR-038). Written by the owner of the folder it
     /// lies in, never by root: a person's folder is theirs to fill with links, and a root write into
     /// it would go where they point. Read by root, into a pipe: the owner holds nothing of the
@@ -1148,7 +1206,7 @@ impl Broker {
             return serde_json::Value::Null;
         }
         let label = chrono::Utc::now().timestamp_millis().to_string();
-        match self.run_command(lock, "snapshot", &self.snapshot_cmd, &[("label", &label)]) {
+        match self.run_command(lock, "snapshot", &self.snapshot_cmd, &[("action", "take"), ("label", &label)]) {
             Ok(()) => json!({ "label": label }),
             Err(e) => json!({ "error": format!("{e:#}") }),
         }
