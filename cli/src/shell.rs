@@ -202,6 +202,37 @@ impl Machine for Real<'_> {
         ))
     }
 
+    fn snapshots(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["snapshots"])?, &log)?, "show system snapshots")?;
+        let list = v.as_array().map(Vec::as_slice).unwrap_or_default();
+        if list.is_empty() {
+            return Ok("No snapshots of the data here (a disk laid out for them has one before each change).\n".into());
+        }
+        let mut out = String::from("The data as it was before each change (request system snapshot restore <n> <path>):\n");
+        for s in list {
+            out.push_str(&format!(
+                "  #{:<4} {}  {}\n",
+                s["change"].as_u64().unwrap_or(0),
+                history::one_line(s["ts"].as_str().unwrap_or("?"), 25),
+                history::one_line(s["reason"].as_str().unwrap_or(""), 70)
+            ));
+        }
+        Ok(out)
+    }
+
+    fn restore_data(&self, change: u64, path: &str, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let seq = change.to_string();
+        let v = done(run::broker_json(broker(self.cli, &["restore-data", &seq, "--path", path, "--approved-by", me])?, &log)?, "request system snapshot restore")?;
+        Ok(format!(
+            "{} is back as it was before #{change} (ledger #{}). What was there is at {}. A service using it should be restarted.\n",
+            history::one_line(path, 120),
+            v["seq"].as_u64().unwrap_or(0),
+            history::one_line(v["data"]["set_aside"].as_str().unwrap_or("?"), 120)
+        ))
+    }
+
     fn remote_key(&self) -> Result<String> {
         let log = run::start_log()?;
         let v = done(run::broker_json(broker(self.cli, &["remote-key"])?, &log)?, "request system remote key")?;

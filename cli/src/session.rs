@@ -62,6 +62,10 @@ pub trait Machine {
     fn remote(&self) -> Result<String>;
     /// `request system remote key`: this machine's key for the remote, made the first time.
     fn remote_key(&self) -> Result<String>;
+    /// `show system snapshots`: the snapshots of the data still here.
+    fn snapshots(&self) -> Result<String>;
+    /// `request system snapshot restore`: put a path back (as `me`, with their password).
+    fn restore_data(&self, change: u64, path: &str, me: &str) -> Result<String>;
     /// `request system remote clear`: clear the remote's alarm (as `me`, with their password).
     fn remote_clear(&self, me: &str) -> Result<String>;
     /// The remote's incoming branch, fetched into the config repo: its commit (None: there is none).
@@ -415,7 +419,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowRemote => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowRemote => {
                 self.show_operational(op)
             }
             Op::Request(r) => self.request(r),
@@ -711,6 +715,7 @@ impl<'a> Session<'a> {
             }
             Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail), self.fit),
             Op::ShowProposals => self.machine.proposals(self.fit),
+            Op::ShowSnapshots => self.machine.snapshots(),
             Op::ShowRemote => self.machine.remote(),
             Op::ShowServices => {
                 // What the configuration in effect turns on: NixOS's services (`services <name> enable`,
@@ -932,6 +937,7 @@ impl<'a> Session<'a> {
             syntax::Request::Apply { proposal } => self.machine.apply_proposal(proposal, &self.me),
             syntax::Request::RemoteKey => self.machine.remote_key(),
             syntax::Request::RemoteClear => self.machine.remote_clear(&self.me),
+            syntax::Request::RestoreData { change, path } => self.machine.restore_data(change, &path, &self.me),
             syntax::Request::Pull => self.pull(),
             syntax::Request::Update { all } => self.update(all),
             syntax::Request::SoftwareRollback { n } => self.software_rollback(n),
@@ -2135,6 +2141,12 @@ mod tests {
         }
         fn remote_clear(&self, me: &str) -> Result<String> {
             Ok(format!("cleared for {me}\\n"))
+        }
+        fn snapshots(&self) -> Result<String> {
+            Ok("no snapshots\n".into())
+        }
+        fn restore_data(&self, change: u64, path: &str, me: &str) -> Result<String> {
+            Ok(format!("{path} before #{change} for {me}\n"))
         }
         fn remote_key(&self) -> Result<String> {
             Ok("ssh-ed25519 AAAA test\n".into())

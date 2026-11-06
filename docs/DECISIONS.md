@@ -843,8 +843,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   compositor; disk for runtimes; the agent builds Nix packages, not Flatpaks. The repository shows
   every application on the machine, by rung.
 
-## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it (proposed)
-- **Status:** proposed, 2026-11-03. The snapshot decision belongs with the installer (ADR-031).
+## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it
+- **Status:** proposed, 2026-11-03; local snapshots accepted and built 2026-11-06 (the owner: btrfs in
+  new images), the backup and sync parts still proposed.
 - **Context:** The repository rebuilds the machine, not the person's life on it. A laptop's data is
   five kinds: documents and media (catastrophic to lose); application settings (annoying);
   secrets — SSH and GPG keys, saved passwords, tokens (serious, and never in the repository);
@@ -874,6 +875,18 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   settings, data. To build: `request system restore`, the restore step in setup, the snapshot hook
   in the broker, the installer's file-system choice. Everything else is NixOS options the tree
   already has, plus telling people the honest thing.
+- **Amended (2026-11-06): local snapshots built.** Every new machine is on btrfs: the image and the
+  ISO, one layout, no choice at install. `/var/lib/torq` is a subvolume of its own, so no snapshot of
+  `/var/lib` holds the ledger, the configuration or the password hashes: restoring data can never
+  rewind the record. Snapshots are read only and root's alone, the newest ten kept, the label in the
+  change's entry. A snapshot that fails stops nothing and is said in the entry: a disk too full to
+  snapshot may need a change to clear it, and a snapshot is a way back, not a guarantee.
+  `rollback` does not bring data back by itself, as this ADR first had it: putting a live service's
+  files back under it is a person's decision. `show system snapshots`, then `request system snapshot
+  restore <n> <path>`, an administrator's, with their password, ledgered. The copy runs as the owner of
+  the folder, never as root: a person's folder is theirs to fill with links, and a root copy into
+  it would go where they point. What was there is set aside, not overwritten. Machines already on ext4
+  (torq5 among them) have no snapshots, and nothing moves them.
 
 ## ADR-039 — Upstreams: what TorqOS owes, and what it depends on
 - **Context:** TorqOS redistributes images made of other people's software: nixpkgs and NixOS's

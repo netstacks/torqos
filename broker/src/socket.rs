@@ -125,7 +125,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
@@ -171,7 +171,7 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         },
         // Their own password: the current one first, as passwd asks.
         "password" if user == Some(who.name.as_str()) => Gate::Password,
-        "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" => admins_only(),
+        "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" => admins_only(),
         other => Gate::Refused(format!("`{other}` is not run over the socket (it is the machine's own, as root)")),
     }
 }
@@ -194,7 +194,7 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--hash-file".into(), hash.context("a password needs its hash, in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
         }
-        "apply" | "revert" | "confirm" | "reconcile" | "repair" | "remote-clear" => a.extend(["--approved-by".into(), who.name.clone()]),
+        "apply" | "revert" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" => a.extend(["--approved-by".into(), who.name.clone()]),
         _ => {}
     }
     Ok(a)

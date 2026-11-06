@@ -294,6 +294,7 @@ nix develop -c sh -c 'cd broker && cargo test'   # the broker's unit tests
 | `agent-run` | A program (Claude Code) run as the agent: one shared directory, nothing else of any home, nothing that outlives it |
 | `remote` | Every change pushed to the remote; a ledger cut short or rewritten here — or pushed on top by root — is an alarm |
 | `adopt` | A new machine chooses a repository at setup and becomes that machine: its history goes on, with its own hardware, software and password |
+| `snapshots` | A snapshot of the data before each change, read only, the ledger never in one; a restore runs as the folder's owner, so a planted link leads nowhere they could not go |
 | `strict` | An administrator's sudo runs break-glass and the agent's launcher and nothing else; a root shell leaves its ledger entry, and pushes it, before it opens |
 | `accounts`, `ssh` | Who can log in, and how; passwords never in the configuration |
 | `image` | The release image from first boot through setup to its first signed update |

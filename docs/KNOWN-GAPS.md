@@ -559,3 +559,14 @@ Its §5 lists claims without a test.
    - **What the shell does is not recorded,** only that it opened, who opened it and why.
    - **It keeps root rare, not absent.** A person with the password can still commit a configuration
      that runs anything as root: that is a change, ledgered, and it is meant to work.
+
+6zk. **Snapshots of the data (ADR-038).** Open:
+   - **Root can delete them.** They keep what a person or a program deletes; a root shell can remove
+     them too, as it can anything on the machine. The backup (not built) is what lives elsewhere.
+   - **What is deleted stays on the disk** until its snapshot goes, ten changes later: a person who
+     deletes a secret on purpose has not removed it from the machine, and it counts against the disk.
+   - **Folders of root's are not restored** (`/var/lib/systemd`, a service that runs as root): that
+     takes break-glass. A folder holding several owners' files comes back as far as its owner can read.
+   - **A service is not stopped for its data.** A person stops it first; the command says to restart it.
+   - **Machines on ext4 have none,** torq5 among them, so this is tested in VMs and not lived with.
+   - **Not built:** the declared backup, `request system restore`, and offering data at `rollback`.

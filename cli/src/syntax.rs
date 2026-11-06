@@ -57,6 +57,7 @@ pub enum Op {
     ShowProposals,
     /// The configuration's remote (ADR-036).
     ShowRemote,
+    ShowSnapshots,
     ShowServices,
     /// `show system ledger [<count>]`: the ledger itself — every change, refused and failed ones too.
     ShowLedger { count: Option<usize> },
@@ -120,6 +121,8 @@ pub enum Request {
     Revert { change: u64 },
     /// Apply a proposal someone else made (the agent's: ADR-041), after showing it and asking.
     Apply { proposal: u64 },
+    /// Put a path back as it was before a change (ADR-038).
+    RestoreData { change: u64, path: String },
     /// This machine's key for the remote (ADR-036), made the first time.
     RemoteKey,
     /// Clear the remote's alarm (ADR-036), ledgered.
@@ -221,6 +224,7 @@ pub fn render(op: &Op) -> String {
         Op::ShowAlarms { display } => format!("show system alarms{}", display_text(display)),
         Op::ShowProposals => "show system proposals".into(),
         Op::ShowRemote => "show system remote".into(),
+        Op::ShowSnapshots => "show system snapshots".into(),
         Op::ShowServices => "show services".into(),
         Op::ShowLedger { count: None } => "show system ledger".into(),
         Op::ShowLedger { count: Some(n) } => format!("show system ledger {n}"),
@@ -237,6 +241,7 @@ pub fn render(op: &Op) -> String {
             Request::Password { user: Some(u) } => format!("request system password {}", quote(u)),
             Request::Revert { change } => format!("request system revert {change}"),
             Request::Apply { proposal } => format!("request system apply {proposal}"),
+            Request::RestoreData { change, path } => format!("request system snapshot restore {change} {path}"),
             Request::RemoteKey => "request system remote key".into(),
             Request::RemoteClear => "request system remote clear".into(),
             Request::Pull => "request system pull".into(),
@@ -313,6 +318,7 @@ mod tests {
             (Mode::Operational, Op::ShowAlarms { display: None }),
             (Mode::Operational, Op::ShowProposals),
             (Mode::Operational, Op::ShowRemote),
+            (Mode::Operational, Op::ShowSnapshots),
             (Mode::Operational, Op::ShowAlarms { display: detail }),
             (Mode::Operational, Op::ShowServices),
             (Mode::Operational, Op::ShowVersion),
@@ -329,6 +335,7 @@ mod tests {
             (Mode::Operational, Op::Request(Request::Password { user: Some("dana".into()) })),
             (Mode::Operational, Op::Request(Request::Revert { change: 12 })),
             (Mode::Operational, Op::Request(Request::Apply { proposal: 12 })),
+            (Mode::Operational, Op::Request(Request::RestoreData { change: 12, path: "/home/alice/a".into() })),
             (Mode::Operational, Op::Request(Request::RemoteKey)),
             (Mode::Operational, Op::Request(Request::RemoteClear)),
             (Mode::Operational, Op::Request(Request::Pull)),
@@ -407,7 +414,7 @@ mod tests {
             (Mode::Configuration, "top top show", "'top' is not a word here (after `top`) (one of: commit, delete, edit"),
             (Mode::Operational, "exit now", "'now' is not a word here: nothing may follow `exit`"),
             (Mode::Operational, "show packages", "needs <word> (words to search for, in names and descriptions)"),
-            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, commit, ledger, proposals, remote, rollback, storage, uptime"),
+            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, commit, ledger, proposals, remote, rollback, snapshots, storage, uptime"),
             (Mode::Operational, "request system revert x", "'x' is not a number (change numbers: 1, 2, …)"),
             (Mode::Configuration, "up 0", "'0' is out of range: levels go from 1 to 10000"),
             (Mode::Configuration, "commit check comment x", "'comment' is not a word here: nothing may follow `commit check`"),

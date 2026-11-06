@@ -13,6 +13,7 @@
 pub mod agent;
 pub mod config;
 pub mod remote;
+pub mod snapshot;
 pub mod ledger;
 pub mod policy;
 pub mod repo;
@@ -48,6 +49,7 @@ pub struct Broker {
     build_cmd: String,
     activate_cmd: String,
     snapshot_cmd: String,
+    snapshot_dir: PathBuf,
     boot_cmd: String,
     schedule_cmd: String,
     /// This broker's own executable, which the scheduled rollback runs: the store path of the
@@ -68,6 +70,15 @@ pub struct Broker {
     agent_limits: agent::Limits,
     /// The config repo's remote, if the owner named one (ADR-036).
     remote: Option<String>,
+}
+
+/// A snapshot of the data, and the change it was taken before (ADR-038).
+#[derive(Debug, Clone, Serialize)]
+pub struct Snapshot {
+    pub change: u64,
+    pub ts: String,
+    pub reason: String,
+    pub label: String,
 }
 
 /// A `commit confirmed` waiting for `confirm`: an `applied` entry with a `confirm` record and no
@@ -490,6 +501,7 @@ impl Broker {
             build_cmd: config::BUILD.into(),
             activate_cmd: config::ACTIVATE.into(),
             snapshot_cmd: String::new(),
+            snapshot_dir: "/.snapshots".into(),
             boot_cmd: config::BOOT.into(),
             schedule_cmd: config::SCHEDULE.into(),
             exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("torq-broker")),
@@ -905,6 +917,73 @@ impl Broker {
         Ok((e, unsent))
     }
 
+    /// The snapshots this machine still has, newest first, each with the change it came before.
+    pub fn snapshots(&self) -> Result<Vec<Snapshot>> {
+        let mut out = vec![];
+        for e in self.ledger.read_all()?.iter().rev() {
+            let Some(label) = e.body.data["snapshot"]["label"].as_str() else { continue };
+            if self.snapshot_dir.join(label).is_dir() {
+                out.push(Snapshot { change: e.body.seq, ts: e.body.ts.clone(), reason: e.body.reason.clone(), label: label.to_string() });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Put `path` back as it was before change `seq` (ADR-038). As the owner of the folder it lies in,
+    /// never as root: a person's folder is theirs to fill with links, and a root copy into it would
+    /// go where they point. What is there now is set aside, not overwritten. Ledgered, whether it
+    /// worked or not: the data has been touched either way.
+    pub fn restore_data(&self, seq: u64, path: &str, by: &str) -> Result<Entry> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let _lock = Lock::acquire(&self.state_dir)?;
+        let label = self.ledger.get(seq)?.body.data["snapshot"]["label"].as_str().map(String::from).with_context(|| format!("change #{seq} has no snapshot"))?;
+        let (tree, parts) = snapshot::data_path(path)?;
+        let from = self.snapshot_dir.join(&label).join(tree);
+        let top = snapshot::no_links(&from, &parts).with_context(|| format!("{path} as it was before #{seq}"))?;
+        let (uid, gid) = (top.uid(), top.gid());
+        if uid == 0 {
+            bail!("{path} lies in a folder of root's: restoring it needs a root shell (torq break-glass)");
+        }
+        let live_top = Path::new(path).components().take(if tree == "home" { 3 } else { 4 }).collect::<PathBuf>();
+        let live = fs::symlink_metadata(&live_top).with_context(|| format!("{} is not there: restore the folder itself first", live_top.display()))?;
+        if live.is_symlink() || live.uid() != uid {
+            bail!("{} has changed hands since the snapshot: not restored", live_top.display());
+        }
+        let set_aside = format!("{path}.before-{label}");
+        let source = fs::File::open(from.join(parts.iter().collect::<PathBuf>())).with_context(|| format!("opening {path} in the snapshot"))?;
+        // The folder at the top sits in one of root's: root moves it, and leaves an empty one of the
+        // owner's. Nothing below `/home` or `/var/lib` itself is a person's to race.
+        let whole = parts.len() == 1;
+        if whole {
+            if fs::symlink_metadata(&set_aside).is_ok() {
+                bail!("{set_aside} is already there: move it first");
+            }
+            fs::rename(path, &set_aside).with_context(|| format!("setting {path} aside"))?;
+            fs::create_dir(path).context("a new folder")?;
+            std::os::unix::fs::chown(path, Some(uid), Some(gid)).context("giving it to its owner")?;
+            fs::set_permissions(path, fs::Permissions::from_mode(top.mode() & 0o7777)).context("its mode")?;
+        }
+        let out = config::command("setpriv")
+            .args(["--reuid", &uid.to_string(), "--regid", &gid.to_string(), "--clear-groups", "--no-new-privs", "--", "sh", "-c", snapshot::COPY, "sh", path, if whole { "" } else { &set_aside }])
+            .stdin(source)
+            .output()
+            .context("running the copy")?;
+        let error = (!out.status.success()).then(|| String::from_utf8_lossy(&out.stderr).trim().to_string());
+        let e = self.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(by.into()),
+            kind: "data_restored".into(),
+            tier: Tier::System.to_string(),
+            tainted: false,
+            reason: format!("{path} put back as it was before #{seq}{}", if error.is_some() { ": it failed" } else { "" }),
+            data: json!({ "change": seq, "path": path, "label": label, "set_aside": set_aside, "error": error }),
+        })?;
+        if let Some(why) = error {
+            bail!("the copy failed, and {path} may be partly restored; what was there is at {set_aside}: {why}");
+        }
+        Ok(e)
+    }
+
     /// A person clears the remote's alarm, having looked into it: ledgered, and the next push checks
     /// the remote's whole history again (an alarm that is still true is raised again).
     pub fn clear_remote_alarm(&self, approved_by: &str) -> Result<Entry> {
@@ -972,6 +1051,12 @@ impl Broker {
 
     pub fn with_current_system(mut self, link: impl Into<PathBuf>) -> Self {
         self.current_system = link.into();
+        self
+    }
+
+    /// Where the snapshots are, and where the data they hold is (a test's; a machine's are fixed).
+    pub fn with_snapshot_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.snapshot_dir = dir.into();
         self
     }
 
