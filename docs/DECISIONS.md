@@ -702,9 +702,10 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      machine — to the config repo's remote (ADR-036), as its own ref; with the remote refusing
      force-pushes, it is append-only in practice. Root can rewrite local history; the anchor
      disagrees, and `verify` says so. Signing entries on the machine is not the defence (N9): a key
-     on the box is a key root can read, a TPM key one root can use. What root changes on the machine
-     does not survive a rebuild from the configuration (the store is read-only; `request system
-     repair`), and data it deletes comes back from snapshots (ADR-038).
+     on the box is a key root can read, a TPM key one root can use. What root changes that the
+     configuration names does not survive a rebuild (and a store path changed in place, `request system
+     repair`, after the daily check); what it leaves elsewhere survives until a reinstall; data it deletes
+     comes back from snapshots, if it did not delete those too (ADR-038; the audit of M3, M5).
 - **Not:** preventing root. The only OS that does is one with no shell at all (Talos); strict mode
   without break-glass is that, and stays an owner's option for later, once every task an owner
   needs is a torqcli command.
@@ -712,7 +713,9 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   broker gains a socket service and loses `sudo` as its door; `torq-broker` under sudo stays for
   dev mode and recovery. Measured boot (SECURITY-MODEL) and data snapshots come after, as planned.
   What TorqOS can then say, truthfully: *the agent cannot get root; the owner can, but not
-  silently; and what root does here cannot rewrite the record elsewhere or outlive a rebuild.*
+  silently; and what root does here cannot rewrite the record elsewhere, nor, where the configuration
+  names it, outlive a rebuild.* (Corrected by the audit of M3, M5: it said "or outlive a rebuild", which
+  claimed more than a rebuild looks at.)
 - **Amended (2026-11-05): strict mode and break-glass built.** `torq.security.strict.enable`, off by
   default, a choice in the tree. An administrator's sudo runs two things: break-glass and the
   agent's launcher. Not the broker, though this ADR said "TorqOS's own commands": torqcli needs no

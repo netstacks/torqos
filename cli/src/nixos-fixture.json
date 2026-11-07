@@ -81,6 +81,29 @@
       "systemd",
       "units",
       "torq-*"
+    ],
+    [
+      "systemd",
+      "sockets",
+      "torq-*"
+    ],
+    [
+      "security",
+      "pam",
+      "services",
+      "torq-*"
+    ],
+    [
+      "security",
+      "pam",
+      "services",
+      "su"
+    ],
+    [
+      "security",
+      "pam",
+      "services",
+      "sudo"
     ]
   ],
   "settings": [

@@ -206,7 +206,8 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    included. Reading one when it is asked for would mean evaluating the configuration (seconds).
    Possible: defaults written by NixOS's manual build, or an evaluation per setting in its own
    process.
-6y. **Reading the history asks for the owner's password out of dev mode** — decided: the history is
+6y. **Reading the history** was the owner's alone, with a password, out of dev mode; since the socket
+   broker (ADR-040) it is anyone's on the machine to read, and only the broker writes it. Formerly: the history is
    privileged (ADR-026).
 6z. **A group that does not exist is quietly ignored** (found 2026-11-02, on torq5) — fixed: warned.
    - **What happens:** `set users users viper extraGroups docker`, with Docker off, commits without
@@ -547,9 +548,10 @@ Its §5 lists claims without a test.
 
 6zj. **Strict mode and break-glass (ADR-035).** Open:
    - **No ledger, no shell, by the owner's decision (2026-11-05: "I prefer secure over back doors").**
-     If the entry cannot be written (a full disk; a ledger edited or damaged: a power cut's torn line is
-     mended, N3) break-glass refuses, and with strict mode on sudo offers nothing else.
-     A torn line on a nearly full disk counts: mending needs room for a copy of the ledger.
+     If the entry cannot be written (a ledger edited or damaged; a power cut's torn line is mended, N3;
+     a full disk is not one any more, since the record has a file system of its own, the audit of M3, M2)
+     break-glass refuses, and with strict mode on sudo offers nothing else.
+     Mending a torn line needs room for a copy of the ledger, on the record's own file system.
      This is a limit accepted, not a gap to close: do not add a fallback shell. The way back is the
      console: an older generation from before strict mode, if one is left (they are limited and
      collected, and an adopted machine may have none), and otherwise external media.
@@ -602,7 +604,25 @@ Its §5 lists claims without a test.
      reach of the file system, not of someone reading the raw disk.
    - **Not built:** the declared backup, `request system restore`, and offering data at `rollback`.
 
-6zl. **The audit of M3 (2026-11-06).** Its one high finding, that a proposal's gate read the tier it was
-   proposed with while `apply` used what the diff did at HEAD, is fixed: the socket refuses a proposal
-   with no `--base`, and `apply` refuses one that no longer does what was judged, ledgered as
-   `apply_refused`. Its medium findings are open, and being worked through.
+6zl. **The audit of M3 (2026-11-06).** Fixed from it:
+   - **H1:** a proposal's gate read the tier it was proposed with, while `apply` used what the diff did
+     at HEAD. The socket refuses a proposal with no `--base`; `apply` refuses one that no longer does
+     what was judged, ledgered as `apply_refused`.
+   - **M1:** the push held the broker's lock across the network, and every request pushed: any account
+     could keep every check busy, and so silent. The push has a lock of its own; a command that wrote
+     nothing pushes nothing; `status` waits as an operation does, and says what the record says of
+     itself while busy.
+   - **M2:** any account could fill the one btrfs, and the ledger then had no room: `/var/lib/torq` is a
+     file system of its own (1 GiB, root's). Machines installed from images before 0.2.2 never had btrfs.
+   - **M3:** five wrong `su` attempts by anyone locked the owner out: `su` is root's alone.
+   - **M4 and N19:** the agent could pad the ledger past what adopt takes: diffs and effects are kept
+     beside it by hash, padding is refused, the agent's diffs are at most 1 MiB.
+   - **M5:** a store path changed in place passed every check: a daily check, `repair` puts it back. The
+     claim "cannot outlive a rebuild" is corrected (ADR-035).
+   - **L1:** `show system alarms` names the remote's alarm. **L3:** the fence covers the socket and the PAM
+     stacks. **M6:** tests for the rarest guards (see the commit log for each).
+   Open from it:
+   - **The store's own record of hashes** is root's to rewrite, and then the daily check agrees with it.
+   - **What root leaves outside the configuration** survives a rebuild; only a reinstall clears it.
+   - **unix_chkpwd**, setuid, checks a person's own password with no count: a program running as them can
+     guess it there, slowly. The audit did not raise it; found while fixing M3.

@@ -24,6 +24,11 @@ pkgs.testers.runNixOSTest {
     users.users.dev.hashedPassword = "!";
     users.allowNoPasswordLogin = true; # (a test: nobody logs in by hand)
     torq.broker.rebuildCommand = "true";
+    # A commit confirmed with no real build: the system it "builds" is the one running.
+    torq.broker.buildCommand = "readlink -f /run/current-system";
+    torq.broker.activateCommand = "true";
+    torq.broker.bootCommand = "true";
+    torq.broker.scheduleCommand = "true";
     torq.remote.url = "ssh://git@gitserver/home/git/config.git";
     environment.systemPackages = [ pkgs.jq pkgs.git ];
   };
@@ -139,7 +144,7 @@ pkgs.testers.runNixOSTest {
         as_git("rm -rf work && git clone -q ~/config.git work && cd work && git checkout -q -b incoming origin/main"
                " && echo '{\"n\": 99}' > desktop.json && git -c user.name=x -c user.email=x@x commit -qam incoming && git push -q origin incoming")
         incoming = as_git("git -C config.git rev-parse refs/heads/incoming").strip()
-        # Fetched — by anyone, over the socket: a read — and nothing on the machine changes.
+        # Fetched — by a person, over the socket: a read — and nothing on the machine changes.
         out = machine.succeed("su - dev -c 'torqcli request system pull'")
         assert "Loaded the remote's incoming configuration" in out and "Kept as this machine's own" in out, out
         assert machine.succeed(f"git -C {repo} rev-parse refs/torq/incoming").strip() == incoming
@@ -206,5 +211,50 @@ pkgs.testers.runNixOSTest {
         assert "rewritten" in out, out
         out = machine.fail("torq-broker status")
         assert "disagree" in out, out
+
+    with subtest("the alarm is named where a person looks, and stays while the remote agrees again"):
+        out = machine.succeed("su - dev -c 'torqcli show system alarms' || true")
+        assert "copy on its remote disagree" in out, out
+        # Put back as the remote has it: they agree now, and still nothing goes until a person clears it.
+        machine.succeed("cp /tmp/ledger.good3 /var/lib/torq/state/ledger.jsonl")
+        before = remote_ledger()
+        out = machine.fail("torq-broker push")
+        assert "not pushed" in out, out
+        assert remote_ledger() == before
+
+    with subtest("the remote's ledger gone: an alarm, not a fresh start"):
+        fresh("/tmp/ledger.good3")
+        remote_git("update-ref -d refs/heads/torq-ledger")
+        out = machine.fail("torq-broker push")
+        assert "is gone" in out, out
+
+    with subtest("a host key not the one pinned: an alarm, not out of reach"):
+        fresh("/tmp/ledger.good3")
+        gitserver.succeed("rm -f /etc/ssh/ssh_host_* && ssh-keygen -A && systemctl restart sshd")
+        gitserver.wait_for_unit("sshd.service")
+        out = machine.fail("torq-broker push")
+        assert "host key" in out, out
+        machine.succeed("rm -f /var/lib/torq/state/remote/*/known_hosts")
+
+    with subtest("a day without a push is an alarm; late is not"):
+        fresh("/tmp/ledger.good3")
+        f = "$(ls /var/lib/torq/state/remote/*/last.json)"
+        machine.succeed(f"jq '.ok = false | .error = \"out of reach\" | .failing_since = \"2026-01-01T00:00:00Z\"' {f} > /tmp/l && cp /tmp/l {f}")
+        out = machine.fail("torq-broker status")
+        assert "for a day or more" in out, out
+        machine.succeed("torq-broker push && torq-broker status")
+
+    with subtest("main is not pushed while a commit confirmed waits: it may yet be rolled back"):
+        head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+        diff = f"--- a/desktop.json\n+++ b/desktop.json\n@@ -1 +1 @@\n-{machine.succeed(f'cat {repo}/desktop.json').strip()}\n+{{\"n\": 77}}\n"
+        machine.succeed(f"printf %s {shlex.quote(diff)} > /tmp/c.diff")
+        p = json.loads(machine.succeed(f"torq-broker --json propose --actor user --base {head} --diff /tmp/c.diff --reason 'confirmed'"))
+        machine.succeed(f"torq-broker --json apply {p['seq']} --approved-by dev --confirm 30")
+        machine.succeed("torq-broker push")
+        assert "commit confirmed waits" in last()["main"], last()
+        assert remote_git("rev-parse refs/heads/main").strip() == head, "the remote's main is the settled one"
+        machine.succeed("torq-broker --json confirm --approved-by dev")
+        machine.succeed("torq-broker push")
+        assert remote_git("rev-parse refs/heads/main").strip() == machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
   '';
 }

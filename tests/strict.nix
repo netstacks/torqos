@@ -113,6 +113,14 @@ pkgs.testers.runNixOSTest {
         assert code != 0 and "say why" in out, out
         assert count() == n
 
+    with subtest("no ledger, no shell: an entry that cannot be written opens nothing (the audit of M3, M6)"):
+        machine.succeed("chattr +i /var/lib/torq/state/ledger.jsonl")
+        n = count()
+        code, out = sudo("$(readlink -f /run/current-system/sw/bin/torq-break-glass) the ledger is stuck")
+        machine.succeed("chattr -i /var/lib/torq/state/ledger.jsonl")
+        assert code != 0 and "Not on the record: no shell" in out and "Root shell" not in out, out
+        assert count() == n
+
     with subtest("break-glass: its entry first, and on the remote, before the shell opens"):
         n = count()
         term("g", "torq break-glass the disk is full; sleep 600")

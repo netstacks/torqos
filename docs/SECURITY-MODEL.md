@@ -37,7 +37,7 @@ tell a person from a program at a root shell — nothing can.
   stated: a program running as the owner could show a fake prompt and read what is typed into it;
   the password is safe from other accounts, and from that program once typed into torqcli (which
   makes itself non-dumpable), not from being asked for by it. `sudo torq-broker` remains the
-  recovery door; its entries say `via: sudo`, which is what root says about itself — `via` and
+  recovery door, except in strict mode, where sudo does not run it; its entries say `via: sudo`, which is what root says about itself — `via` and
   `caller` are evidence only for what a non-root account sent over the socket (KNOWN-GAPS 6zf).
 
 - **The `root` account is locked** (no password: nobody logs in as root). **Root's powers** are
@@ -45,18 +45,25 @@ tell a person from a program at a root shell — nothing can.
   whole shell. That is the owner's override, as on any Linux, and TorqOS does not try to forbid it:
   people stay free, the AI is what is limited.
 - **What a root shell can do:** go around the broker — edit the config repo or system files, rebuild
-  by hand, rewrite the ledger. TorqOS's answer is that going around the door is never invisible:
-  drift from the ledger raises `show system alarms`; `/etc/nixos` refuses a stray rebuild; the
+  by hand, rewrite the ledger. TorqOS's answer is that going around the door is seen, unless root
+  also covers it up:
+  drift from the ledger raises `show system alarms` at the next check (every 15 minutes; a change to
+  the store itself, daily); `/etc/nixos` refuses a stray rebuild; the
   ledger's hash chain shows an edited entry. Gap: a root writer can rewrite the whole chain
-  consistently — closed by signing entries with a key root cannot read and anchoring the head off
-  the machine (KNOWN-GAPS #2, M3).
+  consistently, and here only the remote's copy disagrees: anchoring the head off
+  the machine is the defence, not signing on it (ADR-035; KNOWN-GAPS #2). Root that remains can also
+  hide what it did from the checks themselves (rewriting the store's record of its hashes, say): the
+  checks are of what root did not cover up.
 - **An owner who runs an AI tool in a root shell** has handed it root, and no software can stop
   that. TorqOS makes it **visible** (the same alarms; the ledger records what passed the door —
-  but cannot yet tell a person from a program: the broker identifying its caller, KNOWN-GAPS #4,
-  M3), **recoverable** (every configuration change undoes; `request system repair` returns the
-  machine to its last ledgered state; the store is read-only and rebuilt from the configuration —
-  but data a root process deletes, and a ledger it rewrites, need snapshots of data and the signed
-  ledger, both later), and **unnecessary** (TorqOS's own AI layer: an unprivileged agent that reads
+  as what root says of itself: the broker names its caller from the kernel for what comes through its
+  socket, not for a root shell), **recoverable** (every configuration change undoes; `request system repair` returns the
+  machine to its last ledgered state, and puts back store paths changed in place that the daily check
+  found —
+  but what root leaves outside what the configuration names (a file in /etc NixOS does not manage, a
+  home's), a rebuild does not touch: only a reinstall from the repository clears it. Data a root process
+  deletes comes back from snapshots if root did not delete them too, and a ledger it rewrites is
+  caught by the remote's copy), and **unnecessary** (TorqOS's own AI layer: an unprivileged agent that reads
   and proposes, never `sudo`; the owner approves each proposal).
 - **Strict mode (optional, off by default):** the owner's `sudo` runs only break-glass and the agent's launcher — no
   root shell to run anything in — with a deliberate, ledgered break-glass for emergencies.
@@ -142,7 +149,8 @@ Hardware guidance: integrated-graphics machines are lowest risk for removing Mic
 
 ## Hardening defaults (initial list, expand with care)
 
-- Kernel lockdown (integrity). Modules are not signature-checked yet (KNOWN-GAPS 6).
+- Kernel lockdown is asked for (integrity), but this kernel has no lockdown module loaded, so it does
+  nothing yet (KNOWN-GAPS 6); modules are not signature-checked.
 - No display server by default.
 - Minimal enabled services. TorqOS's own services are not yet sandboxed beyond what systemd does by
   default (`torq-broker-init` only; audit N5).

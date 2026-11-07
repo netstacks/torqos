@@ -260,7 +260,7 @@ pkgs.testers.runNixOSTest {
 
         for svc in ["sudo", "passwd"]:
             stack = machine.succeed(f"grep -E '^auth' /etc/pam.d/{svc}")
-            assert "pam_faillock.so preauth dir=/run/torq/faillock deny=5" in stack and "authfail dir=/run/torq/faillock" in stack, (svc, stack)
+            assert "pam_faillock.so preauth dir=/run/torq/faillock deny=5 unlock_time=600" in stack and "authfail dir=/run/torq/faillock" in stack, (svc, stack)
             assert "pam_faillock.so required" not in stack.replace("  ", " "), stack
   '';
 }

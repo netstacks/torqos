@@ -53,8 +53,9 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
     # that was opened (device and inode): if a link on the way led elsewhere, nothing runs.
     stage=/run/torq-agent-stage
     mount --bind -- "$share" "$stage"
-    # Nothing in it runs with more than its runner has: no setuid program the agent leaves there
-    # works for the person who runs it later; no device nodes.
+    # No set-id program runs from it, and no device node works, while the agent is in it. That holds in
+    # the namespace of the agent only: the view the person has of the folder has no such mount, so what it
+    # leaves set-id is made plain when it ends (below; the audit of M3, L2).
     mount -o remount,bind,nosuid,nodev -- "$stage"
     if [ "$(stat -c %d:%i "$stage")" != "$(stat -L -c %d:%i "/proc/self/fd/$fd")" ]; then
       echo "torq-agent-run: $share is not the directory that was opened (a link changed?): nothing run" >&2
@@ -67,7 +68,8 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
     mkdir -p -- "$share"
     mount --move "$stage" "$share"
   fi
-  exec setpriv --reuid torq-agent --regid torq-agent --init-groups --no-new-privs \
+  rc=0
+  setpriv --reuid torq-agent --regid torq-agent --init-groups --no-new-privs \
     --inh-caps=-all --bounding-set=-all -- \
     bwrap --die-with-parent --unshare-pid --dev-bind / / --proc /proc \
       --tmpfs /run/user --tmpfs /tmp --tmpfs /root \
@@ -77,5 +79,12 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
       --setenv PATH /run/wrappers/bin:/run/current-system/sw/bin \
       --setenv TERM "${TERM:-dumb}" \
       --chdir "${share:-/var/lib/torq-agent}" \
-      -- "$@"
+      -- "$@" || rc=$?
+  # Everything the agent started is gone (its own process namespace): nothing races this. A set-id
+  # file the agent left in the folder would run as the agent outside the sandbox, later.
+  if [ -n "$share" ]; then
+    found=$(find "$share" -xdev -user torq-agent -perm /6000 -type f -print -exec chmod ug-s {} + 2>/dev/null || true)
+    [ -z "$found" ] || echo "torq agent run: set-id bits taken off what the agent left: $found" >&2
+  fi
+  exit "$rc"
 ' torq-agent-run "$share" "$fd" "$@"

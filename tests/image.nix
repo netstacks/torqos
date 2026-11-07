@@ -160,8 +160,11 @@ pkgs.testers.runNixOSTest {
         machine.fail("systemctl is-active getty@tty1")
         machine.succeed("passwd -S root | grep -q ' L '")
         # Listening only on the machine itself (systemd-resolved's stub), not on the network.
-        out = machine.succeed("ss -Htln")
-        assert all(l.split()[3].startswith(("127.", "[::1]", "[::ffff:127.")) for l in out.splitlines()), out
+        # TCP and UDP both: what answers names on the link is UDP (the audit of M3, M6).
+        out = machine.succeed("ss -Htuln")
+        # (A DHCP client's own port is a client's, not a service.)
+        local = lambda a: a.startswith(("127.", "[::1]", "[::ffff:127.")) or a.rsplit(":", 1)[-1] in ("68", "546")
+        assert all(local(l.split()[4]) for l in out.splitlines()), out
         machine.fail("test -s /var/lib/torq/state/ledger.jsonl")
 
     with subtest("setup, answered on the console, records change #1 and switches to the machine it described"):

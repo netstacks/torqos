@@ -67,6 +67,15 @@ pkgs.testers.runNixOSTest {
         machine.fail("su -s /bin/sh torq-agent -c 'cat /home/dev/secret'")
         machine.fail("su -s /bin/sh torq-agent -c 'ls /home/dev/other'")
 
+    with subtest("handed the directory, not a way to it: no descriptor of it left, no privilege to gain (the audit of M3, M6)"):
+        # Every descriptor the agent's program holds, and what its process may do.
+        out = agent("for f in /proc/$$/fd/*; do readlink $f; done; grep -E '^(NoNewPrivs|CapEff|CapPrm|CapBnd):' /proc/$$/status", share="/home/dev/src/project")
+        fds = [l for l in out.splitlines() if l.startswith("/")]
+        assert not any(d.startswith(("/home", "/run/torq-agent-stage")) for d in fds), out
+        status = dict(l.split(":\t") for l in out.splitlines() if ":\t" in l)
+        assert status.get("NoNewPrivs") == "1", out
+        assert status.get("CapEff") == "0000000000000000" and status.get("CapPrm") == "0000000000000000", out
+
     with subtest("only one's own directory, inside one's home, and not the home itself"):
         for share in ["/home/dev", "/etc", "/home/dev/secret", "/var/lib/torq"]:
             out = as_dev(f"torq agent run --share {share} -- true", ok=False)
@@ -111,6 +120,11 @@ pkgs.testers.runNixOSTest {
         assert "nosuid" in out and "nodev" in out, out
         agent("unshare -Urm umount /home", ok=False)
         agent("unshare -Urm umount /home/dev/src/project", ok=False)
+        # What it leaves set-id is made plain when it ends: the person's view of the folder is not nosuid
+        # (the audit of M3, L2).
+        out = agent("cp /run/current-system/sw/bin/true ./sid && chmod 4755 ./sid && stat -c %a ./sid", share="/home/dev/src/project")
+        assert "set-id bits taken off" in out and "sid" in out, out
+        assert machine.succeed("stat -c %a /home/dev/src/project/sid").strip() == "755"
     with subtest("a sandbox of its own still runs inside (as Claude Code's does)"):
         out = agent("bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent sh -c 'id -un; echo nested'")
         assert "nested" in out, out

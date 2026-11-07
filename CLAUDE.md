@@ -102,7 +102,17 @@ sudo torq-broker log && sudo torq-broker verify && sudo torq-broker status
 The VM tests need `/dev/kvm` to be quick; on `torq5` it is there (ESXi exposes nested
 virtualisation). Without it QEMU falls back to TCG and they take minutes.
 
-## Current milestone (M2) — Install: TorqOS as a ready image
+## Current milestone — 0.3.0: M3 finished, data, and the agent's non-GUI half
+
+As of 2026-11-07 the owner set 0.3.0's scope: everything that is not desktop or GUI. M3's build list is done
+(the socket broker, the agent's account and `torq agent run`, the remote with push, anchor, pull and adopt,
+strict mode and break-glass, btrfs images with data snapshots, ledger hardening) and its audit
+(`~/torq-audit-m3/`, kept off the repository until its findings are fixed; KNOWN-GAPS 6zl) is being
+worked through. Then: the release path (A2, A3), `commit at`, `configure exclusive`, systemd-repart;
+the declared backup and `request system restore` (ADR-038); the agent's doctor mode, proposals with
+taint tracking, and session trust (M5, AI-LAYER.md). The desktop (M4) and the agent's GUI parts come after.
+
+### Earlier: M2 — Install: TorqOS as a ready image
 
 Nobody has to build TorqOS to install it: a release is an image to download and boot. Done — the
 qcow2 and the ESXi VMDK, first-boot setup at the console, customer-safe defaults, signed releases a

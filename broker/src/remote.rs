@@ -2,7 +2,7 @@
 //! off the machine.
 //!
 //! After every change the broker pushes the configuration (`main`) and the ledger — as
-//! `refs/torq/ledger`, a chain of commits each holding the ledger as it was — never forced: with the
+//! the branch `torq-ledger` (here `refs/torq/ledger`), a chain of commits each holding the ledger as it was — never forced: with the
 //! remote refusing to rewrite (branch protection), what was pushed stays. The ledger here must then
 //! always be the remote's and more: anything else is a rewritten local history (`verify`, `status`).
 //! Pulling is a proposal, never an apply (`request system pull`, later).
