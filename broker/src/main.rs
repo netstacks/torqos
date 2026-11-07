@@ -29,6 +29,8 @@ struct Cli {
     activate_cmd: Option<String>,
     boot_cmd: Option<String>,
     schedule_cmd: Option<String>,
+    commit_at_cmd: Option<String>,
+    commit_at_cancel_cmd: Option<String>,
     current_system: Option<PathBuf>,
     system_profile: Option<PathBuf>,
     json: bool,
@@ -44,6 +46,11 @@ enum Cmd {
     Apply { seq: u64, approved_by: String, confirm_tainted: bool, confirm: Option<u32> },
     Confirm { approved_by: String },
     ExpireConfirm { seq: Option<u64>, reboot: bool },
+    Schedule { seq: u64, at: String, approved_by: String },
+    RunScheduled { timer: u64 },
+    CancelScheduled { seq: u64, approved_by: String },
+    Scheduled,
+    ResumeScheduled,
     Revert { seq: u64, approved_by: String },
     Reconcile { approved_by: String },
     Repair { approved_by: String },
@@ -104,6 +111,8 @@ fn command_line() -> clap::Command {
         .arg(opt("activate-cmd", "TORQ_ACTIVATE_CMD", "Activate an existing system (rollback of an unconfirmed commit); `{system}`."))
         .arg(opt("boot-cmd", "TORQ_BOOT_CMD", "Make a system the boot default (`confirm`); `{system}`, `{profile}`."))
         .arg(opt("schedule-cmd", "TORQ_SCHEDULE_CMD", "Schedule `{broker} expire-confirm {seq}` after `{seconds}` [default: a transient systemd timer]."))
+        .arg(opt("commit-at-cmd", "TORQ_COMMIT_AT_CMD", "`commit at`: arm the timer that runs `{broker} run-scheduled {id}` at `{at}` [default: a transient systemd timer]."))
+        .arg(opt("commit-at-cancel-cmd", "TORQ_COMMIT_AT_CANCEL_CMD", "`commit at`: stop schedule `{id}`'s timer [default: systemctl stop torq-commit-at-{id}.timer]."))
         .arg(path(
             "current-system",
             "TORQ_CURRENT_SYSTEM",
@@ -154,6 +163,17 @@ fn command_line() -> clap::Command {
                 .arg(Arg::new("seq").value_parser(value_parser!(u64)).help("Only if this applied change, or the timer it names, is the one waiting."))
                 .arg(flag("reboot", "Run at boot: the machine restarted before the change was confirmed.")),
         )
+        .subcommand(
+            Command::new("schedule")
+                .about("Commit at: approve a proposal now, to be applied at a time (one at a time); its timer applies it then as the one who approved it, unless the configuration has moved on.")
+                .arg(seq())
+                .arg(Arg::new("at").long("at").required(true).help("When: an RFC 3339 time, in the future, at most 30 days away."))
+                .arg(by()),
+        )
+        .subcommand(Command::new("run-scheduled").about("Apply the commit scheduled with this timer id, or refuse it on the record (its timer runs this).").arg(Arg::new("id").required(true).value_parser(value_parser!(u64))))
+        .subcommand(Command::new("cancel-scheduled").about("Cancel a scheduled commit (its `apply_scheduled` entry): ledgered, its timer stopped.").arg(seq()).arg(by()))
+        .subcommand(Command::new("scheduled").about("The commits scheduled and waiting for their time."))
+        .subcommand(Command::new("resume-scheduled").about("At boot: arm again the timers of commits scheduled before the restart; refuse those whose time passed meanwhile."))
         .subcommand(Command::new("revert").about("Undo one applied change: a new commit that reverts it, rebuild, ledger.").arg(seq()).arg(by()))
         .subcommand(
             Command::new("reconcile")
@@ -221,6 +241,11 @@ fn parse_cli() -> Cli {
         },
         "confirm" => Cmd::Confirm { approved_by: by(sub) },
         "expire-confirm" => Cmd::ExpireConfirm { seq: seq(sub), reboot: sub.get_flag("reboot") },
+        "schedule" => Cmd::Schedule { seq: seq(sub).unwrap_or_default(), at: s(sub, "at").unwrap_or_default(), approved_by: by(sub) },
+        "run-scheduled" => Cmd::RunScheduled { timer: *sub.get_one::<u64>("id").unwrap_or(&0) },
+        "cancel-scheduled" => Cmd::CancelScheduled { seq: seq(sub).unwrap_or_default(), approved_by: by(sub) },
+        "scheduled" => Cmd::Scheduled,
+        "resume-scheduled" => Cmd::ResumeScheduled,
         "revert" => Cmd::Revert { seq: seq(sub).unwrap_or_default(), approved_by: by(sub) },
         "reconcile" => Cmd::Reconcile { approved_by: by(sub) },
         "repair" => Cmd::Repair { approved_by: by(sub) },
@@ -256,6 +281,8 @@ fn parse_cli() -> Cli {
         activate_cmd: s(&m, "activate-cmd"),
         boot_cmd: s(&m, "boot-cmd"),
         schedule_cmd: s(&m, "schedule-cmd"),
+        commit_at_cmd: s(&m, "commit-at-cmd"),
+        commit_at_cancel_cmd: s(&m, "commit-at-cancel-cmd"),
         current_system: p(&m, "current-system"),
         system_profile: p(&m, "system-profile"),
         json: m.get_flag("json"),
@@ -321,6 +348,8 @@ fn settings(cli: &mut Cli) -> Result<Settings> {
         activate: cli.activate_cmd.clone(),
         boot: cli.boot_cmd.clone(),
         schedule: cli.schedule_cmd.clone(),
+        commit_at: cli.commit_at_cmd.clone(),
+        commit_at_cancel: cli.commit_at_cancel_cmd.clone(),
         current_system: cli.current_system.clone(),
         system_profile: cli.system_profile.clone(),
     };
@@ -356,9 +385,10 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     let writes = matches!(
         cli.cmd,
         Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. }
-            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. }
     );
     let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
+    let sched = torq_broker::at::Scheduler::new(&b, &s.commit_at, &s.commit_at_cancel);
     match cli.cmd {
         Cmd::Serve => unreachable!("served before the settings are read"),
         Cmd::RemoteKey => {
@@ -544,6 +574,31 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             (Some(e), false) => println!("{} (ledger #{})", e.body.reason, e.body.seq),
             (None, false) => println!("nothing is waiting for confirmation"),
         },
+        Cmd::Schedule { seq, at, approved_by } => {
+            let e = sched.schedule(seq, &approved_by, &at)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("proposal #{seq} is scheduled for {} (ledger #{}): torq-broker cancel-scheduled {} cancels it", e.body.data["at"].as_str().unwrap_or("?"), e.body.seq, e.body.seq);
+        }
+        Cmd::RunScheduled { timer } => match (sched.run(timer)?, json) {
+            (e, true) => println!("{}", json!({ "ran": e })),
+            (Some(e), false) => println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq),
+            (None, false) => println!("nothing is scheduled by that id"),
+        },
+        Cmd::CancelScheduled { seq, approved_by } => {
+            let e = sched.cancel(seq, &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::Scheduled => println!("{}", json!({ "scheduled": sched.scheduled()? })),
+        Cmd::ResumeScheduled => {
+            for e in sched.resume()? {
+                println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+            }
+        }
         Cmd::Revert { seq, approved_by } => {
             let e = b.revert(seq, &approved_by)?;
             if json {

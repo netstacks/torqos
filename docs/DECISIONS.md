@@ -1272,3 +1272,31 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   Claude Code run as the agent, is a later step); a default model; the taint held at the broker
   (6, before Proposals); the desktop's dialog (M4). `torq.ai` (the stub) is gone: `torq.agent.doctor` and
   `torq.agent.model` replace it.
+## ADR-043 — `commit at`: approved now, applied then, the ledger the only schedule
+
+**Status:** accepted (2026-11-07). **Context:** ROADMAP M1.5's `commit at <time>`, as on a network
+device: a change made in the evening that lands at night. A timer that applies a change later must
+not become a way to apply something no one approved, as someone no one asked, or on top of a
+configuration it was not prepared for.
+
+- **Approved now, by the person.** `schedule` is gated over the socket exactly as `apply` is (ADR-040):
+  the person's own folder theirs, anything else an administrator's, with their password, now. The
+  agent schedules nothing; a tainted proposal is not schedulable.
+- **What lands is what was approved.** The entry `apply_scheduled` holds the proposal, the time, who,
+  the timer's id, the base and the hash of the diff. The timer passes only its id; the run finds the
+  schedule in the ledger under the broker lock and applies that proposal as that person, refusing
+  (`apply_refused`, ledgered) if HEAD is not the base, a commit confirmed waits, the proposal was
+  applied, or the diff kept beside the ledger is not the approved one.
+- **The ledger is the schedule.** A cancel is ledgered before its timer is stopped, and a run of a
+  cancelled or settled schedule does nothing: nothing outlives a cancel. A timer is armed before its
+  entry is written, so a timer without an entry finds nothing; never an entry without a timer, except
+  after a restart, when `torq-commit-at-boot` arms it again — or refuses it, if its time passed.
+- **On time, by someone who still may.** A run more than 15 minutes past its time is refused (a
+  machine asleep, a clock stepped after boot, a broker busy all along: what was approved for one time
+  is not approved for another); so is one whose approver no longer has an account, is not a person's,
+  or is no longer an administrator, unless the change is wholly their own folder (as the socket reads
+  a caller). Its approver may cancel their own; anyone else's is an administrator's to cancel.
+- **One at a time**, refused rather than queued: two schedules prepared on one configuration cannot
+  both land (the first moves HEAD, so the second is stale by construction); refusing the second when
+  it is made tells the person while they are there, instead of at night in the ledger.
+- **Not with `commit confirmed`:** nobody would be there to confirm it.

@@ -24,6 +24,16 @@ pub trait Machine {
     fn pending_confirm(&self) -> Result<Option<Waiting>>;
     /// Keep the waiting commit confirmed.
     fn confirm(&self) -> Result<u64>;
+    /// `commit at <time>`: the time as the broker takes it (RFC 3339, UTC), and as a person reads it
+    /// (local), by this machine's clock and zone; refused if it has passed or is more than 30 days away.
+    fn commit_time(&self, text: &str) -> Result<(String, String)>;
+    /// Propose `diff` against `base` and schedule it to be applied at `at` (RFC 3339): approved now,
+    /// by the one asking. The broker's tier must be `tier`. Returns the schedule's ledger entry.
+    fn commit_at(&self, diff: &str, base: &str, tier: &str, reason: &str, at: &str) -> Result<u64>;
+    /// The commits scheduled and waiting for their time.
+    fn scheduled(&self) -> Result<Vec<Scheduled>>;
+    /// `clear system commit`: cancel schedule `seq` (as `me`, with their password).
+    fn cancel_scheduled(&self, seq: u64, me: &str) -> Result<u64>;
     /// Ask a person (a system-tier commit, a delete of everything, a repair, a revert).
     fn ask(&self, question: &str) -> Answer;
     /// A person edits `text` (the config file `path`) in their editor; None: they left it unchanged.
@@ -182,6 +192,22 @@ pub struct Waiting {
     pub deadline: String,
     /// Who made it: the one who may confirm it.
     pub by: Option<String>,
+}
+
+/// A commit scheduled with `commit at`, waiting for its time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scheduled {
+    /// Its ledger entry (`apply_scheduled`).
+    pub seq: u64,
+    pub proposal: u64,
+    /// When, in local time.
+    pub when: String,
+    /// Who approved it.
+    pub by: Option<String>,
+    pub reason: String,
+    /// More than 15 minutes past its time: it will not run (the broker refuses it, at the latest when
+    /// the next is scheduled).
+    pub late: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,6 +501,7 @@ impl<'a> Session<'a> {
             Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowRemote => {
                 self.show_operational(op)
             }
+            Op::ClearCommit => self.clear_commit(),
             Op::Request(r) => self.request(r),
             Op::File { action, path } => self.file(action, path),
             Op::Save { file } => self.save_to(&file),
@@ -815,6 +842,17 @@ impl<'a> Session<'a> {
         match op {
             Op::ShowCommits { display } => {
                 let mut out = String::new();
+                // A commit at waiting comes first, as the next configuration (Junos's `commit at` line).
+                for s in self.machine.scheduled()? {
+                    out.push_str(&self.said(&format!(
+                        "Scheduled: #{} at {} by {}: {} ({})",
+                        s.seq,
+                        s.when,
+                        s.by.as_deref().unwrap_or("?"),
+                        crate::history::one_line(&s.reason, 80),
+                        if s.late { "past its time: it will not run" } else { "clear system commit cancels it" }
+                    )));
+                }
                 let h = self.machine.configurations(&self.repo, 50)?;
                 let all = &h.configurations;
                 // Each configuration: its rollback number (0 is in effect), its change number (the
@@ -1094,6 +1132,22 @@ impl<'a> Session<'a> {
             syntax::Request::Update { all } => self.update(all),
             syntax::Request::SoftwareRollback { n } => self.software_rollback(n),
         }
+    }
+
+    /// `clear system commit`: cancel the commit scheduled with `commit at`, after asking.
+    fn clear_commit(&mut self) -> Result<String> {
+        let s = match self.machine.scheduled()?.as_slice() {
+            [] => return Ok(self.said("No commit is scheduled.")),
+            [s] => s.clone(),
+            more => bail!("{} commits are scheduled (a ledger from elsewhere?): `show system commit` lists them", more.len()),
+        };
+        let by = s.by.as_deref().unwrap_or("?");
+        let q = format!("Cancel the commit scheduled for {} by {by} (#{}): {}? ", s.when, s.seq, crate::history::one_line(&s.reason, 80));
+        if let Some(stop) = self.machine.ask(&q).go_on("cancelled")? {
+            return Ok(stop);
+        }
+        let n = self.machine.cancel_scheduled(s.seq, &self.me)?;
+        Ok(self.said(&format!("commit at {} cancelled (#{n})", s.when)))
     }
 
     /// `request system update [all]`: the newest TorqOS (with `all`, every input) into the candidate.
@@ -1412,6 +1466,17 @@ impl<'a> Session<'a> {
             let warned = self.warned(&self.machine.check(&base, &files)?);
             return Ok(format!("{warned}{}", self.said("configuration check succeeds")));
         }
+        // `commit at`: the time first, so that nobody approves a change for a time that is refused.
+        if o.at.is_some() && changes.is_empty() {
+            bail!("nothing to commit at a time: the candidate changes nothing");
+        }
+        let at = o.at.as_deref().map(|t| self.machine.commit_time(t)).transpose()?;
+        // One at a time: said before anything is evaluated, asked, or a password typed.
+        if at.is_some() {
+            if let Some(s) = self.machine.scheduled()?.into_iter().find(|s| !s.late) {
+                bail!("a commit is already scheduled for {} (#{}, by {}): one at a time; `clear system commit` cancels it", s.when, s.seq, s.by.as_deref().unwrap_or("?"));
+            }
+        }
         // A commit confirmed waiting freezes every other change (the broker refuses them): say so
         // before evaluating, asking or proposing anything.
         let waiting = self.machine.pending_confirm()?;
@@ -1487,6 +1552,9 @@ impl<'a> Session<'a> {
             if o.confirm.is_some() {
                 bail!("not proposed: the agent proposes, and a commit confirmed is a person's to make");
             }
+            if at.is_some() {
+                bail!("not proposed: the agent proposes, and a commit at is a person's to approve");
+            }
             let scratch = tempfile::tempdir()?;
             let diff = candidate::unified_diff(scratch.path(), &changes)?;
             let reason = crate::history::one_line(&o.comment.clone().unwrap_or_else(|| summary(&compare)), usize::MAX);
@@ -1498,7 +1566,8 @@ impl<'a> Session<'a> {
         // Asked: the warnings were shown with the question; not asked, they come with the outcome.
         let warned = if why.is_some() { String::new() } else { warned };
         if let Some(why) = why {
-            if let Some(stop) = self.machine.ask(&format!("{shown}{} ", ui.line("", &format!("{why} Commit?")))).go_on("committed")? {
+            let commit = at.as_ref().map_or("Commit?".to_string(), |(_, local)| format!("Commit at {local}?"));
+            if let Some(stop) = self.machine.ask(&format!("{shown}{} ", ui.line("", &format!("{why} {commit}")))).go_on("committed")? {
                 return Ok(stop);
             }
         }
@@ -1510,6 +1579,12 @@ impl<'a> Session<'a> {
         // Checked again after the question, which may have waited: another session may hold the
         // candidate now, or have changed it.
         self.may_write()?;
+        // Approved now, applied then: the candidate is done with (it is the proposal now).
+        if let Some((utc, local)) = at {
+            let seq = self.machine.commit_at(&diff, &base, tier, &reason, &utc)?;
+            self.discard()?;
+            return Ok(warned + &self.said(&format!("commit at {local} scheduled (#{seq}): it lands then unless the configuration changes first; `clear system commit` cancels it")));
+        }
         let seq = self.machine.commit(&diff, &base, tier, &reason, confirm)?;
         let kept = self.discard_committed();
         Ok(warned + &match confirm {
@@ -2298,6 +2373,11 @@ mod tests {
         meanwhile: RefCell<Option<Meanwhile>>,
         /// The locks it took.
         taken: RefCell<Vec<crate::exclusive::Lock>>,
+        /// `commit at`: what was scheduled (diff, base, tier, reason, at), what is scheduled, what
+        /// was cancelled.
+        at_commits: RefCell<Vec<(String, String, String, String, String)>>,
+        scheduled: Vec<Scheduled>,
+        cancelled: RefCell<Vec<u64>>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>> {
@@ -2310,6 +2390,29 @@ mod tests {
             }
             self.commits.borrow_mut().push((diff.into(), base.into(), tier.into(), reason.into(), confirm));
             Ok(42)
+        }
+        /// The clock is 2026-11-07 12:30 local, an hour east of UTC.
+        fn commit_time(&self, text: &str) -> Result<(String, String)> {
+            let local = |s: &str| crate::history::parse_ts(&format!("{}:00Z", s.replace(' ', "T"))).map(|t| t - 3600);
+            let now = crate::history::parse_ts("2026-11-07T11:30:00Z").unwrap_or(0);
+            let t = crate::at::when(text, now, "2026-11-07", &local)?;
+            let utc = crate::at::rfc3339(t);
+            let shown = crate::history::local_stamp(&utc, &crate::history::Clock { now, offset: 3600 });
+            Ok((utc, shown))
+        }
+        fn commit_at(&self, diff: &str, base: &str, tier: &str, reason: &str, at: &str) -> Result<u64> {
+            if self.refuse {
+                bail!("commit at refused: busy");
+            }
+            self.at_commits.borrow_mut().push((diff.into(), base.into(), tier.into(), reason.into(), at.into()));
+            Ok(44)
+        }
+        fn scheduled(&self) -> Result<Vec<Scheduled>> {
+            Ok(self.scheduled.clone())
+        }
+        fn cancel_scheduled(&self, seq: u64, _me: &str) -> Result<u64> {
+            self.cancelled.borrow_mut().push(seq);
+            Ok(45)
         }
         fn pending_confirm(&self) -> Result<Option<Waiting>> {
             Ok(self.pending.clone())
@@ -4061,6 +4164,106 @@ mod tests {
         assert!(e.contains("already waiting for confirmation") && e.contains("`commit` confirms it"), "{e}");
     }
 
+
+    /// `commit at`: the time resolved first, the change asked with it, proposed and scheduled — not
+    /// applied — and the candidate done with.
+    #[test]
+    fn commit_at_schedules_what_is_approved_now() {
+        let (d, m) = (repo(), Fake { answer: true, ..Fake::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system time-zone UTC"]);
+        let out = s.exec("commit at \"2026-11-08 10:00\"").unwrap();
+        assert!(out.contains("commit at 2026-11-08 10:00:00 scheduled (#44)") && out.contains("clear system commit"), "{out}");
+        assert!(m.asked.borrow()[0].contains("This changes the system (all users). Commit at 2026-11-08 10:00:00?"), "{:?}", m.asked.borrow());
+        let c = m.at_commits.borrow();
+        assert_eq!((c[0].1.as_str(), c[0].2.as_str(), c[0].4.as_str()), (s.repo.head().unwrap().as_str(), "system", "2026-11-08T09:00:00Z"));
+        assert!(c[0].0.contains("+++ b/system/host.json"), "{}", c[0].0);
+        assert!(m.commits.borrow().is_empty(), "scheduled, not applied");
+        assert!(s.exec("show | compare").unwrap().starts_with("No changes"), "the candidate is the proposal now");
+        // A person's own settings: not asked; a comment, and and-quit.
+        let m = Fake::default();
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set users dev packages jq"]);
+        let out = s.exec("commit at 14:00 comment \"jq for later\" and-quit").unwrap();
+        assert!(out.contains("commit at 2026-11-07 14:00:00 scheduled") && out.ends_with("Exiting configuration mode\n"), "{out}");
+        assert!(m.asked.borrow().is_empty());
+        let c = m.at_commits.borrow();
+        assert_eq!((c[0].2.as_str(), c[0].3.as_str(), c[0].4.as_str()), ("user", "jq for later", "2026-11-07T13:00:00Z"));
+        // A time already passed today is tomorrow's.
+        let m = Fake::default();
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set users dev packages jq", "commit at 9:15"]);
+        assert_eq!(m.at_commits.borrow()[0].4, "2026-11-08T08:15:00Z");
+    }
+
+    #[test]
+    fn commit_at_refuses_before_anything_is_asked() {
+        let (d, m) = (repo(), Fake { answer: true, ..Fake::default() });
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", "set system time-zone UTC"]);
+        for (bad, why) in [
+            ("commit at 25:00", "is not a time"),
+            ("commit at tomorrow", "is not a time"),
+            ("commit at \"2026-11-07 12:00\"", "has passed"),
+            ("commit at 2026-11-07T11:00:00Z", "has passed"),
+            ("commit at \"2026-12-08 12:31\"", "more than 30 days"),
+            ("commit at 10:00 confirmed 5", "do not go together"),
+            ("commit confirmed at 10:00", "do not go together"),
+            ("commit at", "<time>"),
+        ] {
+            assert!(format!("{:#}", s.exec(bad).unwrap_err()).contains(why), "{bad}");
+        }
+        assert!(m.asked.borrow().is_empty() && m.checks.borrow().is_empty() && m.at_commits.borrow().is_empty());
+        // One already waiting: refused before anything is evaluated, asked, or a password typed.
+        let w = Fake { answer: true, scheduled: scheduled(), ..Fake::default() };
+        let mut s2 = session(d.path(), None, &w);
+        let e = format!("{:#}", run_err(&mut s2, &["configure", "set system time-zone UTC"], "commit at 10:00"));
+        assert!(e.contains("already scheduled for 2026-11-08 10:00:00 (#50, by ana)") && e.contains("clear system commit"), "{e}");
+        assert!(w.asked.borrow().is_empty() && w.checks.borrow().is_empty() && w.at_commits.borrow().is_empty());
+        // One past its time is no obstacle (the broker settles it on the record).
+        let late = Fake { answer: true, scheduled: scheduled().into_iter().map(|s| Scheduled { late: true, ..s }).collect(), ..Fake::default() };
+        let mut s3 = session(d.path(), None, &late);
+        run(&mut s3, &["configure", "set system time-zone UTC", "commit at 10:00"]);
+        assert_eq!(late.at_commits.borrow().len(), 1);
+        assert!(s3.exec("run show system commit").unwrap().contains("(past its time: it will not run)"));
+        let mut s = session(d.path(), None, &m);
+        let e = format!("{:#}", run_err(&mut s, &["configure"], "commit at 10:00"));
+        assert!(e.contains("changes nothing"), "{e}");
+        // The agent proposes; a time is a person's to approve.
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, AGENT);
+        let e = format!("{:#}", run_err(&mut s, &["configure", "set system time-zone UTC"], "commit at 10:00"));
+        assert!(e.contains("a commit at is a person's"), "{e}");
+        assert!(m.at_commits.borrow().is_empty() && m.commits.borrow().is_empty());
+    }
+
+    fn scheduled() -> Vec<Scheduled> {
+        vec![Scheduled { seq: 50, proposal: 49, when: "2026-11-08 10:00:00".into(), by: Some("ana".into()), reason: "night".into(), late: false }]
+    }
+
+    #[test]
+    fn show_system_commit_lists_the_one_scheduled_and_clear_cancels_it() {
+        let (d, m) = (repo(), Fake { answer: true, scheduled: scheduled(), ..Fake::default() });
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("show system commit").unwrap();
+        assert!(out.starts_with("Scheduled: #50 at 2026-11-08 10:00:00 by ana: night (clear system commit cancels it)\n"), "{out}");
+        assert_eq!(s.exec("clear system commit").unwrap(), "commit at 2026-11-08 10:00:00 cancelled (#45)\n");
+        assert!(m.asked.borrow()[0].starts_with("Cancel the commit scheduled for 2026-11-08 10:00:00 by ana (#50)"), "{:?}", m.asked.borrow());
+        assert_eq!(*m.cancelled.borrow(), [50]);
+        // From configuration mode too; abbreviated.
+        run(&mut s, &["configure"]);
+        s.exec("run cl sy com").unwrap();
+        assert_eq!(*m.cancelled.borrow(), [50, 50]);
+        // Said no: nothing cancelled. None scheduled: said so.
+        let m = Fake { no: true, scheduled: scheduled(), ..Fake::default() };
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("clear system commit").unwrap(), "Not cancelled.\n");
+        assert!(m.cancelled.borrow().is_empty());
+        let m = Fake::default();
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("clear system commit").unwrap(), "No commit is scheduled.\n");
+        assert!(!s.exec("show system commit").unwrap().contains("Scheduled"));
+        assert!(format!("{:#}", run_err(&mut s, &["configure"], "clear system commit")).contains("clear"), "an operational command");
+    }
     fn run_err(s: &mut Session, before: &[&str], line: &str) -> anyhow::Error {
         run(s, before);
         s.exec(line).unwrap_err()
@@ -4192,7 +4395,7 @@ mod tests {
         let (d, m) = (repo(), Fake::default());
         let mut s = session(d.path(), None, &m);
         run(&mut s, &["configure", "edit networking"]);
-        for line in ["commit", "com", "comm and", "commit a", "top commit", "to com", "commit comment x"] {
+        for line in ["commit", "com", "comm and", "commit an", "commit at 10:00", "top commit", "to com", "commit comment x"] {
             assert!(s.commits(line), "{line}");
         }
         for line in ["commit check", "comm ch", "show | compare", "commi" , "top commit check"] {

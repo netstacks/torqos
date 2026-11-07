@@ -90,7 +90,7 @@ pub struct Change {
 /// asking and who approves (the kernel's), and files (they come in the request).
 const NOT_FROM_CALLERS: &[&str] = &[
     "--repo", "--state-dir", "--rebuild-cmd", "--build-cmd", "--activate-cmd", "--boot-cmd", "--schedule-cmd",
-    "--current-system", "--system-profile", "--actor", "--approved-by", "--diff", "--hash-file", "--key-file",
+    "--commit-at-cmd", "--commit-at-cancel-cmd", "--current-system", "--system-profile", "--actor", "--approved-by", "--diff", "--hash-file", "--key-file",
 ];
 
 /// Refuse arguments that name the caller, a file, or the broker's settings.
@@ -128,7 +128,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups", "scheduled"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
@@ -165,18 +165,43 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
             Some(_) => admins_only(),
             None => Gate::Refused("no such change".into()),
         },
-        "apply" | "revert" => match change {
+        // A commit at is approved now, as an apply is: the same person, the same password.
+        "apply" | "revert" | "schedule" => match change {
             None => Gate::Refused("no such change".into()),
             Some(c) if c.tier == Tier::Forbidden => Gate::Refused("that change touches what no one may change".into()),
             // A person's own settings are theirs: no password (KNOWN-GAPS 6a — someone else's are not).
-            Some(c) if c.tier <= Tier::User && !c.files.is_empty() && c.files.iter().all(|f| own(&who.name, f)) => Gate::Open,
+            Some(c) if theirs(&who.name, c) => Gate::Open,
             Some(_) => admins_only(),
         },
         // Their own password: the current one first, as passwd asks.
         "password" if user == Some(who.name.as_str()) => Gate::Password,
+        // A commit at, by the one who approved it (`user`: theirs); anyone else's, an administrator's.
+        "cancel-scheduled" if user == Some(who.name.as_str()) => Gate::Open,
+        "cancel-scheduled" => admins_only(),
         "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-key" | "backup-restore" => admins_only(),
         other => Gate::Refused(format!("`{other}` is not run over the socket (it is the machine's own, as root)")),
     }
+}
+
+/// Whether change `c` is wholly within `name`'s own folder of the configuration: theirs to make.
+pub fn theirs(name: &str, c: &Change) -> bool {
+    c.tier <= Tier::User && !c.files.is_empty() && c.files.iter().all(|f| own(name, f))
+}
+
+/// The account named `name`, as `caller` reads it for its uid.
+pub fn account(name: &str, passwd: &str, group: &str) -> Result<Caller> {
+    let uid = passwd
+        .lines()
+        .find_map(|l| {
+            let mut f = l.split(':');
+            (f.next()? == name).then(|| f.nth(1)?.parse::<u32>().ok()).flatten()
+        })
+        .with_context(|| format!("no account is named {name:?}"))?;
+    let c = caller(uid, passwd, group)?;
+    if c.name != name {
+        bail!("{name:?} shares its uid with {:?}: not one account", c.name);
+    }
+    Ok(c)
 }
 
 /// Whether `file` is in `name`'s own folder of the configuration.
@@ -206,7 +231,7 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--key-file".into(), key.context("a backup's key comes in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
         }
-        "apply" | "revert" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
+        "apply" | "revert" | "schedule" | "cancel-scheduled" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
         _ => {}
     }
     Ok(a)
@@ -363,6 +388,39 @@ mod tests {
         assert!(matches!(gate(&who(1001), "apply-confirmed", Some(&mine), None), Gate::Refused(_)));
         assert_eq!(gate(&who(1000), "apply-confirmed", Some(&mine), None), Gate::Password);
         assert!(matches!(gate(&who(990), "apply-confirmed", Some(&mine), None), Gate::Refused(_)));
+    }
+
+    /// `commit at`: approved now, as an apply is (a person's own settings theirs, a system change an
+    /// administrator's with their password); cancelled by an administrator; run only by its timer.
+    #[test]
+    fn a_commit_at_is_approved_as_an_apply_is() {
+        let sys = change(Tier::System, &["nixos/services.json"]);
+        let mine = change(Tier::User, &["users/sam/packages.json"]);
+        assert_eq!(gate(&who(1000), "schedule", Some(&sys), None), Gate::Password);
+        assert!(matches!(gate(&who(1001), "schedule", Some(&sys), None), Gate::Refused(_)));
+        assert_eq!(gate(&who(1001), "schedule", Some(&mine), None), Gate::Open);
+        assert!(matches!(gate(&who(1000), "schedule", None, None), Gate::Refused(_)), "no such proposal");
+        assert!(matches!(gate(&who(1000), "schedule", Some(&change(Tier::Forbidden, &[".git/config"])), None), Gate::Refused(_)));
+        assert!(matches!(gate(&who(990), "schedule", Some(&mine), None), Gate::Refused(_)), "the agent");
+        assert_eq!(gate(&who(1000), "cancel-scheduled", None, None), Gate::Password);
+        assert!(matches!(gate(&who(1001), "cancel-scheduled", None, None), Gate::Refused(_)));
+        // Its approver cancels their own without a password (`user`: who approved it, as the ledger says).
+        assert_eq!(gate(&who(1001), "cancel-scheduled", None, Some("sam")), Gate::Open);
+        assert!(matches!(gate(&who(1001), "cancel-scheduled", None, Some("viper")), Gate::Refused(_)));
+        assert!(matches!(gate(&who(990), "cancel-scheduled", None, Some(AGENT)), Gate::Refused(_)), "the agent cancels nothing");
+        assert_eq!(account("sam", PASSWD, GROUP).unwrap(), who(1001));
+        assert!(account("nobody-here", PASSWD, GROUP).is_err());
+        assert!(account("sam", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP).is_ok());
+        assert!(account("viper", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP).is_err(), "a uid shared is not one account");
+        for uid in [1000, 1001, 990] {
+            assert!(matches!(gate(&who(uid), "run-scheduled", None, None), Gate::Refused(_)), "{uid}");
+            assert!(matches!(gate(&who(uid), "resume-scheduled", None, None), Gate::Refused(_)), "{uid}");
+            assert_eq!(gate(&who(uid), "scheduled", None, None), Gate::Open, "{uid}");
+        }
+        let a = with_identity(&["schedule".into(), "3".into(), "--at=x".into()], "schedule", &who(1001), None, None, None).unwrap();
+        assert_eq!(a, ["schedule", "3", "--at=x", "--approved-by", "sam"]);
+        assert!(check_args(&["schedule".into(), "--commit-at-cmd=true".into()]).is_err());
+        assert!(check_args(&["schedule".into(), "--commit-at-cancel-cmd".into()]).is_err());
     }
 
     /// The review of pull: a fetch goes to the network, as root — a person's, not everyone's.

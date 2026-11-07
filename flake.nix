@@ -113,6 +113,7 @@
         broker = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         trust-loop = import ./tests/trust-loop.nix { inherit pkgs self; };
         socket = import ./tests/socket.nix { inherit pkgs self; };
+        commit-at = import ./tests/commit-at.nix { inherit pkgs self; };
         agent = import ./tests/agent.nix { inherit pkgs self; };
         agent-run = import ./tests/agent-run.nix { inherit pkgs self; };
         doctor = import ./tests/doctor.nix { inherit pkgs self; };

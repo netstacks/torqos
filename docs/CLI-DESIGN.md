@@ -66,7 +66,7 @@ refused (nobody could log in), saying to add a key or allow passwords — whethe
 or was on already. `request system revert` checks the same, with the same function
 (`session::ssh_review`).
 
-And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit comment "<text>"`, `commit
+And: `commit`, `commit check`, `commit confirmed <minutes>`, `commit at <time>`, `commit comment "<text>"`, `commit
 and-quit`, `rollback <n> [<place>]`, `up [<n>]`, `top [<command>]` (a command from the top, then
 back where you were — unless it moves), `show system commit`, `?` help, Tab completion, history (↑).
 `?` lists what may come next, `|` after any whole `show`, and `<[Enter]>` when the line would run as
@@ -416,6 +416,41 @@ viper@torq-utm# commit confirmed 5 comment "ssh, keys only"
 viper@torq-utm# commit
 ```
 
+- **`commit at <time>`** (with `comment "…"` and `and-quit`; not with `confirmed` or `check`):
+  approved now, applied then. The time is `HH:MM` (today, or tomorrow if it has passed),
+  `"YYYY-MM-DD HH:MM"` (local, as `date` reads it), or RFC 3339 with its offset; in the future and
+  at most 30 days away (cli/src/at.rs; the broker checks both again). torqcli resolves it before
+  evaluating or asking, then shows and asks as `commit` does (`… Commit at 2026-11-08 22:00:00?`),
+  proposes the candidate with its base, and has the broker `schedule` it; the candidate is the
+  proposal then, and is discarded. The broker (broker/src/at.rs):
+  - is asked over the socket exactly as `apply` is (`schedule` is gated as `apply`: a person's own
+    folder theirs, anything else an administrator's with their password), and refuses a tainted
+    proposal, one without a base, one whose base is not HEAD, or one already applied;
+  - arms a transient timer of its own (`commitAt` in broker.json: `systemd-run … --unit=torq-commit-at-<id>
+    --on-calendar=<at> {broker} run-scheduled <id>`), then ledgers `apply_scheduled`: the proposal,
+    the time, who, the timer's id, the base, and the hash of the diff approved;
+  - at the time applies that proposal as that person: `applied` / `apply_failed` with `scheduled: <n>`.
+    It is refused, `apply_refused` with `scheduled: <n>`, if the configuration has moved on from the
+    base, a commit confirmed is waiting, the proposal was applied meanwhile, or the diff kept beside
+    the ledger is not the one whose hash was approved; or if it is more than 15 minutes past its time
+    (asleep then, a clock stepped since, a broker busy all along), or its approver may no longer (no
+    account by that name, not a person's, or not an administrator, unless the change is wholly their
+    own folder; read from /etc/passwd and /etc/group as the socket reads a caller). Under the broker
+    lock, from the ledger: the
+    timer's id names the schedule, never the proposal;
+  - **one at a time**: a second is refused while one waits. Both would be prepared on the same
+    configuration and the first changes it, so the second could only ever be refused at its time;
+    refusing it now says so while the person is there (torqcli says so before asking anything). One
+    more than 15 minutes past its time without a run is settled, refused on the record, by the next;
+  - after a restart (the timer was transient) arms it again if its time is still to come, or refuses
+    it if the time passed while the machine was down (`torq-commit-at-boot`, after `time-sync.target`:
+    never applied late); each on its own, one that cannot be read or armed again refused on the record.
+- **`clear system commit`** (operational) asks, then cancels it (`cancel-scheduled`: its approver's own,
+  or an administrator's
+  with their password): `apply_cancelled` in the ledger first, then the timer stopped. A run reads
+  the ledger, so nothing outlives a cancel even if the timer could not be stopped.
+  `show system commit` lists it above the configurations: `Scheduled: #57 at … by viper: …`.
+
 The first `commit` shows the comparison and the keys that will be able to log in as viper (it
 refuses if there are none), asks, and says when the change rolls back unless confirmed; the second
 confirms it.
@@ -445,7 +480,7 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | Command | Does |
 |---|---|
 | `show configuration` | the active configuration |
-| `show system commit` | the commit history, numbered for `rollback`, in local time (as the ledger) |
+| `show system commit` | the commit history, numbered for `rollback`, in local time (as the ledger); a commit scheduled with `commit at` first |
 | `show system rollback <n> [compare <m>]` | commit <n>'s configuration, or what going from <n> to <m> changes (<n> is the base, as on a network device) |
 | `show system alarms` | is this machine exactly as its history says? (and any pending confirmed commit) |
 | `show system ledger [<count>]` | every change as the ledger has it (`#85`, who made it), refused and failed ones too |
@@ -463,12 +498,13 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `save <file>` | (configuration mode) the whole candidate and its config files' content to a file, private |
 | `load override\|merge\|set <file>\|terminal` | (configuration mode) a saved configuration into the candidate, all or nothing; `terminal`: what you paste next, ended by Ctrl-D (brace format, or `set` lines; `#` and `/* … */` comments are left out) |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
+| `clear system commit` | cancel the commit scheduled with `commit at` (asks first; yours, or an administrator's with their password) |
 | `request system revert <change>` | undo one change, `#85` or `85` (a new change that reverses it; asks unless it only touches your own settings) |
 | `configure` / `config` | enter configuration mode |
 | `configure exclusive` | enter it with the shared candidate held by this session alone, until it leaves: your other sessions read it, cannot change or commit it, and are told which session holds it |
 | `help [<command> \| <words>]` | (both modes) the commands; one command; or a search of commands and settings |
 
-Later: `commit at <time>`. (`save` / `load`: built, S5; `configure exclusive`: built, above.)
+(`save` / `load`: built, S5; `configure exclusive` and `commit at`: built, above.)
 
 As built (3e, 4a, 4e): all of the above. The candidate holds the software too (4e): `request system
 update [all]` runs `nix flake update` on the commit the candidate is based on and loads the new

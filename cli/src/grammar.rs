@@ -34,6 +34,8 @@ pub enum Value {
     Change,
     /// Minutes to confirm a commit in.
     Minutes,
+    /// When a commit is applied (`commit at`): HH:MM, "YYYY-MM-DD HH:MM", RFC 3339.
+    Time,
     /// A person's account.
     User,
     /// A file anywhere (save, load: in the home folder if relative).
@@ -58,6 +60,7 @@ impl Value {
             Value::Count => "<count>",
             Value::Change => "<change>",
             Value::Minutes => "<minutes>",
+            Value::Time => "<time>",
             Value::User => "<user>",
             Value::File => "<file>",
             Value::NixFile => "<nix-file>",
@@ -84,6 +87,7 @@ impl Value {
             // As the ledger writes it (#85) or not.
             Value::Change => whole(w.strip_prefix('#').unwrap_or(w), "change numbers", 1, u64::MAX).map(drop),
             Value::Minutes => whole(w, "minutes", 1, 1440).map(drop),
+            Value::Time => crate::at::form(w),
             Value::User if !w.is_empty() => Ok(()),
             Value::File | Value::NixFile | Value::Interface if !w.is_empty() => Ok(()),
             // As modules/backup.nix asserts a name is (it names its key's file).
@@ -222,6 +226,7 @@ const DETAIL: &[Display] = &[Display::Detail];
 const COMPARISON: &[Display] = &[Display::Diff];
 
 static ROOTS: &[Node] = &[
+    fixed("clear", "Clear something the machine holds", In::Op).then(&[fixed("system", "This machine", In::Op).then(&[fixed("commit", "Cancel the commit scheduled with commit at (it asks first)", In::Op).whole(|_| Ok(Op::ClearCommit))])]),
     fixed("commit", "Make the candidate the machine's configuration", In::Cf).whole(commit).then(COMMIT_FIRST),
     fixed("configure", "Edit the configuration (a candidate, until you commit it)", In::Op).top_only().whole(|_| Ok(Op::Configure { exclusive: false })).then(&[fixed("exclusive", "With the candidate yours alone: your other sessions cannot change it until you leave", In::Op).whole(|_| Ok(Op::Configure { exclusive: true }))]),
     fixed("delete", "Remove a value, a setting, or everything below a place", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() })).then(&[node(Word::Path, "What to remove", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() }))]),
@@ -302,19 +307,23 @@ static LOAD_FROM: &[Node] = &[
 /// Right after `commit`: `check` stands alone; the rest combine, each once.
 static COMMIT_FIRST: &[Node] = &[
     fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("check", "Check the candidate evaluates, without committing", In::Cf).once().whole(commit),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
     fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).then(&CONFIRMED),
 ];
-static COMMIT_MORE: [Node; 3] = [
+static COMMIT_MORE: [Node; 4] = [
     fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
     fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).then(&CONFIRMED),
 ];
 static COMMENT: [Node; 1] = [value(Value::Text, "What the change is for").whole(commit).then(&COMMIT_MORE)];
-static CONFIRMED: [Node; 3] = [
+static AT: [Node; 1] = [value(Value::Time, "HH:MM (today, or tomorrow if it has passed), \"YYYY-MM-DD HH:MM\" (local), or RFC 3339; within 30 days").whole(commit).then(&COMMIT_MORE)];
+static CONFIRMED: [Node; 4] = [
     value(Value::Minutes, "1 to 1440: confirm by committing again").whole(commit).then(&COMMIT_MORE),
     fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).then(&COMMIT_MORE),
+    fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
 ];
 
@@ -412,10 +421,14 @@ fn up(r: &Read) -> Result<Op> {
 }
 
 fn commit(r: &Read) -> Result<Op> {
+    if r.has("at") && r.has("confirmed") {
+        bail!("commit at and commit confirmed do not go together: a scheduled commit lands with no one there to confirm it");
+    }
     Ok(Op::Commit(CommitOptions {
         check: r.has("check"),
         confirm: r.has("confirmed").then(|| r.value(Value::Minutes).and_then(|m| m.parse().ok()).unwrap_or(10)),
         comment: r.value(Value::Text).map(String::from),
+        at: r.value(Value::Time).map(String::from),
         and_quit: r.has("and-quit"),
     }))
 }

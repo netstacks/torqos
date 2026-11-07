@@ -68,7 +68,9 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`. torqcli is the agent's int
       services at NixOS's paths, the catalog folded in); `show version`, `show system uptime`,
       `show interfaces`, `show system storage` (CLI-DESIGN.md).
 - [ ] Human polish, below M3–M5: the walk of every `?`; a usability check by someone new to TorqOS
-      (installs, removes, undoes and reads the log unaided); `commit at <time>`. Done: `configure exclusive` (2026-11-07, cli/src/exclusive.rs).
+      (installs, removes, undoes and reads the log unaided). Done: `configure exclusive` (2026-11-07, cli/src/exclusive.rs).
+- [x] `commit at <time>` (approved now, applied then as that person; one at a time; refused if stale;
+      `clear system commit`; `tests/commit-at.nix`, CLI-DESIGN.md).
 
 **First round** (done with the earlier command names; carried over):
 - [x] Broker `--json` for every command (shapes and exit codes in `CLI-DESIGN.md`).

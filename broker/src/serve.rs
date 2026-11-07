@@ -199,9 +199,13 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
         return Err(refused(anyhow::anyhow!("the command is {name}, not {cmd}")));
     }
     let seq = sub.try_get_one::<u64>("seq").ok().flatten().copied();
-    let user = sub.try_get_one::<String>("user").ok().flatten().cloned();
+    // Whose a scheduled commit is: its approver may cancel it (the ledger's word, not the caller's).
+    let user = match (name, seq) {
+        ("cancel-scheduled", Some(seq)) => scheduled_by(&settings.state_dir, seq),
+        _ => sub.try_get_one::<String>("user").ok().flatten().cloned(),
+    };
     let change = match (name, seq) {
-        ("apply" | "revert", Some(seq)) => change(&settings.state_dir, seq, if name == "apply" { "proposal" } else { "applied" }),
+        ("apply" | "schedule" | "revert", Some(seq)) => change(&settings.state_dir, seq, if name == "revert" { "applied" } else { "proposal" }),
         _ => None,
     };
     // A commit confirmed holds everyone else's changes back while it waits: its own case.
@@ -241,6 +245,12 @@ fn one_at_a_time(uid: u32) -> Result<std::fs::File> {
         .with_context(|| format!("opening {}", p.display()))?;
     f.lock().context("waiting for the turn to check the password")?;
     Ok(f)
+}
+
+/// Who approved the commit scheduled as entry `seq`, if it is one.
+fn scheduled_by(state_dir: &Path, seq: u64) -> Option<String> {
+    let e = Ledger::open(state_dir.join("ledger.jsonl")).get(seq).ok()?;
+    (e.body.kind == "apply_scheduled").then_some(e.body.approved_by).flatten()
 }
 
 /// The change `seq` is, if it is a `kind` entry: its tier and the files it touches.
