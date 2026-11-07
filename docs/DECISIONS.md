@@ -580,12 +580,14 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   (`boot.initrd.systemd.repart`, in both copies of the layout: hosts/image/hardware-configuration.nix
   and hosts/installer/file-systems.nix), after the root is mounted and before btrfs is grown by the
   file system's autoResize (`x-systemd.growfs`, ordered after repart by systemd itself). repart matches
-  definitions to the disk's partitions by type, in order, and the record's ext4 partition and the root
-  are both Linux's generic type, so the record's definition comes first with no share of free space
-  (`10-torq`, `Weight=0`), the root's second (`20-root`): only the last partition grows; repart never
-  moves, shrinks or writes into an existing partition. The image names its partitions (`ESP`, `torq`,
-  `nixos`, hosts/image/disk.nix) as the definitions do, so repart has no label to write into the
-  record's entry either; the installer test holds the record's entry to the image's. The image builder's
+  definitions to the disk's partitions by type, so the record's ext4 partition is of a GPT type of
+  TorqOS's own (`79312c32-17cc-4864-8a4c-5a6d06522000`, hosts/image/disk.nix) that no definition names:
+  repart never touches it or its table entry. The one definition (`20-root`, Linux's generic type)
+  matches the root, the last partition, and grows it; repart never moves, shrinks or deletes a
+  partition, but does rewrite the table. It runs only on the image's layout: an `ExecCondition` in the
+  initrd skips it unless the root is partition 3, named `nixos`, of a GPT disk holding exactly the ESP,
+  the record and the root, each of its type — any other layout is never repartitioned. The installer
+  test holds the ESP's and the record's table entries to the image's. The image builder's
   own default of growpart is turned off for the system it puts on the disk. **The greeting runs a copy
   of fastfetch's program alone** (modules/branding.nix), wrapped as NixOS's package wraps it, its one
   reference to its own package (a system-wide configuration directory it is never left to look in) cut:
