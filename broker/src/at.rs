@@ -26,12 +26,16 @@ use sha2::{Digest, Sha256};
 pub const MAX_DAYS: i64 = 30;
 /// How early a run may come (a clock stepped back a little): before that, it is not the time yet.
 const EARLY_SECONDS: i64 = 60;
+/// How late a run may come: after that (a machine asleep at its time, a clock stepped after boot, a
+/// broker busy for long), it is refused on the record, never applied late.
+pub const LATE_MINUTES: i64 = 15;
 
 /// The timer: `{broker} run-scheduled {id}` at `{at}` (UTC, `YYYY-MM-DD HH:MM:SS UTC`). A wall-clock
-/// timer, retried a bounded number of times while the broker is busy, as the rollback's is.
+/// timer, retried a bounded number of times while the broker is busy, as the rollback's is — for
+/// longer than `LATE_MINUTES`, so that a run that keeps failing ends refused on the record.
 pub const SCHEDULE: &str = "systemd-run --quiet --collect --unit=torq-commit-at-{id} --on-calendar={at} \
      --timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=15 \
-     --property=StartLimitIntervalSec=1200 --property=StartLimitBurst=60 \
+     --property=StartLimitIntervalSec=1800 --property=StartLimitBurst=100 \
      {broker} run-scheduled {id}";
 /// Stop it: the timer only — its run, if already started, finds the cancel in the ledger.
 pub const CANCEL: &str = "systemctl stop torq-commit-at-{id}.timer";
@@ -115,12 +119,35 @@ fn sha(text: &str) -> String {
 /// The broker with the commands that arm and stop a schedule's timer (broker.json's `commitAt`,
 /// `commitAtCancel`; tests', stubs).
 pub struct Scheduler<'a> {
-    pub b: &'a Broker,
-    pub schedule: String,
-    pub cancel: String,
+    b: &'a Broker,
+    schedule: String,
+    cancel: String,
+    /// The machine's accounts, read at the run (who approved it must still be someone who may).
+    passwd: std::path::PathBuf,
+    group: std::path::PathBuf,
 }
 
-impl Scheduler<'_> {
+/// Whether a schedule's time `at` is more than `LATE_MINUTES` gone.
+fn late(at: chrono::DateTime<chrono::Utc>) -> bool {
+    chrono::Utc::now() > at + chrono::Duration::minutes(LATE_MINUTES)
+}
+
+fn time_of(s: &Scheduled) -> Result<chrono::DateTime<chrono::Utc>> {
+    Ok(chrono::DateTime::parse_from_rfc3339(&s.at).with_context(|| format!("its time {:?} is not one", s.at))?.with_timezone(&chrono::Utc))
+}
+
+impl<'a> Scheduler<'a> {
+    /// The broker, the commands that arm and stop a timer, and the machine's own accounts.
+    pub fn new(b: &'a Broker, schedule: &str, cancel: &str) -> Self {
+        Scheduler { b, schedule: schedule.into(), cancel: cancel.into(), passwd: "/etc/passwd".into(), group: "/etc/group".into() }
+    }
+
+    /// Other account files (tests').
+    pub fn with_accounts(mut self, passwd: impl Into<std::path::PathBuf>, group: impl Into<std::path::PathBuf>) -> Self {
+        (self.passwd, self.group) = (passwd.into(), group.into());
+        self
+    }
+
     fn arm(&self, lock: &Lock, timer: u64, at: chrono::DateTime<chrono::Utc>) -> Result<()> {
         if self.schedule.is_empty() {
             bail!("this machine schedules no commits (no commitAt command in its broker settings)");
@@ -148,6 +175,13 @@ impl Scheduler<'_> {
         let lock = Lock::acquire(&b.state_dir)?;
         b.reconcile_locked(&lock, approved_by)?;
         b.refuse_unledgered_head()?;
+        // One whose time is long gone without a run (its timer lost, or given up) settles here, on
+        // the record: it blocks no one.
+        for s in self.scheduled()? {
+            if time_of(&s).map_or(true, late) {
+                self.refuse(&s, "its time passed without it being applied")?;
+            }
+        }
         let entries = b.ledger.read_all()?;
         if let Some(s) = pending(&entries).first() {
             bail!(
@@ -200,15 +234,25 @@ impl Scheduler<'_> {
         let Some(s) = self.scheduled()?.into_iter().find(|s| s.timer == timer) else {
             return Ok(None);
         };
-        let at = chrono::DateTime::parse_from_rfc3339(&s.at).context("its time")?;
+        let at = match time_of(&s) {
+            Ok(at) => at,
+            Err(e) => return self.refuse(&s, &format!("{e:#}")).map(Some),
+        };
         if chrono::Utc::now() < at - chrono::Duration::seconds(EARLY_SECONDS) {
             bail!("proposal #{} is scheduled for {}: not yet", s.proposal, s.at);
+        }
+        // Late — the machine asleep at its time, a clock stepped since, a broker busy all along — is
+        // not applied: what was approved for one time is not approved for another.
+        if late(at) {
+            return self.refuse(&s, &format!("it is more than {LATE_MINUTES} minutes past its time")).map(Some);
         }
         // A switch outside the broker passes: the timer tries again (apply would refuse it, for good).
         if crate::switch_running() {
             bail!("a system switch ({}) is running outside the broker; the scheduled commit waits for it", crate::SWITCH_UNIT);
         }
-        let by = s.approved_by.clone().filter(|n| policy::user_name_ok(n)).context("a schedule names the person who approved it")?;
+        let Some(by) = s.approved_by.clone().filter(|n| policy::user_name_ok(n)) else {
+            return self.refuse(&s, "it names no person who approved it").map(Some);
+        };
         b.reconcile_locked(&lock, &by)?;
         if let Some(why) = self.refusal(&s)? {
             return self.refuse(&s, &why).map(Some);
@@ -240,13 +284,40 @@ impl Scheduler<'_> {
         if b.find_child("applied", "proposal", s.proposal)?.is_some() {
             return Ok(Some(format!("proposal #{} was already applied", s.proposal)));
         }
-        // What is applied is what was approved: the diff by its hash, kept beside the ledger.
         let p = b.ledger.get(s.proposal)?;
+        if let Some(why) = self.approver_gone(s, &p)? {
+            return Ok(Some(why));
+        }
+        // What is applied is what was approved: the diff by its hash, kept beside the ledger. The
+        // proposal's entry is in the hash chain and its text is checked against it (proposal_text);
+        // this compares that with the hash the approval recorded, so a schedule written to name
+        // another diff than its proposal's (a ledger from elsewhere) applies nothing.
         match b.proposal_text(&p, "diff") {
             Ok(t) if sha(&t) == s.diff_sha256 => Ok(None),
             Ok(_) => Ok(Some(format!("proposal #{}'s diff is not the one approved", s.proposal))),
             Err(e) => Ok(Some(format!("{e:#}"))),
         }
+    }
+
+    /// Why the one who approved schedule `s` (of proposal `p`) may not have it applied now, if they may
+    /// not: no account by that name, not a person's, or — unless it is wholly their own folder — no
+    /// longer an administrator. Read as the socket reads a caller (socket::caller).
+    fn approver_gone(&self, s: &Scheduled, p: &Entry) -> Result<Option<String>> {
+        let by = s.approved_by.as_deref().unwrap_or_default();
+        let read = |f: &std::path::Path| std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()));
+        let who = match crate::socket::account(by, &read(&self.passwd)?, &read(&self.group)?) {
+            Ok(w) => w,
+            Err(e) => return Ok(Some(format!("its approver is not who they were: {e:#}"))),
+        };
+        if who.agent || !who.person {
+            return Ok(Some(format!("its approver {by} is not a person's account")));
+        }
+        let tier: crate::policy::Tier = serde_json::from_value(json!(p.body.tier)).context("the proposal's tier")?;
+        let files = p.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
+        if !who.admin && !crate::socket::theirs(by, &crate::socket::Change { tier, files }) {
+            return Ok(Some(format!("its approver {by} is no longer an administrator ({})", crate::socket::ADMINS)));
+        }
+        Ok(None)
     }
 
     fn refuse(&self, s: &Scheduled, why: &str) -> Result<Entry> {
@@ -293,19 +364,23 @@ impl Scheduler<'_> {
 
     /// At boot: the timers were transient, and are gone. A schedule from an earlier boot whose time
     /// is still ahead is armed again; one whose time passed while the machine was down is refused
-    /// (never applied late). What it ledgered, if anything.
+    /// (never applied late). Each on its own: one that cannot be read or armed again is refused on
+    /// the record, and the others go on. What it ledgered, if anything.
     pub fn resume(&self) -> Result<Vec<Entry>> {
         let b = self.b;
         let lock = Lock::acquire(&b.state_dir)?;
         let boot = b.boot_id();
         let mut out = Vec::new();
         for s in self.scheduled()?.into_iter().filter(|s| s.boot_id.is_none() || s.boot_id != boot) {
-            let at = chrono::DateTime::parse_from_rfc3339(&s.at).context("its time")?.with_timezone(&chrono::Utc);
-            if at <= chrono::Utc::now() {
-                out.push(self.refuse(&s, "the machine was not running at its time")?);
-            } else {
-                self.arm(&lock, s.timer, at)?;
-            }
+            let why = match time_of(&s) {
+                Err(e) => format!("{e:#}"),
+                Ok(at) if at <= chrono::Utc::now() => "the machine was not running at its time".into(),
+                Ok(at) => match self.arm(&lock, s.timer, at) {
+                    Ok(()) => continue,
+                    Err(e) => format!("its timer could not be armed again after a restart: {e:#}"),
+                },
+            };
+            out.push(self.refuse(&s, &why)?);
         }
         Ok(out)
     }

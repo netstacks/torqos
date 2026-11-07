@@ -2883,13 +2883,39 @@ struct At {
     m: Confirmable,
 }
 
+/// The machine's accounts: casey and viper people, viper an administrator, casey too unless `casey_admin` is false.
+fn accounts(dir: &Path, casey_admin: bool) {
+    fs::write(dir.join("passwd"), "root:x:0:0::/root:/bin/sh\ncasey:x:1000:100::/home/casey:/bin/sh\nviper:x:1001:100::/home/viper:/bin/sh\ntorq-agent:x:990:990::/var/empty:/bin/false\n").unwrap();
+    fs::write(dir.join("group"), format!("wheel:x:1:{}viper\nusers:x:100:\n", if casey_admin { "casey," } else { "" })).unwrap();
+}
+
 impl At {
     fn new() -> Self {
-        At { m: Confirmable::new() }
+        let m = Confirmable::new();
+        accounts(m.dir.path(), true);
+        At { m }
     }
     fn s(&self) -> torq_broker::at::Scheduler<'_> {
         let log = self.m.dir.path().join("log").display().to_string();
-        torq_broker::at::Scheduler { b: &self.m.b, schedule: format!("echo at {{id}} {{at}} {{broker}} >> {log}"), cancel: format!("echo cancel {{id}} >> {log}") }
+        self.with(&self.m.b, &format!("echo at {{id}} {{at}} {{broker}} >> {log}"), &format!("echo cancel {{id}} >> {log}"))
+    }
+    /// A scheduler for broker `b` with these commands, and this test's accounts.
+    fn with<'a>(&self, b: &'a Broker, schedule: &str, cancel: &str) -> torq_broker::at::Scheduler<'a> {
+        torq_broker::at::Scheduler::new(b, schedule, cancel).with_accounts(self.m.dir.path().join("passwd"), self.m.dir.path().join("group"))
+    }
+    /// A schedule written straight into the ledger, as a ledger from elsewhere might hold one.
+    fn forged(&self, proposal: u64, by: &str, at: &str, sha: &str) -> (u64, u64) {
+        let timer = 777_000 + proposal;
+        let e = self.m.b.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(by.into()),
+            kind: "apply_scheduled".into(),
+            tier: "system".into(),
+            tainted: false,
+            reason: "forged".into(),
+            data: serde_json::json!({ "proposal": proposal, "at": at, "timer": timer, "base": self.m.b.repo.head().unwrap(), "diff_sha256": sha }),
+        }).unwrap();
+        (e.body.seq, timer)
     }
     /// A proposal on the configuration as it is (its base: HEAD).
     fn propose(&self, name: &str, diff: &str) -> u64 {
@@ -2959,7 +2985,7 @@ fn a_cancelled_commit_at_never_lands() {
     // A timer that cannot be stopped does not undo the cancel.
     let p2 = t.propose("theme2", THEME);
     let e2 = t.s().schedule(p2, "casey", &At::in_seconds(30)).unwrap();
-    let stuck = torq_broker::at::Scheduler { b: &t.m.b, schedule: String::new(), cancel: "false".into() };
+    let stuck = t.with(&t.m.b, "", "false");
     stuck.cancel(e2.body.seq, "viper").unwrap();
     assert!(t.s().run(e2.body.data["timer"].as_u64().unwrap()).unwrap().is_none());
     assert!(t.theme().contains("dark"));
@@ -3044,11 +3070,11 @@ fn a_commit_at_is_a_fresh_untainted_proposal_with_a_base() {
     t.m.b.revert(applied, "casey").unwrap();
     assert!(format!("{:#}", t.s().schedule(stale, "casey", &At::in_seconds(60)).unwrap_err()).contains("changed since"));
     assert!(format!("{:#}", t.s().schedule(stale, "not a name!", &At::in_seconds(60)).unwrap_err()).contains("not a person's name"));
-    let none = torq_broker::at::Scheduler { b: &t.m.b, schedule: String::new(), cancel: String::new() };
+    let none = t.with(&t.m.b, "", "");
     let fresh = t.propose("night2", NIGHT_LIGHT);
     assert!(format!("{:#}", none.schedule(fresh, "casey", &At::in_seconds(60)).unwrap_err()).contains("schedules no commits"));
     // A timer that cannot be armed: nothing recorded, nothing scheduled.
-    let broken = torq_broker::at::Scheduler { b: &t.m.b, schedule: "false".into(), cancel: String::new() };
+    let broken = t.with(&t.m.b, "false", "");
     assert!(broken.schedule(fresh, "casey", &At::in_seconds(60)).is_err());
     assert!(t.s().scheduled().unwrap().is_empty());
 }
@@ -3059,7 +3085,7 @@ fn a_failed_commit_at_is_ledgered_once_as_scheduled() {
     let p = t.propose("theme", THEME);
     let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
     let failing = Broker::new(t.m.b.repo.root(), t.m.dir.path().join("state"), "false");
-    let s = torq_broker::at::Scheduler { b: &failing, schedule: String::new(), cancel: String::new() };
+    let s = t.with(&failing, "", "");
     let timer = e.body.data["timer"].as_u64().unwrap();
     assert!(s.run(timer).is_err());
     let f = failing.ledger.read_all().unwrap().pop().unwrap();
@@ -3100,4 +3126,117 @@ fn the_scheduled_commits_are_listed_by_the_broker_binary() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!((v["scheduled"][0]["seq"].as_u64(), v["scheduled"][0]["proposal"].as_u64(), v["scheduled"][0]["approved_by"].as_str()), (Some(e.body.seq), Some(p), Some("casey")));
     assert_eq!(v["scheduled"][0]["at"], e.body.data["at"]);
+}
+
+/// The review of commit at: what was approved for one time is not approved for another.
+#[test]
+fn a_commit_at_long_past_its_time_is_refused_and_blocks_no_one() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let sha = t.m.b.ledger.get(p).unwrap().body.data["diff_sha256"].as_str().unwrap().to_string();
+    let late = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
+    let (seq, timer) = t.forged(p, "casey", &late, &sha);
+    let r = t.s().run(timer).unwrap().expect("refused");
+    assert_eq!((r.body.kind.as_str(), r.body.data["scheduled"].as_u64()), ("apply_refused", Some(seq)));
+    assert!(r.body.reason.contains("minutes past its time"), "{}", r.body.reason);
+    assert!(t.theme().contains("dark"));
+    // Within the grace, it runs.
+    let (_, timer) = t.forged(p, "casey", &(chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339(), &sha);
+    assert_eq!(t.s().run(timer).unwrap().unwrap().body.kind, "applied");
+    // One long gone that never ran is settled by the next schedule, on the record, not in its way.
+    let q = t.propose("night", NIGHT_LIGHT);
+    let (stuck, _) = t.forged(q, "casey", &late, &"0".repeat(64));
+    t.s().schedule(q, "casey", &At::in_seconds(60)).unwrap();
+    let r = t.m.b.ledger.read_all().unwrap().into_iter().find(|e| e.body.kind == "apply_refused" && e.body.data["scheduled"] == stuck).unwrap();
+    assert!(r.body.reason.contains("its time passed"), "{}", r.body.reason);
+}
+
+/// The approver must still be someone who may: an account, a person's, an administrator unless the
+/// change is wholly their own folder.
+#[test]
+fn a_commit_at_whose_approver_may_no_longer_is_refused() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    accounts(t.m.dir.path(), false);
+    let r = t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().expect("refused");
+    assert_eq!(r.body.kind, "apply_refused");
+    assert!(r.body.reason.contains("no longer an administrator"), "{}", r.body.reason);
+    assert!(t.theme().contains("dark"));
+    // Their own folder needs no administrator.
+    let own = t.propose("own", &new_user_file("users/casey/packages.json", "[\"hello\"]"));
+    let e = t.s().schedule(own, "casey", &At::in_seconds(30)).unwrap();
+    assert_eq!(t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().unwrap().body.kind, "applied");
+    // No account by that name any more; the agent's; no name at all.
+    for (by, why) in [("gone", "not who they were"), ("torq-agent", "not a person's account"), ("not a name!", "names no person")] {
+        let q = t.propose(&format!("night-{}", by.len()), NIGHT_LIGHT);
+        let sha = t.m.b.ledger.get(q).unwrap().body.data["diff_sha256"].as_str().unwrap().to_string();
+        let (seq, timer) = t.forged(q, by, &At::in_seconds(30), &sha);
+        let r = t.s().run(timer).unwrap().expect("refused");
+        assert_eq!((r.body.kind.as_str(), r.body.data["scheduled"].as_u64()), ("apply_refused", Some(seq)), "{by}");
+        assert!(r.body.reason.contains(why), "{by}: {}", r.body.reason);
+    }
+    assert!(fs::read_to_string(t.m.b.repo.root().join("desktop.nix")).unwrap().contains("false"));
+}
+
+/// The hash the approval recorded is compared at the run: a schedule naming another diff than its
+/// proposal's (here written straight into the ledger) applies nothing, though the proposal's own
+/// text is intact.
+#[test]
+fn a_commit_at_naming_another_diff_than_its_proposals_is_refused() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let (seq, timer) = t.forged(p, "casey", &At::in_seconds(30), &"a".repeat(64));
+    let r = t.s().run(timer).unwrap().expect("refused");
+    assert_eq!((r.body.kind.as_str(), r.body.data["scheduled"].as_u64()), ("apply_refused", Some(seq)));
+    assert!(r.body.reason.contains("not the one approved"), "{}", r.body.reason);
+    assert!(t.theme().contains("dark"));
+}
+
+/// At boot, one schedule that cannot be read or armed again is refused on the record; the others go on.
+#[test]
+fn after_a_restart_one_bad_schedule_does_not_stop_the_others() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let sha = t.m.b.ledger.get(p).unwrap().body.data["diff_sha256"].as_str().unwrap().to_string();
+    let (bad, _) = t.forged(p, "casey", "not a time", &sha);
+    let (good, timer) = t.forged(p, "casey", &At::in_seconds(600), &sha);
+    let r = t.s().resume().unwrap();
+    assert_eq!((r.len(), r[0].body.data["scheduled"].as_u64()), (1, Some(bad)), "{r:?}");
+    assert!(t.m.log().contains(&format!("at {timer} ")), "the good one armed: {}", t.m.log());
+    // An arming that fails: refused, on the record, not left waiting for ever.
+    let r = t.with(&t.m.b, "false", "").resume().unwrap();
+    assert_eq!((r.len(), r[0].body.data["scheduled"].as_u64()), (1, Some(good)));
+    assert!(r[0].body.reason.contains("could not be armed again"), "{}", r[0].body.reason);
+    assert!(t.s().scheduled().unwrap().is_empty());
+}
+
+/// apply's own refusal of a proposal that no longer does what was judged (the audit of M3, H1) is
+/// ledgered once — and a schedule's refusal of the same proposal is not that once.
+#[test]
+fn a_schedules_refusal_does_not_hide_applys_own() {
+    let t = At::new();
+    // A proposal that says it changes one file while its diff changes another (a ledger from elsewhere).
+    let p = t.m.b.ledger.append(NewEntry {
+        actor: "user".into(),
+        approved_by: None,
+        kind: "proposal".into(),
+        tier: "system".into(),
+        tainted: false,
+        reason: "says one thing".into(),
+        data: serde_json::json!({ "diff": NIGHT_LIGHT, "files": ["users/casey.nix"], "base": t.m.b.repo.head().unwrap() }),
+    }).unwrap().body.seq;
+    t.m.b.ledger.append(NewEntry {
+        actor: "broker".into(),
+        approved_by: Some("casey".into()),
+        kind: "apply_refused".into(),
+        tier: "system".into(),
+        tainted: false,
+        reason: "Scheduled change not applied: …".into(),
+        data: serde_json::json!({ "proposal": p, "scheduled": 99 }),
+    }).unwrap();
+    let err = format!("{:#}", t.m.b.apply(p, "casey", false).unwrap_err());
+    assert!(err.contains("no longer does what it was judged on"), "{err}");
+    let own: Vec<_> = t.m.b.ledger.read_all().unwrap().into_iter().filter(|e| e.body.kind == "apply_refused" && e.body.data["proposal"] == p && e.body.data.get("scheduled").is_none()).collect();
+    assert_eq!(own.len(), 1, "apply's own refusal is on the record");
 }

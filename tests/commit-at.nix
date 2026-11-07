@@ -18,6 +18,8 @@ pkgs.testers.runNixOSTest {
     users.users.root.hashedPasswordFile = lib.mkForce null;
     users.users.dev.hashedPasswordFile = lib.mkForce null;
     users.users.dev.hashedPassword = devHash;
+    # Someone who is not an administrator: whose cancel of dev's schedule is refused.
+    users.users.sam = { isNormalUser = true; hashedPasswordFile = lib.mkForce null; hashedPassword = "!"; };
     torq.broker.rebuildCommand = "true";
     environment.systemPackages = [ pkgs.socat pkgs.jq ];
     environment.etc."torq-test/settings.nix".text = "{ a = 0; b = 0; c = 0; }\n";
@@ -110,10 +112,12 @@ pkgs.testers.runNixOSTest {
         p = propose("{ a = 1; b = 0; c = 0; }", "{ a = 1; b = 0; c = 1; }", "c, cancelled")
         s = schedule(p, 45)
         timer = s["data"]["timer"]
-        # Cancelling is an administrator's, with their password.
+        # Someone else's is an administrator's to cancel; the agent's never. Its approver's own: theirs.
+        code, v = ask("sam", {"args": ["--json", "cancel-scheduled", str(s["seq"])]})
+        assert code == 1 and "not an administrator" in v["error"], (code, v)
+        code, v = ask("torq-agent", {"args": ["--json", "cancel-scheduled", str(s["seq"])]})
+        assert code == 1 and "the agent proposes" in v["error"], (code, v)
         code, v = ask("dev", {"args": ["--json", "cancel-scheduled", str(s["seq"])]})
-        assert code == 77, (code, v)
-        code, v = ask("dev", {"args": ["--json", "cancel-scheduled", str(s["seq"])], "password": password})
         assert code == 0 and v["kind"] == "apply_cancelled" and v["data"]["scheduled"] == s["seq"], (code, v)
         machine.fail(f"systemctl is-active torq-commit-at-{timer}.timer")
         # Its run, by hand after the cancel (a timer that could not be stopped): nothing.

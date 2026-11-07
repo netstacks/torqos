@@ -377,7 +377,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. }
     );
     let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
-    let sched = torq_broker::at::Scheduler { b: &b, schedule: s.commit_at.clone(), cancel: s.commit_at_cancel.clone() };
+    let sched = torq_broker::at::Scheduler::new(&b, &s.commit_at, &s.commit_at_cancel);
     match cli.cmd {
         Cmd::Serve => unreachable!("served before the settings are read"),
         Cmd::RemoteKey => {

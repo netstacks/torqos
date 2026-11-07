@@ -2516,8 +2516,9 @@ impl Broker {
         if said != does || p.body.tier != tier.to_string() {
             let _ = fs::remove_file(&tmp);
             let why = format!("proposal {proposal_seq} no longer does what it was judged on: it said {} ({}), and would now change {} ({tier}); propose it again", said.into_iter().collect::<Vec<_>>().join(" "), p.body.tier, does.into_iter().collect::<Vec<_>>().join(" "));
-            // Once each: a person repeating this adds nothing to the record.
-            if self.find_child("apply_refused", "proposal", proposal_seq)?.is_none() {
+            // Once each: a person repeating this adds nothing to the record. (A scheduled run's own refusal
+            // of the same proposal, at.rs, is not this one.)
+            if !self.ledger.read_all()?.iter().any(|e| e.body.kind == "apply_refused" && e.body.data["proposal"] == json!(proposal_seq) && e.body.data.get("scheduled").is_none()) {
                 self.ledger.append(NewEntry {
                     actor: "broker".into(),
                     approved_by: Some(approved_by.into()),

@@ -24,7 +24,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `request system software rollback <n>` | load configuration `<n>`'s software into the candidate (a downgrade) |
 | `request system revert <change>` | undo one recorded change (`#85` or `85`) |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
-| `clear system commit` | cancel the commit scheduled with `commit at` (asks first; an administrator's, with their password) |
+| `clear system commit` | cancel the commit scheduled with `commit at` (asks first; yours, or an administrator's with their password) |
 | <code>help [&lt;command&gt; &#124; &lt;words&gt;]</code> | the commands, one command, or a search of commands and settings |
 
 ## Configuration mode

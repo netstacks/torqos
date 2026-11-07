@@ -159,7 +159,7 @@ in
       default = lib.concatStringsSep " " [
         "systemd-run --quiet --collect --unit=torq-commit-at-{id} --on-calendar={at}"
         "--timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=15"
-        "--property=StartLimitIntervalSec=1200 --property=StartLimitBurst=60"
+        "--property=StartLimitIntervalSec=1800 --property=StartLimitBurst=100"
         "{broker} run-scheduled {id}"
       ];
       description = ''
@@ -467,7 +467,8 @@ in
     # schedules from an earlier boot (the boot ID they were made in), so a switch that starts this does nothing.
     systemd.services.torq-commit-at-boot = {
       description = "Arm again the TorqOS commits scheduled before a restart";
-      after = [ "torq-broker-init.service" "torq-confirm-boot.service" ];
+      # After the clock is set: whether a time has passed is read from it.
+      after = [ "torq-broker-init.service" "torq-confirm-boot.service" "time-sync.target" ];
       wantedBy = [ "multi-user.target" ];
       restartIfChanged = false;
       startLimitIntervalSec = 600;

@@ -7,6 +7,8 @@ use anyhow::{bail, Context, Result};
 
 /// The furthest ahead (the broker's limit too: broker/src/at.rs).
 pub const MAX_DAYS: i64 = 30;
+/// How late the broker still runs one (broker/src/at.rs `LATE_MINUTES`): after that it refuses it.
+pub const LATE_SECONDS: i64 = 15 * 60;
 
 /// How a local wall time ("YYYY-MM-DD HH:MM") is a moment (Unix seconds), on this machine: its time
 /// zone, daylight saving included. None: no such local time (a date that does not exist, the hour a

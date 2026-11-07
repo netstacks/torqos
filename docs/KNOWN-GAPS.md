@@ -627,17 +627,30 @@ Its §5 lists claims without a test.
    - **unix_chkpwd**, setuid, checks a person's own password with no count: a program running as them can
      guess it there, slowly. The audit did not raise it; found while fixing M3.
 
-6zm. **`commit at` (broker/src/at.rs, 2026-11-07).** Open:
+6zo. **`commit at` (broker/src/at.rs, ADR-043, 2026-11-07).** Fixed from its review: a run more than 15
+   minutes late is refused (a machine asleep at its time, a clock stepped after boot, a broker busy
+   all along), and the boot unit waits for `time-sync.target`; the approver is read again at the run (an
+   account still, a person's, an administrator unless it is wholly their own folder); one bad schedule at
+   boot no longer stops the others; one long past its time is settled by the next `commit at`; its
+   approver may cancel their own; apply's own refusal of a proposal is not hidden by a schedule's.
+   Open:
    - **`tests/commit-at.nix` is written and registered, not yet run** (the branch's worker may not build
      VM tests); the broker's unit tests stub the timer.
-   - **Cancelling is an administrator's**, even of a change to a person's own folder that they scheduled
-     themselves without a password: they cannot cancel it, only make it stale (any commit of theirs
-     first) or ask an administrator.
    - **A scheduled proposal is still listed** by `show system proposals`, and `request system apply` of
      it before its time applies it; the schedule is then refused at its time (already applied).
    - **Local times are read by `date`** when the commit is made (`HH:MM`, `"YYYY-MM-DD HH:MM"`): the
      broker holds UTC from then on, so a later change of the machine's time zone does not move it.
+   - **Daylight saving.** A local time the clock skips (02:30 on the night it springs forward) is
+     refused as no such time, if `date` refuses it — GNU `date` does. One the clock passes twice (01:30
+     on the night it falls back) is whichever of the two `date` picks, and the person is shown the
+     resolved time with the question only as a local stamp, not which of the two it is. `HH:MM` is
+     today's or tomorrow's date at that wall time, so across a change it is still that wall time (not 24
+     hours on). The time shown in `show system commit` uses the offset at that moment, read by `date`.
+   - **The grace is fixed** at 15 minutes (broker/src/at.rs `LATE_MINUTES`), not a setting.
    - **A timer armed and never recorded** (the broker killed between the two) waits for its time, finds
      no schedule by its id and does nothing; it is not removed before then.
+   - **A run that fails before it can record anything** (the ledger or accounts unreadable) retries for
+     25 minutes and then stops; the schedule is settled on the record by the next `commit at`, or seen
+     waiting, marked past its time, in `show system commit`.
    - **Adopted with one waiting:** a machine adopting a repository whose ledger holds a schedule arms it
      at its first boot; adopt's own commit moves HEAD, so it is refused at its time, not applied.

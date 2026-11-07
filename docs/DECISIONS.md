@@ -1077,7 +1077,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Not:** the agent applying anything, ever (ADR-040); the launcher (5) in this step; the agent's
   model, tools or prompts (M5).
 
-## ADR-042 — `commit at`: approved now, applied then, the ledger the only schedule
+## ADR-043 — `commit at`: approved now, applied then, the ledger the only schedule
 
 **Status:** accepted (2026-11-07). **Context:** ROADMAP M1.5's `commit at <time>`, as on a network
 device: a change made in the evening that lands at night. A timer that applies a change later must
@@ -1096,6 +1096,11 @@ configuration it was not prepared for.
   cancelled or settled schedule does nothing: nothing outlives a cancel. A timer is armed before its
   entry is written, so a timer without an entry finds nothing; never an entry without a timer, except
   after a restart, when `torq-commit-at-boot` arms it again — or refuses it, if its time passed.
+- **On time, by someone who still may.** A run more than 15 minutes past its time is refused (a
+  machine asleep, a clock stepped after boot, a broker busy all along: what was approved for one time
+  is not approved for another); so is one whose approver no longer has an account, is not a person's,
+  or is no longer an administrator, unless the change is wholly their own folder (as the socket reads
+  a caller). Its approver may cancel their own; anyone else's is an administrator's to cancel.
 - **One at a time**, refused rather than queued: two schedules prepared on one configuration cannot
   both land (the first moves HEAD, so the second is stale by construction); refusing the second when
   it is made tells the person while they are there, instead of at night in the ledger.

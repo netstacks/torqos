@@ -404,14 +404,21 @@ viper@torq-utm# commit
   - at the time applies that proposal as that person: `applied` / `apply_failed` with `scheduled: <n>`.
     It is refused, `apply_refused` with `scheduled: <n>`, if the configuration has moved on from the
     base, a commit confirmed is waiting, the proposal was applied meanwhile, or the diff kept beside
-    the ledger is not the one whose hash was approved. Under the broker lock, from the ledger: the
+    the ledger is not the one whose hash was approved; or if it is more than 15 minutes past its time
+    (asleep then, a clock stepped since, a broker busy all along), or its approver may no longer (no
+    account by that name, not a person's, or not an administrator, unless the change is wholly their
+    own folder; read from /etc/passwd and /etc/group as the socket reads a caller). Under the broker
+    lock, from the ledger: the
     timer's id names the schedule, never the proposal;
   - **one at a time**: a second is refused while one waits. Both would be prepared on the same
     configuration and the first changes it, so the second could only ever be refused at its time;
-    refusing it now says so while the person is there;
+    refusing it now says so while the person is there (torqcli says so before asking anything). One
+    more than 15 minutes past its time without a run is settled, refused on the record, by the next;
   - after a restart (the timer was transient) arms it again if its time is still to come, or refuses
-    it if the time passed while the machine was down (`torq-commit-at-boot`: never applied late).
-- **`clear system commit`** (operational) asks, then cancels it (`cancel-scheduled`, an administrator's
+    it if the time passed while the machine was down (`torq-commit-at-boot`, after `time-sync.target`:
+    never applied late); each on its own, one that cannot be read or armed again refused on the record.
+- **`clear system commit`** (operational) asks, then cancels it (`cancel-scheduled`: its approver's own,
+  or an administrator's
   with their password): `apply_cancelled` in the ledger first, then the timer stopped. A run reads
   the ledger, so nothing outlives a cancel even if the timer could not be stopped.
   `show system commit` lists it above the configurations: `Scheduled: #57 at … by viper: …`.
@@ -463,7 +470,7 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `save <file>` | (configuration mode) the whole candidate and its config files' content to a file, private |
 | `load override\|merge\|set <file>\|terminal` | (configuration mode) a saved configuration into the candidate, all or nothing; `terminal`: what you paste next, ended by Ctrl-D (brace format, or `set` lines; `#` and `/* … */` comments are left out) |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
-| `clear system commit` | cancel the commit scheduled with `commit at` (asks first; an administrator's, with their password) |
+| `clear system commit` | cancel the commit scheduled with `commit at` (asks first; yours, or an administrator's with their password) |
 | `request system revert <change>` | undo one change, `#85` or `85` (a new change that reverses it; asks unless it only touches your own settings) |
 | `configure` / `config` | enter configuration mode |
 | `help [<command> \| <words>]` | (both modes) the commands; one command; or a search of commands and settings |

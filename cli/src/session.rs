@@ -196,6 +196,9 @@ pub struct Scheduled {
     /// Who approved it.
     pub by: Option<String>,
     pub reason: String,
+    /// More than 15 minutes past its time: it will not run (the broker refuses it, at the latest when
+    /// the next is scheduled).
+    pub late: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -701,11 +704,12 @@ impl<'a> Session<'a> {
                 // A commit at waiting comes first, as the next configuration (Junos's `commit at` line).
                 for s in self.machine.scheduled()? {
                     out.push_str(&self.said(&format!(
-                        "Scheduled: #{} at {} by {}: {} (clear system commit cancels it)",
+                        "Scheduled: #{} at {} by {}: {} ({})",
                         s.seq,
                         s.when,
                         s.by.as_deref().unwrap_or("?"),
-                        crate::history::one_line(&s.reason, 80)
+                        crate::history::one_line(&s.reason, 80),
+                        if s.late { "past its time: it will not run" } else { "clear system commit cancels it" }
                     )));
                 }
                 let h = self.machine.configurations(&self.repo, 50)?;
@@ -1310,6 +1314,12 @@ impl<'a> Session<'a> {
             bail!("nothing to commit at a time: the candidate changes nothing");
         }
         let at = o.at.as_deref().map(|t| self.machine.commit_time(t)).transpose()?;
+        // One at a time: said before anything is evaluated, asked, or a password typed.
+        if at.is_some() {
+            if let Some(s) = self.machine.scheduled()?.into_iter().find(|s| !s.late) {
+                bail!("a commit is already scheduled for {} (#{}, by {}): one at a time; `clear system commit` cancels it", s.when, s.seq, s.by.as_deref().unwrap_or("?"));
+            }
+        }
         // A commit confirmed waiting freezes every other change (the broker refuses them): say so
         // before evaluating, asking or proposing anything.
         let waiting = self.machine.pending_confirm()?;
@@ -3691,6 +3701,18 @@ mod tests {
             assert!(format!("{:#}", s.exec(bad).unwrap_err()).contains(why), "{bad}");
         }
         assert!(m.asked.borrow().is_empty() && m.checks.borrow().is_empty() && m.at_commits.borrow().is_empty());
+        // One already waiting: refused before anything is evaluated, asked, or a password typed.
+        let w = Fake { answer: true, scheduled: scheduled(), ..Fake::default() };
+        let mut s2 = session(d.path(), None, &w);
+        let e = format!("{:#}", run_err(&mut s2, &["configure", "set system time-zone UTC"], "commit at 10:00"));
+        assert!(e.contains("already scheduled for 2026-11-08 10:00:00 (#50, by ana)") && e.contains("clear system commit"), "{e}");
+        assert!(w.asked.borrow().is_empty() && w.checks.borrow().is_empty() && w.at_commits.borrow().is_empty());
+        // One past its time is no obstacle (the broker settles it on the record).
+        let late = Fake { answer: true, scheduled: scheduled().into_iter().map(|s| Scheduled { late: true, ..s }).collect(), ..Fake::default() };
+        let mut s3 = session(d.path(), None, &late);
+        run(&mut s3, &["configure", "set system time-zone UTC", "commit at 10:00"]);
+        assert_eq!(late.at_commits.borrow().len(), 1);
+        assert!(s3.exec("run show system commit").unwrap().contains("(past its time: it will not run)"));
         let mut s = session(d.path(), None, &m);
         let e = format!("{:#}", run_err(&mut s, &["configure"], "commit at 10:00"));
         assert!(e.contains("changes nothing"), "{e}");
@@ -3702,7 +3724,7 @@ mod tests {
     }
 
     fn scheduled() -> Vec<Scheduled> {
-        vec![Scheduled { seq: 50, proposal: 49, when: "2026-11-08 10:00:00".into(), by: Some("ana".into()), reason: "night".into() }]
+        vec![Scheduled { seq: 50, proposal: 49, when: "2026-11-08 10:00:00".into(), by: Some("ana".into()), reason: "night".into(), late: false }]
     }
 
     #[test]

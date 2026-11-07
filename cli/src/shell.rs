@@ -434,6 +434,7 @@ impl Machine for Real<'_> {
                     when: history::local_stamp(at, &history::Clock { now: clock.now, offset }),
                     by: s["approved_by"].as_str().map(|b| history::one_line(b, 40)),
                     reason: history::one_line(s["reason"].as_str().unwrap_or_default(), 200),
+                    late: history::parse_ts(at).is_some_and(|t| clock.now > t + crate::at::LATE_SECONDS),
                 })
             })
             .collect())

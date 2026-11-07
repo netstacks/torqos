@@ -167,14 +167,38 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
             None => Gate::Refused("no such change".into()),
             Some(c) if c.tier == Tier::Forbidden => Gate::Refused("that change touches what no one may change".into()),
             // A person's own settings are theirs: no password (KNOWN-GAPS 6a — someone else's are not).
-            Some(c) if c.tier <= Tier::User && !c.files.is_empty() && c.files.iter().all(|f| own(&who.name, f)) => Gate::Open,
+            Some(c) if theirs(&who.name, c) => Gate::Open,
             Some(_) => admins_only(),
         },
         // Their own password: the current one first, as passwd asks.
         "password" if user == Some(who.name.as_str()) => Gate::Password,
-        "password" | "confirm" | "cancel-scheduled" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" => admins_only(),
+        // A commit at, by the one who approved it (`user`: theirs); anyone else's, an administrator's.
+        "cancel-scheduled" if user == Some(who.name.as_str()) => Gate::Open,
+        "cancel-scheduled" => admins_only(),
+        "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" => admins_only(),
         other => Gate::Refused(format!("`{other}` is not run over the socket (it is the machine's own, as root)")),
     }
+}
+
+/// Whether change `c` is wholly within `name`'s own folder of the configuration: theirs to make.
+pub fn theirs(name: &str, c: &Change) -> bool {
+    c.tier <= Tier::User && !c.files.is_empty() && c.files.iter().all(|f| own(name, f))
+}
+
+/// The account named `name`, as `caller` reads it for its uid.
+pub fn account(name: &str, passwd: &str, group: &str) -> Result<Caller> {
+    let uid = passwd
+        .lines()
+        .find_map(|l| {
+            let mut f = l.split(':');
+            (f.next()? == name).then(|| f.nth(1)?.parse::<u32>().ok()).flatten()
+        })
+        .with_context(|| format!("no account is named {name:?}"))?;
+    let c = caller(uid, passwd, group)?;
+    if c.name != name {
+        bail!("{name:?} shares its uid with {:?}: not one account", c.name);
+    }
+    Ok(c)
 }
 
 /// Whether `file` is in `name`'s own folder of the configuration.
@@ -373,6 +397,14 @@ mod tests {
         assert!(matches!(gate(&who(990), "schedule", Some(&mine), None), Gate::Refused(_)), "the agent");
         assert_eq!(gate(&who(1000), "cancel-scheduled", None, None), Gate::Password);
         assert!(matches!(gate(&who(1001), "cancel-scheduled", None, None), Gate::Refused(_)));
+        // Its approver cancels their own without a password (`user`: who approved it, as the ledger says).
+        assert_eq!(gate(&who(1001), "cancel-scheduled", None, Some("sam")), Gate::Open);
+        assert!(matches!(gate(&who(1001), "cancel-scheduled", None, Some("viper")), Gate::Refused(_)));
+        assert!(matches!(gate(&who(990), "cancel-scheduled", None, Some(AGENT)), Gate::Refused(_)), "the agent cancels nothing");
+        assert_eq!(account("sam", PASSWD, GROUP).unwrap(), who(1001));
+        assert!(account("nobody-here", PASSWD, GROUP).is_err());
+        assert!(account("sam", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP).is_ok());
+        assert!(account("viper", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP).is_err(), "a uid shared is not one account");
         for uid in [1000, 1001, 990] {
             assert!(matches!(gate(&who(uid), "run-scheduled", None, None), Gate::Refused(_)), "{uid}");
             assert!(matches!(gate(&who(uid), "resume-scheduled", None, None), Gate::Refused(_)), "{uid}");

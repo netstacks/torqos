@@ -60,8 +60,10 @@ commit at 2026-11-07 22:00:00 scheduled (#57): it lands then unless the configur
   confirmed commit is waiting, it is **refused**, never applied on top of something else; the
   history says so either way.
 - One at a time. `show system commit` shows it above the configurations; `clear system commit`
-  cancels it (an administrator's, with their password).
-- If the machine is off at that time, it is refused when the machine starts: it never lands late.
+  cancels it (yours, or an administrator's with their password).
+- If the machine is off or asleep at that time, or it would land more than 15 minutes late, it is
+  refused: it never lands late. It is refused too if you are no longer an administrator by then
+  (unless it only changes your own settings).
 - It does not go with `commit confirmed`: nobody would be there to confirm it.
 
 ## Roll back
