@@ -129,8 +129,11 @@ fn trust_never_covers_a_tainted_or_sessionless_or_system_proposal() {
     session::taint(&b, &s.id, "read_journal").unwrap();
     let p = propose(&b, &diff(dir.path(), "b.diff", "users/casey/packages.json", "[\"jq\"]"), Actor::Agent, false, Some(&s.id)).unwrap();
     assert!(session::apply_trusted(&b, &p).unwrap().is_none());
-    // System tier, from a clean session.
+    // A clean session, but the proposal marked tainted by its caller: the mark counts.
     let (clean, _) = session::start(&b).unwrap();
+    let p = propose(&b, &diff(dir.path(), "t.diff", "users/casey/packages.json", "[\"bat\"]"), Actor::Agent, true, Some(&clean.id)).unwrap();
+    assert!(p.body.tainted && session::apply_trusted(&b, &p).unwrap().is_none());
+    // System tier, from a clean session.
     let ssh = diff(dir.path(), "ssh.diff", "nixos/services.json", "{\"openssh\": {\"enable\": true}}");
     let p = propose(&b, &ssh, Actor::Agent, false, Some(&clean.id)).unwrap();
     assert_eq!(p.body.tier, "system");
