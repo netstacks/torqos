@@ -38,6 +38,8 @@ pub struct CommitOptions {
     pub check: bool,
     pub confirm: Option<u32>,
     pub comment: Option<String>,
+    /// `at <time>`: applied then, approved now (as typed: resolved when committing).
+    pub at: Option<String>,
     /// `and-quit`: leave configuration mode once committed.
     pub and_quit: bool,
 }
@@ -51,6 +53,8 @@ pub enum Op {
     /// `show configuration [path] [| display set|detail]`.
     ShowActive { path: Vec<String>, display: Option<Display> },
     ShowCommits { display: Option<Display> },
+    /// `clear system commit`: cancel the commit scheduled (`commit at`).
+    ClearCommit,
     ShowRollback { n: usize, compare: Option<usize>, display: Option<Display> },
     ShowAlarms { display: Option<Display> },
     /// The proposals waiting for a person (the agent's, ADR-041).
@@ -213,6 +217,9 @@ pub fn render(op: &Op) -> String {
         if let Some(m) = o.confirm {
             s.push_str(&format!(" confirmed {m}"));
         }
+        if let Some(t) = &o.at {
+            s.push_str(&format!(" at {}", quote(t)));
+        }
         if let Some(c) = &o.comment {
             s.push_str(&format!(" comment {}", quote(c)));
         }
@@ -225,6 +232,7 @@ pub fn render(op: &Op) -> String {
         Op::Configure => "configure".into(),
         Op::ShowActive { path, display } => format!("{}{}", sep("show configuration", path), display_text(display)),
         Op::ShowCommits { display } => format!("show system commit{}", display_text(display)),
+        Op::ClearCommit => "clear system commit".into(),
         Op::ShowRollback { n, compare: None, display } => format!("show system rollback {n}{}", display_text(display)),
         Op::ShowRollback { n, compare: Some(m), display } => format!("show system rollback {n} compare {m}{}", display_text(display)),
         Op::ShowAlarms { display } => format!("show system alarms{}", display_text(display)),
@@ -387,9 +395,12 @@ mod tests {
             (Mode::Configuration, Op::Top { then: Some(Box::new(Op::Run(Box::new(Op::ShowServices)))) }),
             (Mode::Configuration, Op::Commit(CommitOptions::default())),
             (Mode::Configuration, Op::Commit(CommitOptions { check: true, ..Default::default() })),
-            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()), and_quit: false })),
+            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: Some(5), comment: Some("ssh; keys | only \"x\"".into()), at: None, and_quit: false })),
             (Mode::Configuration, Op::Commit(CommitOptions { and_quit: true, ..Default::default() })),
-            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: None, comment: Some("why".into()), and_quit: true })),
+            (Mode::Configuration, Op::Commit(CommitOptions { at: Some("10:00".into()), ..Default::default() })),
+            (Mode::Configuration, Op::Commit(CommitOptions { at: Some("2026-11-08 10:00".into()), comment: Some("night".into()), and_quit: true, ..Default::default() })),
+            (Mode::Operational, Op::ClearCommit),
+            (Mode::Configuration, Op::Commit(CommitOptions { check: false, confirm: None, comment: Some("why".into()), at: None, and_quit: true })),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowAlarms { display: None }))),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowActive { path: v("system"), display: None }))),
             (Mode::Configuration, Op::Run(Box::new(Op::ShowRollback { n: 1, compare: Some(0), display: diff }))),

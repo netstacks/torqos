@@ -11,6 +11,7 @@
 #![forbid(dead_code)]
 
 pub mod agent;
+pub mod at;
 pub mod config;
 pub mod remote;
 pub mod snapshot;
@@ -2440,7 +2441,12 @@ impl Broker {
             bail!("{approved_by:?} is not a person's name");
         }
         let lock = Lock::acquire(&self.state_dir)?;
-        self.reconcile_locked(&lock, approved_by)?;
+        self.apply_locked(&lock, proposal_seq, approved_by, confirm_tainted, confirm, None)
+    }
+
+    /// Apply under a lock already held; `scheduled`: the `commit at` schedule this is the run of (at.rs).
+    fn apply_locked(&self, lock: &Lock, proposal_seq: u64, approved_by: &str, confirm_tainted: bool, confirm: Option<u32>, scheduled: Option<u64>) -> Result<Entry> {
+        self.reconcile_locked(lock, approved_by)?;
         self.refuse_unledgered_head()?;
         // An outside `nixos-rebuild` switching now would interleave with this one, and the system
         // recorded after it might be that one's (as repair and reconcile check; audit of 2026-10-31).
@@ -2604,7 +2610,7 @@ impl Broker {
                     tier: tier.to_string(),
                     tainted: p.body.tainted,
                     reason: Self::failure_reason(if anchor.is_some() { "Commit confirmed" } else { "Rebuild" }, &before, restored),
-                    data: self.with_system(with_snapshot(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored }), &snapshot)),
+                    data: self.with_system(at::note(with_snapshot(json!({ "proposal": proposal_seq, "error": e.to_string(), "restored": restored }), &snapshot), scheduled)),
                 })?;
                 self.clear_pending()?;
                 self.drop_build_link();
@@ -2613,7 +2619,7 @@ impl Broker {
             }
         };
 
-        let mut data = with_snapshot(json!({ "proposal": proposal_seq, "commit": commit, "files": files }), &snapshot);
+        let mut data = at::note(with_snapshot(json!({ "proposal": proposal_seq, "commit": commit, "files": files }), &snapshot), scheduled);
         if let Some(c) = confirm_record {
             data["confirm"] = c;
         }

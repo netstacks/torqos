@@ -387,6 +387,65 @@ impl Machine for Real<'_> {
         }
     }
 
+    fn commit_time(&self, text: &str) -> Result<(String, String)> {
+        let clock = history::Clock::system();
+        let t = crate::at::when(text, clock.now, &crate::at::system_today()?, &crate::at::system_local)?;
+        let utc = crate::at::rfc3339(t);
+        let local = history::local_stamp(&utc, &history::Clock { now: clock.now, offset: crate::at::system_local_offset(t).unwrap_or(clock.offset) });
+        Ok((utc, local))
+    }
+
+    fn commit_at(&self, diff: &str, base: &str, tier: &str, reason: &str, at: &str) -> Result<u64> {
+        let scratch = scratch_dir()?;
+        let file = scratch.path().join("change.diff");
+        fs::write(&file, diff)?;
+        let log = run::start_log()?;
+        let file = file.to_string_lossy();
+        let args = propose_args(&file, base, reason);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let proposed = done(run::broker_json(broker(self.cli, &args)?, &log)?, "commit at")?;
+        let seq = proposed["seq"].as_u64().context("the broker did not say which proposal it made")?;
+        // What was shown (and, for the system, asked) must be what the broker schedules.
+        if proposed["tier"].as_str() != Some(tier) {
+            bail!(
+                "not scheduled: the broker treats this as a {} change, not a {tier} one (recorded as proposal {seq}, not applied)",
+                history::one_line(proposed["tier"].as_str().unwrap_or("?"), 20)
+            );
+        }
+        let (seq_s, at_arg, who) = (seq.to_string(), format!("--at={at}"), me()?);
+        let v = done(run::broker_json(broker(self.cli, &["schedule", &seq_s, &at_arg, "--approved-by", &who])?, &log)?, "commit at")?;
+        v["seq"].as_u64().context("the broker did not say what it recorded")
+    }
+
+    fn scheduled(&self) -> Result<Vec<crate::session::Scheduled>> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["scheduled"])?, &log)?, "the commits scheduled")?;
+        let clock = history::Clock::system();
+        Ok(v["scheduled"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| {
+                let at = s["at"].as_str()?;
+                let offset = history::parse_ts(at).and_then(crate::at::system_local_offset).unwrap_or(clock.offset);
+                Some(crate::session::Scheduled {
+                    seq: s["seq"].as_u64()?,
+                    proposal: s["proposal"].as_u64()?,
+                    when: history::local_stamp(at, &history::Clock { now: clock.now, offset }),
+                    by: s["approved_by"].as_str().map(|b| history::one_line(b, 40)),
+                    reason: history::one_line(s["reason"].as_str().unwrap_or_default(), 200),
+                })
+            })
+            .collect())
+    }
+
+    fn cancel_scheduled(&self, seq: u64, me: &str) -> Result<u64> {
+        let log = run::start_log()?;
+        let seq_s = seq.to_string();
+        let v = done(run::broker_json(broker(self.cli, &["cancel-scheduled", &seq_s, "--approved-by", me])?, &log)?, "clear system commit")?;
+        v["seq"].as_u64().context("the broker did not say what it recorded")
+    }
+
     fn pending_confirm(&self) -> Result<Option<Waiting>> {
         let log = run::start_log()?;
         let v = match run::broker_status(broker(self.cli, &["status"])?, &log)? {

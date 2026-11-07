@@ -228,6 +228,7 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         "adopted" => ("✓", "This machine adopted the configuration".to_string()),
         "refused" => ("✗", format!("Refused: {}", clean(&e.reason))),
         "apply_refused" => ("✗", format!("Refused: {}", clean(&e.reason))),
+        "apply_scheduled" | "apply_cancelled" => ("·", clean(&e.reason)),
         "remote_cleared" => ("✓", clean(&e.reason)),
         "data_restored" => ("↺", clean(&e.reason)),
         "snapshot_taken" | "snapshot_deleted" => ("✓", clean(&e.reason)),

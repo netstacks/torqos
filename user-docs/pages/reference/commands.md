@@ -10,7 +10,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `show configuration` | the active configuration (<code>&#124; display set</code> prints it as `set` lines) |
 | `show system alarms` | whether the machine is exactly as its history says, and any pending confirmed commit |
 | `show system ledger [<count>]` | every recorded change, newest first, with its number (`#85`) |
-| `show system commit` | the configurations, numbered for `rollback` |
+| `show system commit` | the configurations, numbered for `rollback`; a commit scheduled with `commit at` first |
 | `show system rollback <n> [compare <m>]` | configuration `<n>`, or what going from `<n>` to `<m>` changes |
 | `show version` | TorqOS, NixOS, the kernel and `torqcli` versions |
 | `show system uptime` | uptime, load and the last change |
@@ -24,6 +24,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `request system software rollback <n>` | load configuration `<n>`'s software into the candidate (a downgrade) |
 | `request system revert <change>` | undo one recorded change (`#85` or `85`) |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
+| `clear system commit` | cancel the commit scheduled with `commit at` (asks first; an administrator's, with their password) |
 | <code>help [&lt;command&gt; &#124; &lt;words&gt;]</code> | the commands, one command, or a search of commands and settings |
 
 ## Configuration mode
@@ -38,6 +39,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `commit` | apply the candidate (asks first) |
 | `commit check` | build without switching |
 | `commit confirmed [<minutes>]` | apply, and roll back by itself unless confirmed (1–1440, default 10) |
+| `commit at <time>` | approve now, apply then: `HH:MM` (today, or tomorrow if it has passed), `"YYYY-MM-DD HH:MM"`, or RFC 3339; within 30 days, one at a time |
 | `commit comment "<text>"` | commit with a note |
 | `commit and-quit` | commit, then leave configuration mode |
 | `rollback <n> [<place>]` | load configuration `<n>` (or one part of it) into the candidate |

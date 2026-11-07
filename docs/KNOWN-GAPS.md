@@ -626,3 +626,18 @@ Its §5 lists claims without a test.
    - **What root leaves outside the configuration** survives a rebuild; only a reinstall clears it.
    - **unix_chkpwd**, setuid, checks a person's own password with no count: a program running as them can
      guess it there, slowly. The audit did not raise it; found while fixing M3.
+
+6zm. **`commit at` (broker/src/at.rs, 2026-11-07).** Open:
+   - **`tests/commit-at.nix` is written and registered, not yet run** (the branch's worker may not build
+     VM tests); the broker's unit tests stub the timer.
+   - **Cancelling is an administrator's**, even of a change to a person's own folder that they scheduled
+     themselves without a password: they cannot cancel it, only make it stale (any commit of theirs
+     first) or ask an administrator.
+   - **A scheduled proposal is still listed** by `show system proposals`, and `request system apply` of
+     it before its time applies it; the schedule is then refused at its time (already applied).
+   - **Local times are read by `date`** when the commit is made (`HH:MM`, `"YYYY-MM-DD HH:MM"`): the
+     broker holds UTC from then on, so a later change of the machine's time zone does not move it.
+   - **A timer armed and never recorded** (the broker killed between the two) waits for its time, finds
+     no schedule by its id and does nothing; it is not removed before then.
+   - **Adopted with one waiting:** a machine adopting a repository whose ledger holds a schedule arms it
+     at its first boot; adopt's own commit moves HEAD, so it is refused at its time, not applied.

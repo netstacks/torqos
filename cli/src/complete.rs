@@ -469,13 +469,13 @@ mod tests {
     #[test]
     fn commands_of_each_mode() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["configure", "exit", "file", "help", "quit", "request", "show"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["clear", "configure", "exit", "file", "help", "quit", "request", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "interfaces", "packages", "services", "system", "users", "version"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "commit", "ledger", "proposals", "remote", "rollback", "snapshots", "storage", "uptime"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["apply", "ledger", "password", "pull", "remote", "repair", "revert", "snapshot", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show"]);
-        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["file", "help", "request", "show"], "not configure or exit: already here");
+        assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["clear", "file", "help", "request", "show"], "not configure or exit: already here");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
     }
 
@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(c(o, "show system commit"), ["<[Enter]>", "|"]);
         assert_eq!(c(o, "show services"), ["<[Enter]>", "|"]);
         assert!(!enter(o, "show"), "show alone is not a command");
-        assert_eq!(c(k, "commit"), ["<[Enter]>", "and-quit", "check", "comment", "confirmed"]);
+        assert_eq!(c(k, "commit"), ["<[Enter]>", "and-quit", "at", "check", "comment", "confirmed"]);
         assert_eq!(c(k, "rollback"), ["<[Enter]>", "<number>"]);
         assert!(enter(k, "show") && c(k, "show").last().is_some_and(|x| x == "|"));
         // Pipes after pipes: each whole show takes another; a filter's own options are its own.
@@ -667,6 +667,7 @@ mod tests {
         let sample = |p: &str| match p {
             "<number>" | "<count>" | "<change>" | "<minutes>" | "<n>" => "1".to_string(),
             "<user>" => "dev".into(),
+            "<time>" => "10:00".into(),
             "<file>" => "services/x.nix".into(),
             _ => "x".into(),
         };
@@ -727,7 +728,7 @@ mod tests {
         assert_eq!(help(Mode::Configuration, "show").as_deref(), Some("Pipe the output (compare, display, cut, …)"));
         assert!(!words_of(&choices(&s, Mode::Configuration, &w("top"), "")).contains(&"up"));
         let e = format!("{:#}", crate::syntax::parse_line(Mode::Configuration, &w("run run show version")).unwrap_err());
-        assert!(e.starts_with("'run' is not a word here (after `run`)") && e.contains("one of: file, help"), "{e}");
+        assert!(e.starts_with("'run' is not a word here (after `run`)") && e.contains("one of: clear, file, help"), "{e}");
     }
 
     /// `delete` at a setting: a list's values the configuration has; a setting of one value, nothing

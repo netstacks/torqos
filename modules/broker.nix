@@ -152,6 +152,26 @@ in
       ];
       description = "Schedule the rollback of an unconfirmed commit (a transient timer).";
     };
+    # `commit at` (broker/src/at.rs). Fixed settings too; overridden only by tests.
+    commitAtCommand = lib.mkOption {
+      type = lib.types.str;
+      # A wall-clock timer of its own per schedule, retried a bounded number of times while the broker is busy.
+      default = lib.concatStringsSep " " [
+        "systemd-run --quiet --collect --unit=torq-commit-at-{id} --on-calendar={at}"
+        "--timer-property=AccuracySec=1s --property=Restart=on-failure --property=RestartSec=15"
+        "--property=StartLimitIntervalSec=1200 --property=StartLimitBurst=60"
+        "{broker} run-scheduled {id}"
+      ];
+      description = ''
+        Arm the timer of a `commit at`: run `{broker} run-scheduled {id}` at `{at}` (UTC). What is
+        scheduled is the ledger's word: a run finds its schedule there, or does nothing.
+      '';
+    };
+    commitAtCancelCommand = lib.mkOption {
+      type = lib.types.str;
+      default = "systemctl stop torq-commit-at-{id}.timer";
+      description = "Stop a cancelled `commit at`'s timer (the cancel itself is in the ledger, which its run reads).";
+    };
     guardEtcNixos = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -274,6 +294,8 @@ in
         activate = cfg.activateCommand;
         boot = cfg.bootCommand;
         schedule = cfg.scheduleCommand;
+        commitAt = cfg.commitAtCommand;
+        commitAtCancel = cfg.commitAtCancelCommand;
         snapshot = lib.optionalString config.torq.snapshots.enable "${snapshot}/bin/torq-snapshot {action} {label}";
         currentSystem = "/run/current-system";
         systemProfile = "/nix/var/nix/profiles/system";
@@ -439,6 +461,25 @@ in
       account  required       ${pkgs.pam}/lib/security/pam_faillock.so dir=/run/torq/faillock
       account  required       ${pkgs.pam}/lib/security/pam_unix.so
     '';
+
+    # A `commit at` waiting at boot lost its timer (transient): armed again if its time is still to come,
+    # refused on the record if it passed while the machine was down — never applied late. Only for
+    # schedules from an earlier boot (the boot ID they were made in), so a switch that starts this does nothing.
+    systemd.services.torq-commit-at-boot = {
+      description = "Arm again the TorqOS commits scheduled before a restart";
+      after = [ "torq-broker-init.service" "torq-confirm-boot.service" ];
+      wantedBy = [ "multi-user.target" ];
+      restartIfChanged = false;
+      startLimitIntervalSec = 600;
+      startLimitBurst = 30;
+      serviceConfig = {
+        Type = "exec";
+        RemainAfterExit = true;
+        ExecStart = "${lib.getExe cfg.package} resume-scheduled";
+        Restart = "on-failure"; # busy: try again
+        RestartSec = 5;
+      };
+    };
 
     # A commit confirmed still waiting at boot was not confirmed before the machine restarted: its
     # timer was transient and is gone, and the boot default was never changed, so this boot already

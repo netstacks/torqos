@@ -2875,3 +2875,229 @@ fn a_commit_named_in_the_ledger_is_never_an_option_to_git() {
         assert!(torq_broker::repo::revision(good).is_ok(), "{good}");
     }
 }
+
+// ── commit at ────────────────────────────────────────────────────────────────────────────────────
+
+/// A broker whose commit-at timer is a stub: arming and stopping it are lines in the log.
+struct At {
+    m: Confirmable,
+}
+
+impl At {
+    fn new() -> Self {
+        At { m: Confirmable::new() }
+    }
+    fn s(&self) -> torq_broker::at::Scheduler<'_> {
+        let log = self.m.dir.path().join("log").display().to_string();
+        torq_broker::at::Scheduler { b: &self.m.b, schedule: format!("echo at {{id}} {{at}} {{broker}} >> {log}"), cancel: format!("echo cancel {{id}} >> {log}") }
+    }
+    /// A proposal on the configuration as it is (its base: HEAD).
+    fn propose(&self, name: &str, diff: &str) -> u64 {
+        let d = write_diff(self.m.dir.path(), name, diff);
+        self.m.b.propose_on(Some(&self.m.b.repo.head().unwrap()), &d, name, Actor::User, false).unwrap().body.seq
+    }
+    fn in_seconds(s: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::seconds(s)).to_rfc3339()
+    }
+    fn theme(&self) -> String {
+        fs::read_to_string(self.m.b.repo.root().join("users/casey.nix")).unwrap()
+    }
+}
+
+#[test]
+fn a_commit_at_lands_at_its_time_as_the_one_who_approved_it() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    assert_eq!((e.body.kind.as_str(), e.body.approved_by.as_deref(), e.body.data["proposal"].as_u64()), ("apply_scheduled", Some("casey"), Some(p)));
+    assert_eq!(e.body.data["base"], t.m.b.repo.head().unwrap().as_str());
+    assert_eq!(e.body.data["diff_sha256"].as_str().map(str::len), Some(64), "the diff approved, by its hash");
+    let timer = e.body.data["timer"].as_u64().unwrap();
+    // Its own timer, running this broker by its own path, at a wall-clock time.
+    let log = t.m.log();
+    assert!(log.contains(&format!("at {timer} ")) && log.contains(" UTC /nix/store/old-broker/bin/torq-broker"), "{log}");
+    assert!(t.theme().contains("dark"), "nothing applied yet");
+    let listed = t.s().scheduled().unwrap();
+    assert_eq!((listed.len(), listed[0].seq, listed[0].proposal), (1, e.body.seq, p));
+
+    let a = t.s().run(timer).unwrap().expect("applied");
+    assert_eq!((a.body.kind.as_str(), a.body.approved_by.as_deref()), ("applied", Some("casey")));
+    assert_eq!((a.body.data["proposal"].as_u64(), a.body.data["scheduled"].as_u64()), (Some(p), Some(e.body.seq)));
+    assert!(t.theme().contains("light"));
+    assert!(t.s().scheduled().unwrap().is_empty(), "settled");
+    // The timer's retry, or a second run, finds nothing to do.
+    assert!(t.s().run(timer).unwrap().is_none());
+    // An id no schedule names does nothing.
+    assert!(t.s().run(12345).unwrap().is_none());
+}
+
+#[test]
+fn a_commit_at_is_not_run_before_its_time() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(3600)).unwrap();
+    let err = format!("{:#}", t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap_err());
+    assert!(err.contains("not yet"), "{err}");
+    assert_eq!(kinds(&t.m.b).last().map(String::as_str), Some("apply_scheduled"), "nothing ledgered");
+    assert!(t.theme().contains("dark"));
+}
+
+#[test]
+fn a_cancelled_commit_at_never_lands() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    let timer = e.body.data["timer"].as_u64().unwrap();
+    let c = t.s().cancel(e.body.seq, "viper").unwrap();
+    assert_eq!((c.body.kind.as_str(), c.body.approved_by.as_deref(), c.body.data["scheduled"].as_u64()), ("apply_cancelled", Some("viper"), Some(e.body.seq)));
+    assert!(t.m.log().contains(&format!("cancel {timer}")), "its timer stopped: {}", t.m.log());
+    assert!(t.s().scheduled().unwrap().is_empty());
+    // A timer that could not be stopped still applies nothing: the ledger says it is cancelled.
+    assert!(t.s().run(timer).unwrap().is_none());
+    assert!(t.theme().contains("dark"));
+    assert!(format!("{:#}", t.s().cancel(e.body.seq, "viper").unwrap_err()).contains("not a commit scheduled"));
+    // A timer that cannot be stopped does not undo the cancel.
+    let p2 = t.propose("theme2", THEME);
+    let e2 = t.s().schedule(p2, "casey", &At::in_seconds(30)).unwrap();
+    let stuck = torq_broker::at::Scheduler { b: &t.m.b, schedule: String::new(), cancel: "false".into() };
+    stuck.cancel(e2.body.seq, "viper").unwrap();
+    assert!(t.s().run(e2.body.data["timer"].as_u64().unwrap()).unwrap().is_none());
+    assert!(t.theme().contains("dark"));
+}
+
+#[test]
+fn a_commit_at_gone_stale_is_refused_on_the_record() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    // The configuration moves on meanwhile (another file: the diff would still apply).
+    let other = t.propose("night", NIGHT_LIGHT);
+    t.m.b.apply(other, "viper", false).unwrap();
+    let r = t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().expect("refused");
+    assert_eq!((r.body.kind.as_str(), r.body.data["scheduled"].as_u64()), ("apply_refused", Some(e.body.seq)));
+    assert!(r.body.reason.contains("changed since it was scheduled"), "{}", r.body.reason);
+    assert!(t.theme().contains("dark"), "never applied on top of something else");
+    assert!(t.s().scheduled().unwrap().is_empty() && t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().is_none());
+}
+
+#[test]
+fn a_commit_confirmed_waiting_holds_a_commit_at_back() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    let other = t.m.b.propose(&write_diff(t.m.dir.path(), "night", NIGHT_LIGHT), "night", Actor::User, false).unwrap().body.seq;
+    t.m.b.apply_confirmed(other, "viper", false, 10).unwrap();
+    let r = t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().expect("refused");
+    assert_eq!(r.body.kind, "apply_refused");
+    assert!(r.body.reason.contains("commit confirmed"), "{}", r.body.reason);
+    assert!(t.theme().contains("dark"));
+}
+
+#[test]
+fn a_commit_at_applies_only_the_diff_approved() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    // The diff kept beside the ledger, changed after the approval.
+    let pe = t.m.b.ledger.get(p).unwrap();
+    let kept = t.m.dir.path().join("state/proposals").join(pe.body.data["diff_sha256"].as_str().unwrap());
+    fs::write(&kept, THEME.replace("light", "evil")).unwrap();
+    let r = t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().expect("refused");
+    assert_eq!(r.body.kind, "apply_refused");
+    assert!(r.body.reason.contains("changed"), "{}", r.body.reason);
+    assert!(t.theme().contains("dark"));
+}
+
+#[test]
+fn one_commit_at_at_a_time_and_only_within_the_bounds() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    for (at, why) in [
+        (At::in_seconds(-60), "not in the future"),
+        (At::in_seconds(31 * 86_400), "more than 30 days"),
+        ("tomorrow".to_string(), "not an RFC 3339 time"),
+    ] {
+        let err = format!("{:#}", t.s().schedule(p, "casey", &at).unwrap_err());
+        assert!(err.contains(why), "{at}: {err}");
+    }
+    let e = t.s().schedule(p, "casey", &At::in_seconds(30 * 86_400 - 60)).unwrap();
+    let q = t.propose("night", NIGHT_LIGHT);
+    let err = format!("{:#}", t.s().schedule(q, "casey", &At::in_seconds(60)).unwrap_err());
+    assert!(err.contains("already scheduled") && err.contains("one at a time"), "{err}");
+    t.s().cancel(e.body.seq, "casey").unwrap();
+    t.s().schedule(q, "casey", &At::in_seconds(60)).unwrap();
+    assert_eq!(kinds(&t.m.b).iter().filter(|k| *k == "apply_scheduled").count(), 2, "refusals at schedule time are not ledgered");
+}
+
+#[test]
+fn a_commit_at_is_a_fresh_untainted_proposal_with_a_base() {
+    let t = At::new();
+    let d = write_diff(t.m.dir.path(), "theme", THEME);
+    let no_base = t.m.b.propose(&d, "theme", Actor::User, false).unwrap().body.seq;
+    assert!(format!("{:#}", t.s().schedule(no_base, "casey", &At::in_seconds(60)).unwrap_err()).contains("its base"));
+    let tainted = t.m.b.propose_on(Some(&t.m.b.repo.head().unwrap()), &d, "theme", Actor::User, true).unwrap().body.seq;
+    assert!(format!("{:#}", t.s().schedule(tainted, "casey", &At::in_seconds(60)).unwrap_err()).contains("untrusted"));
+    let p = t.propose("theme2", THEME);
+    let applied = t.m.b.apply(p, "casey", false).unwrap().body.seq;
+    assert!(format!("{:#}", t.s().schedule(p, "casey", &At::in_seconds(60)).unwrap_err()).contains("already applied"));
+    let stale = t.propose("night", NIGHT_LIGHT);
+    t.m.b.revert(applied, "casey").unwrap();
+    assert!(format!("{:#}", t.s().schedule(stale, "casey", &At::in_seconds(60)).unwrap_err()).contains("changed since"));
+    assert!(format!("{:#}", t.s().schedule(stale, "not a name!", &At::in_seconds(60)).unwrap_err()).contains("not a person's name"));
+    let none = torq_broker::at::Scheduler { b: &t.m.b, schedule: String::new(), cancel: String::new() };
+    let fresh = t.propose("night2", NIGHT_LIGHT);
+    assert!(format!("{:#}", none.schedule(fresh, "casey", &At::in_seconds(60)).unwrap_err()).contains("schedules no commits"));
+    // A timer that cannot be armed: nothing recorded, nothing scheduled.
+    let broken = torq_broker::at::Scheduler { b: &t.m.b, schedule: "false".into(), cancel: String::new() };
+    assert!(broken.schedule(fresh, "casey", &At::in_seconds(60)).is_err());
+    assert!(t.s().scheduled().unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_commit_at_is_ledgered_once_as_scheduled() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    let failing = Broker::new(t.m.b.repo.root(), t.m.dir.path().join("state"), "false");
+    let s = torq_broker::at::Scheduler { b: &failing, schedule: String::new(), cancel: String::new() };
+    let timer = e.body.data["timer"].as_u64().unwrap();
+    assert!(s.run(timer).is_err());
+    let f = failing.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!((f.body.kind.as_str(), f.body.data["scheduled"].as_u64(), f.body.approved_by.as_deref()), ("apply_failed", Some(e.body.seq), Some("casey")));
+    assert!(s.run(timer).unwrap().is_none(), "settled: the timer's retry does nothing");
+    assert!(t.theme().contains("dark"));
+}
+
+#[test]
+fn after_a_restart_a_commit_at_is_armed_again_or_refused_if_its_time_passed() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(2)).unwrap();
+    let timer = e.body.data["timer"].as_u64().unwrap();
+    // The same boot: its timer is there, nothing to do.
+    assert!(t.s().resume().unwrap().is_empty());
+    assert_eq!(t.m.log().matches(&format!("at {timer} ")).count(), 1);
+    // A restart while it was still ahead: armed again, under the same id.
+    fs::write(t.m.dir.path().join("boot_id"), "boot-2\n").unwrap();
+    assert!(t.s().resume().unwrap().is_empty());
+    assert_eq!(t.m.log().matches(&format!("at {timer} ")).count(), 2, "{}", t.m.log());
+    // A restart after its time: refused, never applied late.
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    fs::write(t.m.dir.path().join("boot_id"), "boot-3\n").unwrap();
+    let r = t.s().resume().unwrap();
+    assert_eq!((r.len(), r[0].body.kind.as_str(), r[0].body.data["scheduled"].as_u64()), (1, "apply_refused", Some(e.body.seq)));
+    assert!(r[0].body.reason.contains("not running at its time"), "{}", r[0].body.reason);
+    assert!(t.s().run(timer).unwrap().is_none() && t.theme().contains("dark"));
+}
+
+#[test]
+fn the_scheduled_commits_are_listed_by_the_broker_binary() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let e = t.s().schedule(p, "casey", &At::in_seconds(600)).unwrap();
+    let out = t.m.cli(BUILD, ACTIVATE, &["scheduled"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!((v["scheduled"][0]["seq"].as_u64(), v["scheduled"][0]["proposal"].as_u64(), v["scheduled"][0]["approved_by"].as_str()), (Some(e.body.seq), Some(p), Some("casey")));
+    assert_eq!(v["scheduled"][0]["at"], e.body.data["at"]);
+}

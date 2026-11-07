@@ -197,7 +197,7 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     let seq = sub.try_get_one::<u64>("seq").ok().flatten().copied();
     let user = sub.try_get_one::<String>("user").ok().flatten().cloned();
     let change = match (name, seq) {
-        ("apply" | "revert", Some(seq)) => change(&settings.state_dir, seq, if name == "apply" { "proposal" } else { "applied" }),
+        ("apply" | "schedule" | "revert", Some(seq)) => change(&settings.state_dir, seq, if name == "revert" { "applied" } else { "proposal" }),
         _ => None,
     };
     // A commit confirmed holds everyone else's changes back while it waits: its own case.
