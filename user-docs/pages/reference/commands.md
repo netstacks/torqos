@@ -20,7 +20,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `show services` | the services the configuration turns on, and how SSH is protected |
 | `show users` | people with an account, who is logged in, and their groups |
 | `request system password [<user>]` | change a password (kept outside the configuration) |
-| `request system update [all]` | load the newest signed TorqOS release (`all`: and nixpkgs) into the candidate |
+| `request system update [all]` | load the newest signed TorqOS release (`all`: and nixpkgs) into the candidate; <code>show &#124; compare</code> names its version beside the running one, and says when it is older (a downgrade) |
 | `request system software rollback <n>` | load configuration `<n>`'s software into the candidate (a downgrade) |
 | `request system revert <change>` | undo one recorded change (`#85` or `85`) |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |

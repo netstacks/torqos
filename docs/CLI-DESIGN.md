@@ -445,7 +445,16 @@ As built (3e, 4a, 4e): all of the above. The candidate holds the software too (4
 update [all]` runs `nix flake update` on the commit the candidate is based on and loads the new
 `flake.lock`; `request system software rollback <n>` loads commit <n>'s; `show | compare` shows it as
 `[edit system software]` (each input's date, a downgrade said so), `| display diff` as the raw
-`flake.lock` diff, and `commit` (system tier: it asks) installs it. `rollback <n>` loads a configuration and keeps the
+`flake.lock` diff, and `commit` (system tier: it asks) installs it. TorqOS itself is named by its
+version where one is known (audit A3): `-   torq 0.2.1 (2026-11-05);` `+   torq 0.2.2 (2026-11-07);`.
+The version before is the running one (`/etc/os-release`, only where it is TorqOS's, and only
+against the configuration in effect); the one after is the release's, read from `cli/Cargo.toml` of
+the very commit fetched to check its signature (no second fetch), kept with the candidate beside
+that commit, and named when the release is checked (`TorqOS release 0123456789ab (TorqOS 0.2.2):
+signed by …`). With both, the versions decide (SemVer: a pre-release is older than its release),
+not the dates: an older one says `## TorqOS 0.1.9 is older than 0.2.1, which runs now: a
+downgrade`, the same version goes by date. A source that is not the releases, `request system
+software rollback`, or a release without a version: dates, as before. `rollback <n>` loads a configuration and keeps the
 software loaded into the candidate (and says so); `rollback 0` starts over without it. Loading onto a
 candidate whose base is no longer the active configuration warns that `commit` will be refused.
 

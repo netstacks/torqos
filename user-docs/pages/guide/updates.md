@@ -16,7 +16,18 @@ alice@torq# commit
 
 `request system update` fetches the newest release, **checks its signature** against the key your
 machine trusts, and loads it into your candidate. An unsigned or wrongly signed release is refused
-and nothing is loaded. You see the change in `show | compare` before committing it.
+and nothing is loaded. You see the change in `show | compare` before committing it, with TorqOS
+named by version — the one running, then the release's:
+
+```text
+[edit system software]
+-   torq 0.2.1 (2026-11-05);
++   torq 0.2.2 (2026-11-07);
+```
+
+If the release is an older version than the one running, it says so plainly
+(`## TorqOS 0.1.9 is older than 0.2.1, which runs now: a downgrade`), whatever its date. Where no
+version can be read (a source other than the releases), each side is shown by its date.
 
 `request system update all` also updates the NixOS packages (nixpkgs) along with TorqOS.
 

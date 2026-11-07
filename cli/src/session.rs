@@ -97,8 +97,11 @@ pub trait Machine {
     /// reference, `git+https://…?ref=stable`.
     fn releases(&self) -> Result<String>;
     /// Whether commit `rev` of the releases (`repo`) is signed by the release key (release.rs): what
-    /// git says of its signature, or why it is refused.
-    fn check_release(&self, repo: &str, rev: &str) -> Result<String>;
+    /// git says of its signature and the version of TorqOS it holds, or why it is refused.
+    fn check_release(&self, repo: &str, rev: &str) -> Result<crate::release::Signed>;
+    /// The version of TorqOS the machine runs (/etc/os-release's, where it is TorqOS's); None: not
+    /// known.
+    fn running_version(&self) -> Option<String>;
 }
 
 
@@ -990,18 +993,30 @@ impl<'a> Session<'a> {
         let lock = self.machine.lock_with(&base, &flake, all)?;
         let signed = self.release_signed(&lock)?;
         let base_lock = self.repo.file_at(&base, "flake.lock")?;
-        let shown = software_compare(base_lock.as_deref(), &Some(lock.clone()));
+        let shown = software_compare(base_lock.as_deref(), &Some(lock.clone()), &self.versions(&base)?);
         self.candidate()?.lock = Some(lock);
         Ok(format!("{shown}{signed}{}", self.said("The new source is locked into the candidate: `commit` installs it.")))
     }
 
     /// If `lock` takes TorqOS from the releases, the release key's word on that commit (ADR-028): one
-    /// it did not sign is refused, before anything is loaded.
-    fn release_signed(&self, lock: &str) -> Result<String> {
+    /// it did not sign is refused, before anything is loaded. The version it holds is kept with the
+    /// candidate, for `show | compare` and `commit` to show (audit A3).
+    fn release_signed(&mut self, lock: &str) -> Result<String> {
         let repo = crate::software::releases_repo(&self.machine.releases()?);
         let Some(rev) = crate::software::release_commit(lock, &repo) else { return Ok(String::new()) };
-        self.machine.check_release(&repo, &rev)?;
-        Ok(self.said(&format!("TorqOS release {}: signed by the TorqOS release key.", short(&rev))))
+        let signed = self.machine.check_release(&repo, &rev)?;
+        let version = signed.version.filter(|v| crate::release::is_version(v));
+        let named = version.as_ref().map(|v| format!(" (TorqOS {v})")).unwrap_or_default();
+        self.candidate()?.release = version.map(|v| candidate::Release { rev: rev.clone(), version: v });
+        Ok(self.said(&format!("TorqOS release {}{named}: signed by the TorqOS release key.", short(&rev))))
+    }
+
+    /// The versions a comparison of software against commit `base` can name: the running one only
+    /// if `base` is the configuration in effect (else the old lock is not what runs), and the release
+    /// the candidate's software was checked as.
+    fn versions(&mut self, base: &str) -> Result<Versions> {
+        let running = if self.repo.head()? == base { self.machine.running_version() } else { None };
+        Ok(Versions { running, release: self.candidate()?.release.clone() })
     }
 
     /// `request system pull` (ADR-036): the configuration waiting on the remote — its `incoming`
@@ -1087,7 +1102,7 @@ impl<'a> Session<'a> {
         let head = self.repo.head()?;
         let base = self.candidate()?.base.clone();
         let base_lock = self.repo.file_at(&base, "flake.lock")?;
-        let shown = software_compare(base_lock.as_deref(), &Some(lock.clone()));
+        let shown = software_compare(base_lock.as_deref(), &Some(lock.clone()), &self.versions(&base)?);
         let c = self.candidate()?;
         let had = c.lock.is_some();
         c.lock = (!shown.is_empty()).then_some(lock);
@@ -1236,7 +1251,8 @@ impl<'a> Session<'a> {
         let files = self.repo.tree_files(&self.schema, &base)?;
         let lock = self.repo.file_at(&base, "flake.lock")?;
         let base_nix = nix.keys().map(|p| Ok((p.clone(), self.repo.file_at(&base, p)?))).collect::<Result<_>>()?;
-        Ok(Against { base, files, lock, data, new_lock, nix, base_nix })
+        let versions = self.versions(&base)?;
+        Ok(Against { base, files, lock, data, new_lock, nix, base_nix, versions })
     }
 
     fn commit(&mut self, o: CommitOptions) -> Result<String> {
@@ -1689,6 +1705,8 @@ struct Against {
     /// Config files as edited in the candidate, and as they are at the base (None: not there).
     nix: std::collections::BTreeMap<String, Option<String>>,
     base_nix: std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    /// The versions its software can be named by.
+    versions: Versions,
 }
 
 impl Against {
@@ -1741,7 +1759,7 @@ impl Against {
             let scratch = tempfile::tempdir()?;
             out.push_str(&format!("[edit config files]\n{}", candidate::unified_diff(scratch.path(), &edited)?));
         }
-        out.push_str(&software_compare(self.lock.as_deref(), &self.new_lock));
+        out.push_str(&software_compare(self.lock.as_deref(), &self.new_lock, &self.versions));
         Ok(out)
     }
 
@@ -1758,14 +1776,32 @@ impl Against {
     /// value is a `-` and a `+` of one setting), each software input moved, each config file
     /// changed once — however many lines its diff has.
     fn count(&self, w: &crate::whole::Whole) -> Result<usize> {
-        let settings = w.compare(&self.base_data(w.schema)?, &self.data) + &software_compare(self.lock.as_deref(), &self.new_lock);
+        let settings = w.compare(&self.base_data(w.schema)?, &self.data) + &software_compare(self.lock.as_deref(), &self.new_lock, &self.versions);
         Ok(settings_changed(&settings) + self.edited_files().len())
     }
 }
 
+/// The versions of TorqOS a comparison of software can name (audit A3): the one running, and the
+/// release the candidate's software was checked as (release.rs: read from the commit fetched to
+/// check its signature).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Versions {
+    running: Option<String>,
+    release: Option<candidate::Release>,
+}
+
+/// The node a lock takes TorqOS from (the root's `torq` input), and the commit it is locked at.
+fn torq_node(lock: &str) -> Option<(String, Option<String>)> {
+    let v: serde_json::Value = serde_json::from_str(lock).ok()?;
+    let node = v["nodes"]["root"]["inputs"]["torq"].as_str()?;
+    Some((node.to_string(), v["nodes"][node]["locked"]["rev"].as_str().map(String::from)))
+}
+
 /// The software a candidate changes, as `show | compare` shows it: each input moved, and a
-/// downgrade said so.
-fn software_compare(old: Option<&[u8]>, new: &Option<String>) -> String {
+/// downgrade said so. TorqOS is named by its version where it is known — the running one before,
+/// the checked release's after (`torq 0.2.1 (2026-11-05)`) — and then a downgrade is by version,
+/// not date; without one, by date.
+fn software_compare(old: Option<&[u8]>, new: &Option<String>, versions: &Versions) -> String {
     let Some(new) = new else { return String::new() };
     let old = old.map(|o| String::from_utf8_lossy(o).into_owned()).unwrap_or_default();
     if old == *new {
@@ -1776,20 +1812,39 @@ fn software_compare(old: Option<&[u8]>, new: &Option<String>) -> String {
     if moves.is_empty() {
         out.push_str("    flake.lock changes (`| display diff` shows how)\n");
     }
+    // TorqOS's version before (the running one, if the old lock names TorqOS) and after (the checked
+    // release's, if the new lock is at that commit).
+    let (was_torq, is_torq) = (torq_node(&old), torq_node(new));
+    let before_version = was_torq.as_ref().and(versions.running.clone()).filter(|v| crate::release::is_version(v));
+    let after_version = is_torq.as_ref().zip(versions.release.as_ref()).filter(|((_, rev), r)| rev.as_deref() == Some(r.rev.as_str())).map(|(_, r)| r.version.clone());
     let mut older = false;
+    let mut downgrade = None;
     for m in &moves {
         // Names come from upstream flakes: one line each, cleaned, so none can draw a line of its own.
         let name = crate::history::one_line(&m.name, 40);
         let (before, after) = crate::pkg::move_dates(m);
+        let named = |v: &Option<String>, date: String| match v {
+            Some(v) => format!("{v} ({date})"),
+            None => date,
+        };
+        let torq = |n: &Option<(String, Option<String>)>| n.as_ref().is_some_and(|(node, _)| *node == m.name);
+        let (vb, va) = (before_version.clone().filter(|_| torq(&was_torq)), after_version.clone().filter(|_| torq(&is_torq)));
         if m.was {
-            out.push_str(&format!("-   {name} {before};\n"));
+            out.push_str(&format!("-   {name} {};\n", named(&vb, before)));
         }
         if m.is {
-            out.push_str(&format!("+   {name} {after};\n"));
+            out.push_str(&format!("+   {name} {};\n", named(&va, after)));
         }
-        // Older to the second; an input whose date is unknown on either side says nothing.
-        older |= matches!((m.before, m.after), (Some(b), Some(a)) if a < b);
+        // Two versions that differ decide; the same version (a commit rebuilt) goes by date.
+        let by_version = vb.as_deref().zip(va.as_deref()).and_then(|(b, a)| crate::release::order(a, b).filter(|o| o.is_ne()).map(|o| (o, a, b)));
+        match by_version {
+            Some((std::cmp::Ordering::Less, a, b)) => downgrade = Some(format!("## TorqOS {a} is older than {b}, which runs now: a downgrade\n")),
+            Some(_) => {}
+            // Older to the second; an input whose date is unknown on either side says nothing.
+            None => older |= matches!((m.before, m.after), (Some(b), Some(a)) if a < b),
+        }
     }
+    out.push_str(&downgrade.unwrap_or_default());
     if older {
         out.push_str("## older software than now: a downgrade\n");
     }
@@ -2053,6 +2108,9 @@ mod tests {
         /// The newest TorqOS is this commit of the releases, signed by the release key or not (else:
         /// `NEWER`, from no releases); and the commits whose signature was checked.
         release: Option<(String, bool)>,
+        /// The version the release holds (None: none read), and the one the machine runs.
+        release_version: Option<String>,
+        running: Option<String>,
         release_checks: RefCell<Vec<String>>,
         /// What the configuration warns of, when checked.
         warnings: Vec<String>,
@@ -2205,13 +2263,16 @@ mod tests {
         fn releases(&self) -> Result<String> {
             Ok(RELEASES.into())
         }
-        fn check_release(&self, repo: &str, rev: &str) -> Result<String> {
+        fn check_release(&self, repo: &str, rev: &str) -> Result<crate::release::Signed> {
             assert_eq!(repo, "https://github.com/netstacks/torqos-releases", "the machine's releases");
             self.release_checks.borrow_mut().push(rev.into());
             match &self.release {
-                Some((r, true)) if r == rev => Ok("Good \"git\" signature for torqos-release".into()),
+                Some((r, true)) if r == rev => Ok(crate::release::Signed { said: "Good \"git\" signature for torqos-release".into(), version: self.release_version.clone() }),
                 _ => bail!("release {} is not signed by the TorqOS release key", &rev[..12]),
             }
+        }
+        fn running_version(&self) -> Option<String> {
+            self.running.clone()
         }
     }
     impl Fake {
@@ -2401,6 +2462,62 @@ mod tests {
         assert!(out.contains(&format!("+   torq {};", crate::pkg::ymd(NEWER_ALL))) && out.ends_with("Loaded into the candidate: `commit` (in configuration mode) installs it.\n"), "{out}");
     }
 
+    /// Audit A3: the software is shown as versions — the running one, and the release's, read from the
+    /// commit fetched to check its signature — in `show | compare` and at `commit`; an older version is
+    /// a downgrade, said plainly, whatever the dates say. Without a version, dates, as before.
+    #[test]
+    fn software_is_shown_as_versions() {
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let on_releases = || {
+            let d = repo_with_software();
+            sh(d.path(), &format!("printf '{{\\n  inputs = {{\\n    torq.url = \"{RELEASES}\";\\n  }};\\n}}\\n' > flake.nix && git add -A && git commit -qm flake"));
+            d
+        };
+        let (now, newer) = (crate::pkg::ymd(NOW), crate::pkg::ymd(NEWER));
+        let fake = |release: &str| Fake { answer: true, release: Some((rev.into(), true)), release_version: Some(release.into()), running: Some("0.2.1".into()), ..Default::default() };
+
+        // Newer: both versions, each with its date; no downgrade.
+        let (d, m) = (on_releases(), fake("0.2.2"));
+        let saved = d.path().join("saved.json");
+        let mut s = session(d.path(), Some(saved.clone()), &m);
+        let out = s.exec("request system update").unwrap();
+        let shown = format!("[edit system software]\n-   torq 0.2.1 ({now});\n+   torq 0.2.2 ({newer});\n");
+        assert!(out.starts_with(&shown) && !out.contains("downgrade"), "{out}");
+        assert!(out.ends_with("TorqOS release 0123456789ab (TorqOS 0.2.2): signed by the TorqOS release key.\n"), "{out}");
+        // Kept with the candidate: another session shows it too, without fetching again.
+        let mut again = session(d.path(), Some(saved), &m);
+        again.exec("configure").unwrap();
+        assert_eq!(again.exec("show | compare").unwrap(), shown);
+        assert_eq!(m.release_checks.borrow().len(), 1, "one fetch");
+        again.exec("commit").unwrap();
+        assert!(m.asked.borrow().last().unwrap().starts_with(&shown), "the commit asks with the versions: {:?}", m.asked.borrow());
+
+        // Older by version, though newer by date (a backport released after): a downgrade, said so.
+        let (d, m) = (on_releases(), fake("0.1.9"));
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("request system update").unwrap();
+        assert!(out.starts_with(&format!("[edit system software]\n-   torq 0.2.1 ({now});\n+   torq 0.1.9 ({newer});\n## TorqOS 0.1.9 is older than 0.2.1, which runs now: a downgrade\n")), "{out}");
+        assert!(!out.contains("older software than now"), "the dates do not decide: {out}");
+        s.exec("configure").unwrap();
+        assert!(s.exec("commit").is_ok());
+        assert!(m.asked.borrow().last().unwrap().contains("## TorqOS 0.1.9 is older than 0.2.1, which runs now: a downgrade"), "{:?}", m.asked.borrow());
+
+        // A pre-release of the running version is older than it.
+        let (d, m) = (on_releases(), Fake { running: Some("0.3.0".into()), ..fake("0.3.0-rc1") });
+        let mut s = session(d.path(), None, &m);
+        assert!(s.exec("request system update").unwrap().contains("## TorqOS 0.3.0-rc1 is older than 0.3.0, which runs now: a downgrade\n"));
+
+        // No version read from the release, or none known running: dates, as before.
+        for m in [Fake { release_version: None, ..fake("") }, Fake { running: None, ..fake("0.2.2") }] {
+            let d = on_releases();
+            let mut s = session(d.path(), None, &m);
+            let out = s.exec("request system update").unwrap();
+            let one = |v: &Option<String>, date: &str| v.as_ref().map_or(date.to_string(), |v| format!("{v} ({date})"));
+            assert!(out.starts_with(&format!("[edit system software]\n-   torq {};\n+   torq {};\n", one(&m.running, &now), one(&m.release_version, &newer))), "{out}");
+            assert!(!out.contains("downgrade"), "{out}");
+        }
+    }
+
     /// ADR-028: a machine set up from the image runs the TorqOS inside it; its first update moves it to
     /// the releases. From then on, an update takes only a commit the release key signed.
     #[test]
@@ -2539,11 +2656,11 @@ mod tests {
             format!(r#"{{"nodes":{{"root":{{}},{}}},"version":7}}"#, n.join(","))
         };
         let (a, b) = (lock(&[("torq", node(NOW)), ("extra", node(OLD))]), lock(&[("torq", node(NOW - 10))]));
-        let out = software_compare(Some(a.as_bytes()), &Some(b.clone()));
+        let out = software_compare(Some(a.as_bytes()), &Some(b.clone()), &Versions::default());
         assert!(out.contains("-   extra ") && !out.contains("+   extra"), "a removed input shows: {out}");
         assert!(out.contains("## older software than now: a downgrade"), "ten seconds older, in the same minute, is older: {out}");
         let evil = lock(&[("torq", node(NOW)), ("x;\n+   fine", node(NEWER))]);
-        let out = software_compare(Some(b.as_bytes()), &Some(evil));
+        let out = software_compare(Some(b.as_bytes()), &Some(evil), &Versions::default());
         assert!(!out.lines().any(|l| l.starts_with("+   fine")), "a name draws no line of its own: {out}");
     }
 

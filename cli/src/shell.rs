@@ -714,9 +714,12 @@ impl Machine for Real<'_> {
         let v: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("{file} is not JSON"))?;
         v["url"].as_str().map(String::from).with_context(|| format!("{file} names no releases (url)"))
     }
-    fn check_release(&self, repo: &str, rev: &str) -> Result<String> {
+    fn check_release(&self, repo: &str, rev: &str) -> Result<crate::release::Signed> {
         let _p = run::Progress::start("Checking the release's signature");
         crate::release::check(repo, rev, Path::new(crate::release::SIGNERS))
+    }
+    fn running_version(&self) -> Option<String> {
+        fs::read_to_string("/etc/os-release").ok().and_then(|t| crate::release::os_release_version(&t))
     }
     fn ask(&self, question: &str) -> crate::session::Answer {
         ask_person(question)
