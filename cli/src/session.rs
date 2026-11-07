@@ -93,8 +93,11 @@ pub trait Machine {
     fn fetch_incoming(&self) -> Result<Option<String>>;
     /// `request system apply <n>`: show proposal <n>, ask, apply it (as `me`).
     fn apply_proposal(&self, seq: u64, me: &str) -> Result<String>;
-    /// Propose `diff` against `base` and stop there (the agent's commit, ADR-041): the proposal's number.
-    fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64>;
+    /// `request system agent trust <minutes>`: the agent's untainted proposals in `me`'s own folder
+    /// apply without asking, for that long (ADR-042, 7; it asks their password). `revoke`: end it.
+    fn trust(&self, minutes: Option<u32>) -> Result<String>;
+    /// Propose `diff` against `base` and stop there (the agent's commit, ADR-041): the proposal's number, and the change it became if a person's trust applied it at once (ADR-042, 7).
+    fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<(u64, Option<u64>)>;
     /// The running machine: its versions, uptime, interfaces and disks (facts.rs).
     fn facts(&self) -> Result<crate::facts::Facts>;
     /// `request system revert <change>`: undo that one change (a new change forward), asked as a
@@ -1120,6 +1123,8 @@ impl<'a> Session<'a> {
             syntax::Request::Password { user } => self.machine.set_password(user.as_deref().unwrap_or(&self.me.clone())),
             syntax::Request::Revert { change } => self.machine.revert(change, &self.me),
             syntax::Request::Apply { proposal } => self.machine.apply_proposal(proposal, &self.me),
+            syntax::Request::Trust { minutes } => self.machine.trust(Some(minutes)),
+            syntax::Request::TrustRevoke => self.machine.trust(None),
             syntax::Request::RemoteKey => self.machine.remote_key(),
             syntax::Request::RemoteClear => self.machine.remote_clear(&self.me),
             syntax::Request::LedgerAcknowledge => self.machine.acknowledge(&self.me),
@@ -1559,9 +1564,13 @@ impl<'a> Session<'a> {
             let diff = candidate::unified_diff(scratch.path(), &changes)?;
             let reason = crate::history::one_line(&o.comment.clone().unwrap_or_else(|| summary(&compare)), usize::MAX);
             self.may_write()?;
-            let seq = self.machine.propose(&diff, &base, &reason)?;
+            let (seq, applied) = self.machine.propose(&diff, &base, &reason)?;
             let kept = self.discard_committed();
-            return Ok(warned + &self.said(&format!("proposed as #{seq}: a person applies it (request system apply {seq})")) + &kept);
+            let said = match applied {
+                Some(change) => format!("proposed as #{seq} and applied as change #{change}, under the trust of the person whose folder it is (request system revert {change} undoes it)"),
+                None => format!("proposed as #{seq}: a person applies it (request system apply {seq})"),
+            };
+            return Ok(warned + &self.said(&said) + &kept);
         }
         // Asked: the warnings were shown with the question; not asked, they come with the outcome.
         let warned = if why.is_some() { String::new() } else { warned };
@@ -2526,12 +2535,15 @@ mod tests {
         fn proposals(&self, _fit: Option<usize>) -> Result<String> {
             Ok("(no proposals)\n".into())
         }
+        fn trust(&self, minutes: Option<u32>) -> Result<String> {
+            Ok(format!("trust {minutes:?}\n"))
+        }
         fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
             Ok(format!("applied proposal #{seq} for {me}\n"))
         }
-        fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<u64> {
+        fn propose(&self, diff: &str, base: &str, reason: &str) -> Result<(u64, Option<u64>)> {
             self.commits.borrow_mut().push((diff.into(), base.into(), "proposed".into(), reason.into(), None));
-            Ok(41)
+            Ok((41, None))
         }
         fn revert(&self, seq: u64, me: &str) -> Result<String> {
             Ok(format!("reverted {seq} for {me}\n"))

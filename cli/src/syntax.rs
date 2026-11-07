@@ -148,6 +148,10 @@ pub enum Request {
     Pull,
     /// The newest TorqOS (`all`: every input) into the candidate.
     Update { all: bool },
+    /// Session trust (ADR-042): the agent's untainted proposals in one's own folder apply without asking, for `minutes`.
+    Trust { minutes: u32 },
+    /// End one's trust in the agent.
+    TrustRevoke,
     /// An earlier configuration's software into the candidate.
     SoftwareRollback { n: usize },
 }
@@ -264,6 +268,8 @@ pub fn render(op: &Op) -> String {
             Request::Password { user: Some(u) } => format!("request system password {}", quote(u)),
             Request::Revert { change } => format!("request system revert {change}"),
             Request::Apply { proposal } => format!("request system apply {proposal}"),
+            Request::Trust { minutes } => format!("request system agent trust {minutes}"),
+            Request::TrustRevoke => "request system agent trust revoke".into(),
             Request::RestoreData { change, path } => format!("request system snapshot restore {change} {path}"),
             Request::SnapshotTake => "request system snapshot take".into(),
             Request::BackupKey { name } => format!("request system backup key {}", quote(name)),
@@ -366,6 +372,8 @@ mod tests {
             (Mode::Operational, Op::Request(Request::Password { user: Some("dana".into()) })),
             (Mode::Operational, Op::Request(Request::Revert { change: 12 })),
             (Mode::Operational, Op::Request(Request::Apply { proposal: 12 })),
+            (Mode::Operational, Op::Request(Request::Trust { minutes: 30 })),
+            (Mode::Operational, Op::Request(Request::TrustRevoke)),
             (Mode::Operational, Op::Request(Request::RestoreData { change: 12, path: "/home/alice/a".into() })),
             (Mode::Operational, Op::Request(Request::SnapshotTake)),
             (Mode::Operational, Op::Request(Request::BackupKey { name: "nas".into() })),
