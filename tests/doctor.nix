@@ -122,11 +122,9 @@ pkgs.testers.runNixOSTest {
         assert len(r["refused"]) == 2, r
 
     with subtest("the broker holds the session's taint, where the agent cannot write; nothing was proposed or changed"):
-        new = [json.loads(l) for l in machine.succeed(f"tail -n +{int(before) + 1} {ledger}").splitlines()]
-        assert [e["kind"] for e in new] == ["session_started", "session_tainted"], new
-        sid = new[0]["data"]["session"]
-        assert sid == r["brokerSession"] and new[1]["data"]["session"] == sid and new[1]["data"]["source"] == "read_journal", new
-        assert all(e["actor"] == "agent" and e["data"]["caller"] == "torq-agent" for e in new), new
+        # A session that proposed nothing costs the ledger nothing: its record is the broker's alone.
+        assert machine.succeed(f"wc -l < {ledger}").strip() == before
+        sid = r["brokerSession"]
         held = f"/var/lib/torq/state/sessions/{sid}.json"
         machine.succeed(f"test \"$(stat -c %a:%U {held})\" = 600:root")
         b = json.loads(machine.succeed(f"cat {held}"))
