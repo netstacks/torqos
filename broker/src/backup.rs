@@ -22,9 +22,24 @@ use std::process::Stdio;
 
 /// Where the keys are: each backup's in a file of its name, root's alone.
 pub const KEYS: &str = "/var/lib/torq/secrets/backup";
-/// Where a restore in progress is kept, root's alone: not in `/var/lib/torq`, a small file system of its
-/// own so that no one can fill the ledger's room (the audit of M3, M2), nor in a snapshot or a backup.
+/// Where a restore in progress is kept, root's alone: not in `/var/lib/torq`, kept apart so that no one
+/// can fill the ledger's room (the audit of M3, M2), nor in a snapshot or a backup. It shares its disk
+/// with everything else: a restore that would not fit, with room to spare, is refused before it starts.
 pub const ROOMS: &str = "/var/cache/torq/restoring";
+/// What restores a path into the room: restic, in a unit of its own, able to write the room and
+/// nothing else of the machine, to make no device and to gain nothing (the review of the backup, M2).
+/// `{restic}` the backup's restic, `{snapshot}` its whole id, `{room}`, `{path}`. Root's restic still
+/// writes as whoever the repository says owns each file: the copy after it is what keeps that out of
+/// a person's folder. (modules/backup.nix sets the same, as `torq.broker.backupRestoreCommand`.)
+pub const RESTORE: &str = concat!(
+    "systemd-run --pipe --wait --collect --quiet --service-type=exec",
+    " -p ProtectSystem=strict -p ReadWritePaths={room} -p PrivateDevices=yes -p PrivateTmp=yes -p NoNewPrivileges=yes",
+    " -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes",
+    " -p 'CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH'",
+    " {restic} --no-cache --no-lock restore {snapshot} --target {room} --include {path} --sparse"
+);
+/// What is kept free on the room's disk beyond what a restore takes: a twentieth of it, 4 GiB at most.
+const SPARE_MAX: u64 = 4 << 30;
 /// The longest key taken: a passphrase, not a file.
 pub const KEY_MAX: usize = 1024;
 /// How long `backups` waits for a repository to list its snapshots: a remote one may be out of reach.
@@ -43,12 +58,40 @@ pub struct Backups {
     restic: BTreeMap<String, String>,
     keys: PathBuf,
     rooms: PathBuf,
+    /// The restore's command (`RESTORE`).
+    restore: String,
+    /// The machine's accounts (tests: a file of their own).
+    passwd: PathBuf,
 }
 
 impl Default for Backups {
     fn default() -> Self {
-        Backups { restic: BTreeMap::new(), keys: KEYS.into(), rooms: ROOMS.into() }
+        Backups { restic: BTreeMap::new(), keys: KEYS.into(), rooms: ROOMS.into(), restore: RESTORE.into(), passwd: "/etc/passwd".into() }
     }
+}
+
+/// The uid of the account `name`, from /etc/passwd's text.
+fn uid_of(passwd: &str, name: &str) -> Option<u32> {
+    passwd.lines().find_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        (f.len() >= 3 && f[0] == name).then(|| f[2].parse().ok()).flatten()
+    })
+}
+
+/// Bytes free on the file system `p` is on, and its size, for whoever is root.
+fn room_on(p: &Path) -> Result<(u64, u64)> {
+    let s = rustix::fs::statvfs(p).with_context(|| format!("how much room {} has", p.display()))?;
+    Ok((s.f_bavail.saturating_mul(s.f_frsize), s.f_blocks.saturating_mul(s.f_frsize)))
+}
+
+/// Whether `p` is a folder of this process's own, closed to everyone else, and itself (not a link).
+fn own_closed(p: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::symlink_metadata(p).with_context(|| format!("reading {}", p.display()))?;
+    if m.is_symlink() || !m.is_dir() || m.uid() != rustix::process::geteuid().as_raw() || m.mode() & 0o077 != 0 {
+        bail!("{} is not the broker's own folder, closed to everyone else: not restored", p.display());
+    }
+    Ok(())
 }
 
 /// One backup, as `show system backups` says it.
@@ -114,36 +157,66 @@ fn said(s: &str, n: usize) -> String {
 }
 
 /// The broker's room for a restore in progress: root's alone, its own for each run, gone when dropped.
-/// What restic brings back sits here, as it was, until the owner's copy has read it.
-struct Room(PathBuf);
+/// What restic brings back sits here, as it was, until the owner's copy has read it. Its lock file is
+/// held for as long as it is in use: a room whose lock anyone can take is a restore cut short.
+struct Room {
+    dir: PathBuf,
+    lock: PathBuf,
+    _held: fs::File,
+}
 
 impl Room {
     fn new(all: &Path) -> Result<Self> {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let above = all.parent().context("the rooms' folder has no parent")?;
         fs::DirBuilder::new().recursive(true).mode(0o700).create(all).with_context(|| format!("creating {}", all.display()))?;
-        // Root's own, and the folder itself: what restic writes here may be anyone's secrets.
-        let m = fs::symlink_metadata(all)?;
-        if !m.is_dir() || std::os::unix::fs::MetadataExt::uid(&m) != rustix::process::geteuid().as_raw() {
-            bail!("{} is not the broker's own folder: not restored", all.display());
-        }
-        fs::set_permissions(all, fs::Permissions::from_mode(0o700))?;
-        // What a restore cut short left (its broker gone): a copy of someone's data, kept from them.
+        // Root's own, closed, and not a link, both levels: what restic writes here may be anyone's
+        // secrets, set-id programs among them. Refused as it is found, never mended.
+        own_closed(above)?;
+        own_closed(all)?;
+        let nofollow = rustix::fs::OFlags::NOFOLLOW.bits() as i32;
+        // What restores cut short left (their broker gone, whatever became of its pid): a copy of
+        // someone's data, kept from them. A room in use holds its lock.
         for e in fs::read_dir(all)?.flatten() {
-            if e.file_name().to_str().and_then(|p| p.parse::<u32>().ok()).is_some_and(|p| !Path::new("/proc").join(p.to_string()).exists()) {
-                let _ = fs::remove_dir_all(e.path());
+            let p = e.path();
+            let Some(stem) = p.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".lock")).map(String::from) else { continue };
+            if let Ok(f) = fs::OpenOptions::new().read(true).custom_flags(nofollow).open(&p) {
+                if f.try_lock().is_ok() {
+                    let _ = fs::remove_dir_all(all.join(&stem));
+                    let _ = fs::remove_file(&p);
+                }
             }
         }
-        let dir = all.join(std::process::id().to_string());
-        let _ = fs::remove_dir_all(&dir);
+        for e in fs::read_dir(all)?.flatten() {
+            let p = e.path();
+            // A room with no lock beside it is one whose broker stopped before it took one.
+            if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('.')) {
+                // One being taken, or taken by a broker that stopped before it named it.
+                if fs::OpenOptions::new().read(true).custom_flags(nofollow).open(&p).is_ok_and(|f| f.try_lock().is_ok()) {
+                    let _ = fs::remove_file(&p);
+                }
+            } else if p.extension().is_none() && !p.with_extension("lock").exists() {
+                let _ = fs::remove_dir_all(&p);
+            }
+        }
+        let name = format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+        let lock = all.join(format!("{name}.lock"));
+        // Locked before it has its name: a lock anyone sees is already held.
+        let taking = all.join(format!(".{name}.taking"));
+        let held = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(nofollow).open(&taking).with_context(|| format!("creating {}", taking.display()))?;
+        held.lock().context("holding the room")?;
+        fs::rename(&taking, &lock).with_context(|| format!("creating {}", lock.display()))?;
+        let dir = all.join(&name);
         fs::DirBuilder::new().mode(0o700).create(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        Ok(Room(dir))
+        Ok(Room { dir, lock, _held: held })
     }
 }
 
 impl Drop for Room {
     fn drop(&mut self) {
         // `remove_dir_all` follows no link: what restic restored may hold any.
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.dir);
+        let _ = fs::remove_file(&self.lock);
     }
 }
 
@@ -158,6 +231,85 @@ impl Broker {
     pub fn with_backup_rooms(mut self, dir: impl Into<PathBuf>) -> Self {
         self.backup.rooms = dir.into();
         self
+    }
+
+    /// What restores a path into the room (broker.json's `restore`; tests: restic itself, unconfined).
+    pub fn with_backup_restore(mut self, cmd: &str) -> Self {
+        self.backup.restore = cmd.into();
+        self
+    }
+
+    /// Where the machine's accounts are read from (tests: a file of their own).
+    pub fn with_backup_accounts(mut self, passwd: impl Into<PathBuf>) -> Self {
+        self.backup.passwd = passwd.into();
+        self
+    }
+
+    /// Who owns `tree`'s folder `first` on this machine, as the machine says, never the repository: the
+    /// account of that name for a home, the live folder's owner for a service's. Not root's, not the
+    /// agent's (the review of the backup, H1).
+    fn owner_here(&self, tree: &str, first: &str) -> Result<u32> {
+        use std::os::unix::fs::MetadataExt;
+        let passwd = fs::read_to_string(&self.backup.passwd).context("reading the accounts")?;
+        let uid = if tree == "home" {
+            uid_of(&passwd, first).with_context(|| format!("/home/{first}: no account named {first} on this machine: make it first, then restore"))?
+        } else {
+            let live = format!("/var/lib/{first}");
+            let m = fs::symlink_metadata(&live).with_context(|| format!("{live} is not on this machine: a service's folder comes back into one its service has made"))?;
+            if m.is_symlink() {
+                bail!("{live} is a link: not restored");
+            }
+            m.uid()
+        };
+        if uid == 0 || uid_of(&passwd, crate::socket::AGENT) == Some(uid) {
+            bail!("{} is root's or the agent's: not restored from a backup", snapshot::written_out(tree, &[first.to_string()]));
+        }
+        Ok(uid)
+    }
+
+    /// What restoring `path` from snapshot `id` writes, in bytes: restic's own list of it, summed as it
+    /// comes (never held: a hostile repository may list without end).
+    fn restore_size(&self, name: &str, id: &str, path: &str) -> Result<u64> {
+        use std::io::BufRead;
+        let mut child = config::command(self.restic_of(name)?)
+            .args(["--no-lock", "ls", "--json", "--recursive", id, path])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("running restic")?;
+        let mut total = 0u64;
+        let lines = std::io::BufReader::new(child.stdout.take().context("restic's output")?).split(b'\n');
+        for line in lines {
+            let v: serde_json::Value = serde_json::from_slice(&line.context("reading restic")?).unwrap_or_default();
+            if v["struct_type"] == "node" && v["type"] == "file" {
+                total = total.saturating_add(v["size"].as_u64().unwrap_or(u64::MAX));
+            }
+        }
+        if !child.wait().context("running restic")?.success() {
+            bail!("restic could not list {path} in snapshot {}", &id[..8]);
+        }
+        Ok(total)
+    }
+
+    /// Refused unless `size` fits in the room, and again beside the target, with room to spare.
+    fn fits(&self, size: u64, tree: &str) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let rooms = self.backup.rooms.parent().unwrap_or(&self.backup.rooms);
+        let target = Path::new(if tree == "home" { "/home" } else { "/var/lib" });
+        let same = fs::metadata(rooms).ok().map(|m| m.dev()) == fs::metadata(target).ok().map(|m| m.dev());
+        let mut on = vec![(rooms, if same { size.saturating_mul(2) } else { size })];
+        if !same && target.exists() {
+            on.push((target, size));
+        }
+        for (p, need) in on {
+            let (free, total) = room_on(p)?;
+            let spare = (total / 20).min(SPARE_MAX);
+            if need.saturating_add(spare) > free {
+                bail!("not restored: it takes {} MiB on {}, which has {} MiB free and keeps {} MiB spare", need >> 20, p.display(), free >> 20, spare >> 20);
+            }
+        }
+        Ok(())
     }
 
     /// Where the keys are kept (tests: a scratch folder).
@@ -185,28 +337,36 @@ impl Broker {
             }
             None => config::command(cmd),
         };
-        let mut child = c.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("running restic")?;
-        let mut err = child.stderr.take().context("restic's errors")?;
-        let errs = std::thread::spawn(move || {
-            let mut kept = Vec::new();
-            let _ = (&mut err).take(SAID).read_to_end(&mut kept);
-            let _ = std::io::copy(&mut err, &mut std::io::sink());
-            kept
-        });
-        let mut out = Vec::new();
-        // A list of snapshots, at most this large: the rest is read and dropped, never kept in root's memory.
-        let mut stdout = child.stdout.take().context("restic's output")?;
-        (&mut stdout).take(OUT_MAX).read_to_end(&mut out).context("reading restic")?;
-        std::io::copy(&mut stdout, &mut std::io::sink()).context("reading restic")?;
-        let status = child.wait().context("running restic")?;
-        let errs = errs.join().unwrap_or_default();
-        if !status.success() {
-            let why = said(String::from_utf8_lossy(&errs).trim(), 300);
-            bail!("restic failed ({status}){}", if why.is_empty() { String::new() } else { format!(": {why}") });
-        }
-        Ok(out)
+        bounded(c.args(args))
     }
+}
 
+/// Run `c`: what it printed (up to `OUT_MAX`), or what it said (up to `SAID`) if it failed. Nothing
+/// more of either is kept in root's memory.
+fn bounded(c: &mut std::process::Command) -> Result<Vec<u8>> {
+    let mut child = c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("running restic")?;
+    let mut err = child.stderr.take().context("restic's errors")?;
+    let errs = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let _ = (&mut err).take(SAID).read_to_end(&mut kept);
+        let _ = std::io::copy(&mut err, &mut std::io::sink());
+        kept
+    });
+    let mut out = Vec::new();
+    // At most this much is kept: the rest is read and dropped.
+    let mut stdout = child.stdout.take().context("restic's output")?;
+    (&mut stdout).take(OUT_MAX).read_to_end(&mut out).context("reading restic")?;
+    std::io::copy(&mut stdout, &mut std::io::sink()).context("reading restic")?;
+    let status = child.wait().context("running restic")?;
+    let errs = errs.join().unwrap_or_default();
+    if !status.success() {
+        let why = said(String::from_utf8_lossy(&errs).trim(), 300);
+        bail!("restic failed ({status}){}", if why.is_empty() { String::new() } else { format!(": {why}") });
+    }
+    Ok(out)
+}
+
+impl Broker {
     /// The snapshots `wanted` names in `name`'s repository (`latest`, or an id): restic's JSON, read.
     fn snaps(&self, name: &str, wanted: Option<&str>) -> Result<Vec<Snap>> {
         let mut args = vec!["snapshots", "--json", "--no-lock"];
@@ -341,14 +501,23 @@ impl Broker {
         let id = self.snaps(name, Some(wanted))?.into_iter().next().map(|s| s.id).with_context(|| format!("backup {name} has no snapshot {wanted}"))?;
         let short = &id[..8];
         let done = (|| -> Result<snapshot::Copy> {
+            // Whose it will be, before anything is written: the machine's word (H1).
+            let owner = self.owner_here(tree, &parts[0])?;
             let room = Room::new(&self.backup.rooms)?;
-            let target = room.0.to_string_lossy().into_owned();
-            self.restic(name, &["restore", &id, "--target", &target, "--include", &path], None)?;
+            // Once what a restore cut short left has gone: it may be what would not fit.
+            self.fits(self.restore_size(name, &id, &path)?, tree)?;
+            let restic = self.restic_of(name)?;
+            let cmd = crate::fill(&self.backup.restore, &[("restic", restic), ("snapshot", &id), ("room", &room.dir.to_string_lossy()), ("path", &path)]);
+            bounded(config::command("sh").args(["-c", &cmd])).context("restic could not restore it")?;
             // As restic wrote it: below the room, the path as it was backed up.
-            let from = room.0.join(if tree == "home" { "home" } else { "var/lib" });
+            let from = room.dir.join(if tree == "home" { "home" } else { "var/lib" });
             let copy = {
                 let _lock = Lock::acquire(&self.state_dir)?;
-                snapshot::plan(&from, tree, &parts, &format!("backup-{name}-{short}"), &format!("in backup {name}'s snapshot {short}"))?
+                let copy = snapshot::plan(&from, tree, &parts, &format!("backup-{name}-{short}"), &format!("in backup {name}'s snapshot {short}"))?;
+                if copy.uid != owner {
+                    bail!("{} is uid {} in the backup and uid {owner} here: not restored (the repository does not say whose a folder is)", snapshot::written_out(tree, &parts[..1]), copy.uid);
+                }
+                copy
             };
             copy.run()?;
             Ok(copy)

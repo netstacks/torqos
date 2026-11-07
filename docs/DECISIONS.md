@@ -916,14 +916,25 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   two commands. `show system backups`, everyone's and read only: whether each has its key, its snapshots,
   how its unit last ran since boot (the journal's words read by torqcli as the person, as far as they may).
   `request system restore <name> [<snapshot>] <path>`, an administrator's with their password, ledgered
-  with the snapshot's whole id (`latest` is another tomorrow): restic restores the one path into a room of
-  the broker's (`/var/cache/torq/restoring`, root's alone: not `/var/lib/torq`, kept small so no one fills the ledger's room), and from there it is the snapshot's restore, the same checks and the
+  with the snapshot's whole id (`latest` is another tomorrow). *Whose it is, the machine says*: a home
+  is the account of its name's, which must exist; a service's folder its live owner's, which must be
+  there; never root's or the agent's; and the uid restic restored must be that one, or nothing is
+  written (the repository is whoever can write it). Restic's own list of the path is summed first, and a
+  restore that would not fit, with a twentieth of the disk (4 GiB at most) to spare, is refused. Restic
+  restores the one path, sparse, into a room of the broker's (`/var/cache/torq/restoring`, root's
+  alone and closed, as is the folder it is in; not `/var/lib/torq`, whose file system is kept apart so
+  that no one fills the ledger's room), in a unit of its own that may write the room and nothing else,
+  makes no device and gains nothing (`torq.broker.backupRestoreCommand`); a room still locked is a
+  restore in progress, any other is cleared. From there it is the snapshot's restore, the same checks and the
   same copy (`snapshot::plan`, `Copy`): written by the owner of the folder, what is there set aside,
   staged, swapped; the lock for the checks only. The same paths only: below `/home` and `/var/lib`, never
   `/var/lib/torq` or the machine's own folders; a path with restic's pattern characters is refused,
   since it would bring back more than was named. A restore takes the room twice over while it runs.
+  The tree may not carry the key another way either (`RESTIC_PASSWORD*` in the unit's environment, a
+  `--password…` argument), nor rclone's credentials (`rcloneConfig`). A request's files — a diff, a
+  hash, a key — wait in `/run/torq`, memory only, never on a disk or in a backup.
   Not built: the restore step in setup's from-a-repository path; credentials for a remote target
-  (`environmentFile`, an SSH key for SFTP) are placed by hand (KNOWN-GAPS 6zm).
+  (`environmentFile`, an SSH key for SFTP) have no protected place yet and are placed by hand (KNOWN-GAPS 6zm).
 
 ## ADR-039 — Upstreams: what TorqOS owes, and what it depends on
 - **Context:** TorqOS redistributes images made of other people's software: nixpkgs and NixOS's

@@ -19,6 +19,7 @@ pkgs.testers.runNixOSTest {
     users.users.dev.hashedPasswordFile = lib.mkForce null;
     users.users.dev.hashedPassword = devHash;
     users.users.bob = { isNormalUser = true; group = "users"; };
+    users.users.carol = { isNormalUser = true; group = "users"; };
     users.users.svc = { isSystemUser = true; group = "svc"; };
     users.groups.svc = { };
     torq.broker.rebuildCommand = "true";
@@ -88,6 +89,10 @@ pkgs.testers.runNixOSTest {
     with subtest("a backup of /home and /var/lib, without the machine's secrets"):
         machine.succeed(as_user("bob", "mkdir -p docs && echo one > docs/a && echo keep > docs/b"))
         machine.succeed(as_user("bob", "mkdir -p trap && echo ok > trap/f"))
+        machine.succeed(as_user("bob", "mkdir -p tree && mkfifo tree/pipe && cp /run/current-system/sw/bin/id tree/sid && chmod 4755 tree/sid"))
+        machine.succeed(as_user("bob", "mkdir -p devs && echo keep > devs/f") + " && mknod /home/bob/devs/z c 1 3")
+        # A home the repository says is bob's, where the machine says carol's is.
+        machine.succeed("echo c > /home/carol/c && chown -R bob /home/carol")
         machine.succeed("mkdir -p /var/lib/svcdata && echo v1 > /var/lib/svcdata/db && chown -R svc:svc /var/lib/svcdata && chmod 750 /var/lib/svcdata")
         machine.succeed("systemctl start restic-backups-local.service")
         listed = machine.succeed("restic-local ls latest")
@@ -132,6 +137,31 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("readlink /home/bob/trap").strip() == "/etc"
         e = last()
         assert e["kind"] == "backup_restored" and e["data"]["error"], e
+
+    with subtest("set-id bits do not come back, a pipe does, a device fails it"):
+        machine.succeed(as_user("bob", "rm -rf tree"))
+        rc, out = restore("r4", "/home/bob/tree")
+        assert rc == "done=0", out
+        assert machine.succeed("stat -c %a:%U /home/bob/tree/sid").strip() == "755:bob"
+        machine.succeed("test -p /home/bob/tree/pipe")
+        # restic's restore makes no device (no CAP_MKNOD, PrivateDevices): it fails, what is live stays.
+        machine.succeed(as_user("bob", "echo live > devs/f"))
+        rc, out = restore("r5", "/home/bob/devs")
+        assert rc != "done=0", out
+        assert machine.succeed("cat /home/bob/devs/f").strip() == "live"
+        machine.fail("ls -d /home/bob/devs.restoring-* /home/bob/devs.before-*")
+        assert last()["data"]["error"], last()
+
+    with subtest("whose a folder is, the machine says, never the repository"):
+        # The repository says bob's; carol's account says hers: refused, nothing made.
+        machine.succeed("rm -rf /home/carol")
+        rc, out = restore("r6", "/home/carol")
+        assert rc != "done=0" and "in the backup and uid" in out, out
+        machine.fail("test -e /home/carol")
+        machine.fail("ls -d /home/carol.restoring-*")
+        # A service's folder comes back only into one the machine has.
+        out = machine.fail("torq-broker backup-restore --name local --path /var/lib/not-here --approved-by dev 2>&1")
+        assert "not on this machine" in out, out
 
     with subtest("what may not be restored, and by whom"):
         for path, why in [("/var/lib/torq/secrets/backup/local", "machine's own"), ("/var/lib/torq/state/ledger.jsonl", "machine's own"), ("/etc/shadow", "below /home and /var/lib"), ("/home/bob/*", "pattern")]:

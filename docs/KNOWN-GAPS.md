@@ -628,13 +628,18 @@ Its §5 lists claims without a test.
      guess it there, slowly. The audit did not raise it; found while fixing M3.
 
 6zm. **The declared backup (ADR-038, amended 2026-11-07).** Open:
-   - **Tested against a repository on the machine's own disk only** (`tests/backup.nix`). A remote target's
-     credentials — an SFTP key, an `environmentFile` with S3's — are placed by hand, root's, outside what
-     TorqOS keeps or ledgers; only the passphrase is `request system backup key`'s.
+   - **A repository's credentials have no protected place yet.** Only the passphrase is kept (`request system
+     backup key`); the tree refuses rclone's keys and the key by another way, but an SFTP key or S3's keys in an
+     `environmentFile` are placed by hand, root's, outside what TorqOS keeps, ledgers or backs up.
+   - **Tested against a repository on the machine's own disk only** (`tests/backup.nix`).
    - **The key here is not the repository's.** Giving a new one changes what the machine reads, not the
      repository's own key (`restic key passwd`, by hand). A wrong one shows at the next run, and in
      `show system backups`.
    - **A backup that runs as another account is refused** (`user`): its key is root's alone.
+   - **The room shares its disk with everything** (`/var/cache` is on the root file system): restic's own list
+     of the path is summed first, and a restore that would not fit with a twentieth of the disk (4 GiB at
+     most) to spare is refused. The sum is restic's word: a repository that lies about sizes can still fill
+     the disk, as far as the restore's writes go, until it fails and the room is removed.
    - **A restore takes the room twice over while it runs:** restic writes the path whole into
      `/var/cache/torq/restoring`, and the owner's copy writes it again beside the target. A disk too full
      fails it, what is live untouched. A machine stopped mid-restore leaves that copy, root's, until the
@@ -651,3 +656,10 @@ Its §5 lists claims without a test.
      boot; why it failed, the journal's, shown only to whoever may read the journal.
    - **Not built:** the restore step in setup's from-a-repository path (ADR-036), and a VM test against a
      remote target.
+   - **Root's restic still writes as the repository says** (owners, modes, set-id bits) inside the room,
+     confined to it (no device, no new privilege, the rest of the machine read only). The owner check
+     before the copy and the copy as the owner are what keep that out of a person's folder.
+   - **`extraOptions` reach root's shell as NixOS writes them,** unquoted (the review's L3, not taken):
+     NixOS's own unit and wrapper write them so, and its example (`sftp.command='ssh …'`) relies on it;
+     quoted in TorqOS's wrapper only, an option would mean one thing in the backup and another in the
+     restore. Setting one is a system change, an administrator's.

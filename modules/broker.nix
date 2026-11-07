@@ -152,6 +152,19 @@ in
       ];
       description = "Schedule the rollback of an unconfirmed commit (a transient timer).";
     };
+    # The declared backup's restore (ADR-038; broker/src/backup.rs RESTORE): restic in a unit of its
+    # own that may write the broker's room and nothing else, make no device, and gain nothing.
+    backupRestoreCommand = lib.mkOption {
+      type = lib.types.str;
+      default = lib.concatStrings [
+        "systemd-run --pipe --wait --collect --quiet --service-type=exec"
+        " -p ProtectSystem=strict -p ReadWritePaths={room} -p PrivateDevices=yes -p PrivateTmp=yes -p NoNewPrivileges=yes"
+        " -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes"
+        " -p 'CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH'"
+        " {restic} --no-cache --no-lock restore {snapshot} --target {room} --include {path} --sparse"
+      ];
+      description = "Restore a path from a backup into the broker's room: `{restic}`, `{snapshot}`, `{room}`, `{path}`. Fixed settings; tests set restic itself.";
+    };
     guardEtcNixos = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -300,6 +313,7 @@ in
         remote = config.torq.remote.url;
         # The backups the configuration declares, each with its restic (ADR-038, modules/backup.nix).
         backups = cfg.backups;
+        restore = cfg.backupRestoreCommand;
       };
      }
 

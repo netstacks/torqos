@@ -20,6 +20,7 @@ let
   secrets = "/var/lib/torq/secrets";
   # Where the broker keeps a restore in progress (broker/src/backup.rs ROOMS).
   rooms = "/var/cache/torq/restoring";
+  stateDir = config.torq.broker.stateDir;
   backups = config.services.restic.backups;
   # Whether `paths` names the secrets, or something in them.
   namesSecrets = paths: lib.any (p: p == secrets || lib.hasPrefix "${secrets}/" p) (if paths == null then [ ] else paths);
@@ -32,6 +33,8 @@ let
       ${lib.optionalString (b.environmentFile != null) "source ${lib.escapeShellArg b.environmentFile}"}
       ${lib.toShellVars (lib.mapAttrs (_: v: "${v}") (lib.filterAttrs (n: v: v != null && n != "PATH") unit.environment))}
       PATH=${unit.environment.PATH or ""}:$PATH
+      # extraOptions as NixOS's own wrapper and unit write them, shell words (`sftp.command='ssh …'`, its
+      # example): quoted here, they would mean something else here than in the backup itself.
       exec ${lib.getExe b.package}${lib.concatMapStrings (a: " -o ${a}") b.extraOptions} "$@"
     '';
 in
@@ -42,7 +45,8 @@ in
         passwordFile = lib.mkDefault "${keys}/${name}";
         # A backup of a command's output (`command`) holds no paths: NixOS refuses both at once.
         paths = lib.mkIf (config.command == [ ]) (lib.mkDefault [ "/home" "/var/lib" ]);
-        exclude = [ rooms ] ++ lib.optional (!namesSecrets config.paths) secrets;
+        # The broker's rooms, and what a request left in its state from before requests moved to /run.
+        exclude = [ rooms "${stateDir}/request-*" ] ++ lib.optional (!namesSecrets config.paths) secrets;
       };
     }));
   };
