@@ -715,3 +715,13 @@ Its §5 lists claims without a test.
      waiting, marked past its time, in `show system commit`.
    - **Adopted with one waiting:** a machine adopting a repository whose ledger holds a schedule arms it
      at its first boot; adopt's own commit moves HEAD, so it is refused at its time, not applied.
+6zp. **The socket's and the ledger's words are written twice (code review, 2026-11-07; ADR-044, after
+   0.3.0).** `cli/src/run.rs` re-declares `Request`, `Frame`, `SOCKET`, `NEED_PASSWORD` from
+   `broker/src/socket.rs`, and reads exit codes 1, 2, 75 as bare numbers; `cli/src/shell.rs`'s
+   `ledgered_commit` and `waiting_proposals` repeat the broker's kind lists (`broker/src/lib.rs`); entry
+   kinds, tiers and actors are strings matched across broker/, cli/ and agent/; a commit id, a store path and
+   a snapshot label are checked ad hoc (`repo::revision`, `lib.rs` `shapes_ok`, `snapshot::label_ok`).
+   No drift today: the two kind lists match, and `tests/socket.nix` exercises both ends of the protocol. A
+   kind added on one side only would go unnoticed by the compiler. ADR-044's crate `torq-wire` closes it,
+   fixtures first so the ledger's bytes are proven unchanged; not in 0.3.0 (it changes all three Nix
+   packages' sources and touches `lib.rs` while the release's branches do).

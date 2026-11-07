@@ -220,6 +220,14 @@ acceptance tests, each a VM test.
 - [ ] **Watch the desktop**: screenshot and input through the compositor's protocols, in the
       person's session; the agent's tooling, not the broker's.
 
+## After 0.3.0: first in the next cycle
+
+- [ ] **One vocabulary for the socket and the ledger** (ADR-044, KNOWN-GAPS 6zp): the crate `torq-wire`
+      (`Request`, `Frame`, the exit codes; `Entry`, `Kind`, `Tier`, `Actor` with an `Unknown` case;
+      `CommitId`, `StorePath`, `SnapshotLabel`) used by broker, torqcli and the agent. Fixture ledgers
+      from today's broker first, each round-tripping byte for byte; then the socket's types, then the
+      kinds, then the newtypes. Typed `data` per kind and splitting `broker/src/lib.rs` after that.
+
 ## Later (not planned now): boot security, and limits on root
 
 - Owner-rooted boot security (own Secure Boot keys, TPM2 + PIN; SECURITY-MODEL.md), tested in

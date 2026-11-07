@@ -1300,3 +1300,70 @@ configuration it was not prepared for.
   both land (the first moves HEAD, so the second is stale by construction); refusing the second when
   it is made tells the person while they are there, instead of at night in the ledger.
 - **Not with `commit confirmed`:** nobody would be there to confirm it.
+
+## ADR-044 — One vocabulary: a shared crate for the socket and the ledger, after 0.3.0
+
+**Status:** accepted, 2026-11-07; **deferred until after 0.3.0** (KNOWN-GAPS 6zp, ROADMAP "After 0.3.0").
+**Context:** A code review found the wire protocol and the ledger's words written twice, by hand.
+`cli/src/run.rs` re-declares `Request`, `Frame`, `SOCKET` and `NEED_PASSWORD` from
+`broker/src/socket.rs` (and the exit codes 1, 2, 75, 77 as bare numbers); `cli/src/shell.rs`'s
+`ledgered_commit` and `waiting_proposals` repeat the broker's (`broker/src/lib.rs` keeps the same list of
+kinds that made a commit); entry kinds (`"applied"`, `"apply_failed"`, `"rolled_back"`, about thirty) and
+tiers are matched as strings across broker/, cli/ and agent/ (some 200 matches of the kind names alone); a commit id, a store path
+and a snapshot label are checked ad hoc (`repo::revision`, `lib.rs` `shapes_ok`, `snapshot::label_ok`).
+Nothing has drifted yet (the two kind lists are identical today), but a kind added to one crate and not the
+other is a silent mistake: a configuration the CLI does not see, a proposal shown as waiting that is settled.
+
+- **A library crate, `torq-wire` (`wire/`):** what crosses between the three programs, nothing else.
+  `#![forbid(unsafe_code)]`, `#![forbid(dead_code)]` (ADR-020), `publish = false`, its version set by
+  `scripts/bump-version` with the others (which then also rewrites `torq-wire`'s entry in each crate's
+  `Cargo.lock`); dependencies serde and serde_json only.
+- **What goes in.**
+  - The socket: `Request`, `Frame`, `SOCKET`, and the exit codes as named constants (`OK`, `REFUSED` 1,
+    `USAGE` 2, `BUSY` 75, `NEED_PASSWORD` 77). `deny_unknown_fields` stays the broker's reading of a request.
+  - The ledger's line: `Body` and `Entry` as the broker writes them, field order unchanged — that order *is*
+    the hash's definition (`ledger.rs`), so it lives beside a test vector that pins one entry's hash.
+  - `Kind`, `Tier` and `Actor` as enums, read and written through their exact strings
+    (`#[serde(from = "String", into = "String")]`), **each with an `Unknown(String)` case** that
+    round-trips whatever it holds. Closed enums would make an older torq refuse a newer ledger — a
+    TorqOS generation rolled back to 0.3.0 reading a ledger 0.4.0 wrote, or a remote's ledger adopted —
+    and the ledger must stay readable by every torq that ever wrote to it. The ledger's `Actor` has
+    `broker`, which the socket's caller (`policy::Actor`, user or agent) never is: one enum, the caller's
+    a subset checked at the socket.
+  - The questions both sides ask of a kind, once: `made_commit` (the list `ledgered_commit` repeats),
+    `settles_proposal` (`applied`, `apply_failed`: `waiting_proposals`), and the like.
+  - Newtypes parsed where a value enters: `CommitId` (40 lowercase hex), `StorePath`, `SnapshotLabel`;
+    `repo::revision` keeps `HEAD` and `refs/…` as a separate `Rev`, built on `CommitId`.
+- **What does not.** The ledger's file, its lock, its hash chain and `verify` (the broker's, privileged);
+  policy, the gate, PAM; how torqcli turns arguments into a request (`run::request`); how history is shown.
+  Typed `data` per kind (an enum of payloads) and splitting `broker/src/lib.rs` are later steps of their
+  own: `data` stays a `serde_json::Value`.
+- **How the crates depend on it.** A path dependency (`torq-wire = { path = "../wire" }`) from broker, cli
+  and agent; no Cargo workspace, so each keeps its own `Cargo.lock` and the broker's dependencies stay
+  auditable alone. Each `package.nix` builds from a source that holds its crate and `wire/` only
+  (`lib.fileset.toSource { root = ../.; fileset = unions [ ./. ../wire ]; }`, `cargoRoot` and
+  `buildAndTestSubdir` set to the crate), so a change elsewhere in the repository still rebuilds nothing.
+  `cd broker && cargo test` in the dev shell works as before. ADR-039's unfree check is unaffected (no
+  new `package.nix`); a machine building TorqOS from the release git builds `wire/` with the rest.
+- **Migration, the ledger's bytes never changing.** Each step is its own branch, reviewed, with every
+  crate's tests, `nix flake check` and the socket and trust-loop VM tests:
+  0. **Fixtures first, from today's broker**, before any type moves: ledgers the broker's own tests
+     write (the trust loop, `commit at`, backup, adopt, snapshots, a mended tear, break-glass), and lines
+     by hand with a kind, tier and actor no torq knows, kept in `wire/tests/fixtures/`. The test: every
+     line parsed as `Entry` and written again is byte-for-byte the line, and the broker's `verify` passes
+     over every fixture. It runs in every later step unchanged.
+  1. The crate with the socket's types and exit codes; the three `package.nix` sources; `run.rs`,
+     `socket.rs`, `serve.rs` use it. Nothing in the ledger moves.
+  2. `Kind`, `Tier`, `Actor` in `Body`; the string matches replaced crate by crate (broker, then cli,
+     then agent); `ledgered_commit` and `waiting_proposals` become `Kind`'s.
+  3. The newtypes; `shapes_ok`, `revision` and `label_ok` become their parsers.
+  4. Later, separately: typed `data` per kind; `lib.rs` split.
+- **Why after 0.3.0.** The benefit is real but is maintenance, not a fault: no drift today. The risk is
+  near the release: step 1 changes how all three Nix packages are built, which only `nix flake check`, the
+  VM tests and a release machine's own build prove; step 2 touches some 45 lines of `broker/src/lib.rs`
+  and 60 of `broker/tests/trust_loop.rs` while several 0.3.0 branches change them daily, so it would
+  conflict with each; and it changes how the privileged code reads the record it verifies. Nothing in
+  0.3.0 needs it. It lands first in the cycle after 0.3.0, steps 0 and 1 together, before new kinds
+  (M4's, M5's) add to the strings to move.
+- **Not:** a crate shared with the outside (the socket is TorqOS's own, ADR-040); the broker's logic in
+  the shared crate; a change of the ledger's format or field order, ever, for this.
