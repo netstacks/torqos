@@ -725,3 +725,21 @@ Its §5 lists claims without a test.
    kind added on one side only would go unnoticed by the compiler. ADR-044's crate `torq-wire` closes it,
    fixtures first so the ledger's bytes are proven unchanged; not in 0.3.0 (it changes all three Nix
    packages' sources and touches `lib.rs` while the release's branches do).
+
+6zr. **Python out of a new machine (ADR-032/033, amended 2026-11-07, `work/w6`).** The root is grown by
+   systemd-repart in the initrd, not growpart; the SSH greeting runs fastfetch's program without its
+   Python completions. Open:
+   - **Python stays for the boot writer** (systemd-boot's installer, ~135 MB): ADR-032's amendment says
+     what replacing it would take. The size budget stays 1280 MB until then (1252 MB now).
+   - **Not yet run in a VM:** `tests/installer.nix` (repart's definitions compared instead of
+     `boot.growPartition`, and the layout check; repart's "Growing existing partition 2." in the journal,
+     its numbering from 0, and nothing of partitions 0 or 1; the ESP's and the record's entries as the
+     image left them, the record's of TorqOS's type; no growpart unit) and `tests/image.nix` (which boots the
+     image, grown, and was not changed). What only they show: that repart in the initrd finds the
+     disk behind a btrfs root, and that btrfs then grows on `subvol=@`.
+   - **Machines installed before this** keep `boot.growPartition` in their own hardware file, and with
+     it cloud-utils and Python. Their disks are not the image's layout now (no partition names, the
+     record of Linux's generic type), so the new hardware file's repart would not run on them: its
+     layout check skips it. Theirs stay grown by growpart, which does nothing once grown.
+   - **Only the image's layout grows.** Any other (an install by hand, a partition added) is left as it
+     is, and its root is not grown: by design, never repartitioned rather than guessed at.

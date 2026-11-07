@@ -148,6 +148,11 @@ first.
 - [ ] **Python out** (ADR-032/033): the root grown by systemd-repart instead of growpart; then the
       boot writer is the last thing needing Python. Lanzaboote is deferred to Secure Boot (ADR-033,
       amended 2026-11-03); the branch is deleted, its lessons in the ADR.
+      *(2026-11-07, `work/w6`: the root grown by systemd-repart in the initrd, the record's partition
+      matched first and never grown; the SSH greeting's fastfetch without its Python completions. Left:
+      the boot writer, ~135 MB — a smaller Python under NixOS's script or TorqOS's own writer, each
+      needing tests/boot.nix and a second reviewer (ADR-032, amended 2026-11-07). The installer and
+      image VM tests are still to be run on it.)*
 - [x] **Upstreams** (ADR-039): a source statement on each release; CI fails an image or ISO that
       holds anything nixpkgs marks unfree (redistributable firmware, which it counts as free, is on
       the ISO). *(checks.<system>.free, 2026-11-03: nothing lets an unfree package into either, on
