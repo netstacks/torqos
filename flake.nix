@@ -116,6 +116,7 @@
         adopt = import ./tests/adopt.nix { inherit pkgs self; };
         strict = import ./tests/strict.nix { inherit pkgs self; };
         snapshots = import ./tests/snapshots.nix { inherit pkgs self; };
+        release-path = import ./tests/release-path.nix { inherit pkgs self; };
         # How a machine starts: a real EFI partition and its boot menu (ADR-033).
         boot = import ./tests/boot.nix { inherit pkgs self; };
         tree = import ./tests/tree.nix { inherit pkgs self; };
