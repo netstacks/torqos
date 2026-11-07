@@ -53,26 +53,31 @@ fn an_agents_proposal_without_a_session_is_tainted() {
 #[test]
 fn the_broker_holds_the_taint_and_nothing_clears_it() {
     let (dir, b) = setup(&[]);
-    let (s, e) = session::start(&b).unwrap();
-    assert_eq!((e.body.kind.as_str(), e.body.data["session"].as_str()), ("session_started", Some(s.id.as_str())));
-    // Its record is the broker's, in its state directory, private.
+    let before = b.ledger.read_all().unwrap().len();
+    let s = session::start(&b).unwrap();
+    // Its record is the broker's, in its state directory, private; the ledger has nothing of it yet.
     use std::os::unix::fs::PermissionsExt;
     let rec = dir.path().join("state/sessions").join(format!("{}.json", s.id));
     assert_eq!(fs::metadata(&rec).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(b.ledger.read_all().unwrap().len(), before, "a session that proposes nothing costs the ledger nothing");
     // A clean session's proposal is not tainted; the caller's --tainted still adds.
     let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
     assert!(!p.body.tainted);
-    assert_eq!(p.body.data["session"], json!(s.id));
+    assert_eq!(p.body.data["session"], json!({ "id": s.id, "started": s.started, "tainted_by": [] }));
     let d2 = diff(dir.path(), "two.diff", "users/casey/packages.json", "[\"jq\"]");
     assert!(propose(&b, &d2, Actor::Agent, true, Some(&s.id)).unwrap().body.tainted, "the caller's flag adds");
-    // Tainted: ledgered once, sticky; a proposal saying otherwise is tainted all the same.
+    // Tainted, sticky; a proposal saying otherwise is tainted all the same, and its entry says by what.
     session::taint(&b, &s.id, "read_journal").unwrap();
     session::taint(&b, &s.id, "show_ledger").unwrap();
-    assert_eq!(kinds(&b, "session_tainted"), 1, "the first taint is ledgered, once");
     let r = session::read(&b, &s.id).unwrap().unwrap();
     assert!(r.tainted && r.tainted_by == ["read_journal", "show_ledger"]);
     let d3 = diff(dir.path(), "three.diff", "users/casey/packages.json", "[\"tree\"]");
-    assert!(propose(&b, &d3, Actor::Agent, false, Some(&s.id)).unwrap().body.tainted, "from the broker's record, not the caller's word");
+    let p3 = propose(&b, &d3, Actor::Agent, false, Some(&s.id)).unwrap();
+    assert!(p3.body.tainted, "from the broker's record, not the caller's word");
+    assert_eq!(p3.body.data["session"]["tainted_by"], json!(["read_journal", "show_ledger"]), "the ledger keeps what tainted it");
+    // The record says what cited it, for what the agent is told.
+    let cited: Vec<u64> = session::read(&b, &s.id).unwrap().unwrap().proposals.iter().map(|c| c.proposal).collect();
+    assert_eq!(cited.last(), Some(&p3.body.seq));
     // A source that is not a tool's name is refused, and nothing changes.
     assert!(session::taint(&b, &s.id, "x; rm").is_err());
 }
@@ -84,20 +89,40 @@ fn a_session_must_be_the_brokers_and_the_agents() {
     let err = format!("{:#}", propose(&b, &d, Actor::Agent, false, Some(&"0".repeat(32))).unwrap_err());
     assert!(err.contains("no session the broker holds"), "{err}");
     assert!(kinds(&b, "refused") == 1, "an agent's refusal is ledgered");
-    assert!(propose(&b, &d, Actor::Agent, false, Some("../../x")).is_err(), "not an id");
-    let (s, _) = session::start(&b).unwrap();
+    for bad in ["../../x", &"A".repeat(32), &"0".repeat(31)] {
+        let err = format!("{:#}", propose(&b, &d, Actor::Agent, false, Some(bad)).unwrap_err());
+        assert!(err.contains("is not a session's id"), "{bad}: {err}");
+        assert!(session::read(&b, bad).is_err(), "{bad}");
+    }
+    let s = session::start(&b).unwrap();
     assert!(propose(&b, &d, Actor::User, false, Some(&s.id)).is_err(), "a person names no session");
     assert!(session::taint(&b, &"1".repeat(32), "read_journal").is_err(), "no such session");
 }
 
+/// The review of w5: sessions are bounded in what they keep, and an old one's file going makes a
+/// proposal naming it refused, never untainted.
 #[test]
-fn sessions_cannot_fill_the_ledger() {
-    let (_dir, b) = setup(&[]);
-    for _ in 0..session::SESSIONS_AN_HOUR {
-        session::start(&b).unwrap();
+fn sessions_are_bounded() {
+    let (dir, b) = setup(&[]);
+    let sessions = dir.path().join("state/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    // As many as are kept, from long ago: one more start takes the oldest away.
+    for i in 0..session::SESSIONS_KEPT {
+        let id = format!("{i:032x}");
+        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": format!("2020-01-01T00:{:02}:{:02}Z", i / 60 % 60, i % 60), "tainted": i == 0, "tainted_by": []}).to_string()).unwrap();
     }
-    assert!(session::start(&b).is_err());
-    assert_eq!(kinds(&b, "session_started"), session::SESSIONS_AN_HOUR);
+    let oldest = format!("{:032x}", 0);
+    session::start(&b).unwrap();
+    assert_eq!(fs::read_dir(&sessions).unwrap().count(), session::SESSIONS_KEPT);
+    assert!(session::read(&b, &oldest).unwrap().is_none(), "the oldest went");
+    assert!(propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&oldest)).is_err(), "gone: refused, not untainted");
+    // At most so many started in an hour.
+    let now = chrono::Utc::now().to_rfc3339();
+    for i in 0..session::SESSIONS_AN_HOUR {
+        let id = format!("{:032x}", 1_000_000 + i);
+        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": now, "tainted": false, "tainted_by": []}).to_string()).unwrap();
+    }
+    assert!(format!("{:#}", session::start(&b).unwrap_err()).contains("in the last hour"));
 }
 
 #[test]
@@ -106,7 +131,7 @@ fn under_trust_a_clean_proposal_in_the_persons_folder_applies() {
     let g = session::grant(&b, "casey", 30).unwrap();
     assert_eq!((g.body.kind.as_str(), g.body.approved_by.as_deref()), ("trust_granted", Some("casey")));
     assert_eq!(session::active(&b.ledger.read_all().unwrap()).len(), 1);
-    let (s, _) = session::start(&b).unwrap();
+    let s = session::start(&b).unwrap();
     let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
     let a = session::apply_trusted(&b, &p).unwrap().expect("applied under trust");
     assert_eq!(a.body.kind, "applied");
@@ -125,12 +150,12 @@ fn trust_never_covers_a_tainted_or_sessionless_or_system_proposal() {
     let p = propose(&b, &htop(dir.path()), Actor::Agent, false, None).unwrap();
     assert!(session::apply_trusted(&b, &p).unwrap().is_none());
     // A tainted session.
-    let (s, _) = session::start(&b).unwrap();
+    let s = session::start(&b).unwrap();
     session::taint(&b, &s.id, "read_journal").unwrap();
     let p = propose(&b, &diff(dir.path(), "b.diff", "users/casey/packages.json", "[\"jq\"]"), Actor::Agent, false, Some(&s.id)).unwrap();
     assert!(session::apply_trusted(&b, &p).unwrap().is_none());
     // A clean session, but the proposal marked tainted by its caller: the mark counts.
-    let (clean, _) = session::start(&b).unwrap();
+    let clean = session::start(&b).unwrap();
     let p = propose(&b, &diff(dir.path(), "t.diff", "users/casey/packages.json", "[\"bat\"]"), Actor::Agent, true, Some(&clean.id)).unwrap();
     assert!(p.body.tainted && session::apply_trusted(&b, &p).unwrap().is_none());
     // System tier, from a clean session.
@@ -149,7 +174,7 @@ fn trust_is_the_persons_own_folder_only() {
     let (dir, b) = setup(&[]);
     let b = b.with_agent_limits(&Limits { users: vec!["casey".into(), "sam".into()], settings: vec![] });
     session::grant(&b, "sam", 30).unwrap();
-    let (s, _) = session::start(&b).unwrap();
+    let s = session::start(&b).unwrap();
     // casey's folder: sam's trust does not cover it.
     let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
     assert!(session::apply_trusted(&b, &p).unwrap().is_none());
@@ -168,7 +193,7 @@ fn trust_is_bounded_revocable_and_expires_on_the_record() {
     let r = session::revoke(&b, "casey").unwrap().unwrap();
     assert_eq!((r.body.kind.as_str(), r.body.data["grant"].as_u64()), ("trust_revoked", Some(g.body.seq)));
     assert!(session::revoke(&b, "casey").unwrap().is_none());
-    let (s, _) = session::start(&b).unwrap();
+    let s = session::start(&b).unwrap();
     let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
     assert!(session::apply_trusted(&b, &p).unwrap().is_none(), "revoked");
     // A grant whose time is over: settled by the next operation, and covers nothing.
@@ -193,7 +218,7 @@ fn trust_is_bounded_revocable_and_expires_on_the_record() {
 #[test]
 fn what_could_cut_the_machine_off_is_applied_confirmed() {
     let (dir, b) = setup(&["networking"]);
-    let (s, _) = session::start(&b).unwrap();
+    let s = session::start(&b).unwrap();
     let wifi = diff(dir.path(), "w.diff", "nixos/networking.json", "{\"wireless\": {\"enable\": true}}");
     let p = propose(&b, &wifi, Actor::Agent, false, Some(&s.id)).unwrap();
     assert_eq!(p.body.data["cuts_off"], json!(["networking.wireless.enable"]));
@@ -203,4 +228,56 @@ fn what_could_cut_the_machine_off_is_applied_confirmed() {
     // A person's own change is theirs to make as they like.
     let mine = propose(&b, &diff(dir.path(), "m.diff", "nixos/time.json", "{\"timeZone\": \"UTC\"}"), Actor::User, false, None).unwrap();
     assert!(mine.body.data.get("cuts_off").is_none());
+}
+
+/// The review of w5: a session tainted after its proposal, before the trusted apply, is not trusted
+/// (the record is read again, under the lock).
+#[test]
+fn a_session_tainted_before_the_apply_is_not_trusted() {
+    let (dir, b) = setup(&[]);
+    session::grant(&b, "casey", 30).unwrap();
+    let s = session::start(&b).unwrap();
+    let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    assert!(!p.body.tainted);
+    session::taint(&b, &s.id, "read_journal").unwrap();
+    assert!(session::apply_trusted(&b, &p).unwrap().is_none());
+    assert_eq!(kinds(&b, "applied"), 0);
+}
+
+/// The review of w5: a revoke never waits for the broker's lock — a trusted change being built
+/// holds it — and no trusted apply starts after it.
+#[test]
+fn a_revoke_is_on_the_record_at_once_whatever_the_broker_is_doing() {
+    let (dir, b) = setup(&[]);
+    session::grant(&b, "casey", 30).unwrap();
+    let s = session::start(&b).unwrap();
+    let first = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    assert!(session::apply_trusted(&b, &first).unwrap().is_some(), "one applied under trust");
+    let d = dir.path().join("r.diff");
+    fs::write(&d, "--- a/users/casey/packages.json\n+++ b/users/casey/packages.json\n@@ -1 +1 @@\n-[\"htop\"]\n+[\"jq\"]\n").unwrap();
+    let next = propose(&b, &d, Actor::Agent, false, Some(&s.id)).unwrap();
+    // The broker's lock held, as a rebuild would: the revoke goes through, and quickly.
+    let held = fs::File::open(dir.path().join("state/broker.lock")).unwrap();
+    held.lock().unwrap();
+    let t = std::time::Instant::now();
+    let r = session::revoke(&b, "casey").unwrap().expect("revoked");
+    assert!(t.elapsed() < std::time::Duration::from_secs(2), "it did not wait for the broker");
+    assert_eq!(r.body.kind, "trust_revoked");
+    drop(held);
+    // The next apply checks the record again: revoked, nothing applied.
+    assert!(session::apply_trusted(&b, &next).unwrap().is_none());
+    assert_eq!(kinds(&b, "applied"), 1);
+}
+
+/// The review of w5: a commit at never takes what could cut the machine off — no one is there to confirm.
+#[test]
+fn a_commit_at_refuses_what_could_cut_the_machine_off() {
+    let (dir, b) = setup(&["networking"]);
+    let s = session::start(&b).unwrap();
+    let wifi = diff(dir.path(), "w.diff", "nixos/networking.json", "{\"wireless\": {\"enable\": true}}");
+    let p = propose(&b, &wifi, Actor::Agent, false, Some(&s.id)).unwrap();
+    let at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let err = format!("{:#}", torq_broker::at::Scheduler::new(&b, "true", "true").schedule(p.body.seq, "casey", &at).unwrap_err());
+    assert!(err.contains("could lose the network or the screen"), "{err}");
+    assert_eq!(kinds(&b, "apply_scheduled"), 0);
 }

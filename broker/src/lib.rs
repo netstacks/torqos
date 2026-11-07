@@ -1811,9 +1811,14 @@ impl Broker {
     pub fn propose_in(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool, session: Option<&str>) -> Result<Entry> {
         let _l = Lock::acquire(&self.state_dir)?;
         session::settle_trust(self)?;
-        let judged = session::tainted(self, actor, tainted, session);
-        let tainted = *judged.as_ref().unwrap_or(&true);
-        let proposed = judged.and_then(|t| self.propose_locked(base, diff_path, reason, actor, t, session));
+        let judged = session::judge(self, actor, tainted, session);
+        let tainted = judged.as_ref().map_or(true, |j| j.0);
+        let proposed = judged.and_then(|(t, cited)| self.propose_locked(base, diff_path, reason, actor, t, cited));
+        // Its session's record notes it, for what the agent is told it did (session.rs).
+        if let (Ok(e), Some(id)) = (&proposed, session) {
+            // (Only for telling: the proposal and what its session read are in the ledger already.)
+            let _ = session::cite(self, id, e.body.seq, None);
+        }
         // Every refusal of the agent's is on the record, whatever refused it — the forbidden paths,
         // bad data, a diff that does not apply, the list (the audit of ADR-041): an agent that tries
         // is seen trying. (Busy is not a refusal: nothing was looked at.)
@@ -1988,7 +1993,7 @@ impl Broker {
         out.into_iter().collect()
     }
 
-    fn propose_locked(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool, session: Option<&str>) -> Result<Entry> {
+    fn propose_locked(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool, session: Option<serde_json::Value>) -> Result<Entry> {
         self.refuse_if_interrupted()?;
         // An agent always says what it prepared its change against: without a base, a diff applies on
         // top of whatever the configuration has become (second audit, M2; KNOWN-GAPS 6g).
@@ -2087,7 +2092,7 @@ impl Broker {
         // The agent's session, the broker's record of what it read (session.rs), and what of the
         // change could cut the machine off.
         if let Some(s) = session {
-            data["session"] = s.into();
+            data["session"] = s;
         }
         if !cuts_off.is_empty() {
             data["cuts_off"] = cuts_off.into();

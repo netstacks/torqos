@@ -152,10 +152,10 @@ fn command_line() -> clap::Command {
                 .arg(Arg::new("base").long("base").help("The commit this change was prepared against: refused if the configuration has moved on."))
                 .arg(Arg::new("session").long("session").help("The agent's session (session-start): the proposal is tainted as the broker's record of it says; an agent's proposal without one is tainted.")),
         )
-        .subcommand(Command::new("session-start").about("The agent starts a session (ADR-042): its record kept by the broker, `session_started` ledgered; its id printed."))
+        .subcommand(Command::new("session-start").about("The agent starts a session (ADR-042): its record kept by the broker (ledgered in the proposals that cite it); its id printed."))
         .subcommand(
             Command::new("session-taint")
-                .about("The agent's session read untrusted text: marked tainted for good (nothing clears it), `session_tainted` ledgered the first time.")
+                .about("The agent's session read untrusted text: marked tainted for good (nothing clears it).")
                 .arg(Arg::new("id").required(true))
                 .arg(Arg::new("source").long("source").required(true).help("What it read: a tool's name.")),
         )
@@ -573,8 +573,8 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             println!("approve with: torq-broker apply {} --approved-by <name>", e.body.seq);
         }
         Cmd::SessionStart => {
-            let (r, e) = torq_broker::session::start(&b)?;
-            println!("{}", json!({ "session": r.id, "seq": e.body.seq }));
+            let r = torq_broker::session::start(&b)?;
+            println!("{}", json!({ "session": r.id }));
         }
         Cmd::SessionTaint { id, source } => println!("{}", serde_json::to_string(&torq_broker::session::taint(&b, &id, &source)?)?),
         Cmd::SessionShow { id } => match torq_broker::session::read(&b, &id)? {

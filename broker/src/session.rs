@@ -2,25 +2,30 @@
 //!
 //! **Sessions.** A program of the agent's (`torq-doctor`) starts a session at the broker over its
 //! socket, as `torq-agent`; the broker makes its record here, in its own state directory (root's,
-//! 0600), and ledgers `session_started`. Each read of untrusted text the program does, it reports
-//! (`session-taint`) before the model is shown the text; the broker marks the record tainted —
-//! sticky: nothing clears it, there is no command that does — and ledgers `session_tainted`, once. A
-//! proposal of the agent's names its session: it is tainted as this record says, the caller's
-//! `--tainted` only adding to it; one that names none is tainted.
+//! 0600). Each read of untrusted text the program does, it reports (`session-taint`) before the model
+//! is shown the text; the broker marks the record tainted — sticky: nothing clears it, there is no
+//! command that does. A proposal of the agent's names its session: it is tainted as this record says,
+//! the caller's `--tainted` only adding to it; one that names none is tainted. The ledger holds a
+//! session only where a proposal cites it: the proposal's entry carries the session's id, when it
+//! started and what tainted it — so a session that proposed nothing costs the ledger nothing, and the
+//! record of one that did outlives its file here.
 //!
 //! What the broker can vouch for is what was reported to it: it cannot see what a program of the
 //! agent's reads. So a record is the agent's own word, kept where the agent cannot change it — a
 //! report cannot be taken back, but a program that never reports (any tool run as the agent other than
-//! TorqOS's own) has an untainted session. Hence the default: no session, tainted.
+//! TorqOS's own) has an untainted session (KNOWN-GAPS 6zq). Hence the default: no session, tainted.
 //!
 //! **Trust.** A person grants, with their password, "for the next N minutes (at most 60), the agent's
 //! user-tier proposals in my own folder apply without asking": `trust_granted`, the ledger the only
 //! record of it. While it holds, a proposal of the agent's that names a session, is not tainted, is
 //! wholly in that person's folder (user tier, and on the agent's list) and could not cut the machine
 //! off is applied as soon as it is made, as that person, its `applied` entry marked with the grant —
-//! each its own change, revertible. Never a system-tier change, never a tainted one. `trust-revoke`
-//! ends it (`trust_revoked`); its time ends it (`trust_expired`, ledgered by the next operation that
-//! writes the ledger — it is over at its time whether or not that has been written).
+//! each its own change, revertible. Never a system-tier change, never a tainted one. Grants, revokes
+//! and expiries are written under the sessions' own short lock, never the broker's: a revoke is on the
+//! record at once, even while a trusted change is being built, and every trusted apply checks the
+//! record again, under the broker's lock, just before it starts. Its time ends it (`trust_expired`,
+//! ledgered by the next operation that writes trust or may apply under it — it is over at its time
+//! whether or not that has been written).
 
 use crate::ledger::{Entry, NewEntry};
 use crate::policy::{self, Actor, Tier};
@@ -31,9 +36,13 @@ use serde_json::json;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-/// How many sessions the agent may start in an hour: past that it is refused, without an entry each,
-/// so that sessions cannot fill the ledger.
-pub const SESSIONS_AN_HOUR: usize = 60;
+/// How many sessions may be started in an hour: past that, refused. One account is the agent, so the
+/// doctor's sessions and any other agent program's share it: a program run as the agent can use it up
+/// and keep the doctor from starting for the rest of the hour — refused, never less careful.
+pub const SESSIONS_AN_HOUR: usize = 600;
+/// How many session records are kept: past that, the oldest go. A proposal naming a session whose
+/// record is gone is refused, never taken as untainted; what tainted it is in its proposal's entry.
+pub const SESSIONS_KEPT: usize = 2000;
 /// The longest a person's trust lasts.
 pub const TRUST_MAX_MINUTES: u32 = 60;
 
@@ -46,6 +55,18 @@ pub struct Record {
     pub tainted: bool,
     /// What tainted it, as reported: a tool's name.
     pub tainted_by: Vec<String>,
+    /// The proposals that cited it, as the broker ledgered them (what the agent is told it did).
+    #[serde(default)]
+    pub proposals: Vec<Cited>,
+}
+
+/// A proposal that cited a session, and the change it became if a person's trust applied it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cited {
+    pub proposal: u64,
+    #[serde(default)]
+    pub applied: Option<u64>,
 }
 
 /// A session's id: 128 random bits, as 32 lowercase hex digits.
@@ -94,8 +115,9 @@ fn write(b: &Broker, r: &Record) -> Result<()> {
     Ok(())
 }
 
-/// The sessions' own lock: short, never the broker's (which a rebuild holds for minutes), so that a
-/// report is never kept waiting by a change.
+/// The sessions' and trust's own lock: short, never the broker's (which a rebuild holds for
+/// minutes), so that a report or a revoke is never kept waiting by a change. Never taken twice in
+/// one process at once; may be taken while the broker's is held, never the other way round.
 fn lock(b: &Broker) -> Result<Lock> {
     Lock::acquire_named(&b.state_dir, "sessions.lock", 10)
 }
@@ -104,21 +126,33 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// Start a session of the agent's: its record, and `session_started` in the ledger.
-pub fn start(b: &Broker) -> Result<(Record, Entry)> {
-    let _l = lock(b)?;
-    let entries = b.ledger.read_all()?;
-    if entries.first().is_none_or(|e| e.body.kind != "init") {
-        bail!("refused: this machine's ledger has not begun");
+/// Every record kept, as (when it started, its id).
+fn kept(b: &Broker) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir(b)) else { return Ok(out) };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_suffix(".json").filter(|i| id_ok(i)) else { continue };
+        if let Some(r) = read(b, id)? {
+            out.push((r.started, r.id));
+        }
     }
+    out.sort();
+    Ok(out)
+}
+
+/// Start a session of the agent's: its record, here. At most `SESSIONS_AN_HOUR` an hour; past
+/// `SESSIONS_KEPT`, the oldest records go.
+pub fn start(b: &Broker) -> Result<Record> {
+    let _l = lock(b)?;
+    let kept = kept(b)?;
     let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
-    let recent = entries
-        .iter()
-        .filter(|e| e.body.kind == "session_started")
-        .filter(|e| chrono::DateTime::parse_from_rfc3339(&e.body.ts).is_ok_and(|t| t > hour_ago))
-        .count();
+    let recent = kept.iter().filter(|(t, _)| chrono::DateTime::parse_from_rfc3339(t).is_ok_and(|t| t > hour_ago)).count();
     if recent >= SESSIONS_AN_HOUR {
-        bail!("refused: the agent has started {recent} sessions in the last hour (at most {SESSIONS_AN_HOUR})");
+        bail!("refused: {recent} of the agent's sessions were started in the last hour (at most {SESSIONS_AN_HOUR})");
+    }
+    for (_, id) in kept.iter().take((kept.len() + 1).saturating_sub(SESSIONS_KEPT)) {
+        std::fs::remove_file(dir(b).join(format!("{id}.json")))?;
     }
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).context("reading /dev/urandom")?;
@@ -126,58 +160,52 @@ pub fn start(b: &Broker) -> Result<(Record, Entry)> {
     if read(b, &id)?.is_some() {
         bail!("a session {id} exists already");
     }
-    let r = Record { id: id.clone(), started: now(), tainted: false, tainted_by: vec![] };
+    let r = Record { id, started: now(), tainted: false, tainted_by: vec![], proposals: vec![] };
     write(b, &r)?;
-    let e = b.ledger.append(NewEntry {
-        actor: Actor::Agent.to_string(),
-        approved_by: None,
-        kind: "session_started".into(),
-        tier: Tier::Observe.to_string(),
-        tainted: false,
-        reason: format!("The agent started session {id}"),
-        data: json!({ "session": id }),
-    })?;
-    Ok((r, e))
+    Ok(r)
 }
 
-/// Session `id` read untrusted text (from `source`): tainted, for good. The record first, so that a
-/// ledger that cannot be written never leaves the session untainted; the ledger once, at the first.
+/// Session `id` read untrusted text (from `source`): tainted, for good.
 pub fn taint(b: &Broker, id: &str, source: &str) -> Result<Record> {
     if !source_ok(source) {
         bail!("{source:?} is not a source's name (a tool's: letters, digits, - and _)");
     }
     let _l = lock(b)?;
     let mut r = read(b, id)?.context("refused: no such session")?;
-    let first = !r.tainted;
     if !r.tainted_by.iter().any(|s| s == source) {
         r.tainted_by.push(source.into());
     }
     r.tainted = true;
     write(b, &r)?;
-    if first {
-        b.ledger.append(NewEntry {
-            actor: Actor::Agent.to_string(),
-            approved_by: None,
-            kind: "session_tainted".into(),
-            tier: Tier::Observe.to_string(),
-            tainted: true,
-            reason: format!("Session {id} read untrusted text ({source})"),
-            data: json!({ "session": id, "source": source }),
-        })?;
-    }
     Ok(r)
 }
 
-/// Whether a proposal is tainted: by `actor`, the caller's `flag` (which only adds), and the
-/// broker's record of `session`. A person's proposal names no session; an agent's that names none is
-/// tainted; one that names a session there is not, is refused.
-pub fn tainted(b: &Broker, actor: Actor, flag: bool, session: Option<&str>) -> Result<bool> {
+/// Whether a proposal is tainted — by `actor`, the caller's `flag` (which only adds), and the
+/// broker's record of `session` — and what of the session goes into its entry. A person's proposal
+/// names no session; an agent's that names none is tainted; one that names a session not held here is
+/// refused.
+pub fn judge(b: &Broker, actor: Actor, flag: bool, session: Option<&str>) -> Result<(bool, Option<serde_json::Value>)> {
     match (actor, session) {
         (Actor::User, Some(_)) => bail!("refused: a session is the agent's; a person's proposal names none"),
-        (Actor::User, None) => Ok(flag),
-        (Actor::Agent, None) => Ok(true),
-        (Actor::Agent, Some(id)) => Ok(flag || read(b, id)?.context("refused: the proposal names no session the broker holds")?.tainted),
+        (Actor::User, None) => Ok((flag, None)),
+        (Actor::Agent, None) => Ok((true, None)),
+        (Actor::Agent, Some(id)) => {
+            let r = read(b, id)?.context("refused: the proposal names no session the broker holds")?;
+            Ok((flag || r.tainted, Some(json!({ "id": r.id, "started": r.started, "tainted_by": r.tainted_by }))))
+        }
     }
+}
+
+/// The proposal `seq` cited session `id` (and, `applied`, became that change under trust): noted in
+/// its record, for what the agent is told.
+pub fn cite(b: &Broker, id: &str, seq: u64, applied: Option<u64>) -> Result<()> {
+    let _l = lock(b)?;
+    let Some(mut r) = read(b, id)? else { return Ok(()) };
+    match r.proposals.iter_mut().find(|c| c.proposal == seq) {
+        Some(c) => c.applied = applied.or(c.applied),
+        None => r.proposals.push(Cited { proposal: seq, applied }),
+    }
+    write(b, &r)
 }
 
 /// A person's trust, granted and not yet revoked or expired on the record.
@@ -219,9 +247,9 @@ pub fn active(entries: &[Entry]) -> Vec<Grant> {
     unsettled(entries).into_iter().filter(|g| !g.over(now)).collect()
 }
 
-/// Ledger `trust_expired` for every grant whose time is over and is not yet settled. Under the
-/// broker's lock: by every operation that may apply under trust, and by a grant and a revoke.
-pub fn settle_trust(b: &Broker) -> Result<()> {
+/// Ledger `trust_expired` for every grant whose time is over and is not yet settled, under the
+/// sessions' lock (held).
+fn settle_locked(b: &Broker) -> Result<()> {
     let now = chrono::Utc::now();
     for g in unsettled(&b.ledger.read_all()?).into_iter().filter(|g| g.over(now)) {
         b.ledger.append(NewEntry {
@@ -237,6 +265,12 @@ pub fn settle_trust(b: &Broker) -> Result<()> {
     Ok(())
 }
 
+/// `settle_locked`, taking the sessions' lock: by every operation that may apply under trust.
+pub fn settle_trust(b: &Broker) -> Result<()> {
+    let _l = lock(b)?;
+    settle_locked(b)
+}
+
 /// `person` trusts the agent's user-tier proposals in their own folder for `minutes`. (Over the
 /// socket: only that person, with their password.)
 pub fn grant(b: &Broker, person: &str, minutes: u32) -> Result<Entry> {
@@ -249,8 +283,8 @@ pub fn grant(b: &Broker, person: &str, minutes: u32) -> Result<Entry> {
     if !b.agent_limits.users.iter().any(|u| u == person) {
         bail!("refused: the agent may not propose in {person}'s folder (torq.agent.mayPropose.users), so there is nothing to trust it with");
     }
-    let _l = Lock::acquire(&b.state_dir)?;
-    settle_trust(b)?;
+    let _l = lock(b)?;
+    settle_locked(b)?;
     if let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person) {
         bail!("refused: {person} trusts the agent already, until {} (#{}): revoke it first", g.until, g.seq);
     }
@@ -266,10 +300,12 @@ pub fn grant(b: &Broker, person: &str, minutes: u32) -> Result<Entry> {
     })
 }
 
-/// End `person`'s trust now, if they have granted one.
+/// End `person`'s trust now, if they have granted one: on the record at once, whatever the broker is
+/// doing (the sessions' lock, never the broker's). A trusted apply already started finishes; none
+/// starts after.
 pub fn revoke(b: &Broker, person: &str) -> Result<Option<Entry>> {
-    let _l = Lock::acquire(&b.state_dir)?;
-    settle_trust(b)?;
+    let _l = lock(b)?;
+    settle_locked(b)?;
     let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person) else { return Ok(None) };
     Ok(Some(b.ledger.append(NewEntry {
         actor: Actor::User.to_string(),
@@ -288,11 +324,16 @@ pub fn cuts_off(p: &Entry) -> Option<Vec<String>> {
     (!c.is_empty()).then_some(c)
 }
 
+/// The session a proposal cites, by its id (`data.session.id`).
+pub fn cited(p: &Entry) -> Option<&str> {
+    p.body.data["session"]["id"].as_str()
+}
+
 /// Whose trust `p` could be applied under: an agent's proposal, naming a session, not tainted, user
 /// tier, wholly one person's folder, nothing that could cut the machine off. None: not one.
 fn trusted_by(p: &Entry) -> Option<String> {
     let b = &p.body;
-    if b.kind != "proposal" || b.actor != Actor::Agent.to_string() || b.tainted || b.tier != Tier::User.to_string() || b.data["session"].as_str().is_none() || cuts_off(p).is_some() {
+    if b.kind != "proposal" || b.actor != Actor::Agent.to_string() || b.tainted || b.tier != Tier::User.to_string() || cited(p).is_none() || cuts_off(p).is_some() {
         return None;
     }
     let files: Vec<String> = b.data["files"].as_array()?.iter().filter_map(|f| f.as_str().map(String::from)).collect();
@@ -301,20 +342,30 @@ fn trusted_by(p: &Entry) -> Option<String> {
 }
 
 /// Apply proposal `p` now if a person's trust covers it (`trusted_by`, and their grant holding): as
-/// that person, its entry marked with the grant. None: not covered; it waits for a person.
+/// that person, its entry marked with the grant. None: not covered; it waits for a person. Judged
+/// under the broker's lock, with the sessions' lock held only while the record is read — so a revoke
+/// is never kept waiting by the build.
 pub fn apply_trusted(b: &Broker, p: &Entry) -> Result<Option<Entry>> {
     if trusted_by(p).is_none() {
         return Ok(None);
     }
     let lock = Lock::acquire(&b.state_dir)?;
-    settle_trust(b)?;
-    // The proposal as the ledger has it, judged again under the lock.
-    let p = b.ledger.get(p.body.seq)?;
-    let Some(person) = trusted_by(&p) else { return Ok(None) };
-    // Its session as the broker holds it now: tainted since the proposal, it is not trusted.
-    if p.body.data["session"].as_str().map(|s| read(b, s)).transpose()?.flatten().is_none_or(|r| r.tainted) {
-        return Ok(None);
+    let (p, person, grant) = {
+        let _s = self::lock(b)?;
+        settle_locked(b)?;
+        // The proposal as the ledger has it, and its session as the broker holds it now: tainted since
+        // the proposal, it is not trusted; its grant revoked or over, nor is it.
+        let p = b.ledger.get(p.body.seq)?;
+        let Some(person) = trusted_by(&p) else { return Ok(None) };
+        if cited(&p).map(|s| read(b, s)).transpose()?.flatten().is_none_or(|r| r.tainted) {
+            return Ok(None);
+        }
+        let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person) else { return Ok(None) };
+        (p, person, g.seq)
+    };
+    let e = b.apply_locked(&lock, p.body.seq, &person, false, None, Some(("trust", grant)))?;
+    if let Some(id) = cited(&p) {
+        cite(b, id, p.body.seq, Some(e.body.seq))?;
     }
-    let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person) else { return Ok(None) };
-    b.apply_locked(&lock, p.body.seq, &person, false, None, Some(("trust", g.seq))).map(Some)
+    Ok(Some(e))
 }
