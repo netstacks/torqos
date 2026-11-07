@@ -572,6 +572,39 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   not every way (limits on root: later, ROADMAP). Habits from NixOS (`nixos-rebuild switch`) fail
   with "command not found" instead of the `/etc/nixos` guard's message; the guard stays for `nix`
   itself. Tests that read JSON in their VMs bring their own jq.
+- **Amended (2026-11-07): Python out of everything but the boot writer.** Three things brought Python
+  (3.13, ~135 MB that nothing else on the machine shares) into a new machine's system (`nix why-depends`
+  on the image's toplevel): systemd-boot's installer; `growpart` (cloud-utils' guest tools, which
+  `boot.growPartition` runs); and the SSH greeting's fastfetch, whose package's shell completions run
+  Python. Two are gone. **The root is grown by systemd-repart in the initrd**
+  (`boot.initrd.systemd.repart`, in both copies of the layout: hosts/image/hardware-configuration.nix
+  and hosts/installer/file-systems.nix), after the root is mounted and before btrfs is grown by the
+  file system's autoResize (`x-systemd.growfs`, ordered after repart by systemd itself). repart matches
+  definitions to the disk's partitions by type, in order, and the record's ext4 partition and the root
+  are both Linux's generic type, so the record's definition comes first with no share of free space
+  (`10-torq`, `Weight=0`), the root's second (`20-root`): only the last partition grows; repart never
+  moves, shrinks or writes into an existing partition. The image names its partitions (`ESP`, `torq`,
+  `nixos`, hosts/image/disk.nix) as the definitions do, so repart has no label to write into the
+  record's entry either; the installer test holds the record's entry to the image's. The image builder's
+  own default of growpart is turned off for the system it puts on the disk. **The greeting runs a copy
+  of fastfetch's program alone** (modules/branding.nix), wrapped as NixOS's package wraps it, its one
+  reference to its own package (a system-wide configuration directory it is never left to look in) cut:
+  nothing compiled, nothing lost but the completions of a program no one types. Machines installed before
+  this keep the hardware file they were given (`boot.growPartition`, so cloud-utils and Python): theirs
+  to change, through the broker, once grown it does nothing. **Sizes** (x86_64, the size check's way):
+  1253 MB in 535 store paths before, 1252 MB in 531 after — Python stays, for the boot writer, so the
+  ~135 MB come only with it. The budget stays 1280 until then: 1 MB is not a step worth spending the
+  headroom other branches in flight use.
+- **What the boot writer would take.** systemd-boot's installer is NixOS's `systemd-boot-builder.py`
+  (the module passes `pkgs.python3` to it; nothing in its options chooses another). Two ways: (a) **a
+  smaller Python under the same script**: NixOS's `python3Minimal` (27 MB, from NixOS's cache) has every
+  module the script imports but `ctypes`, which it uses for one call, `syncfs` on the EFI partition and
+  `/boot` after writing (`sync -f`, coreutils, is the same call). That means replacing
+  `system.build.installBootLoader` with a copy of NixOS's builder, patched — boot-loader code TorqOS then
+  carries and must follow at every nixpkgs bump — for ~108 MB; (b) **TorqOS's own writer** (ADR-033's
+  option 2, Rust), removing Python entirely. Either is a change to what writes the boot menu: it needs
+  `tests/boot.nix` (the check `boot`) passing on it and a second reviewer (ADR-033), and is not done
+  here. Lanzaboote stays deferred to Secure Boot (ADR-033, amended).
 
 ## ADR-033 — Python leaves with systemd-boot's installer: Lanzaboote now, Secure Boot later
 - **Status:** decided, 2026-11-03 (the owner: option 1); **deferred** the same day (the owner),
@@ -632,6 +665,16 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   left needing it. Until then the menu is NixOS's writer's, and `tests/boot.nix` (the check
   `boot`) holds it to what this ADR asked of any writer: the entries after a switch, the default,
   an older entry chosen at the menu, a commit confirmed rolled back by a power cut, the editor off.
+- **Amended (2026-11-07): the root grown by systemd-repart.** growpart is gone from a new machine
+  (ADR-032, amended 2026-11-07), and so is the SSH greeting's other way to Python (fastfetch's
+  completions): the boot writer is now the only thing on a new machine that needs Python, and replacing
+  it would save ~135 MB. What that would take, a smaller Python under NixOS's own script or TorqOS's
+  own writer, is in ADR-032's amendment; either needs `tests/boot.nix` passing on it and a second
+  reviewer. The deferral's premise has changed: Lanzaboote's `lzbt` would now take Python with it too
+  (less sbctl and lzbt themselves, ~50 MB on the branch). What else deferred it stands — the EFI
+  partition of an installed machine too small for the move, the clean-up that could remove the only
+  entries that start, a Rust toolchain on each machine — so it stays deferred to Secure Boot unless the
+  owner decides otherwise.
 ## ADR-034 — One base, two faces: the sysadmin's server as code, and a person's machine an AI can drive
 - **Context:** ADR-019 narrowed TorqOS to a thin, CLI-only OS and deferred the desktop and the AI,
   so the configuration layer could be built first. It is built: the trust loop (M1), torqcli

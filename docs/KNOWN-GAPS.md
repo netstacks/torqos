@@ -715,3 +715,22 @@ Its §5 lists claims without a test.
      waiting, marked past its time, in `show system commit`.
    - **Adopted with one waiting:** a machine adopting a repository whose ledger holds a schedule arms it
      at its first boot; adopt's own commit moves HEAD, so it is refused at its time, not applied.
+
+6zr. **Python out of a new machine (ADR-032/033, amended 2026-11-07, `work/w6`).** The root is grown by
+   systemd-repart in the initrd, not growpart; the SSH greeting runs fastfetch's program without its
+   Python completions. Open:
+   - **Python stays for the boot writer** (systemd-boot's installer, ~135 MB): ADR-032's amendment says
+     what replacing it would take. The size budget stays 1280 MB until then (1252 MB now).
+   - **Not yet run in a VM:** `tests/installer.nix` (repart's definitions compared instead of
+     `boot.growPartition`; repart's "Growing existing partition 3" in the journal; the record's
+     partition entry as the image left it; no growpart unit) and `tests/image.nix` (which boots the
+     image, grown, and was not changed). What only they show: that repart in the initrd finds the
+     disk behind a btrfs root, and that btrfs then grows on `subvol=@`.
+   - **Machines installed before this** keep `boot.growPartition` in their own hardware file, and with
+     it cloud-utils and Python. Their partitions have no names (the image named none then): a machine
+     that changed to repart's definitions would have repart write the definitions' names into its
+     partition table entries, the record's included (names only, not where or how big).
+   - **The definitions match by order.** A disk whose record partition is not the first of Linux's
+     generic type (an install by hand, another layout) would have the root's definition, the one that
+     grows, match another partition, perhaps the record's, which would grow if free space followed it.
+     Only the image's layout is supported.
