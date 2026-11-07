@@ -42,9 +42,11 @@ in
     esp_start=$(cat /sys/class/block/vdb1/start)
     esp_size=$(cat /sys/class/block/vdb1/size)
     # The ESP as built; the record's own (1 GiB, before the root, which grows into the rest); the root.
-    # Each named as the hardware file's repart definitions name it, so repart, growing the root at the
-    # first boot, finds nothing to write in the record's entry.
-    printf 'label: gpt\nstart=%s, size=%s, type=U, name=ESP\nsize=1GiB, type=L, name=torq\ntype=L, name=nixos\n' "$esp_start" "$esp_size" | sfdisk --quiet /dev/vda
+    # The record's partition is of TorqOS's own GPT type, 79312c32-17cc-4864-8a4c-5a6d06522000 (made for
+    # it, fixed: the hardware file's repart check requires it), so no definition of Linux's types matches
+    # it: systemd-repart, growing the root at the first boot, never touches it. Each partition named as the
+    # hardware file names it.
+    printf 'label: gpt\nstart=%s, size=%s, type=U, name=ESP\nsize=1GiB, type=79312c32-17cc-4864-8a4c-5a6d06522000, name=torq\ntype=L, name=nixos\n' "$esp_start" "$esp_size" | sfdisk --quiet /dev/vda
     udevadm settle 2>/dev/null || true
     partx -u /dev/vda 2>/dev/null || true
     dd if=/dev/vdb1 of=/dev/vda1 bs=1M status=none

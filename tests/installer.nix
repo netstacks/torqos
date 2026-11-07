@@ -35,7 +35,7 @@ let
   want = builtins.toJSON {
     mounts = builtins.mapAttrs (_: f: { inherit (f) device fsType options autoResize neededForBoot; }) image.config.fileSystems;
     # Grown by systemd-repart in the initrd (not growpart, which needs Python: ADR-032, amended).
-    grow = { inherit (image.config.boot.initrd.systemd.repart) enable; partitions = image.config.systemd.repart.partitions; growpart = image.config.boot.growPartition; };
+    grow = { inherit (image.config.boot.initrd.systemd.repart) enable; partitions = image.config.systemd.repart.partitions; growpart = image.config.boot.growPartition; layout = image.config.boot.initrd.systemd.services.systemd-repart.serviceConfig.ExecCondition; };
   };
 
   qemu = "${pkgs.qemu_test}/bin/qemu-system-${pkgs.stdenv.hostPlatform.qemuArch}";
@@ -183,8 +183,11 @@ pkgs.testers.runNixOSTest {
         installer.succeed("mkdir -p /tmp/esp && mount -o ro /dev/vda1 /tmp/esp")
         installer.succeed("grep -qx 'editor 0' /tmp/esp/loader/loader.conf")
         installer.succeed("umount /tmp/esp")
-        # The record's partition as the image left it: where it starts, its size, type and name.
-        record = installer.succeed("sfdisk --dump /dev/vda | grep '^/dev/vda2 '").strip()
+        # The ESP's and the record's partitions as the image left them: where each starts, its size, type
+        # and name; the record's of TorqOS's own type (hosts/image/disk.nix), which repart has no
+        # definition for.
+        before = installer.succeed("sfdisk --dump /dev/vda | grep -E '^/dev/vda[12] '").strip()
+        assert "type=79312C32-17CC-4864-8A4C-5A6D06522000" in before.splitlines()[1], before
         installer.shutdown()
 
     installed = machine("installed", target(0))
@@ -195,8 +198,11 @@ pkgs.testers.runNixOSTest {
         # Grown at boot (systemd-repart in the initrd, then the file system's autoResize), from the
         # image's 6 GB: the root's partition, the last, and only it.
         installed.wait_until_succeeds("test $(df --output=size -B1 / | tail -1) -gt 10000000000", timeout=120)
-        installed.succeed("journalctl -b --no-pager --identifier systemd-repart --grep 'Growing existing partition 3'")
-        assert installed.succeed("sfdisk --dump /dev/vda | grep '^/dev/vda2 '").strip() == record, "the record's partition is untouched"
+        # repart numbers partitions from 0: vda3 is its 2. It ran (the layout check let it), grew the
+        # root, and neither of the others.
+        installed.succeed("journalctl -b --no-pager --identifier systemd-repart --grep 'Growing existing partition 2\\.'")
+        installed.fail("journalctl -b --no-pager --identifier systemd-repart --grep 'existing partition [01]\\.'")
+        assert installed.succeed("sfdisk --dump /dev/vda | grep -E '^/dev/vda[12] '").strip() == before, "the ESP's and the record's partitions are untouched"
         assert installed.succeed("test $(( $(cat /sys/class/block/vda3/start) + $(cat /sys/class/block/vda3/size) )) -gt $(( 11 << 21 )) && echo ok").strip() == "ok"
         installed.fail("systemctl cat growpart.service")
         # One btrfs file system, each subvolume where it belongs, and the record not under /var/lib's.
@@ -223,7 +229,7 @@ pkgs.testers.runNixOSTest {
                 'let c = (import ${self.inputs.nixpkgs}/nixos/lib/eval-config.nix { system = "${system}"; '
                 'modules = [ /var/lib/torq/install/hardware-configuration.nix { boot.loader.grub.enable = false; system.stateVersion = "26.05"; } ]; }).config; in '
                 '{ mounts = builtins.mapAttrs (_: f: { inherit (f) device fsType options autoResize neededForBoot; }) c.fileSystems; '
-                'grow = { inherit (c.boot.initrd.systemd.repart) enable; partitions = c.systemd.repart.partitions; growpart = c.boot.growPartition; }; virtio = builtins.elem "virtio_pci" c.boot.initrd.availableKernelModules; }'
+                'grow = { inherit (c.boot.initrd.systemd.repart) enable; partitions = c.systemd.repart.partitions; growpart = c.boot.growPartition; layout = c.boot.initrd.systemd.services.systemd-repart.serviceConfig.ExecCondition; }; virtio = builtins.elem "virtio_pci" c.boot.initrd.availableKernelModules; }'
             )
         )
         got = json.loads(got)

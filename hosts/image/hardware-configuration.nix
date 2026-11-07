@@ -30,17 +30,45 @@ in
   };
   # The root grown to the disk at boot, by systemd-repart in the initrd, then btrfs by the file system's
   # autoResize (x-systemd.growfs, after repart). Not growpart (boot.growPartition): cloud-utils needs Python
-  # (ADR-032, amended). repart matches its definitions, in name order, to the disk's partitions of the
-  # same type, in order: the ESP has none and is left as it is; both others are Linux's generic type, so
-  # the record's (the 1 GiB ext4 `torq`, partition 2) must come first, with no share of free space
-  # (Weight 0), or the root's definition would match it. Only the last partition, the root, grows; repart
-  # never moves, shrinks or deletes a partition, nor writes into one it does not create (the labels are
-  # the ones hosts/image/disk.nix gives, so it leaves the record's table entry as it is).
-  boot.initrd.systemd.repart.enable = true;
-  systemd.repart.partitions = {
-    "10-torq" = { Type = "linux-generic"; Label = "torq"; Weight = 0; };
-    "20-root" = { Type = "linux-generic"; Label = "nixos"; };
-  };
+  # (ADR-032, amended). On the image's layout only (hosts/image/disk.nix): the ESP; the record's ext4
+  # `torq`, of TorqOS's own partition type, which no definition here names, so repart leaves it and its
+  # table entry alone; the root, last, of Linux's generic type, which the one definition matches and
+  # grows into the free space after it. repart never moves, shrinks or deletes a partition, but it does
+  # rewrite the partition table (the root's entry, its size; a label where one is empty). Any other
+  # layout, and repart is not run at all (the check below).
+  systemd.repart.partitions."20-root" = { Type = "linux-generic"; Label = "nixos"; };
+  boot.initrd.systemd =
+    let
+      esp = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+      record = "79312c32-17cc-4864-8a4c-5a6d06522000"; # TorqOS's record (hosts/image/disk.nix)
+      linux = "0fc63daf-8483-4772-8e79-3d69d8477de4";
+      # Exits 0 (grow) only if the root is partition 3, named nixos, of a GPT disk holding exactly the
+      # ESP, the record and it, each of its type; anything else (an error included) skips repart.
+      layout = pkgs.writeShellScript "torq-repart-layout" ''
+        set -u
+        prop() { udevadm info -q property --property="$2" --value "/dev/$1"; }
+        root=$(udevadm info -q name /dev/disk/by-label/nixos) || exit 1
+        [ "$(prop "$root" ID_PART_ENTRY_SCHEME)" = gpt ] || exit 1
+        [ "$(prop "$root" ID_PART_ENTRY_NAME)" = nixos ] || exit 1
+        [ "$(prop "$root" ID_PART_ENTRY_NUMBER)" = 3 ] || exit 1
+        disk=$(prop "$root" ID_PART_ENTRY_DISK) && [ -n "$disk" ] || exit 1
+        seen=""
+        for p in /sys/dev/block/"$disk"/*/partition; do
+          [ -e "$p" ] || exit 1
+          n=$(< "$p"); d=''${p%/partition}; d=''${d##*/}
+          case "$n:$(prop "$d" ID_PART_ENTRY_TYPE)" in
+            "1:${esp}" | "2:${record}" | "3:${linux}") seen="$seen$n" ;;
+            *) exit 1 ;;
+          esac
+        done
+        [ "$seen" = 123 ] || exit 1
+      '';
+    in
+    {
+      repart.enable = true;
+      storePaths = [ layout ];
+      services.systemd-repart.serviceConfig.ExecCondition = "${layout}";
+    };
   # VMware ESXi's disk controllers (PVSCSI, LSI Logic SAS and parallel), on x86_64, where ESXi
   # runs: its default for a Linux guest is one of these, which the profile above (virtio, for QEMU)
   # does not cover. SATA and NVMe are covered by NixOS's defaults.
