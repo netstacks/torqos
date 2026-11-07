@@ -1000,8 +1000,8 @@ impl Broker {
             }
         }
         // The old machine's history is this one's: in, whole, and this adoption on top of it.
-        self.ledger.install(&fs::read(self.state_dir.join("adopt-ledger.jsonl")).context("reading the staged ledger")?).context("installing the ledger")?;
-        let e = self.ledger.append(NewEntry {
+        let staged = fs::read(self.state_dir.join("adopt-ledger.jsonl")).context("reading the staged ledger")?;
+        let e = self.ledger.install(&staged, NewEntry {
             actor: "user".into(),
             approved_by: None,
             kind: "adopted".into(),
@@ -1013,7 +1013,7 @@ impl Broker {
                 if switched.is_ok() { "" } else { "; the switch reported a problem: show system alarms, and restart if it still runs the image" }
             ),
             data: self.with_system(json!({ "commit": commit, "url": url, "from": a.head })),
-        })?;
+        }).context("installing the ledger")?;
         // Done: from here nothing may undo it. What is left is housekeeping.
         let _ = r.set_verified(&a.tip);
         let _ = fs::remove_dir_all(&stage_path);

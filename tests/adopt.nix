@@ -121,7 +121,8 @@ pkgs.testers.runNixOSTest {
         answer(second, "Second-7731-secret")
         on_console(second, "Become this machine?")
         answer(second, "yes")
-        second.wait_until_succeeds("test -s /var/lib/torq/state/ledger.jsonl", timeout=300)
+        # The adoption's own entry, not just a ledger: the switch comes before it, and the console with it.
+        second.wait_until_succeeds("tail -n 1 /var/lib/torq/state/ledger.jsonl | grep -q '\"kind\":\"adopted\"'", timeout=300)
         second.wait_for_unit("getty@tty1.service")
         out = second.succeed("cat /var/lib/torq/state/ledger.jsonl")
         assert out.startswith(entries), "the old machine's history, whole, is this one's"

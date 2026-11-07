@@ -129,10 +129,18 @@ impl Ledger {
         self.split().is_ok_and(|(_, tail)| !tail.is_empty())
     }
 
-    /// A whole ledger from elsewhere, at once (a machine adopting another's): all of it, or none.
-    pub fn install(&self, bytes: &[u8]) -> Result<()> {
+    /// A whole ledger from elsewhere and the entry that follows it, at once (a machine adopting
+    /// another's): both or neither, so a machine is never the other's with no record of becoming it.
+    pub fn install(&self, bytes: &[u8], next: NewEntry) -> Result<Entry> {
         let _guard = self.exclusive()?;
-        self.write_durably(&self.path, bytes)
+        let text = std::str::from_utf8(bytes).context("the ledger is not text")?;
+        let entries = Self::parse(text)?;
+        verify_entries(&entries)?;
+        let entry = self.next_entry(&entries, next)?;
+        let mut all = bytes.to_vec();
+        all.extend_from_slice(format!("{}\n", serde_json::to_string(&entry)?).as_bytes());
+        self.write_durably(&self.path, &all)?;
+        Ok(entry)
     }
 
     fn mend_locked(&self) -> Result<Option<Entry>> {

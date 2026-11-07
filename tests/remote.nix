@@ -249,6 +249,8 @@ pkgs.testers.runNixOSTest {
         head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
         diff = f"--- a/desktop.json\n+++ b/desktop.json\n@@ -1 +1 @@\n-{machine.succeed(f'cat {repo}/desktop.json').strip()}\n+{{\"n\": 77}}\n"
         machine.succeed(f"printf %s {shlex.quote(diff)} > /tmp/c.diff")
+        # A test VM boots with no system profile: give it the one a machine has.
+        machine.succeed("nix-env -p /nix/var/nix/profiles/system --set $(readlink -f /run/current-system)")
         p = json.loads(machine.succeed(f"torq-broker --json propose --actor user --base {head} --diff /tmp/c.diff --reason 'confirmed'"))
         machine.succeed(f"torq-broker --json apply {p['seq']} --approved-by dev --confirm 30")
         machine.succeed("torq-broker push")
