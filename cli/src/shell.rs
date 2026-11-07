@@ -1049,13 +1049,14 @@ fn apply_warning(body: &serde_json::Value, read: Option<&[String]>) -> (String, 
     }
     let cuts: Vec<String> = body["data"]["cuts_off"].as_array().into_iter().flatten().filter_map(|s| s.as_str()).map(|s| history::one_line(s, 80)).collect();
     let confirm = (!cuts.is_empty()).then_some(CUTS_OFF_MINUTES);
+    if body["tier"] != "user" {
+        why.push_str("This changes the system (all users). ");
+    }
     if !cuts.is_empty() {
         why.push_str(&format!(
             "It changes {}, which could cut this machine off the network or the screen: it is applied as a commit confirmed, and rolls itself back in {CUTS_OFF_MINUTES} minutes unless you confirm it (configure; commit). ",
             cuts.join(", ")
         ));
-    } else if body["tier"] != "user" {
-        why.push_str("This changes the system (all users). ");
     }
     (why, confirm)
 }

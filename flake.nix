@@ -117,6 +117,7 @@
         agent = import ./tests/agent.nix { inherit pkgs self; };
         agent-run = import ./tests/agent-run.nix { inherit pkgs self; };
         doctor = import ./tests/doctor.nix { inherit pkgs self; };
+        agent-proposals = import ./tests/agent-proposals.nix { inherit pkgs self; };
         remote = import ./tests/remote.nix { inherit pkgs self; };
         adopt = import ./tests/adopt.nix { inherit pkgs self; };
         strict = import ./tests/strict.nix { inherit pkgs self; };
