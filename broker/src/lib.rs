@@ -14,6 +14,7 @@ pub mod agent;
 pub mod config;
 pub mod remote;
 pub mod snapshot;
+pub mod inputs;
 pub mod ledger;
 pub mod policy;
 pub mod repo;
@@ -113,6 +114,14 @@ struct DropFile(PathBuf);
 impl Drop for DropFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// A folder of the broker's own, gone when it is dropped.
+struct DropDir(PathBuf);
+impl Drop for DropDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -1861,6 +1870,75 @@ impl Broker {
         Ok(())
     }
 
+    /// What a commit's flake.lock builds, checked against what names it, before anything builds it
+    /// (`inputs`; the audit of 2026-11-04, A2). Each input it changes is fetched again by its `rev` and
+    /// its hash compared; TorqOS's own releases are checked to be signed by the release key.
+    fn check_inputs(&self, before: &str, commit: &str) -> Result<()> {
+        let old = self.repo.text_at_most(before, "flake.lock", 1 << 20).unwrap_or_default();
+        let new = self.repo.text_at_most(commit, "flake.lock", 1 << 20).unwrap_or_default();
+        let changes = inputs::changed(&old, &new)?;
+        let fetch = inputs::to_fetch(&changes);
+        if !fetch.is_empty() {
+            let file = self.state_dir.join("inputs.json");
+            fs::write(&file, serde_json::to_vec(&fetch)?)?;
+            let out = config::command("timeout")
+                .args(["600", "nix", "eval", "--impure", "--json", "--expr", &inputs::expr(&file)])
+                .stdin(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .context("fetching the changed inputs again")?;
+            let _ = fs::remove_file(&file);
+            if !out.status.success() {
+                bail!("the changed inputs could not be fetched again, to check them: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("?"));
+            }
+            let fetched: serde_json::Value = serde_json::from_slice(&out.stdout).context("reading what was fetched")?;
+            let bad = inputs::mismatched(&changes, &fetched);
+            if !bad.is_empty() {
+                bail!("refused: flake.lock names {} by a hash that is not what its rev fetches: it would build other source than it says", bad.join(", "));
+            }
+        }
+        let releases = fs::read_to_string(inputs::RELEASES).ok().and_then(|s| inputs::releases_repo(&s));
+        for (name, locked) in changes.iter().filter(|(_, l)| inputs::is_release(l, releases.as_deref())) {
+            let rev = locked["rev"].as_str().filter(|r| inputs::rev_ok(r)).with_context(|| format!("refused: {name} names no release"))?;
+            self.release_signed(releases.as_deref().unwrap_or_default(), rev).with_context(|| format!("refused: {name}'s release {}", &rev[..12]))?;
+        }
+        Ok(())
+    }
+
+    /// Release `rev` of `repo` is signed by the release key: that commit alone fetched into a folder of
+    /// its own and checked by git, with nothing of anyone's configuration.
+    fn release_signed(&self, repo: &str, rev: &str) -> Result<()> {
+        let dir = DropDir(self.state_dir.join(format!("release-check-{}", std::process::id())));
+        let _ = fs::remove_dir_all(&dir.0);
+        fs::create_dir(&dir.0).context("a folder to check the release in")?;
+        let git = |args: &[&str]| -> Result<String> {
+            let out = config::command("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("HOME", &dir.0)
+                .env("GNUPGHOME", &dir.0)
+                .arg("-C")
+                .arg(&dir.0)
+                .args(inputs::git_config(Path::new(inputs::SIGNERS)))
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .context("running git")?;
+            if !out.status.success() {
+                bail!("{}", String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("git failed"));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        git(&["init", "-q"])?;
+        git(&["fetch", "-q", "--depth=1", "--no-tags", repo, rev]).context("fetching it")?;
+        if !inputs::ssh_signed(&git(&["cat-file", "commit", rev])?) {
+            bail!("it is not signed by the TorqOS release key ({}): no SSH signature", inputs::SIGNERS);
+        }
+        git(&["verify-commit", rev]).with_context(|| format!("it is not signed by the TorqOS release key ({})", inputs::SIGNERS))?;
+        Ok(())
+    }
+
     /// Where a proposal's diff and what it does are kept: beside the ledger, by their hash, so the
     /// ledger stays small however big they are (the audit of M3, M4; N19). The remote gets them with
     /// the ledger (`sync_remote`).
@@ -2568,7 +2646,10 @@ impl Broker {
         // This attempt's own, in milliseconds: never a ledger number, which `torq break-glass` could take
         // while the build runs, and never an earlier attempt's, whose timer may still be waiting.
         let timer = chrono::Utc::now().timestamp_millis().unsigned_abs();
+        // What the lock builds, checked before anything builds it (A2): refused, as a failed build is.
+        let checked = if files.iter().any(|f| f == "flake.lock") { self.check_inputs(&before, &commit) } else { Ok(()) };
         let activated = match (confirm, &anchor_system) {
+            _ if checked.is_err() => Err((checked.unwrap_err(), None)),
             (Some(minutes), Some(anchor)) => self
                 .build_system(&lock, &commit)
                 .and_then(|system| {
