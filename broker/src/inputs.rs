@@ -52,7 +52,11 @@ pub fn to_fetch(changes: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
         .map(|(n, l)| {
             let mut a = l.clone();
             if let Some(o) = a.as_object_mut() {
-                o.remove("narHash");
+                // What is checked, and what Nix derives itself from what it fetches: given back, they
+                // would have to match too, and say nothing about what is built.
+                for k in ["narHash", "lastModified", "lastModifiedDate", "revCount"] {
+                    o.remove(k);
+                }
             }
             (n.clone(), a)
         })
