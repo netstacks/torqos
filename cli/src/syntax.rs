@@ -58,6 +58,8 @@ pub enum Op {
     /// The configuration's remote (ADR-036).
     ShowRemote,
     ShowSnapshots,
+    /// The declared backups: their keys, snapshots and last runs (ADR-038).
+    ShowBackups,
     ShowServices,
     /// `show system ledger [<count>]`: the ledger itself — every change, refused and failed ones too.
     ShowLedger { count: Option<usize> },
@@ -129,6 +131,10 @@ pub enum Request {
     SnapshotDelete { change: u64 },
     /// Put a path back as it was before a change (ADR-038).
     RestoreData { change: u64, path: String },
+    /// A declared backup's key, typed at the terminal and kept outside the configuration (ADR-038).
+    BackupKey { name: String },
+    /// Put a path back from a declared backup (`None`: its newest snapshot).
+    Restore { name: String, snapshot: Option<String>, path: String },
     /// This machine's key for the remote (ADR-036), made the first time.
     RemoteKey,
     /// Clear the remote's alarm (ADR-036), ledgered.
@@ -231,6 +237,7 @@ pub fn render(op: &Op) -> String {
         Op::ShowProposals => "show system proposals".into(),
         Op::ShowRemote => "show system remote".into(),
         Op::ShowSnapshots => "show system snapshots".into(),
+        Op::ShowBackups => "show system backups".into(),
         Op::ShowServices => "show services".into(),
         Op::ShowLedger { count: None } => "show system ledger".into(),
         Op::ShowLedger { count: Some(n) } => format!("show system ledger {n}"),
@@ -249,6 +256,9 @@ pub fn render(op: &Op) -> String {
             Request::Apply { proposal } => format!("request system apply {proposal}"),
             Request::RestoreData { change, path } => format!("request system snapshot restore {change} {path}"),
             Request::SnapshotTake => "request system snapshot take".into(),
+            Request::BackupKey { name } => format!("request system backup key {}", quote(name)),
+            Request::Restore { name, snapshot: None, path } => format!("request system restore {} {path}", quote(name)),
+            Request::Restore { name, snapshot: Some(s), path } => format!("request system restore {} {s} {path}", quote(name)),
             Request::SnapshotDelete { change } => format!("request system snapshot delete {change}"),
             Request::LedgerAcknowledge => "request system ledger acknowledge".into(),
             Request::RemoteKey => "request system remote key".into(),
@@ -328,6 +338,7 @@ mod tests {
             (Mode::Operational, Op::ShowProposals),
             (Mode::Operational, Op::ShowRemote),
             (Mode::Operational, Op::ShowSnapshots),
+            (Mode::Operational, Op::ShowBackups),
             (Mode::Operational, Op::ShowAlarms { display: detail }),
             (Mode::Operational, Op::ShowServices),
             (Mode::Operational, Op::ShowVersion),
@@ -346,6 +357,9 @@ mod tests {
             (Mode::Operational, Op::Request(Request::Apply { proposal: 12 })),
             (Mode::Operational, Op::Request(Request::RestoreData { change: 12, path: "/home/alice/a".into() })),
             (Mode::Operational, Op::Request(Request::SnapshotTake)),
+            (Mode::Operational, Op::Request(Request::BackupKey { name: "nas".into() })),
+            (Mode::Operational, Op::Request(Request::Restore { name: "nas".into(), snapshot: None, path: "/home/alice/a".into() })),
+            (Mode::Operational, Op::Request(Request::Restore { name: "nas".into(), snapshot: Some("4bd1d0c5".into()), path: "/var/lib/pg".into() })),
             (Mode::Operational, Op::Request(Request::SnapshotDelete { change: 12 })),
             (Mode::Operational, Op::Request(Request::LedgerAcknowledge)),
             (Mode::Operational, Op::Request(Request::RemoteKey)),
@@ -426,7 +440,7 @@ mod tests {
             (Mode::Configuration, "top top show", "'top' is not a word here (after `top`) (one of: commit, delete, edit"),
             (Mode::Operational, "exit now", "'now' is not a word here: nothing may follow `exit`"),
             (Mode::Operational, "show packages", "needs <word> (words to search for, in names and descriptions)"),
-            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, commit, ledger, proposals, remote, rollback, snapshots, storage, uptime"),
+            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, backups, commit, ledger, proposals, remote, rollback, snapshots, storage, uptime"),
             (Mode::Operational, "request system revert x", "'x' is not a number (change numbers: 1, 2, …)"),
             (Mode::Configuration, "up 0", "'0' is out of range: levels go from 1 to 10000"),
             (Mode::Configuration, "commit check comment x", "'comment' is not a word here: nothing may follow `commit check`"),

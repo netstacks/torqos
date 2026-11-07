@@ -178,7 +178,7 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
 - [x] **Strict mode and `torq break-glass`** (ADR-035): sudoers limited to TorqOS's commands; a root
       shell only after a ledger entry, anchored. A VM test that a shell leaves its entry.
 - [x] **Data snapshots before each system change** (ADR-038) on btrfs, in new images; restored by a person, with `request system snapshot restore`. The
-      backup and offering data at `rollback` are not built.
+      backup is built too (2026-11-07, under M4's data item); offering data at `rollback` is not.
 - [x] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
       the `Ledger-Entry` trailer cross-check.
 
@@ -192,7 +192,8 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. Can run 
       for a person's own builds in the tree (`users <name> projects`), user tier; what TorqOS refuses
       (`curl | sh`, self-updaters) said where it can see it.
 - [ ] **Data declared** (ADR-038): `services syncthing` and a sync mount as tree settings; the
-      backup (`services restic backups`) with its key outside the repo; `request system restore`;
+      backup (`services restic backups`) with its key outside the repo and `request system restore`
+      (built 2026-11-07: `request system backup key`, `show system backups`, `tests/backup.nix`; KNOWN-GAPS 6zm);
       the restore step in setup's from-a-repository path.
 - [ ] **Approval as a dialog**: a system-tier commit on a desktop asks in a window, with the
       owner's password; the same prompt text torqcli prints.

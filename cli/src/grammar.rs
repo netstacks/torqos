@@ -42,6 +42,10 @@ pub enum Value {
     NixFile,
     /// A network interface of the machine (`show interfaces <interface>`).
     Interface,
+    /// A declared backup's name (`services restic backups <name>`).
+    Backup,
+    /// A backup's snapshot (`latest`, or its id) — or, where it may be left out, the path after it.
+    Snapshot,
     /// Free text (a comment).
     Text,
 }
@@ -58,6 +62,8 @@ impl Value {
             Value::File => "<file>",
             Value::NixFile => "<nix-file>",
             Value::Interface => "<interface>",
+            Value::Backup => "<backup>",
+            Value::Snapshot => "<snapshot>",
             Value::Text => "<\"text\">",
         }
     }
@@ -80,6 +86,11 @@ impl Value {
             Value::Minutes => whole(w, "minutes", 1, 1440).map(drop),
             Value::User if !w.is_empty() => Ok(()),
             Value::File | Value::NixFile | Value::Interface if !w.is_empty() => Ok(()),
+            // As modules/backup.nix asserts a name is (it names its key's file).
+            Value::Backup if (1..=64).contains(&w.len()) && w.starts_with(|c: char| c.is_ascii_alphanumeric()) && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') => Ok(()),
+            Value::Backup => bail!("'{w}' is not a backup's name (letters, digits, - and _: show system backups lists them)"),
+            Value::Snapshot if w == "latest" || w.starts_with('/') || ((8..=64).contains(&w.len()) && w.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) => Ok(()),
+            Value::Snapshot => bail!("'{w}' is neither a snapshot (latest, or an id from show system backups) nor a path"),
             Value::Text => Ok(()),
             _ => bail!("an empty word is not a {}", self.placeholder()),
         }
@@ -244,6 +255,7 @@ static SHOW: &[Node] = &[
 
 static SHOW_SYSTEM: &[Node] = &[
     fixed("alarms", "Whether this machine is as its history says", In::Op).whole(|r| Ok(Op::ShowAlarms { display: r.display })).pipes(Pipes::Views(DETAIL)),
+    fixed("backups", "The backups the configuration declares: whether each has its key, its snapshots, its last run", In::Op).whole(|_| Ok(Op::ShowBackups)).pipes(Pipes::Filters),
     fixed("commit", "The configurations so far, newest first", In::Op).whole(|r| Ok(Op::ShowCommits { display: r.display })).pipes(Pipes::Views(DETAIL)),
     fixed("ledger", "Every change, as the ledger has it (refused and failed ones too)", In::Op).whole(ledger).pipes(Pipes::Filters).then(&[value(Value::Count, "How many entries (20)").whole(ledger).pipes(Pipes::Filters)]),
     fixed("proposals", "Changes proposed and waiting for a person (the agent's): request system apply <n> applies one", In::Op).whole(|_| Ok(Op::ShowProposals)).pipes(Pipes::Filters),
@@ -256,11 +268,13 @@ static SHOW_SYSTEM: &[Node] = &[
 
 static REQUEST_SYSTEM: &[Node] = &[
     fixed("apply", "Apply a change someone else proposed (the agent's): it shows it and asks first", In::Op).then(&[value(Value::Change, "The proposal's number, from show system proposals").whole(|r| Ok(Op::Request(Request::Apply { proposal: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
+    fixed("backup", "A backup the configuration declares (services restic backups)", In::Op).then(&[fixed("key", "Give its key, typed here: kept root's alone, outside the configuration, never in the ledger (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").whole(|r| Ok(Op::Request(Request::BackupKey { name: r.value(Value::Backup).unwrap_or_default().into() })))])]),
     fixed("ledger", "The ledger", In::Op).then(&[fixed("acknowledge", "You have looked into where it and the repository disagree: say no more of it (ledgered; a new one is said as ever)", In::Op).whole(|_| Ok(Op::Request(Request::LedgerAcknowledge)))]),
     fixed("password", "Change a person's password (yours, or <user>'s)", In::Op).whole(password).then(&[value(Value::User, "Whose (yours, if none)").whole(password)]),
     fixed("pull", "Load the configuration waiting on the remote (its incoming branch) into the candidate: nothing changes until you commit it", In::Op).whole(|_| Ok(Op::Request(Request::Pull))),
     fixed("remote", "The configuration's remote", In::Op).then(&[fixed("clear", "Clear its alarm, having looked into it (ledgered; raised again if still true)", In::Op).whole(|_| Ok(Op::Request(Request::RemoteClear))), fixed("key", "This machine's key for it, to add to the repository as a deploy key (made the first time)", In::Op).whole(|_| Ok(Op::Request(Request::RemoteKey)))]),
     fixed("repair", "Return a machine changed outside TorqOS to its last configuration (it asks first)", In::Op).whole(|_| Ok(Op::Request(Request::Repair))),
+    fixed("restore", "Put a path back from a backup, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").then(&[value(Value::Snapshot, "A snapshot's id, from show system backups — or, for the newest, the path").whole(restore).then(&[value(Value::File, "The path, under /home or /var/lib").whole(restore)])])]),
     fixed("revert", "Undo one change: a new change that reverses it (it asks first, unless it only touches your own settings)", In::Op).then(&[value(Value::Change, "The change's number, from show system ledger").whole(|r| Ok(Op::Request(Request::Revert { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
     fixed("snapshot", "The data as it was before a change", In::Op).then(&[fixed("delete", "Delete one, for the room or for what is in it: on the record first, and there is no undoing it (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").whole(|r| Ok(Op::Request(Request::SnapshotDelete { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]), fixed("restore", "Put a path back, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").then(&[value(Value::File, "The path, under /home or /var/lib").whole(|r| Ok(Op::Request(Request::RestoreData { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()?, path: r.value(Value::File).map(String::from).unwrap_or_default() })))])]), fixed("take", "Take one now, before work you may think better of (it asks your password)", In::Op).whole(|_| Ok(Op::Request(Request::SnapshotTake)))]),
     fixed("software", "This machine's software", In::Op).then(&[fixed("rollback", "Load an earlier configuration's software into the candidate (a downgrade)", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(|r| Ok(Op::Request(Request::SoftwareRollback { n: r.number(Value::Rollback).unwrap_or(0) })))])]),
@@ -354,6 +368,19 @@ fn ledger(r: &Read) -> Result<Op> {
 
 fn password(r: &Read) -> Result<Op> {
     Ok(Op::Request(Request::Password { user: r.value(Value::User).map(String::from) }))
+}
+
+/// `request system restore <backup> [<snapshot>] <path>`: one word after the name is the path (the
+/// newest snapshot); two, the snapshot and the path.
+fn restore(r: &Read) -> Result<Op> {
+    let name = r.value(Value::Backup).unwrap_or_default().to_string();
+    let first = r.value(Value::Snapshot).unwrap_or_default();
+    Ok(Op::Request(match r.value(Value::File) {
+        Some(_) if first.starts_with('/') => bail!("'{first}' is a path: the snapshot comes before it (request system restore {name} <snapshot> <path>)"),
+        Some(path) => Request::Restore { name, snapshot: Some(first.to_string()), path: path.to_string() },
+        None if first.starts_with('/') => Request::Restore { name, snapshot: None, path: first.to_string() },
+        None => bail!("needs <file> (the path, under /home or /var/lib) after the snapshot"),
+    }))
 }
 
 fn update(r: &Read) -> Result<Op> {

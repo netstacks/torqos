@@ -54,6 +54,10 @@ pub struct Settings {
     /// Take a snapshot of the data before a change (ADR-038): `{label}`. Empty: this machine does not.
     #[serde(default)]
     pub snapshot: String,
+    /// The backups the configuration declares (ADR-038, `services.restic.backups`): each one's name, and
+    /// the restic command with its repository and key already set (modules/backup.nix). None: none.
+    #[serde(default)]
+    pub backups: std::collections::BTreeMap<String, String>,
 }
 
 /// What the caller asked for, by flag or `TORQ_*` variable; None where nothing was given.
@@ -124,6 +128,7 @@ impl Settings {
             agent: crate::agent::Limits::default(),
             remote: None,
             snapshot: String::new(),
+            backups: Default::default(),
         }
     }
 
@@ -203,6 +208,7 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             agent: defaults.agent,
             remote: defaults.remote,
             snapshot: defaults.snapshot,
+            backups: defaults.backups,
         }),
     }
 }
@@ -274,6 +280,7 @@ mod tests {
             agent: crate::agent::Limits::default(),
             remote: None,
             snapshot: String::new(),
+            backups: Default::default(),
         }
     }
     fn defaults() -> Settings {

@@ -63,6 +63,9 @@ enum Cmd {
     RestoreData { seq: u64, path: String, approved_by: String },
     SnapshotTake { approved_by: String },
     SnapshotDelete { seq: u64, approved_by: String },
+    Backups,
+    BackupKey { name: String, key_file: PathBuf, approved_by: String },
+    BackupRestore { name: String, snapshot: Option<String>, path: String, approved_by: String },
     AdoptKey { url: String },
     AdoptInspect { url: String },
     Adopt { url: String, own: PathBuf, head: String, tip: String, user: String },
@@ -179,6 +182,9 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("verify-store").about("Check the running system's store paths against what the store recorded when each was built (the audit of M3, M5); kept for status."))
         .subcommand(Command::new("snapshots").about("The snapshots of the data this machine still has (ADR-038)."))
         .subcommand(Command::new("restore-data").about("Put a path back as it was before a change (ADR-038): as its owner, what is there set aside, ledgered.").arg(seq()).arg(Arg::new("path").long("path").required(true)).arg(by()))
+        .subcommand(Command::new("backups").about("The backups the configuration declares (ADR-038): whether each has its key, the snapshots its repository holds, and how it last ran. Read only."))
+        .subcommand(Command::new("backup-key").about("Keep a declared backup's key (its passphrase, read from a file) root's alone, outside the config repo, where its passwordFile points; ledgered without the key.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("key-file").long("key-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
+        .subcommand(Command::new("backup-restore").about("Put a path back from a declared backup (ADR-038): restic restores it where only root can reach it, then its owner writes it, what is there set aside; ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("snapshot").long("snapshot").help("A snapshot's id [default: latest].")).arg(Arg::new("path").long("path").required(true)).arg(by()))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
         .subcommand(Command::new("ledger-acknowledge").about("A person has looked into where the ledger and the repository disagree: said no more, and on the record.").arg(by()))
         .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
@@ -228,6 +234,9 @@ fn parse_cli() -> Cli {
         "remote-clear" => Cmd::RemoteClear { approved_by: by(sub) },
         "ledger-acknowledge" => Cmd::Acknowledge { approved_by: by(sub) },
         "fetch-incoming" => Cmd::FetchIncoming,
+        "backups" => Cmd::Backups,
+        "backup-key" => Cmd::BackupKey { name: s(sub, "name").unwrap_or_default(), key_file: p(sub, "key-file").unwrap_or_default(), approved_by: by(sub) },
+        "backup-restore" => Cmd::BackupRestore { name: s(sub, "name").unwrap_or_default(), snapshot: s(sub, "snapshot"), path: s(sub, "path").unwrap_or_default(), approved_by: by(sub) },
         "snapshots" => Cmd::Snapshots,
         "verify-store" => Cmd::VerifyStore,
         "snapshot-take" => Cmd::SnapshotTake { approved_by: by(sub) },
@@ -334,6 +343,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_system_profile(&s.system_profile)
         .with_confirm_commands(&s.build, &s.activate, &s.boot, &s.schedule)
         .with_snapshots(&s.snapshot)
+        .with_backups(&s.backups)
         .with_people(&s.people)
         .with_agent_limits(&s.agent)
         .with_remote(s.remote.as_deref())
@@ -345,7 +355,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     let writes = matches!(
         cli.cmd,
         Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. }
-            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. }
     );
     let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
     match cli.cmd {
@@ -449,16 +459,19 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 println!("initialised {} (ledger: {})", s.repo.display(), b.ledger.path().display());
             }
         }
+        Cmd::Backups => println!("{}", serde_json::to_string(&b.backups())?),
+        Cmd::BackupKey { name, key_file, approved_by } => {
+            let key = plain_file(&key_file, torq_broker::backup::KEY_MAX as u64 + 1, "the key")?;
+            let e = b.set_backup_key(&name, key.strip_suffix('\n').unwrap_or(&key), &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::BackupRestore { name, snapshot, path, approved_by } => println!("{}", serde_json::to_string(&b.restore_backup(&name, snapshot.as_deref(), &path, &approved_by)?)?),
         Cmd::Password { user, hash_file, approved_by } => {
             // (A file, as a diff is passed: the caller's standard input is sudo's, for its own password.)
-            // A plain file, never followed through a link (it is opened as root).
-            use std::os::unix::fs::OpenOptionsExt;
-            let f = std::fs::OpenOptions::new().read(true).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(&hash_file).context("reading the hash (a plain file, not a link)")?;
-            if !f.metadata()?.is_file() {
-                anyhow::bail!("the hash file is not a plain file");
-            }
-            let mut hash = String::new();
-            std::io::Read::read_to_string(&mut std::io::Read::take(f, 1024), &mut hash)?;
+            let hash = plain_file(&hash_file, 1024, "the hash")?;
             let e = b.set_password(&user, hash.trim_end(), &approved_by)?;
             if json {
                 return print_entry(&e);
@@ -646,6 +659,18 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     Ok(())
 }
 
+/// A small file a secret came in (a hash, a backup's key): a plain file, never followed through a link
+/// (it is opened as root), at most `max` bytes of it.
+fn plain_file(path: &Path, max: u64, what: &str) -> Result<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(path).with_context(|| format!("reading {what} (a plain file, not a link)"))?;
+    if !f.metadata()?.is_file() {
+        anyhow::bail!("{what} is not in a plain file");
+    }
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut std::io::Read::take(f, max), &mut s)?;
+    Ok(s)
+}
 
 /// Ledger text and proposed diffs are written by whoever proposed, the agent included, and must not
 /// be able to make one thing look like another on a terminal (escape sequences, carriage returns,

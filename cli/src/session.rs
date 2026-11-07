@@ -71,6 +71,12 @@ pub trait Machine {
     fn snapshots(&self) -> Result<String>;
     /// `request system snapshot restore`: put a path back (as `me`, with their password).
     fn restore_data(&self, change: u64, path: &str, me: &str) -> Result<String>;
+    /// `show system backups`: the declared backups, their keys, snapshots and last runs (ADR-038).
+    fn backups(&self) -> Result<String>;
+    /// `request system backup key <name>`: the key typed at the terminal, kept outside the configuration.
+    fn backup_key(&self, name: &str, me: &str) -> Result<String>;
+    /// `request system restore`: put a path back from a backup (as `me`, with their password).
+    fn restore_backup(&self, name: &str, snapshot: Option<&str>, path: &str, me: &str) -> Result<String>;
     /// `request system remote clear`: clear the remote's alarm (as `me`, with their password).
     fn remote_clear(&self, me: &str) -> Result<String>;
     /// The remote's incoming branch, fetched into the config repo: its commit (None: there is none).
@@ -424,7 +430,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowRemote => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowRemote => {
                 self.show_operational(op)
             }
             Op::Request(r) => self.request(r),
@@ -721,6 +727,7 @@ impl<'a> Session<'a> {
             Op::ShowAlarms { display } => self.machine.alarms(display == Some(Display::Detail), self.fit),
             Op::ShowProposals => self.machine.proposals(self.fit),
             Op::ShowSnapshots => self.machine.snapshots(),
+            Op::ShowBackups => self.machine.backups(),
             Op::ShowRemote => self.machine.remote(),
             Op::ShowServices => {
                 // What the configuration in effect turns on: NixOS's services (`services <name> enable`,
@@ -945,6 +952,8 @@ impl<'a> Session<'a> {
             syntax::Request::LedgerAcknowledge => self.machine.acknowledge(&self.me),
             syntax::Request::RestoreData { change, path } => self.machine.restore_data(change, &path, &self.me),
             syntax::Request::SnapshotTake => self.machine.snapshot_take(&self.me),
+            syntax::Request::BackupKey { name } => self.machine.backup_key(&name, &self.me),
+            syntax::Request::Restore { name, snapshot, path } => self.machine.restore_backup(&name, snapshot.as_deref(), &path, &self.me),
             syntax::Request::SnapshotDelete { change } => self.machine.snapshot_delete(change, &self.me),
             syntax::Request::Pull => self.pull(),
             syntax::Request::Update { all } => self.update(all),
@@ -2161,6 +2170,15 @@ mod tests {
         }
         fn snapshots(&self) -> Result<String> {
             Ok("no snapshots\n".into())
+        }
+        fn backups(&self) -> Result<String> {
+            Ok("no backups\n".into())
+        }
+        fn backup_key(&self, name: &str, me: &str) -> Result<String> {
+            Ok(format!("key of {name} for {me}\n"))
+        }
+        fn restore_backup(&self, name: &str, snapshot: Option<&str>, path: &str, me: &str) -> Result<String> {
+            Ok(format!("{path} from {name} {} for {me}\n", snapshot.unwrap_or("latest")))
         }
         fn restore_data(&self, change: u64, path: &str, me: &str) -> Result<String> {
             Ok(format!("{path} before #{change} for {me}\n"))

@@ -11,6 +11,7 @@
 #![forbid(dead_code)]
 
 pub mod agent;
+pub mod backup;
 pub mod config;
 pub mod remote;
 pub mod snapshot;
@@ -68,6 +69,8 @@ pub struct Broker {
     people: Vec<String>,
     /// What the agent may propose (ADR-041).
     agent_limits: agent::Limits,
+    /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
+    backup: backup::Backups,
     /// The config repo's remote, if the owner named one (ADR-036).
     remote: Option<String>,
 }
@@ -600,6 +603,7 @@ impl Broker {
             password_cmd: "chpasswd -e".into(),
             people: Vec::new(),
             agent_limits: agent::Limits::default(),
+            backup: backup::Backups::default(),
             remote: None,
         }
     }
@@ -1133,7 +1137,6 @@ impl Broker {
     /// was there is set aside, not overwritten. The broker's lock is for the checks alone: an owner can
     /// stop their half of the copy, and that must stop no one else. Ledgered, whether it worked or not.
     pub fn restore_data(&self, seq: u64, path: &str, by: &str) -> Result<Entry> {
-        use std::os::unix::fs::MetadataExt;
         let lock = Lock::acquire(&self.state_dir)?;
         // Not on top of a change still in doubt: a machine going back while its data does would leave a
         // person guessing. A check at the start, no more: nothing holds one off during the copy.
@@ -1143,40 +1146,13 @@ impl Broker {
         let entry = self.ledger.get(seq)?;
         let label = entry.body.data["snapshot"]["label"].as_str().filter(|l| snapshot::label_ok(l)).map(String::from).with_context(|| format!("change #{seq} has no snapshot"))?;
         let (tree, parts) = snapshot::data_path(path)?;
-        let path = snapshot::written_out(tree, &parts);
-        let from = self.snapshot_dir.join(&label).join(tree);
-        let (top, last) = snapshot::no_links(&from, &parts).with_context(|| format!("{path} as it was before #{seq}"))?;
-        // A snapshot does not change, so what is read here stays so. A pipe would hang whoever opens it.
-        if !last.is_dir() && !last.is_file() {
-            bail!("{path} was neither a file nor a folder: not restored");
-        }
-        let uid = top.uid();
-        if uid == 0 {
-            bail!("{path} lies in a folder of root's: restoring it needs a root shell (torq break-glass)");
-        }
-        let gid = snapshot::primary_group(&fs::read_to_string("/etc/passwd").context("reading the accounts")?, uid).with_context(|| format!("no account has uid {uid} now, whose {path} this was"))?;
-        let whole = parts.len() == 1;
-        let live_top = snapshot::written_out(tree, &parts[..1]);
-        let live = match fs::symlink_metadata(&live_top) {
-            Ok(m) => Some(m),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && whole => None,
-            Err(e) => return Err(e).with_context(|| format!("{live_top} is not there: restore that first")),
-        };
-        if live.as_ref().is_some_and(|m| m.is_symlink() || m.uid() != uid) {
-            bail!("{live_top} has changed hands since the snapshot: not restored");
-        }
-        let set_aside = format!("{path}.before-{label}");
-        if whole && live.is_some() && fs::symlink_metadata(&set_aside).is_ok() {
-            bail!("{set_aside} is already there: move it first");
-        }
-        // Its own, for each run: nothing else makes two restores of one path keep apart.
-        let stage = format!("{path}.restoring-{label}-{}", std::process::id());
-        let copy = snapshot::Copy { source: from.join(parts.iter().collect::<PathBuf>()), to: &path, set_aside: &set_aside, stage: &stage, folder: last.is_dir(), mode: last.mode(), uid, gid, whole };
+        let copy = snapshot::plan(&self.snapshot_dir.join(&label).join(tree), tree, &parts, &label, &format!("as it was before #{seq}"))?;
+        let (path, set_aside) = (&copy.to, &copy.set_aside);
         drop(lock);
         let done = copy.run();
         let error = done.as_ref().err().map(|e| format!("{e:#}").chars().filter(|c| !c.is_control()).take(300).collect::<String>());
         // What happened, not what was expected: the swap decides, on what is there by then.
-        let kept = done.is_ok() && fs::symlink_metadata(&set_aside).is_ok();
+        let kept = done.is_ok() && fs::symlink_metadata(set_aside).is_ok();
         let e = self.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(by.into()),
@@ -1184,7 +1160,7 @@ impl Broker {
             tier: Tier::System.to_string(),
             tainted: false,
             reason: format!("{path} put back as it was before #{seq}{}", if error.is_some() { ": it failed" } else { "" }),
-            data: json!({ "change": seq, "path": path, "label": label, "set_aside": kept.then_some(&set_aside), "error": error }),
+            data: json!({ "change": seq, "path": path, "label": label, "set_aside": kept.then_some(set_aside), "error": error }),
         })?;
         done.with_context(|| format!("{path} was not restored"))?;
         Ok(e)

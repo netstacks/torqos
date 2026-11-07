@@ -817,6 +817,13 @@
       "users",
       "*",
       "passwordFile"
+    ],
+    [
+      "services",
+      "restic",
+      "backups",
+      "*",
+      "passwordFile"
     ]
   ],
   "packages": [

@@ -700,6 +700,9 @@ fn a_password_is_never_in_the_configuration() {
     for p in ["password", "hashedPassword", "initialPassword", "initialHashedPassword", "hashedPasswordFile", "passwordFile"] {
         assert!(fence.contains(&format!("\"{p}\"")) && tree.password(&w(&format!("users users anyone {p}"))), "{p}");
     }
+    // A backup's key, kept as a password is (ADR-038): its file is not the tree's to point elsewhere.
+    assert!(fence.contains(r#"[ "services" "restic" "backups" "*" "passwordFile" ]"#) && tree.password(&w("services restic backups nas passwordFile")));
+    assert!(!tree.password(&w("services restic backups nas repository")), "where it goes is the tree's");
 }
 
 #[cfg(test)]

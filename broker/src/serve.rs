@@ -181,10 +181,12 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     let scratch = Scratch::new(&settings.state_dir).map_err(&refused)?;
     let diff = req.diff.as_deref().map(|d| scratch.write("change.diff", d)).transpose().map_err(&refused)?;
     let hash = req.hash.as_deref().map(|h| scratch.write("hash", h)).transpose().map_err(&refused)?;
+    let key = req.key.as_deref().map(|k| scratch.write("key", k)).transpose().map_err(&refused)?;
     let cmd = req.args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_default();
     let diff_s = diff.as_ref().map(|p| p.to_string_lossy().into_owned());
     let hash_s = hash.as_ref().map(|p| p.to_string_lossy().into_owned());
-    let args = socket::with_identity(&req.args, &cmd, &who, diff_s.as_deref(), hash_s.as_deref()).map_err(&refused)?;
+    let key_s = key.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let args = socket::with_identity(&req.args, &cmd, &who, diff_s.as_deref(), hash_s.as_deref(), key_s.as_deref()).map_err(&refused)?;
 
     // The arguments as the broker will read them: what they name, for the gate.
     let m = crate::command_line()

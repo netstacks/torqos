@@ -298,6 +298,8 @@ in
         agent = { inherit (config.torq.agent.mayPropose) users settings; };
         # The config repo's remote (ADR-036): none, or an SSH URL.
         remote = config.torq.remote.url;
+        # The backups the configuration declares, each with its restic (ADR-038, modules/backup.nix).
+        backups = cfg.backups;
       };
      }
 

@@ -151,6 +151,9 @@ pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     if let Some(k) = r.loc.iter().find(|k| k.starts_with('_')) {
         bail!("{}: a name starting with _ is a NixOS module directive, not a setting: the tree holds data only", k);
     }
+    if tree.password(&r.loc) && r.loc.first().is_some_and(|w| w == "services") {
+        bail!("{}: a backup's key is never in the configuration, nor pointed at from it: it is kept root's alone, outside it (`request system backup key {}` gives it)", r.loc.join(" "), r.loc.get(3).map_or("<name>", String::as_str));
+    }
     if tree.password(&r.loc) {
         bail!("{}: a password is never in the configuration (everyone can read it, and its history keeps it): `request system password {}` sets one", r.loc.join(" "), r.loc.get(2).map_or("<user>", String::as_str));
     }

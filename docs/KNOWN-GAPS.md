@@ -568,7 +568,7 @@ Its §5 lists claims without a test.
 6zk. **Snapshots of the data (ADR-038).** Open:
    - **Root can delete them, and so can an administrator,** with a password and on the record. They keep
      what a person or a program deletes; a root shell can remove
-     them too, as it can anything on the machine. The backup (not built) is what lives elsewhere.
+     them too, as it can anything on the machine. The backup (6zm) is what lives elsewhere.
    - **What is deleted stays on the disk** until its snapshot goes, ten system changes later (`torq snapshots
      keep`), or an administrator deletes it (`request system snapshot delete`): a person
      who deletes a secret on purpose has not removed it from the machine, and it counts against the disk.
@@ -602,7 +602,7 @@ Its §5 lists claims without a test.
      build after this will say whether the runner has the space.
    - **A deleted snapshot is not wiped:** its blocks are free, not overwritten, so a secret in one is out of
      reach of the file system, not of someone reading the raw disk.
-   - **Not built:** the declared backup, `request system restore`, and offering data at `rollback`.
+   - **Not built:** offering data at `rollback`. The declared backup and `request system restore`: 6zm.
 
 6zl. **The audit of M3 (2026-11-06).** Fixed from it:
    - **H1:** a proposal's gate read the tier it was proposed with, while `apply` used what the diff did
@@ -626,3 +626,28 @@ Its §5 lists claims without a test.
    - **What root leaves outside the configuration** survives a rebuild; only a reinstall clears it.
    - **unix_chkpwd**, setuid, checks a person's own password with no count: a program running as them can
      guess it there, slowly. The audit did not raise it; found while fixing M3.
+
+6zm. **The declared backup (ADR-038, amended 2026-11-07).** Open:
+   - **Tested against a repository on the machine's own disk only** (`tests/backup.nix`). A remote target's
+     credentials — an SFTP key, an `environmentFile` with S3's — are placed by hand, root's, outside what
+     TorqOS keeps or ledgers; only the passphrase is `request system backup key`'s.
+   - **The key here is not the repository's.** Giving a new one changes what the machine reads, not the
+     repository's own key (`restic key passwd`, by hand). A wrong one shows at the next run, and in
+     `show system backups`.
+   - **A backup that runs as another account is refused** (`user`): its key is root's alone.
+   - **A restore takes the room twice over while it runs:** restic writes the path whole into
+     `/var/cache/torq/restoring`, and the owner's copy writes it again beside the target. A disk too full
+     fails it, what is live untouched. A machine stopped mid-restore leaves that copy, root's, until the
+     next restore clears it, and nothing ledgered.
+   - **Everything 6zk says of a snapshot's restore holds** (it is the same copy): set-id bits dropped,
+     extended attributes and ACLs not carried, root's folders not restored, a device node fails it, an
+     owner can stall their half, nothing holds a change off during the copy.
+   - **A path with `*`, `?`, `[`, `]` or `\` in it is not restored by itself:** restic would read it as a
+     pattern. Restore the folder it is in.
+   - **`latest` is the repository's newest,** from whichever machine: where several share one, name the
+     snapshot.
+   - **`show system backups` is anyone's,** and runs restic as root against the repository, a minute at
+     most each: any account can make the machine reach a remote target. Its last run is systemd's, since
+     boot; why it failed, the journal's, shown only to whoever may read the journal.
+   - **Not built:** the restore step in setup's from-a-repository path (ADR-036), and a VM test against a
+     remote target.

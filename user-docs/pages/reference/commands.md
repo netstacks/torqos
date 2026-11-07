@@ -16,10 +16,13 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `show system uptime` | uptime, load and the last change |
 | `show interfaces [<interface>]` | network interfaces' state and addresses |
 | `show system storage` | disks' size and use, and the system versions kept |
+| `show system backups` | the declared backups: their snapshots and how each last ran |
 | `show packages <words>` | search this machine's packages (`*` marks installed ones) |
 | `show services` | the services the configuration turns on, and how SSH is protected |
 | `show users` | people with an account, who is logged in, and their groups |
 | `request system password [<user>]` | change a password (kept outside the configuration) |
+| `request system backup key <backup>` | give a backup's key, its passphrase (kept outside the configuration) |
+| `request system restore <backup> [<snapshot>] <path>` | put a path back from a backup, what is there set aside |
 | `request system update [all]` | load the newest signed TorqOS release (`all`: and nixpkgs) into the candidate |
 | `request system software rollback <n>` | load configuration `<n>`'s software into the candidate (a downgrade) |
 | `request system revert <change>` | undo one recorded change (`#85` or `85`) |
