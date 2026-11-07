@@ -101,7 +101,8 @@ pkgs.testers.runNixOSTest {
         assert "/var/lib/torq/secrets" not in listed, "the keys and password hashes are not in a backup"
         assert "/var/lib/torq/state/ledger.jsonl" in listed, "the rest of /var/lib is"
         out = machine.succeed(as_user("dev", "torqcli show system backups"))
-        assert "last run" in out and "done" in out and "/home /var/lib" in out, out
+        # No timer here, so systemd forgets the run: the newest snapshot is said instead.
+        assert ("last run" in out and "done" in out or "last snapshot" in out) and "/home /var/lib" in out, out
         # Everyone may look; the agent too: what is listed is no secret.
         machine.succeed(as_user("bob", "torqcli show system backups"))
 
@@ -121,7 +122,9 @@ pkgs.testers.runNixOSTest {
 
     with subtest("by its snapshot's id; a service's whole folder, in a folder of root's"):
         snap = json.loads(machine.succeed("torq-broker --json backups"))[0]["snapshots"][-1]["id"][:8]
-        machine.succeed("rm -rf /var/lib/svcdata")
+        # Its contents lost, the folder as its service keeps it: the owner is the machine's word, never
+        # the repository's (the review of the backup, H1). A folder gone altogether is refused, below.
+        machine.succeed("rm -rf /var/lib/svcdata/* && echo damaged > /var/lib/svcdata/db && chown svc:svc /var/lib/svcdata/db")
         rc, out = restore("r2", f"{snap} /var/lib/svcdata")
         assert rc == "done=0", out
         assert machine.succeed("stat -c %U:%a /var/lib/svcdata").strip() == "svc:750"

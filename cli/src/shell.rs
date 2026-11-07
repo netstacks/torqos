@@ -281,7 +281,12 @@ impl Machine for Real<'_> {
                     }
                 }
             } else {
-                out.push_str("    not run since the machine started\n");
+                // systemd forgets a unit nothing refers to (a backup with no timer, run by hand): the newest
+                // snapshot, restic's own record, says when it last succeeded.
+                match b["snapshots"].as_array().and_then(|s| s.iter().filter_map(|x| x["time"].as_str()).max()) {
+                    Some(t) => out.push_str(&format!("    last snapshot {} (systemd keeps no record of the run itself)\n", history::one_line(t, 40))),
+                    None => out.push_str("    not run since the machine started\n"),
+                }
             }
             if let Some(e) = b["error"].as_str() {
                 out.push_str(&format!("    {}\n", history::one_line(e, 200)));

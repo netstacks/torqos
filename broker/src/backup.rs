@@ -391,7 +391,7 @@ impl Broker {
     fn last_run(name: &str) -> Option<Run> {
         let unit = format!("restic-backups-{name}.service");
         let out = config::command("systemctl")
-            .args(["show", &unit, "--property=Result,ExecMainStatus,ExecMainExitTimestamp,ActiveState"])
+            .args(["show", &unit, "--property=Result,ExecMainStatus,InactiveExitTimestamp,InactiveEnterTimestamp,ActiveState"])
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
@@ -399,8 +399,12 @@ impl Broker {
             .filter(|o| o.status.success())?;
         let text = String::from_utf8_lossy(&out.stdout);
         let get = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=')).map(|v| said(v, 100)).unwrap_or_default();
-        let (at, running) = (get("ExecMainExitTimestamp"), get("ActiveState") == "activating");
-        (!at.is_empty() || running).then(|| Run { unit, result: get("Result"), status: get("ExecMainStatus"), at, running })
+        // When it last stopped, if it has started this boot: a oneshot with several commands, as restic's
+        // backup is, has no ExecMainExitTimestamp, and a run went unseen (its VM test caught it).
+        let started = !get("InactiveExitTimestamp").is_empty();
+        let running = get("ActiveState") == "activating";
+        let at = if started && !running { get("InactiveEnterTimestamp") } else { String::new() };
+        (started && (!at.is_empty() || running)).then(|| Run { unit, result: get("Result"), status: get("ExecMainStatus"), at, running })
     }
 
     /// `show system backups`: each declared backup, whether it has its key, what its repository holds,
