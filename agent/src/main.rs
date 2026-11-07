@@ -16,35 +16,27 @@ mod tools;
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 const SETTINGS: &str = "/etc/torq/agent.json";
 
 /// The machine: a program run with nothing of this process's environment but a fixed PATH, its
-/// home and plain output, its input closed.
+/// home and plain output, its input closed, its output and its time bounded (tools::bounded).
 struct Machine {
     home: PathBuf,
 }
 
 impl tools::Host for Machine {
     fn run(&self, program: &Path, args: &[String]) -> Result<String> {
-        let out = Command::new(program)
-            .args(args)
+        let mut cmd = Command::new(program);
+        cmd.args(args)
             .env_clear()
             .env("PATH", "/run/current-system/sw/bin")
             .env("HOME", &self.home)
             .env("NO_COLOR", "1")
             .env("TERM", "dumb")
-            .env("LANG", "C.UTF-8")
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("running {}", program.display()))?;
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-        if !out.status.success() {
-            text.push_str(&format!("\n[{} exited with {}]\n", program.display(), out.status));
-        }
-        Ok(text)
+            .env("LANG", "C.UTF-8");
+        tools::bounded(cmd, tools::MAX_PROGRAM_BYTES, tools::PROGRAM_TIMEOUT).with_context(|| format!("running {}", program.display()))
     }
 }
 

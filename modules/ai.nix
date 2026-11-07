@@ -24,6 +24,11 @@ let
     if m.path != null then m.path
     else if m.url != null then pkgs.fetchurl { inherit (m) url hash; }
     else null;
+  # llama-server's flags that would change where it listens, what it shows or lets be changed, or
+  # which model it loads — TorqOS's own, never the owner's extra ones (a `--flag=value` by its flag).
+  fixedFlags = [ "--host" "--port" "--slots" "--no-slots" "--props" "-m" "--model" "-mu" "--model-url" "-hf" "-hfr" "-hff" "-hfv" "-hffv" "--path" "--api-prefix" "--jinja" "--no-jinja" ];
+  isFixed = f: let name = lib.head (lib.splitString "=" f); in builtins.elem name fixedFlags || lib.hasPrefix "--hf-" name || lib.hasPrefix "-hf" name;
+  refusedFlags = lib.filter isFixed m.extraFlags;
 in
 {
   options.torq.agent.doctor = {
@@ -41,7 +46,8 @@ in
       description = ''
         The OpenAI-compatible endpoint the doctor asks (its base URL, ending in `/v1`). `null`, the
         default: the model on this machine (`torq.agent.model`), llama-server on a unix socket.
-        Anything else is remote: what the tools return — logs, the configuration, the ledger — leaves
+        Anything else is remote: what the tools return — logs, the configuration (a wifi network's key in
+        it too), the ledger — leaves
         the machine, and the doctor says so each time it starts (ADR-005: indicated and ledgered).
         Plain http is accepted only to this machine.
       '';
@@ -68,13 +74,15 @@ in
 
     journal = lib.mkOption {
       type = lib.types.bool;
-      default = local;
-      defaultText = lib.literalExpression "config.torq.agent.doctor.endpoint == null";
+      default = false;
       description = ''
-        Whether the agent may read the system journal: `torq-agent` joins `systemd-journal` (read-only:
-        the group reads the journal's files, and writes and rotates nothing). Every service's log, and
-        every account's, is then the agent's to read — and the model's to be shown. On by default with
-        the local model; off by default with a remote one, where it would send the logs off the machine.
+        Whether the agent may read the system journal. Off by default, with any model. On, the whole
+        `torq-agent` account joins `systemd-journal` — not only the doctor: every program run as the
+        agent gains it, including any tool a person starts with `torq agent run` (Claude Code, which
+        sends what it reads to its own remote service), and every later session of the agent. What it
+        gains is read access to every service's and every account's log; the group writes, rotates and
+        deletes nothing. With a remote endpoint, the doctor also sends what it reads of the journal off
+        the machine. Off, the doctor's journal tool is not offered.
       '';
     };
 
@@ -112,7 +120,17 @@ in
       type = lib.types.listOf (lib.types.strMatching "[A-Za-z0-9._=:-]+");
       default = [ ];
       example = [ "--ctx-size" "16384" "--n-gpu-layers" "99" ];
-      description = "More of llama-server's flags (its context size, GPU layers).";
+      description = ''
+        More of llama-server's flags (its context size, GPU layers). Never those that would change where
+        it listens, what it shows, or which model it loads: --host, --port, --slots, --props, -m/--model,
+        -mu/--model-url, -hf and the --hf-* flags are refused (and TorqOS's own come last).
+      '';
+    };
+    memoryMax = lib.mkOption {
+      type = lib.types.nullOr (lib.types.strMatching "[0-9]+[KMGT%]?");
+      default = "75%";
+      example = "24G";
+      description = "The most memory llama-server may take (systemd's MemoryMax); it is also the first the kernel kills when memory runs out.";
     };
   };
 
@@ -139,6 +157,10 @@ in
           assertion = cfg.apiKeyFile == null || !(lib.hasPrefix "/nix/store/" cfg.apiKeyFile || lib.hasPrefix "/var/lib/torq/config" cfg.apiKeyFile);
           message = "torq.agent.doctor.apiKeyFile: outside the store and the config repo (both are readable by everyone).";
         }
+        {
+          assertion = refusedFlags == [ ];
+          message = "torq.agent.model.extraFlags: ${lib.concatStringsSep " " refusedFlags} would change where llama-server listens, what it shows, or which model it loads: TorqOS sets those.";
+        }
       ];
     }
 
@@ -157,17 +179,25 @@ in
         model = modelFile;
         # A path ending in .sock: llama-server listens there, on no port (its --port is then unused).
         host = socket;
-        # Tool calls need the model's own chat template (--jinja); /slots would show other requests'
-        # prompts to anyone who can connect.
-        extraFlags = [ "--jinja" "--no-slots" ] ++ m.extraFlags;
+        # The owner's flags first, TorqOS's last (llama-server takes a flag's last value): tool calls need
+        # the model's own chat template (--jinja); /slots would show other requests' prompts to anyone
+        # who can connect.
+        extraFlags = m.extraFlags ++ [ "--jinja" "--no-slots" ];
       };
       # The socket in a directory only the service writes. Its mode lets local accounts connect (0666:
       # a umask of 0111; the service's other files are under DynamicUser's private, root-only parents).
+      # No network at all — a unix socket works across network namespaces — so the model, and anything
+      # it was made to do, reaches nothing and is reached by nothing but the socket. The first the
+      # kernel kills when memory runs out, and bounded.
       systemd.services.llama-cpp.serviceConfig = {
         RuntimeDirectory = "llama-cpp";
         RuntimeDirectoryMode = "0755";
         UMask = "0111";
-      };
+        PrivateNetwork = true;
+        RestrictAddressFamilies = lib.mkForce [ "AF_UNIX" ];
+        IPAddressDeny = "any";
+        OOMScoreAdjust = 500;
+      } // lib.optionalAttrs (m.memoryMax != null) { MemoryMax = m.memoryMax; };
     })
   ];
 }

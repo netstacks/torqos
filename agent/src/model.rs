@@ -30,24 +30,32 @@ impl Endpoint {
             }
             return Ok(Endpoint::Unix(PathBuf::from(path)));
         }
-        if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            bail!("{s:?}: not a URL");
+        // No userinfo, query, fragment or backslash anywhere: what curl takes for the host is then
+        // what is checked here (`http://127.0.0.1:1@evil.example/v1` is evil.example to curl).
+        if s.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '@' | '#' | '?' | '\\')) {
+            bail!("{s:?}: an endpoint is a plain URL (no user, query, fragment or backslash)");
         }
-        if let Some(rest) = s.strip_prefix("https://") {
-            if rest.is_empty() {
-                bail!("{s}: no host");
-            }
-            return Ok(Endpoint::Http { base: s.trim_end_matches('/').to_string(), local: false });
+        let (rest, local) = if let Some(rest) = s.strip_prefix("https://") {
+            (rest, false)
+        } else if let Some(rest) = s.strip_prefix("http://") {
+            (rest, true)
+        } else {
+            bail!("{s}: an endpoint is unix:/path, http://127.0.0.1:<port>/v1, or https://…/v1");
+        };
+        let authority = rest.split('/').next().unwrap_or("");
+        if authority.is_empty() {
+            bail!("{s}: no host");
         }
-        if let Some(rest) = s.strip_prefix("http://") {
-            let host = rest.split('/').next().unwrap_or("");
-            let name = if host.starts_with('[') { host.split(']').next().map(|h| format!("{h}]")).unwrap_or_default() } else { host.split(':').next().unwrap_or("").to_string() };
-            if !["127.0.0.1", "localhost", "[::1]"].contains(&name.as_str()) {
+        if local {
+            // The whole host[:port], compared: one of this machine's names, then at most a port.
+            let ok = ["127.0.0.1", "localhost", "[::1]"].iter().any(|h| {
+                authority.strip_prefix(h).is_some_and(|p| p.is_empty() || p.strip_prefix(':').is_some_and(|n| !n.is_empty() && n.len() <= 5 && n.bytes().all(|b| b.is_ascii_digit())))
+            });
+            if !ok {
                 bail!("{s}: plain http only to this machine (127.0.0.1); another host needs https");
             }
-            return Ok(Endpoint::Http { base: s.trim_end_matches('/').to_string(), local: true });
         }
-        bail!("{s}: an endpoint is unix:/path, http://127.0.0.1:<port>/v1, or https://…/v1");
+        Ok(Endpoint::Http { base: s.trim_end_matches('/').to_string(), local })
     }
 
     /// Whether what the model is shown stays on this machine.
@@ -66,28 +74,40 @@ impl Endpoint {
         }
     }
 
+    /// curl's arguments for one request: no configuration file of its own (`-q`, first: the agent's
+    /// home could hold a `.curlrc`), no redirect followed, no proxy, http only to this machine and
+    /// https only elsewhere, an answer of at most 4 MiB within 600 s; the body on its input; the key's
+    /// header, if any, from a file.
+    fn curl_args(&self, header: Option<&Path>) -> Vec<String> {
+        let mut a: Vec<String> = ["-q", "-sS", "--fail-with-body", "--max-time", "600", "--max-filesize", "4194304", "--noproxy", "*", "--proto"]
+            .map(String::from)
+            .to_vec();
+        a.push(if self.local() { "=http" } else { "=https" }.into());
+        a.extend(["-H", "Content-Type: application/json", "-H", "Expect:", "--data-binary", "@-"].map(String::from));
+        if let Some(h) = header {
+            a.extend(["-H".into(), format!("@{}", h.display())]);
+        }
+        match self {
+            Endpoint::Unix(p) => a.extend(["--unix-socket".into(), p.display().to_string(), "http://localhost/v1/chat/completions".into()]),
+            Endpoint::Http { base, .. } => a.push(format!("{base}/chat/completions")),
+        }
+        a
+    }
+
     /// One chat completion: the request's JSON in, the response's JSON out.
     pub fn chat(&self, key: Option<&str>, body: &Value) -> Result<Value> {
         let curl = option_env!("TORQ_CURL").context("this build has no curl (TORQ_CURL; agent/package.nix, `nix develop`)")?;
-        let mut cmd = Command::new(curl);
-        // -q first: no ~/.curlrc. No redirects followed, no proxy, http(s) only.
-        cmd.args(["-q", "-sS", "--fail-with-body", "--max-time", "600", "--noproxy", "*"])
-            .args(["--proto", if self.local() { "=http" } else { "=https" }])
-            .args(["-H", "Content-Type: application/json", "-H", "Expect:", "--data-binary", "@-"]);
         // The key in a private file (0600, in a /tmp the launcher makes the agent's own): never in argv.
         let header = match key {
             Some(k) => {
                 let mut f = tempfile::NamedTempFile::new().context("a private file for the key's header")?;
                 writeln!(f, "Authorization: Bearer {}", k.trim())?;
-                cmd.arg("-H").arg(format!("@{}", f.path().display()));
                 Some(f)
             }
             None => None,
         };
-        match self {
-            Endpoint::Unix(p) => cmd.arg("--unix-socket").arg(p).arg("http://localhost/v1/chat/completions"),
-            Endpoint::Http { base, .. } => cmd.arg(format!("{base}/chat/completions")),
-        };
+        let mut cmd = Command::new(curl);
+        cmd.args(self.curl_args(header.as_ref().map(|f| f.path())));
         let mut child = cmd
             .env_clear()
             .stdin(Stdio::piped())
@@ -131,9 +151,32 @@ mod tests {
         assert!(Endpoint::parse("http://[::1]:8080/v1").unwrap().local());
         let remote = Endpoint::parse("https://api.anthropic.com/v1").unwrap();
         assert!(!remote.local());
-        for bad in ["http://192.168.1.5:8080/v1", "http://127.0.0.1.evil.com/v1", "http://localhost@evil.com/v1", "ftp://x", "unix:relative.sock", "https://", "https://a b"] {
+        for bad in [
+            "http://192.168.1.5:8080/v1", "http://127.0.0.1.evil.com/v1", "http://localhost@evil.com/v1",
+            "http://127.0.0.1:1@evil.example/v1", "http://127.0.0.1:8080@evil.example/v1", "http://[::1]@evil.example/v1",
+            "http://127.0.0.1:80x/v1", "http://127.0.0.1:/v1", "http://127.0.0.1\\@evil.example/v1", "http://127.0.0.1#@evil.example/v1",
+            "http://127.0.0.1?@evil.example/v1", "https://user:pw@api.example/v1", "ftp://x", "unix:relative.sock", "https://", "https://a b",
+        ] {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn curl_reads_no_configuration_and_speaks_only_its_protocol() {
+        let local = Endpoint::parse("http://127.0.0.1:8080/v1").unwrap().curl_args(None);
+        assert_eq!(local[0], "-q", "first, or curl reads ~/.curlrc");
+        let at = |a: &[String], f: &str| a.iter().position(|x| x == f).map(|i| a[i + 1].clone());
+        assert_eq!(at(&local, "--proto").as_deref(), Some("=http"));
+        assert_eq!(at(&local, "--max-filesize").as_deref(), Some("4194304"));
+        assert!(!local.iter().any(|x| x == "-L" || x == "--location"), "no redirect followed");
+        let remote = Endpoint::parse("https://api.anthropic.com/v1").unwrap().curl_args(Some(Path::new("/tmp/h")));
+        assert_eq!(remote[0], "-q");
+        assert_eq!(at(&remote, "--proto").as_deref(), Some("=https"));
+        assert_eq!(remote.last().unwrap(), "https://api.anthropic.com/v1/chat/completions");
+        assert!(remote.windows(2).any(|w| w[0] == "-H" && w[1] == "@/tmp/h"), "the key from a file, never inline");
+        let sock = Endpoint::parse("unix:/run/llama-cpp/llama.sock").unwrap().curl_args(None);
+        assert_eq!(at(&sock, "--unix-socket").as_deref(), Some("/run/llama-cpp/llama.sock"));
+        assert_eq!(at(&sock, "--proto").as_deref(), Some("=http"));
     }
 
     #[test]

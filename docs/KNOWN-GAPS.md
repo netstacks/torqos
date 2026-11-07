@@ -627,14 +627,27 @@ Its §5 lists claims without a test.
    - **unix_chkpwd**, setuid, checks a person's own password with no count: a program running as them can
      guess it there, slowly. The audit did not raise it; found while fixing M3.
 
-6zm. **Doctor mode (ADR-042, built on `work/w3` 2026-11-07).** Open:
+6zm. **Doctor mode (ADR-042, built on `work/w3` 2026-11-07).** Fixed from its review (2026-11-07): the
+   session's record is written before the first model call and after every tool result (a failed
+   call left none); its id is random and made new (inside the launcher every pid is 2); the journal is
+   off by default with any model; a tainted answer is headed so on standard output; plain http's host
+   and port are compared whole and no endpoint has a user, query, fragment or backslash; llama-server
+   has no network, its fixed flags last and the dangerous ones refused, a memory bound; each tool's
+   program is bounded in bytes and time, at most 8 calls a round, curl's answer at most 4 MiB; the
+   configuration taints too; invisible characters are cleaned. Open:
+   - **The taint record is the agent's own.** It lives in the agent's home, which the agent can write:
+     any program run as `torq-agent` (Claude Code under `torq agent run`) can rewrite or delete it, so
+     it is no record against the agent. Before Proposals ship, the taint must be held where the agent
+     cannot write — the broker (ADR-042, 6). Not built.
+   - **The journal, once on, is the whole account's**: every program run as the agent reads every log,
+     Claude Code included (which sends what it reads to its own service). A reader only the doctor has
+     is later.
+   - **With a remote endpoint the configuration leaves the machine**, a wifi network's key in it
+     included, as well as anything else a tool returns.
    - **`tests/doctor.nix` has not been run** yet, and no real model has been tried: the unit tests and
      the VM test use a scripted endpoint. Whether a given local model calls tools well is untested.
    - **Anyone on the machine can use the local model** (its socket is 0666); restricting it to the
      agent's group needs the service off DynamicUser.
    - **llama-server runs from boot** once the local model is on, holding the model in memory; it does
      not start on demand.
-   - **No timeout on a tool's program** (journalctl, torqcli, the hardware tools): one that hangs hangs
-     the doctor (curl has its own, 600 s).
    - **Only an administrator** can run `torq doctor` (it goes through `torq agent run`).
-   - **The journal, once readable, is readable by everything run as the agent**, not only the doctor.

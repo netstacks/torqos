@@ -185,6 +185,7 @@ name = "torq-agent"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "rustix",
  "serde_json",
  "tempfile",
 ]

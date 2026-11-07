@@ -4,7 +4,8 @@
 
 /// `s` with every terminal escape sequence (CSI, OSC, DCS and the other strings, any two-character
 /// ESC sequence, their 8-bit C1 forms) and every control character removed — newlines and tabs kept,
-/// a carriage return dropped — and the bidirectional overrides and isolates removed.
+/// a carriage return dropped — and the bidirectional controls, zero-width characters, the line and
+/// paragraph separators and the byte-order mark removed.
 pub fn clean(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
@@ -24,7 +25,10 @@ pub fn clean(s: &str) -> String {
             '\u{9b}' => skip_csi(&mut it),
             '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => skip_string(&mut it),
             c if c.is_control() => {}
-            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {}
+            // Bidirectional overrides, embeddings and isolates; the marks (LRM, RLM, ALM); zero-width and
+            // invisible characters; the line and paragraph separators; the byte-order mark.
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}' => {}
+            '\u{200b}'..='\u{200d}' | '\u{2060}'..='\u{2064}' | '\u{2028}' | '\u{2029}' | '\u{feff}' => {}
             c => out.push(c),
         }
     }
@@ -72,6 +76,8 @@ mod tests {
             ("line\roverwritten", "lineoverwritten"),
             ("bell\x07 back\x08space nul\0 del\x7f", "bell backspace nul del"),
             ("rtl \u{202e}desrever\u{202c} \u{2066}iso\u{2069}", "rtl desrever iso"),
+            ("z\u{200b}e\u{200c}r\u{200d}o\u{2060} \u{feff}bom \u{200e}l\u{200f}r\u{061c}a", "zero bom lra"),
+            ("one\u{2028}line\u{2029}", "oneline"),
             ("keep\n\ttabs and lines, ünïcödé ✓", "keep\n\ttabs and lines, ünïcödé ✓"),
             ("unterminated \x1b]0;title", "unterminated "),
             ("trailing \x1b", "trailing "),

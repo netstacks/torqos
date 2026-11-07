@@ -219,6 +219,8 @@ torq doctor "why is my wifi flaky?"
 ```
 
 llama-server then runs on `/run/llama-cpp/llama.sock`; 64 GB here is enough for the models in
-question. A remote endpoint instead: `set torq agent doctor endpoint https://…/v1`, its key in a
+question. The journal is off unless `set torq agent doctor journal true` (then every program run as
+the agent reads it). A remote endpoint instead: `set torq agent doctor endpoint https://…/v1` —
+what the tools return, the configuration included, then leaves the machine — its key in a
 file outside the repo (`torq.agent.doctor.apiKeyFile`). The doctor's unit tests need no model:
 `nix develop --command bash -c 'cd agent && cargo test'`.

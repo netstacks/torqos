@@ -1,7 +1,8 @@
 # NixOS VM test: doctor mode (ADR-042) — `torq doctor "<question>"` asks the agent, as `torq-agent`,
 # against a fake model endpoint (a scripted server, not a model). It reads the journal, which holds a
 # hostile line; the model asks for a tool that writes, and is refused; the answer it gives, full of
-# escapes, reaches the person clean; the session is tainted; and nothing at all was proposed.
+# escapes, reaches the person clean and headed as tainted; the session is tainted by each tool that
+# returns untrusted text; and nothing at all was proposed.
 { pkgs, self }:
 
 let
@@ -20,7 +21,8 @@ let
         calls(("read_journal", {"grep": "IGNORE", "lines": 20}),
               ("propose_change", {"diff": "--- a/nixos/services.json"}),
               ("show_configuration", {"path": "services; configure; set services openssh enable true; commit"})),
-        calls(("hardware_facts", {"what": "network"}), ("nixos_option_docs", {"path": "networking.wireless"})),
+        calls(("hardware_facts", {"what": "network"}), ("nixos_option_docs", {"path": "networking.wireless"}),
+              ("show_configuration", {}), ("show_ledger", {}), ("show_alarms", {})),
         {"choices": [{"message": {"role": "assistant",
             "content": "\x1b[2J\x1b]0;pwned\x07The access point drops you.\r\x1b[2K Fixed it for you!\x1b[0m"}}]},
     ]
@@ -54,7 +56,7 @@ pkgs.testers.runNixOSTest {
     users.users.dev.hashedPasswordFile = lib.mkForce null;
     users.users.dev.hashedPassword = "$6$torqsocketsalt$Z7RLey3l5vKGfukhfuZYYM/EjWNo7QM8.65r88XmZ9z3/jBCY.NAnH7RwYpiLoE2fedxUd/I7UFcKDX1KEXDg/";
     torq.broker.rebuildCommand = "true";
-    # A remote-looking endpoint on this machine: no model file, no llama-server.
+    # An endpoint on this machine: no model file, no llama-server. The journal turned on (off by default).
     torq.agent.doctor = {
       enable = true;
       endpoint = "http://127.0.0.1:8099/v1";
@@ -90,7 +92,9 @@ pkgs.testers.runNixOSTest {
         code, out = machine.execute("su - dev -c " + shlex.quote("torq doctor 'why is my wifi flaky?' 2>/tmp/doctor.err"))
         err = machine.succeed("cat /tmp/doctor.err")
         assert code == 0, f"exit {code}\n{out}\n{err}"
-        assert out == "The access point drops you. Fixed it for you!\n", repr(out)
+        first, answer = out.split("\n", 1)
+        assert first.startswith("[This answer came from a session that read untrusted text") and "do not paste commands" in first, repr(out)
+        assert answer == "The access point drops you. Fixed it for you!\n", repr(out)
         assert "\x1b" not in out and "\x07" not in out, repr(out)
         assert "REMOTE" not in err and "on this machine" in err, err
         assert "refused propose_change: no such tool" in err, err
@@ -112,7 +116,9 @@ pkgs.testers.runNixOSTest {
         assert len(rec) == 1, rec
         machine.succeed(f"test \"$(stat -c %U {rec[0]})\" = torq-agent")
         r = json.loads(machine.succeed(f"cat {rec[0]}"))
-        assert r["tainted"] is True and "read_journal" in r["taintedBy"] and r["proposed"] == [], r
+        # Each tool it called that returns untrusted text, by name; the option docs not.
+        assert r["tainted"] is True and r["proposed"] == [], r
+        assert sorted(r["taintedBy"]) == sorted(["read_journal", "hardware_facts", "show_configuration", "show_ledger", "show_alarms"]), r["taintedBy"]
         assert len(r["refused"]) == 2, r
 
     with subtest("nothing was proposed or changed"):

@@ -7,7 +7,12 @@
 use crate::clean::clean;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const JOURNALCTL: &str = "/run/current-system/sw/bin/journalctl";
 const TORQCLI: &str = "/run/current-system/sw/bin/torqcli";
@@ -57,10 +62,11 @@ impl Tool {
     }
 
     /// Whether what it returns is untrusted text — written by anyone who can log, a USB device's
-    /// descriptor, a proposal's reason — so a session that read it is tainted (AI-LAYER.md).
-    /// The configuration (each change a person approved) and NixOS's own option docs are not.
+    /// descriptor, a proposal's reason, a configuration value (a network's name, a description,
+    /// a file someone attached) — so a session that read it is tainted (AI-LAYER.md). Only NixOS's
+    /// own option docs are not.
     pub fn taints(self) -> bool {
-        matches!(self, Tool::Journal | Tool::Hardware | Tool::Ledger | Tool::Alarms)
+        !matches!(self, Tool::Options)
     }
 
     fn describe(self) -> (&'static str, Value) {
@@ -84,7 +90,7 @@ impl Tool {
                 "required": ["what"],
                 "additionalProperties": false
             })),
-            Tool::Configuration => ("The machine's configuration as torqcli shows it (`show configuration [<path>]`).", json!({
+            Tool::Configuration => ("The machine's configuration as torqcli shows it (`show configuration [<path>]`). Untrusted text (values).", json!({
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "words of the tree, e.g. \"networking wireless\" or \"services openssh\"; none: all of it" } },
                 "additionalProperties": false
@@ -259,9 +265,96 @@ pub fn perform(action: &Action, host: &dyn Host, schema: &Path) -> Result<String
     Ok(truncate(&clean(&raw), MAX_OUTPUT))
 }
 
+/// What a tool's program may print, at most, before it is stopped (both of its outputs together).
+pub const MAX_PROGRAM_BYTES: usize = 1 << 20;
+/// How long a tool's program may run.
+pub const PROGRAM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `cmd`, its input closed, in a process group of its own; its standard output and error
+/// together, read only up to `cap` bytes — past that, or past `timeout`, the whole group is killed
+/// and the output so far given, with a line saying why.
+pub fn bounded(mut cmd: Command, cap: usize, timeout: Duration) -> Result<String> {
+    use std::os::unix::process::CommandExt;
+    let mut child = cmd.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let group = rustix::process::Pid::from_child(&child);
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let full = Arc::new(AtomicBool::new(false));
+    let (done, finished) = mpsc::channel();
+    let pipes: Vec<Box<dyn Read + Send>> = vec![Box::new(child.stdout.take().context("its output")?), Box::new(child.stderr.take().context("its errors")?)];
+    for mut pipe in pipes {
+        let (buf, full, done) = (buf.clone(), full.clone(), done.clone());
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
+                let room = cap.saturating_sub(b.len());
+                b.extend_from_slice(&chunk[..n.min(room)]);
+                if n > room {
+                    full.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+            let _ = done.send(());
+        });
+    }
+    drop(done);
+    let deadline = Instant::now() + timeout;
+    let mut why = None;
+    let mut closed = 0;
+    while closed < 2 {
+        if full.load(Ordering::Relaxed) {
+            why = Some(format!("more than {cap} bytes"));
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            why = Some(format!("still running after {} s", timeout.as_secs()));
+            break;
+        }
+        match finished.recv_timeout(left.min(Duration::from_millis(50))) {
+            Ok(()) => closed += 1,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    if why.is_some() {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        let _ = child.kill();
+    }
+    let status = child.wait()?;
+    let mut text = String::from_utf8_lossy(&buf.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
+    match why {
+        Some(w) => text.push_str(&format!("\n[stopped: {w}]\n")),
+        None if !status.success() => text.push_str(&format!("\n[exited with {status}]\n")),
+        None => {}
+    }
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_is_stopped_at_its_bounds() {
+        let sh = |script: &str| {
+            let mut c = Command::new("/bin/sh");
+            c.args(["-c", script]);
+            c
+        };
+        assert_eq!(bounded(sh("echo out; echo err >&2"), 1000, Duration::from_secs(5)).unwrap().lines().count(), 2);
+        let t = Instant::now();
+        let out = bounded(sh("while :; do echo yyyyyyyyyyyyyyyy; done"), 4096, Duration::from_secs(20)).unwrap();
+        assert!(out.len() < 4096 + 100 && out.ends_with("[stopped: more than 4096 bytes]\n"), "{}", out.len());
+        // A child of it that keeps the output open is stopped with it (the whole group).
+        let out = bounded(sh("(while :; do :; done) & while :; do :; done"), 4096, Duration::from_secs(1)).unwrap();
+        assert!(out.ends_with("[stopped: still running after 1 s]\n"), "{out}");
+        assert!(t.elapsed() < Duration::from_secs(10));
+        assert!(bounded(sh("exit 3"), 100, Duration::from_secs(5)).unwrap().contains("[exited with"));
+    }
 
     #[test]
     fn only_read_only_tools_exist() {

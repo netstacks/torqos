@@ -83,7 +83,7 @@ Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `reverted`, `revert_
 ## Tool inventory
 
 Built (doctor mode, ADR-042, `agent/src/tools.rs`; all read-only): `read_journal`,
-`hardware_facts`, `show_configuration`, `show_ledger`, `show_alarms`, `nixos_option_docs`. Four of
-them — the journal, hardware, the ledger, alarms — return untrusted text and
+`hardware_facts`, `show_configuration`, `show_ledger`, `show_alarms`, `nixos_option_docs`. All but
+the option docs return untrusted text (a configuration value too) and
 taint the session. Next (Proposals, ADR-042 6): `propose_change`, structured operations on the tree.
 Later: `logs.coredump`, `pkg.search`, `power.status`, `secureboot.status`, `files.read_scoped`.
