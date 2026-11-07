@@ -32,7 +32,7 @@ grep -o -m1 vmx /proc/cpuinfo  # must print vmx
 ```
 
 The disk needs no partitioning work: the image's `hardware-configuration.nix` sets
-`autoResize` and `boot.growPartition`, so the root filesystem grows to fill whatever disk the VM
+`autoResize` and grows its last partition, the root, with systemd-repart in the initrd (ADR-032), so the root filesystem grows to fill whatever disk the VM
 is given on first boot.
 
 ### 2. Install TorqOS from a release image

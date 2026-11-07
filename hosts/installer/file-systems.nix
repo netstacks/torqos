@@ -25,5 +25,17 @@ in
     device = "/dev/disk/by-label/ESP";
     fsType = "vfat";
   };
-  boot.growPartition = true;
+  # The root grown to the disk at boot, by systemd-repart in the initrd, then btrfs by the file system's
+  # autoResize (x-systemd.growfs, after repart). Not growpart (boot.growPartition): cloud-utils needs Python
+  # (ADR-032, amended). repart matches its definitions, in name order, to the disk's partitions of the
+  # same type, in order: the ESP has none and is left as it is; both others are Linux's generic type, so
+  # the record's (the 1 GiB ext4 `torq`, partition 2) must come first, with no share of free space
+  # (Weight 0), or the root's definition would match it. Only the last partition, the root, grows; repart
+  # never moves, shrinks or deletes a partition, nor writes into one it does not create (the labels are
+  # the ones hosts/image/disk.nix gives, so it leaves the record's table entry as it is).
+  boot.initrd.systemd.repart.enable = true;
+  systemd.repart.partitions = {
+    "10-torq" = { Type = "linux-generic"; Label = "torq"; Weight = 0; };
+    "20-root" = { Type = "linux-generic"; Label = "nixos"; };
+  };
 }
