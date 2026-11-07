@@ -24,6 +24,12 @@
     ],
     [
       "torq",
+      "agent",
+      "doctor",
+      "package"
+    ],
+    [
+      "torq",
       "schema"
     ],
     [

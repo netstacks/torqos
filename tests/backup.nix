@@ -78,7 +78,8 @@ pkgs.testers.runNixOSTest {
         machine.fail(as_user("bob", "cat /var/lib/torq/secrets/backup/local"))
         machine.fail(as_user("dev", "cat /var/lib/torq/secrets/backup/local"))
         e = last()
-        assert e["kind"] == "backup_key" and e["approved_by"] == "dev" and e["data"] == {"backup": "local"}, e
+        # (The socket adds who sent it, as it does to every entry; never the key.)
+        assert e["kind"] == "backup_key" and e["approved_by"] == "dev" and e["data"]["backup"] == "local" and set(e["data"]) <= {"backup", "via", "caller"}, e
         # Not in the ledger, the repository and its history, or anything a request left behind.
         machine.fail(f"grep -rF {key} /var/lib/torq/state {repo}")
         machine.fail(f"git -C {repo} log -p --all | grep -F {key}")
