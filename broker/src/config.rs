@@ -54,6 +54,18 @@ pub struct Settings {
     /// Take a snapshot of the data before a change (ADR-038): `{label}`. Empty: this machine does not.
     #[serde(default)]
     pub snapshot: String,
+    /// The backups the configuration declares (ADR-038, `services.restic.backups`): each one's name, and
+    /// the restic command with its repository and key already set (modules/backup.nix). None: none.
+    #[serde(default)]
+    pub backups: std::collections::BTreeMap<String, String>,
+    /// What restores a path from a backup into the broker's room, confined (backup.rs `RESTORE`):
+    /// `{restic}`, `{snapshot}`, `{room}`, `{path}`.
+    #[serde(default = "restore_default")]
+    pub restore: String,
+}
+
+fn restore_default() -> String {
+    crate::backup::RESTORE.into()
 }
 
 /// What the caller asked for, by flag or `TORQ_*` variable; None where nothing was given.
@@ -124,6 +136,8 @@ impl Settings {
             agent: crate::agent::Limits::default(),
             remote: None,
             snapshot: String::new(),
+            backups: Default::default(),
+            restore: crate::backup::RESTORE.into(),
         }
     }
 
@@ -203,6 +217,8 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             agent: defaults.agent,
             remote: defaults.remote,
             snapshot: defaults.snapshot,
+            backups: defaults.backups,
+            restore: defaults.restore,
         }),
     }
 }
@@ -274,6 +290,8 @@ mod tests {
             agent: crate::agent::Limits::default(),
             remote: None,
             snapshot: String::new(),
+            backups: Default::default(),
+            restore: crate::backup::RESTORE.into(),
         }
     }
     fn defaults() -> Settings {

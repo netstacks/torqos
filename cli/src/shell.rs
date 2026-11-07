@@ -253,6 +253,109 @@ impl Machine for Real<'_> {
         ))
     }
 
+    fn backups(&self) -> Result<String> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["backups"])?, &log)?, "show system backups")?;
+        let list = v.as_array().map(Vec::as_slice).unwrap_or_default();
+        if list.is_empty() {
+            return Ok("No backups are declared (set services restic backups <name> repository <where>: ADR-038).\n".into());
+        }
+        let text = |b: &serde_json::Value, k: &str, n: usize| history::one_line(b[k].as_str().unwrap_or(""), n);
+        let mut out = String::from("Backups (request system restore <backup> [<snapshot>] <path>):\n");
+        for b in list {
+            let name = text(b, "name", 64);
+            out.push_str(&format!("  {name}\n"));
+            let run = &b["last_run"];
+            if run["running"].as_bool() == Some(true) {
+                out.push_str("    running now\n");
+            } else if run.is_object() {
+                let failed = run["result"].as_str() != Some("success");
+                out.push_str(&format!("    last run {}: {}\n", text(run, "at", 40), if failed { format!("failed ({}, status {})", text(run, "result", 30), text(run, "status", 10)) } else { "done".into() }));
+                if failed {
+                    // What it said, as the journal has it: read as the person asking, as they may.
+                    let unit = text(run, "unit", 100);
+                    let said = std::process::Command::new("journalctl").args(["-u", &unit, "-n", "3", "-o", "cat", "-q", "--no-pager"]).stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success() && !o.stdout.is_empty());
+                    match said {
+                        Some(o) => String::from_utf8_lossy(&o.stdout).lines().for_each(|l| out.push_str(&format!("      {}\n", history::one_line(l, 160)))),
+                        None => out.push_str(&format!("      (journalctl -u {unit} says why)\n")),
+                    }
+                }
+            } else {
+                out.push_str("    not run since the machine started\n");
+            }
+            if let Some(e) = b["error"].as_str() {
+                out.push_str(&format!("    {}\n", history::one_line(e, 200)));
+            }
+            let snaps = b["snapshots"].as_array().map(Vec::as_slice).unwrap_or_default();
+            if b["error"].is_null() && snaps.is_empty() {
+                out.push_str("    no snapshots yet\n");
+            }
+            const SHOWN: usize = 10;
+            for s in snaps.iter().rev().take(SHOWN) {
+                let paths: Vec<String> = s["paths"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).map(|p| history::one_line(p, 60)).collect();
+                out.push_str(&format!("    {}  {}  {}  {}\n", text(s, "id", 8), text(s, "time", 25), text(s, "host", 30), paths.join(" ")));
+            }
+            if snaps.len() > SHOWN {
+                out.push_str(&format!("    … and {} older\n", snaps.len() - SHOWN));
+            }
+        }
+        Ok(out)
+    }
+
+    fn backup_key(&self, name: &str, me: &str) -> Result<String> {
+        if !std::io::stdin().is_terminal() {
+            bail!("a key is typed at a terminal: `request system backup key {name}` there");
+        }
+        let typed = |q: &str| -> Result<String> {
+            print!("{q}: ");
+            std::io::stdout().flush()?;
+            let _hidden = Echo::set(false);
+            let mut s = String::new();
+            std::io::stdin().lock().read_line(&mut s)?;
+            println!();
+            Ok(s.trim_end_matches(['\n', '\r']).to_string())
+        };
+        // Non-dumpable while it is held, as a password is (ADR-040).
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).context("protecting the key")?;
+        let key = typed(&format!("Key of backup {name} (its repository's passphrase)"))?;
+        if key.is_empty() {
+            bail!("not changed: no key");
+        }
+        if typed("Again")? != key {
+            bail!("not changed: the two differ");
+        }
+        // To the broker as a password's hash goes: a private file, gone as soon as it is read.
+        let scratch = crate::scratch_dir()?;
+        let file = scratch.path().join("key");
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?.write_all(key.as_bytes())?;
+        }
+        let log = run::start_log()?;
+        let file = file.to_string_lossy().into_owned();
+        let v = done(run::broker_json(broker(self.cli, &["backup-key", "--name", name, "--key-file", &file, "--approved-by", me])?, &log)?, "request system backup key")?;
+        Ok(format!(
+            "The key of backup {name} is kept (ledger #{}): root's alone, outside the configuration. Keep it somewhere else too: without it, nothing in the backup can be read.\n",
+            v["seq"].as_u64().unwrap_or(0)
+        ))
+    }
+
+    fn restore_backup(&self, name: &str, snapshot: Option<&str>, path: &str, me: &str) -> Result<String> {
+        let log = run::start_log()?;
+        let mut args = vec!["backup-restore", "--name", name, "--path", path, "--approved-by", me];
+        if let Some(s) = snapshot {
+            args.extend(["--snapshot", s]);
+        }
+        let v = done(run::broker_json(broker(self.cli, &args)?, &log)?, "request system restore")?;
+        let kept = v["data"]["set_aside"].as_str().map_or(String::new(), |a| format!(" What was there is at {}.", history::one_line(a, 120)));
+        Ok(format!(
+            "{} is back from backup {name}, snapshot {} (ledger #{}).{kept} A service using it should be restarted.\n",
+            history::one_line(path, 120),
+            history::one_line(&v["data"]["backup_snapshot"].as_str().unwrap_or("?").chars().take(8).collect::<String>(), 8),
+            v["seq"].as_u64().unwrap_or(0)
+        ))
+    }
+
     fn remote_key(&self) -> Result<String> {
         let log = run::start_log()?;
         let v = done(run::broker_json(broker(self.cli, &["remote-key"])?, &log)?, "request system remote key")?;

@@ -44,6 +44,9 @@ pub struct Request {
     pub hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// A backup's key (`backup-key`): its passphrase, kept root's alone, never in the ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// What comes back, one JSON line at a time: the broker's standard output and error as they come,
@@ -87,7 +90,7 @@ pub struct Change {
 /// asking and who approves (the kernel's), and files (they come in the request).
 const NOT_FROM_CALLERS: &[&str] = &[
     "--repo", "--state-dir", "--rebuild-cmd", "--build-cmd", "--activate-cmd", "--boot-cmd", "--schedule-cmd",
-    "--current-system", "--system-profile", "--actor", "--approved-by", "--diff", "--hash-file",
+    "--current-system", "--system-profile", "--actor", "--approved-by", "--diff", "--hash-file", "--key-file",
 ];
 
 /// Refuse arguments that name the caller, a file, or the broker's settings.
@@ -125,7 +128,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
@@ -171,7 +174,7 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         },
         // Their own password: the current one first, as passwd asks.
         "password" if user == Some(who.name.as_str()) => Gate::Password,
-        "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" => admins_only(),
+        "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-key" | "backup-restore" => admins_only(),
         other => Gate::Refused(format!("`{other}` is not run over the socket (it is the machine's own, as root)")),
     }
 }
@@ -182,8 +185,8 @@ fn own(name: &str, file: &str) -> bool {
 }
 
 /// The arguments the broker runs with: the caller's, then who it is, as this module decided.
-/// `diff` and `hash` are the private files the request's own came to.
-pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str>, hash: Option<&str>) -> Result<Vec<String>> {
+/// `diff`, `hash` and `key` are the private files the request's own came to.
+pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str>, hash: Option<&str>, key: Option<&str>) -> Result<Vec<String>> {
     let mut a = args.to_vec();
     match cmd {
         "propose" => {
@@ -199,7 +202,11 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--hash-file".into(), hash.context("a password needs its hash, in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
         }
-        "apply" | "revert" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" => a.extend(["--approved-by".into(), who.name.clone()]),
+        "backup-key" => {
+            a.extend(["--key-file".into(), key.context("a backup's key comes in the request")?.into()]);
+            a.extend(["--approved-by".into(), who.name.clone()]);
+        }
+        "apply" | "revert" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
         _ => {}
     }
     Ok(a)
@@ -340,12 +347,12 @@ mod tests {
 
     #[test]
     fn identity_is_added_not_taken() {
-        let a = with_identity(&["apply".into(), "3".into()], "apply", &who(1001), None, None).unwrap();
+        let a = with_identity(&["apply".into(), "3".into()], "apply", &who(1001), None, None, None).unwrap();
         assert_eq!(a, ["apply", "3", "--approved-by", "sam"]);
-        assert!(with_identity(&["propose".into(), "--reason".into(), "x".into()], "propose", &who(1000), Some("/run/d"), None).is_err(), "no base");
-        let p = with_identity(&["propose".into(), "--base=c".into(), "--reason".into(), "x".into()], "propose", &who(990), Some("/run/d"), None).unwrap();
+        assert!(with_identity(&["propose".into(), "--reason".into(), "x".into()], "propose", &who(1000), Some("/run/d"), None, None).is_err(), "no base");
+        let p = with_identity(&["propose".into(), "--base=c".into(), "--reason".into(), "x".into()], "propose", &who(990), Some("/run/d"), None, None).unwrap();
         assert_eq!(p, ["propose", "--base=c", "--reason", "x", "--actor", "agent", "--diff", "/run/d"]);
-        assert!(with_identity(&["propose".into()], "propose", &who(1000), None, None).is_err(), "a proposal brings its diff");
+        assert!(with_identity(&["propose".into()], "propose", &who(1000), None, None, None).is_err(), "a proposal brings its diff");
     }
 
     /// The audit of ADR-040 (2026-11-04, its 2): `apply --confirm` holds every other change back
@@ -374,5 +381,26 @@ mod tests {
             assert!(matches!(gate(&who(uid), "propose", None, None), Gate::Refused(_)), "{uid}");
             assert_eq!(gate(&who(uid), "log", None, None), Gate::Open, "{uid}");
         }
+    }
+
+    /// ADR-038: a backup's key and a restore from it are an administrator's, with their password; the
+    /// list is everyone's. The key comes in the request, never as a path, and never from the agent.
+    #[test]
+    fn a_backup_is_an_administrators() {
+        for cmd in ["backup-key", "backup-restore"] {
+            assert_eq!(gate(&who(1000), cmd, None, None), Gate::Password, "{cmd}");
+            for uid in [1001, 990, 65534] {
+                assert!(matches!(gate(&who(uid), cmd, None, None), Gate::Refused(_)), "{cmd} {uid}");
+            }
+        }
+        for uid in [1000, 1001, 990] {
+            assert_eq!(gate(&who(uid), "backups", None, None), Gate::Open, "{uid}");
+        }
+        assert!(check_args(&["backup-key".into(), "--name=home".into(), "--key-file=/etc/shadow".into()]).is_err());
+        let k = with_identity(&["backup-key".into(), "--name".into(), "home".into()], "backup-key", &who(1000), None, None, Some("/run/k")).unwrap();
+        assert_eq!(k, ["backup-key", "--name", "home", "--key-file", "/run/k", "--approved-by", "viper"]);
+        assert!(with_identity(&["backup-key".into()], "backup-key", &who(1000), None, None, None).is_err(), "a key comes in the request");
+        let r = with_identity(&["backup-restore".into(), "--name=home".into(), "--path=/home/sam".into()], "backup-restore", &who(1000), None, None, None).unwrap();
+        assert_eq!(r.last().map(String::as_str), Some("viper"));
     }
 }

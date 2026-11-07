@@ -900,6 +900,41 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   `torq snapshots keep` and `enable` are a person's, in the tree: a system change, never the agent's; what the
   broker runs for them stays fenced. `request system snapshot take` and `delete <n>` are an administrator's,
   with their password. A delete removes a way back, so its entry comes first, as a password's does.
+- **Amended (2026-11-07): the declared backup built** (`modules/backup.nix`, `broker/src/backup.rs`,
+  `tests/backup.nix`). It is NixOS's own `services.restic.backups.<name>`, set in the tree as any setting
+  (`set services restic backups nas repository sftp:…`); TorqOS adds three things and no backup code of
+  its own. *The key* is kept as a password is: each backup's `passwordFile` is
+  `/var/lib/torq/secrets/backup/<name>`, root's alone; the tree may not point it elsewhere (the fence's
+  rule 3); `request system backup key <name>` asks for the passphrase twice at the terminal, an
+  administrator's with their password, and the broker keeps it, its entry first and never the key. The
+  backup runs as root, then (asserted): the key is root's. A backup's name is letters, digits, `-` and `_`,
+  as it names a file. *What it holds*: `/home` and `/var/lib` unless the tree says otherwise, and never
+  `/var/lib/torq/secrets` unless its `paths` name it — every person's password hash, the remote's key, every
+  backup's own key: a backup lives where the machine's protections do not, and its key inside it is no
+  key at all. The ledger and the configuration are backed up (the remote has them too). *The broker
+  knows each backup's restic* (broker.json, the same environment as NixOS's `restic-<name>` wrapper), for
+  two commands. `show system backups`, everyone's and read only: whether each has its key, its snapshots,
+  how its unit last ran since boot (the journal's words read by torqcli as the person, as far as they may).
+  `request system restore <name> [<snapshot>] <path>`, an administrator's with their password, ledgered
+  with the snapshot's whole id (`latest` is another tomorrow). *Whose it is, the machine says*: a home
+  is the account of its name's, which must exist; a service's folder its live owner's, which must be
+  there; never root's or the agent's; and the uid restic restored must be that one, or nothing is
+  written (the repository is whoever can write it). Restic's own list of the path is summed first, and a
+  restore that would not fit, with a twentieth of the disk (4 GiB at most) to spare, is refused. Restic
+  restores the one path, sparse, into a room of the broker's (`/var/cache/torq/restoring`, root's
+  alone and closed, as is the folder it is in; not `/var/lib/torq`, whose file system is kept apart so
+  that no one fills the ledger's room), in a unit of its own that may write the room and nothing else,
+  makes no device and gains nothing (`torq.broker.backupRestoreCommand`); a room still locked is a
+  restore in progress, any other is cleared. From there it is the snapshot's restore, the same checks and the
+  same copy (`snapshot::plan`, `Copy`): written by the owner of the folder, what is there set aside,
+  staged, swapped; the lock for the checks only. The same paths only: below `/home` and `/var/lib`, never
+  `/var/lib/torq` or the machine's own folders; a path with restic's pattern characters is refused,
+  since it would bring back more than was named. A restore takes the room twice over while it runs.
+  The tree may not carry the key another way either (`RESTIC_PASSWORD*` in the unit's environment, a
+  `--password…` argument), nor rclone's credentials (`rcloneConfig`). A request's files — a diff, a
+  hash, a key — wait in `/run/torq`, memory only, never on a disk or in a backup.
+  Not built: the restore step in setup's from-a-repository path; credentials for a remote target
+  (`environmentFile`, an SSH key for SFTP) have no protected place yet and are placed by hand (KNOWN-GAPS 6zm).
 
 ## ADR-039 — Upstreams: what TorqOS owes, and what it depends on
 - **Context:** TorqOS redistributes images made of other people's software: nixpkgs and NixOS's
