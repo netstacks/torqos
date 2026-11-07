@@ -15,7 +15,7 @@ Three things a person says to their machine; each is an acceptance test (ROADMAP
 | "Build me an application for this." | writes and builds it in the person's home, installs it through the tree (ADR-037, rung 3) | none: user tier; every step a ledger line; `rollback` undoes it |
 | "Watch while I try it." | screenshots and input through the compositor's protocols | the person's session; nothing of the broker's |
 
-In order: **doctor mode** (read, explain, propose nothing), **proposals**, **session trust** ("for
+In order: **doctor mode** (read, explain, propose nothing; built, ADR-042: `torq doctor "<question>"`), **proposals**, **session trust** ("for
 the next hour, user-tier changes without asking" — ledgered, revertible, never for system tier).
 On a desktop the approval is a dialog with the owner's password, the one thing a program in the
 owner's shell does not have; in a terminal it is torqcli's prompt, the same text.
@@ -24,10 +24,10 @@ owner's shell does not have; in a terminal it is torqcli's prompt, the same text
 
 | Component | Privilege | Language | Role |
 |---|---|---|---|
-| `torq-agent` | unprivileged, sandboxed | Rust (or Python early) | Talks to the model, plans, calls MCP tools, *proposes* changes |
+| `torq-agent` (`agent/`, `torq-doctor`) | unprivileged, sandboxed (`torq agent run`) | Rust | Talks to the model (OpenAI-compatible chat API), calls its read-only tools; later *proposes* changes (ADR-042) |
 | MCP tool servers | unprivileged, read-mostly | Rust | Typed access per subsystem |
 | `torq-broker` | privileged (root, minimal) | Rust | Only writer of the config repo; tiers, commits, rebuild, rollback, ledger |
-| Model runtime | unprivileged | llama.cpp | Local inference |
+| Model runtime | unprivileged (DynamicUser) | llama.cpp (`llama-server`, a unix socket) | Local inference; or a remote endpoint as a setting (ADR-042) |
 | torqcli | the person's | Rust | Shows proposals, diffs and the ledger; a person approves at a terminal |
 
 ## Permission tiers
@@ -80,9 +80,10 @@ Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `reverted`, `revert_
    (ADR-036). (Signing on the machine is not the defence — ADR-035; the anchor is.)
 5. `rollback <seq|commit>` — `git revert`, rebuild, ledger append.
 
-## Tool inventory (initial)
+## Tool inventory
 
-`hw.inventory`, `hw.firmware_status`, `logs.query`, `logs.coredump`, `pkg.search`,
-`config.read`, `config.propose`, `net.status`, `power.status`,
-`secureboot.status` (read-only), `files.read_scoped`.
-
+Built (doctor mode, ADR-042, `agent/src/tools.rs`; all read-only): `read_journal`,
+`hardware_facts`, `show_configuration`, `show_ledger`, `show_alarms`, `nixos_option_docs`. Four of
+them — the journal, hardware, the ledger, alarms — return untrusted text and
+taint the session. Next (Proposals, ADR-042 6): `propose_change`, structured operations on the tree.
+Later: `logs.coredump`, `pkg.search`, `power.status`, `secureboot.status`, `files.read_scoped`.

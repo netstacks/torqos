@@ -626,3 +626,15 @@ Its §5 lists claims without a test.
    - **What root leaves outside the configuration** survives a rebuild; only a reinstall clears it.
    - **unix_chkpwd**, setuid, checks a person's own password with no count: a program running as them can
      guess it there, slowly. The audit did not raise it; found while fixing M3.
+
+6zm. **Doctor mode (ADR-042, built on `work/w3` 2026-11-07).** Open:
+   - **`tests/doctor.nix` has not been run** yet, and no real model has been tried: the unit tests and
+     the VM test use a scripted endpoint. Whether a given local model calls tools well is untested.
+   - **Anyone on the machine can use the local model** (its socket is 0666); restricting it to the
+     agent's group needs the service off DynamicUser.
+   - **llama-server runs from boot** once the local model is on, holding the model in memory; it does
+     not start on demand.
+   - **No timeout on a tool's program** (journalctl, torqcli, the hardware tools): one that hangs hangs
+     the doctor (curl has its own, 600 s).
+   - **Only an administrator** can run `torq doctor` (it goes through `torq agent run`).
+   - **The journal, once readable, is readable by everything run as the agent**, not only the doctor.
