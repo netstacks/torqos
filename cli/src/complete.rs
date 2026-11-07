@@ -473,7 +473,7 @@ mod tests {
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "interfaces", "packages", "services", "system", "users", "version"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "backups", "commit", "ledger", "proposals", "remote", "rollback", "snapshots", "storage", "uptime"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["apply", "backup", "ledger", "password", "pull", "remote", "repair", "restore", "revert", "snapshot", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["agent", "apply", "backup", "ledger", "password", "pull", "remote", "repair", "restore", "revert", "snapshot", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["clear", "file", "help", "request", "show"], "not configure or exit: already here");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn requests_for_the_software() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["apply", "backup", "ledger", "password", "pull", "remote", "repair", "restore", "revert", "snapshot", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["agent", "apply", "backup", "ledger", "password", "pull", "remote", "repair", "restore", "revert", "snapshot", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["<[Enter]>", "all"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system revert"), "")), ["<change>"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system ledger"), "")), ["<[Enter]>", "<count>", "|"]);

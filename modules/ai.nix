@@ -3,7 +3,9 @@
 #
 # The doctor (`torq-doctor`, agent/) runs as the agent's account (modules/agent.nix), started by a
 # person with `torq doctor "<question>"` — through `torq agent run`, so in the launcher's sandbox and
-# for that one question; there is no agent service. It reads and explains; it proposes nothing.
+# for that one question; there is no agent service. It reads and explains; it proposes nothing. With
+# `torq agent propose "<ask>"` it may also propose one change (never apply it), its session's taint
+# held by the broker (ADR-042, 6 and 7).
 #
 # The model: by default llama.cpp's `llama-server` (nixpkgs' services.llama-cpp) on this machine,
 # listening on a unix socket only (no TCP port, so nothing else can take its place on 127.0.0.1),

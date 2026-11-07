@@ -5,8 +5,8 @@
 //! session that fails half-way (the model gone, a tool's error) still leaves what it read. The record
 //! is in the agent's own home, which the agent can write: it is the agent's account of itself, not a
 //! record against it — a program run as the agent (Claude Code under `torq agent run`) can rewrite
-//! it. Before Proposals use it, the taint must be held where the agent cannot write: the broker
-//! (ADR-042, 6; KNOWN-GAPS 6zm).
+//! it. The taint that counts is the broker's (ADR-042, amended): each tainting read is reported there
+//! first (doctor.rs), and a proposal is judged by the broker's record, never by this one.
 
 use crate::tools::Tool;
 use anyhow::{Context, Result};
@@ -21,6 +21,10 @@ pub struct Session {
     pub id: String,
     /// Where its record is.
     pub record: PathBuf,
+    /// Its id at the broker, which holds its taint.
+    pub broker: String,
+    /// What it proposed: torqcli's word for each.
+    pub proposed: Vec<String>,
     question: String,
     model: String,
     /// The tools that returned untrusted text into it.
@@ -34,13 +38,13 @@ pub struct Session {
 impl Session {
     /// A new session, its record made at once in `dir` (the agent's own, 0700) — a new file, never
     /// one that is there already.
-    pub fn start(dir: &Path, question: &str, model: &str) -> Result<Session> {
+    pub fn start(dir: &Path, question: &str, model: &str, broker: &str) -> Result<Session> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
         let id = format!("doctor-{}", random_hex()?);
         let record = dir.join(format!("{id}.json"));
         std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&record).with_context(|| format!("creating {}", record.display()))?;
-        let s = Session { id, record, question: question.into(), model: model.into(), tainted_by: BTreeSet::new(), calls: vec![], refused: vec![] };
+        let s = Session { id, record, broker: broker.into(), proposed: vec![], question: question.into(), model: model.into(), tainted_by: BTreeSet::new(), calls: vec![], refused: vec![] };
         s.save()?;
         Ok(s)
     }
@@ -65,14 +69,14 @@ impl Session {
         use std::os::unix::fs::OpenOptionsExt;
         let record = json!({
             "id": self.id,
-            "mode": "doctor",
+            "brokerSession": self.broker,
             "question": self.question,
             "model": self.model,
             "tainted": self.tainted(),
             "taintedBy": self.taint_sources(),
             "calls": self.calls,
             "refused": self.refused,
-            "proposed": [],
+            "proposed": self.proposed,
         });
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -98,8 +102,8 @@ mod tests {
     #[test]
     fn each_session_its_own_new_record() {
         let d = tempfile::tempdir().unwrap();
-        let a = Session::start(d.path(), "q", "m").unwrap();
-        let b = Session::start(d.path(), "q", "m").unwrap();
+        let a = Session::start(d.path(), "q", "m", "0").unwrap();
+        let b = Session::start(d.path(), "q", "m", "0").unwrap();
         assert_ne!(a.id, b.id);
         assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 2);
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&a.record).unwrap()).unwrap();

@@ -1159,7 +1159,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 
 ## ADR-042 — The agent's runtime: doctor mode, the model, the tool boundary
 - **Status:** proposed (2026-11-07); doctor mode (1–5) built on `work/w3`, its VM test written and
-  not yet run; Proposals (6) and Session trust (7) designed here, not built. ROADMAP M5's first item,
+  not yet run; Proposals (6) and Session trust (7) built on `work/w5` (2026-11-07), the taint held by
+  the broker, amended from their design as each says; `tests/agent-proposals.nix` written, not yet run. ROADMAP M5's first item,
   on ADR-005 (local by default), ADR-034, ADR-040 and ADR-041 (the account, `torq agent run`).
 - **Context:** M5 starts with doctor mode: "why is my wifi flaky?" — read logs, hardware and the
   configuration, explain, propose nothing. Four things had no answer yet: how TorqOS's own agent runs
@@ -1260,8 +1261,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
        calls, the refusals, `tainted` and what tainted it, what it proposed (nothing). It is in the
        agent's own home, which the agent can write: **it is the agent's account of itself, not a
        record against the agent** — any program run as `torq-agent` (Claude Code under `torq agent
-       run`) can rewrite or delete it. It serves the doctor and the person reading it; before
-       Proposals ship, the taint must be held where the agent cannot write — the broker (6).
+       run`) can rewrite or delete it. It serves the doctor and the person reading it; the taint that
+       counts is held where the agent cannot write — the broker (6, built).
      - **The journal** (`torq.agent.doctor.journal`, **off by default, with any model**): on, the whole
        `torq-agent` account joins `systemd-journal` — not only the doctor. Every program run as the
        agent gains it: any tool a person starts with `torq agent run` (Claude Code, which sends what
@@ -1271,33 +1272,82 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
        the doctor also sends what it reads of it off the machine. Off, the agent sees only its own
        logs, and the doctor's journal tool is not offered. Narrower access (a reader only the doctor
        has) is later.
-  6. **Proposals (designed, not built).** A separate mode (`torq agent propose "<ask>"`), never the
-     doctor: its tools are the doctor's plus one, `propose_change`, whose arguments are structured
-     — a reason, and a list of `{set|delete, path, value}` on the tree — never a diff or a torqcli
-     command string. The agent checks each path against the schema and hands the list to torqcli as
-     data (a new `torqcli --ops <file>` taking JSON, so no value is parsed as a command), as the
-     agent; torqcli's commit as the agent proposes and stops (ADR-041, 4), the broker's allow-list
-     decides what it may propose at all (ADR-041, 2), and a person applies with `request system apply
-     <n>`, which shows the diff the broker recorded, the reason, and — tainted — each taint source
-     from the session. The taint is held by the broker, not the agent's home: the agent opens a
-     session at the broker, reports each tainting read to it as it happens (before the model is
-     shown the text), and the broker keeps the session's taint itself, sticky; a proposal names its
-     session and is ledgered tainted if the broker's copy is. The agent cannot undo a report, but it
-     can fail to make one, so the flag only ever adds care: an agent's proposal is approved per
-     step, always, and the taint makes the person see why. The guarantee
-     changes from "nothing writes" to "nothing applies": a hostile log can make the agent propose,
-     never apply. `commit confirmed` is the default for what could lose the network or the screen
-     (`networking.*`, `hardware.*`, `boot.*`, the display's services).
-  7. **Session trust (designed, not built).** A person grants a session — by its id, at a terminal,
-     with their password — "user-tier changes without asking, for <duration>": a ledgered `trust`
-     entry (who, which session, which categories, until when). While it holds, the broker applies the
-     agent's user-tier proposals that carry that session id, are within the allow-list, and are not
-     tainted, each as its own ledgered, revertible change. Never system tier; never a tainted proposal
-     (and once a session sends one, the broker ends its grant: taint is sticky at the broker too);
-     only from TorqOS's own agent program (the broker checks the caller's executable, from
-     `SO_PEERCRED`'s pid, is the system's `torq-agent`), so a tool run as the agent cannot use it; it
-     ends at its time, with `request system trust end`, or at the session's end, and
-     `request system revert` undoes each change.
+  6. **Proposals (built on `work/w5`, 2026-11-07; amended from the design).** A separate mode,
+     `torq agent propose "<ask>"` — `torq-doctor --propose` — never `torq doctor`, which stays
+     read-only: its tools are the doctor's plus `propose_change`, whose arguments are structured — a
+     reason (one line, a narrow alphabet), and up to 8 `set {path, value}` and `delete path`, each
+     path words of the tree and each value one word, a whole number or a boolean — never a diff or a
+     torqcli command string. The doctor builds torqcli's `-c` script from those checked words
+     (`configure; set …; commit comment "…"`), so nothing of the model's is a `;`, a quote, a filter
+     or an option — simpler than the `torqcli --ops` the design named, with the same property — and
+     runs it as the agent; torqcli's commit as the agent proposes and stops (ADR-041, 4), the broker's
+     allow-list decides what it may propose (ADR-041, 2), and a person applies with `request system
+     apply <n>`, which shows what git does and, for a tainted proposal, what its session read.
+     - **The taint is the broker's** (`broker/src/session.rs`). The doctor starts a session at the
+       broker over its socket, as `torq-agent` (`torq agent session start`), before the model is
+       asked; the broker makes its record in its state directory (root's, 0600). Each tainting read
+       is reported (`torq agent session taint <id> <tool>`) **before the model is shown the text**;
+       the broker marks the record tainted, for good — there is no command that clears it. No
+       session, no question; a report that fails ends the session before the text reaches the model.
+       A proposal names its session (torqcli passes `TORQ_AGENT_SESSION`, which the doctor sets for
+       its proposal only); the broker sets `tainted` from its record, the caller's `--tainted` only
+       adding to it, and the proposal's entry carries the session — its id, when it started, what
+       tainted it — so the ledger holds a session where a proposal cites it, and only there (the
+       review of w5: a ledger entry per session would have grown it by about a million a year). An
+       agent's proposal that names no session is tainted; one naming a session the broker does not
+       hold is refused (and ledgered, as every agent refusal is). Sessions are the agent's: a
+       person's proposal names none, and only the agent's uid may start or taint one. At most 600
+       are started an hour, and 2000 records kept (the oldest go; a proposal naming a gone one is
+       refused, never untainted). The doctor's sessions and any other agent program's share that
+       budget — one account, so no separate one by uid: a rogue program can keep the doctor from
+       starting for the rest of an hour (refused, never less careful). The record also notes the
+       proposals that cited it and the change each became under trust: what the doctor tells the model
+       it did is that (`torq agent session show`), never torqcli's output, which the propose step's
+       time limit (30 minutes: torqcli evaluates, and under trust the broker builds and switches)
+       could cut short.
+     - **Reported, not first-hand — the choice.** The broker could run the doctor's reading tools
+       itself and so know first-hand what was read. Not taken: the broker would run journalctl and
+       the hardware tools as root — reading every log, more than the agent may — growing the
+       privileged code for no gain, since what can lie is not the doctor but another program run as
+       the same account, which reads the web or files no broker sees. So taint is the agent's report,
+       held where the agent cannot take it back; and the default for what reports nothing is
+       tainted. (KNOWN-GAPS 6zq: a program that starts a session and never reports.)
+     - **What could cut the machine off is applied confirmed.** The broker records, on an agent's
+       proposal, the settings it changes inside `CUTS_OFF` (broker/src/agent.rs: the network and the
+       ways in over it — `networking`, `systemd.network`, `services.openssh` and its alias
+       `services.sshd`, `services.sshguard`, `services.resolved`, `services.tailscale`, a person's
+       `users.users.*.openssh` and `users.extraUsers.*.openssh`; what runs — `systemd.services`,
+       `environment.etc`; `hardware`, `boot`; the screen and the console — `console`,
+       `services.getty`, `services.kmscon`, the display's services, niri): `data.cuts_off`. `apply`
+       of such a proposal without `--confirm` is refused; torqcli's `request
+       system apply` says why and applies it as a commit confirmed of 10 minutes, which rolls back
+       unless the person, still reaching the machine, confirms it; `commit at` refuses it (no one there
+       to confirm). `boot` and `hardware` act at the next start: the boot default does not move until
+       the commit is confirmed. A person's own commit is not held to it.
+     The guarantee changes from "nothing writes" to "nothing applies": a hostile log can make the
+     agent propose, never apply.
+  7. **Session trust (built on `work/w5`, 2026-11-07; amended from the design).** A person grants,
+     with their own password, `request system agent trust <minutes>` (1 to 60): for that long, the
+     agent's proposals **wholly in that person's own folder** (user tier, and their folder on the
+     agent's list) that name a session the broker holds untainted, and are not marked tainted, and
+     could not cut the machine off, are applied as soon as they are made — as that person, each its
+     own change, its `applied` entry naming the grant (`data.trust`), revertible with `request system
+     revert`. Never system tier; never tainted; never another's folder. Only the person whose folder it
+     is grants it: the grant is for the approver, whom the socket names from the kernel, and asks
+     their password (any person's, not only an administrator's). Ledgered: `trust_granted` (who, how
+     long, until), each apply under it, `trust_revoked` (`request system agent trust revoke`, no
+     password: it only takes away), and `trust_expired` — written by the next operation that could
+     apply under trust; a grant is over at its time whether or not that is written. One at a time
+     per person. `show system alarms` shows each while it holds. Grants, revokes and expiries are
+     written under the sessions' own short lock, never the broker's (the review of w5: a stream of
+     trusted applies, each holding the broker's lock through its build, could have kept a revoke
+     waiting): a revoke is on the record at once, and each trusted apply reads the grant and its
+     session's record again, under the broker's lock, just before it starts — one already started
+     finishes, none starts after. Changed from the design: the grant
+     is the person's folder for a while, not a session by its id (one session per question, so a
+     grant per session would be a grant per question); and there is no check of the caller's
+     executable — a program run as the agent can trace TorqOS's own doctor and so pass any such
+     check, so it would have claimed a boundary that is not there (KNOWN-GAPS 6zq says what bounds it).
 - **Tested** (cargo, `agent/`, with a scripted HTTP server as the model and curl speaking to it):
   exactly the six read-only tools exist and are offered (the journal not, when it is not readable);
   a model asking for `propose_change`, `commit`, `run_shell`, `config.propose` or a torqcli injection
@@ -1312,10 +1362,26 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   `tests/doctor.nix` (check `doctor`; written, not yet run): `torq doctor` as a person, against a
   fake endpoint, with a hostile journal line and the journal turned on — as the agent, in
   `systemd-journal` and no other group; the writing call refused; the answer clean and headed as
-  tainted; the record of the agent's naming each tainting tool it called; the ledger unchanged.
+  tainted; the record of the agent's naming each tainting tool it called; the ledger unchanged (a
+  session that proposed nothing is the broker's record alone), that root-owned record matching.
+  6 and 7 (each test fails with its guard taken out — checked for the broker's): `broker/tests/sessions.rs`
+  (a sessionless agent proposal tainted; the broker's record decides and the caller's flag only adds;
+  taint sticky, and what tainted it in the citing proposal's entry; ids, an unknown or evicted
+  session refused, a person's session refused; at most 600 an hour and 2000 kept; a session tainted
+  between its proposal and the trusted apply not trusted; a revoke on the record with the broker's
+  lock held, and no trusted apply after it; a commit at of a cuts-off proposal refused;
+  under trust a clean proposal in the person's folder applied, naming its grant, and
+  revertible; never a tainted, sessionless, caller-marked, system-tier or other person's one; bounds,
+  one at a time, revoke and expiry on the record; a network change refused without `--confirm`),
+  socket gate tests (sessions the agent's, trust a person's with their password, the approver the
+  kernel's), `agent/` (each tainting read reported to the broker first, once a source; no session, no
+  question; a failed report ends the session unseen; `propose_change` only in propose mode, words
+  never a command; what a proposal became told from the broker's record, never torqcli's), torqcli (what `request system apply` says and when it confirms; the session id
+  passed only if it is one; trust in the alarms). `tests/agent-proposals.nix` (check
+  `agent-proposals`; written, not yet run) checks each of them on a machine, the real doctor's report
+  included.
 - **Not:** an agent service; MCP (the tools are in-process; serving them over MCP, for tools such as
-  Claude Code run as the agent, is a later step); a default model; the taint held at the broker
-  (6, before Proposals); the desktop's dialog (M4). `torq.ai` (the stub) is gone: `torq.agent.doctor` and
+  Claude Code run as the agent, is a later step); a default model; the desktop's dialog (M4). `torq.ai` (the stub) is gone: `torq.agent.doctor` and
   `torq.agent.model` replace it.
 ## ADR-043 — `commit at`: approved now, applied then, the ledger the only schedule
 

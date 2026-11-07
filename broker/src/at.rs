@@ -92,10 +92,11 @@ pub fn pending(entries: &[Entry]) -> Vec<Scheduled> {
         .collect()
 }
 
-/// `data`, marked as the run of schedule `scheduled` (if it is one).
-pub fn note(mut data: serde_json::Value, scheduled: Option<u64>) -> serde_json::Value {
-    if let Some(s) = scheduled {
-        data["scheduled"] = s.into();
+/// `data`, marked as what applied it with no person there, if something did: the run of a schedule
+/// (`("scheduled", <its entry>)`), or a person's trust (`("trust", <its grant>)`, session.rs).
+pub fn note(mut data: serde_json::Value, by: Option<(&str, u64)>) -> serde_json::Value {
+    if let Some((key, seq)) = by {
+        data[key] = seq.into();
     }
     data
 }
@@ -200,6 +201,10 @@ impl<'a> Scheduler<'a> {
         if p.body.tainted {
             bail!("refused: proposal {proposal_seq} came from a session that read untrusted content; apply it yourself");
         }
+        // One that could cut the machine off is applied as a commit confirmed: no one is there at its time to confirm.
+        if crate::session::cuts_off(&p).is_some() {
+            bail!("refused: proposal {proposal_seq} could lose the network or the screen: it is applied confirmed, by a person who is there");
+        }
         let base = p.body.data["base"].as_str().context("refused: a scheduled change says the commit it was prepared against (its base)")?.to_string();
         b.refuse_stale_base(&base)?;
         let diff = b.proposal_text(&p, "diff")?;
@@ -257,7 +262,7 @@ impl<'a> Scheduler<'a> {
         if let Some(why) = self.refusal(&s)? {
             return self.refuse(&s, &why).map(Some);
         }
-        match b.apply_locked(&lock, s.proposal, &by, false, None, Some(s.seq)) {
+        match b.apply_locked(&lock, s.proposal, &by, false, None, Some(("scheduled", s.seq))) {
             Ok(e) => Ok(Some(e)),
             Err(e) if e.downcast_ref::<Busy>().is_some() => Err(e),
             // A refusal of apply's own (the proposal no longer does what was judged, say), or a

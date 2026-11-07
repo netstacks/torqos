@@ -15,11 +15,13 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const JOURNALCTL: &str = "/run/current-system/sw/bin/journalctl";
-const TORQCLI: &str = "/run/current-system/sw/bin/torqcli";
+pub const TORQCLI: &str = "/run/current-system/sw/bin/torqcli";
 /// What a tool returns to the model, at most (the last of it, for a log).
 pub const MAX_OUTPUT: usize = 16_000;
 
-/// Every tool doctor mode has. None of them writes.
+/// Every tool the agent has. Doctor mode's (`ALL`) only read; `Propose` (propose mode alone,
+/// ADR-042, 6) proposes a change through torqcli as the agent — which stops at the proposal: a
+/// person applies it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tool {
     Journal,
@@ -28,6 +30,7 @@ pub enum Tool {
     Ledger,
     Alarms,
     Options,
+    Propose,
 }
 
 /// What a tool does once its parameters are checked: programs to run, or the options to look up.
@@ -35,11 +38,19 @@ pub enum Tool {
 pub enum Action {
     Run(Vec<(PathBuf, Vec<String>)>),
     Options(Vec<String>),
+    /// torqcli's script (`-c`) that proposes a change, as the agent, naming its session.
+    Propose(String),
 }
 
 /// Runs a program and gives its output (standard output and error): the machine, or a test's stand-in.
 pub trait Host {
     fn run(&self, program: &Path, args: &[String]) -> Result<String>;
+    /// torqcli with `script` (`-c`), as the agent, its session at the broker `session` (the only
+    /// way a proposal names one: `TORQ_AGENT_SESSION`).
+    fn propose(&self, script: &str, session: &str) -> Result<String>;
+    /// torqcli's `agent session <args>` (start, taint): the agent's session at the broker. An error
+    /// unless it succeeded — a report that did not reach the broker is never taken as made.
+    fn session(&self, args: &[&str]) -> Result<String>;
 }
 
 impl Tool {
@@ -53,6 +64,7 @@ impl Tool {
             Tool::Ledger => "show_ledger",
             Tool::Alarms => "show_alarms",
             Tool::Options => "nixos_option_docs",
+            Tool::Propose => "propose_change",
         }
     }
 
@@ -101,6 +113,19 @@ impl Tool {
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "e.g. \"networking.wireless\" or \"networking networkmanager wifi\"" } },
                 "required": ["path"],
+                "additionalProperties": false
+            })),
+            Tool::Propose => ("Propose one change to the configuration, for a person to apply: settings to set and to delete, as words of the tree, and why. It is never applied by this: a person reads it and applies it (`request system apply <n>`); the broker refuses what the agent may not propose. Only what you were asked for.", json!({
+                "type": "object",
+                "properties": {
+                    "reason": { "type": "string", "description": "one line, at most 200 characters: letters, digits, spaces and , . : ( ) _ / + -" },
+                    "set": { "type": "array", "maxItems": 8, "items": { "type": "object", "properties": {
+                        "path": { "type": "string", "description": "words of the tree, e.g. \"users viper packages\" or \"networking wireless enable\"" },
+                        "value": { "type": ["string", "integer", "boolean"], "description": "one value: a word (a package's name), a number, true or false" }
+                    }, "required": ["path", "value"], "additionalProperties": false } },
+                    "delete": { "type": "array", "maxItems": 8, "items": { "type": "string", "description": "words of the tree, e.g. \"users viper packages htop\"" } }
+                },
+                "required": ["reason"],
                 "additionalProperties": false
             })),
         }
@@ -196,6 +221,7 @@ impl Tool {
             Tool::Ledger => torqcli("show system ledger".into()),
             Tool::Alarms => torqcli("show system alarms".into()),
             Tool::Options => Action::Options(words(text("path")?.context("path: which settings")?)?),
+            Tool::Propose => Action::Propose(proposal(args)?),
         })
     }
 }
@@ -250,8 +276,54 @@ pub fn truncate(s: &str, max: usize) -> String {
     format!("[… {} characters left out]\n{}", n - max, s.chars().skip(n - max).collect::<String>())
 }
 
-/// Runs the action, and gives what it returned cleaned of escapes and control characters, cut to size.
-pub fn perform(action: &Action, host: &dyn Host, schema: &Path) -> Result<String> {
+/// The most changes one proposal makes.
+pub const MAX_CHANGES: usize = 8;
+
+/// `propose_change`'s arguments, checked, as torqcli's script: `configure`, a `set` or `delete` of
+/// checked words each, and `commit comment "<reason>"` — which, as the agent, proposes and stops.
+/// Nothing in it is a quote, a `;`, a filter or an option of the model's making.
+fn proposal(args: &Map<String, Value>) -> Result<String> {
+    let reason = args.get("reason").and_then(Value::as_str).context("reason: why, in one line")?;
+    let n = reason.chars().count();
+    if !(1..=200).contains(&n) || !reason.chars().all(|c| c.is_ascii_alphanumeric() || " ,.:()_/+-".contains(c)) || reason.trim().is_empty() {
+        bail!("reason: 1 to 200 characters, letters, digits, spaces and , . : ( ) _ / + - only");
+    }
+    let list = |k: &str| -> Result<Vec<Value>> {
+        match args.get(k) {
+            None | Some(Value::Null) => Ok(vec![]),
+            Some(Value::Array(a)) => Ok(a.clone()),
+            Some(_) => bail!("{k}: a list"),
+        }
+    };
+    let (sets, deletes) = (list("set")?, list("delete")?);
+    if sets.len() + deletes.len() == 0 || sets.len() + deletes.len() > MAX_CHANGES {
+        bail!("a proposal sets or deletes 1 to {MAX_CHANGES} settings");
+    }
+    let mut script = vec!["configure".to_string()];
+    for s in &sets {
+        let o = s.as_object().context("set: each one {path, value}")?;
+        if let Some(k) = o.keys().find(|k| *k != "path" && *k != "value") {
+            bail!("set has no field {k:?}");
+        }
+        let path = words(o.get("path").and_then(Value::as_str).context("set: a path")?)?;
+        let value = match o.get("value") {
+            Some(Value::String(v)) if word(v, "._:/@+-", 128) => v.clone(),
+            Some(Value::Bool(b)) => b.to_string(),
+            Some(Value::Number(n)) if n.is_i64() => n.to_string(),
+            _ => bail!("set {}: a value is one word (letters, digits, . _ : / @ + -), a whole number, or true or false", path.join(" ")),
+        };
+        script.push(format!("set {} {value}", path.join(" ")));
+    }
+    for d in &deletes {
+        script.push(format!("delete {}", words(d.as_str().context("delete: each one words of the tree")?)?.join(" ")));
+    }
+    script.push(format!("commit comment \"{reason}\""));
+    Ok(script.join("; "))
+}
+
+/// Runs the action, and gives what it returned cleaned of escapes and control characters, cut to
+/// size. `session`: the agent's session at the broker, which a proposal names.
+pub fn perform(action: &Action, host: &dyn Host, schema: &Path, session: &str) -> Result<String> {
     let raw = match action {
         Action::Run(steps) => {
             let mut out = String::new();
@@ -261,6 +333,7 @@ pub fn perform(action: &Action, host: &dyn Host, schema: &Path) -> Result<String
             out
         }
         Action::Options(path) => options(schema, path)?,
+        Action::Propose(script) => host.propose(script, session)?,
     };
     Ok(truncate(&clean(&raw), MAX_OUTPUT))
 }
@@ -269,6 +342,9 @@ pub fn perform(action: &Action, host: &dyn Host, schema: &Path) -> Result<String
 pub const MAX_PROGRAM_BYTES: usize = 1 << 20;
 /// How long a tool's program may run.
 pub const PROGRAM_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a proposal may take: torqcli evaluates the configuration before it proposes, and under a
+/// person's trust the broker applies it then and there — a build and a switch.
+pub const PROPOSE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Run `cmd`, its input closed, in a process group of its own; its standard output and error
 /// together, read only up to `cap` bytes — past that, or past `timeout`, the whole group is killed
@@ -369,6 +445,7 @@ mod tests {
             };
             match t.plan(&args).unwrap() {
                 Action::Options(_) => {}
+                Action::Propose(_) => panic!("doctor mode has no tool that proposes"),
                 Action::Run(steps) => for (p, a) in steps {
                     let p = p.file_name().unwrap().to_str().unwrap().to_string();
                     match p.as_str() {
@@ -434,6 +511,38 @@ mod tests {
             Tool::Configuration.plan(&json!({"path": "networking.wireless"})).unwrap(),
             Action::Run(vec![(PathBuf::from(TORQCLI), vec!["-c".into(), "show configuration networking wireless | no-more".into()])])
         );
+    }
+
+    /// ADR-042, 6: a proposal is structured — words of the tree and one-word values — and becomes a
+    /// torqcli script of the agent's own making, never text of the model's.
+    #[test]
+    fn a_proposal_is_words_never_a_command() {
+        assert_eq!(
+            Tool::Propose.plan(&json!({"reason": "htop for viper", "set": [{"path": "users viper packages", "value": "htop"}, {"path": "networking.wireless.enable", "value": true}], "delete": ["users viper packages nano"]})).unwrap(),
+            Action::Propose("configure; set users viper packages htop; set networking wireless enable true; delete users viper packages nano; commit comment \"htop for viper\"".into())
+        );
+        let many: Vec<Value> = (0..9).map(|_| json!({"path": "a", "value": "b"})).collect();
+        for bad in [
+            json!({"set": [{"path": "a", "value": "b"}]}),
+            json!({"reason": "x\"; commit; \"", "set": [{"path": "a", "value": "b"}]}),
+            json!({"reason": "x; y", "set": [{"path": "a", "value": "b"}]}),
+            json!({"reason": "x", "set": [{"path": "a; commit", "value": "b"}]}),
+            json!({"reason": "x", "set": [{"path": "a", "value": "b; delete system"}]}),
+            json!({"reason": "x", "set": [{"path": "a", "value": "\"q\""}]}),
+            json!({"reason": "x", "set": [{"path": "a", "value": "-x"}]}),
+            json!({"reason": "x", "set": [{"path": "a", "value": "b | display set"}]}),
+            json!({"reason": "x", "set": [{"path": "a", "value": 1.5}]}),
+            json!({"reason": "x", "set": [{"path": "a", "value": "b", "apply": true}]}),
+            json!({"reason": "x", "delete": ["a | b"]}),
+            json!({"reason": "x"}),
+            json!({"reason": "x", "set": many}),
+            json!({"reason": "x", "set": [{"path": "a", "value": "b"}], "apply": true}),
+        ] {
+            assert!(Tool::Propose.plan(&bad).is_err(), "{bad}");
+        }
+        // Not among doctor mode's tools: offered only in propose mode.
+        assert!(!Tool::ALL.contains(&Tool::Propose));
+        assert!(Tool::Propose.taints(), "what torqcli says back is not the agent's own text");
     }
 
     #[test]

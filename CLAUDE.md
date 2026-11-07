@@ -61,7 +61,7 @@ templates/config/      the per-machine config repo the broker manages
                        (`nix flake new -t .#config /var/lib/torq/config`)
 broker/                Rust crate: torq-broker (ledger, policy, git, rebuild, rollback)
 cli/                   Rust crate: torqcli — the grammar, the candidate, the tree (ADR-025)
-agent/                 Rust crate: torq-doctor — the agent's doctor mode, read-only tools (ADR-042)
+agent/                 Rust crate: torq-doctor — the agent: doctor mode, propose mode, its session at the broker (ADR-042)
 tests/                 NixOS VM tests
 release/               allowed_signers: the keys a machine trusts a release from
 .github/workflows/     test (pull requests, by hand, each release), weekly nixpkgs bump, release on a v* tag

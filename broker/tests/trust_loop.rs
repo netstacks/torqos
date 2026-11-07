@@ -2244,7 +2244,7 @@ fn what_a_person_is_shown_is_what_git_does() {
     let p = b.propose_on(Some(&head), &smuggled, "htop for casey", Actor::Agent, false).unwrap();
     let effect = &b.proposal_text(&p, "effect").unwrap();
     assert!(effect.contains("+[\"nmap\"]") && !effect.contains("htop"), "{effect}");
-    b.apply(p.body.seq, "casey", false).unwrap();
+    b.apply(p.body.seq, "casey", true).unwrap(); // (no session: tainted)
     assert_eq!(fs::read_to_string(b.repo.root().join("users/casey/packages.json")).unwrap().trim(), "[\"nmap\"]", "what was shown is what landed");
 }
 
@@ -2292,7 +2292,7 @@ fn the_agents_list_is_checked_again_at_apply() {
     let ok = write_diff(dir.path(), "ok.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
     let p = b.propose_on(Some(&head), &ok, "htop", Actor::Agent, false).unwrap();
     let narrowed = b.with_agent_limits(&torq_broker::agent::Limits::default());
-    let err = format!("{:#}", narrowed.apply(p.body.seq, "casey", false).unwrap_err());
+    let err = format!("{:#}", narrowed.apply(p.body.seq, "casey", true).unwrap_err());
     assert!(err.contains("no longer allow"), "{err}");
 }
 

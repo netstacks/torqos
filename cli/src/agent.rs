@@ -183,21 +183,34 @@ pub fn run(args: &[String]) -> Result<i32> {
 /// `torq doctor "<question>"` (ADR-042): the agent, in doctor mode, asked one question — run as the
 /// agent's account through `torq agent run` (no directory shared), so it reads only what the agent
 /// may, and proposes nothing. As the agent already (a tool run as it), the doctor itself.
-pub fn doctor(args: &[String]) -> Result<i32> {
+///
+/// `torq agent propose "<ask>"` (`propose`; ADR-042, 6): the same, with one more tool — it may
+/// propose a change within what the agent may (torq.agent.mayPropose), never apply one: a person
+/// applies it with `request system apply <n>`.
+pub fn doctor_mode(args: &[String], propose: bool) -> Result<i32> {
     const DOCTOR: &str = "/run/current-system/sw/bin/torq-doctor";
     let question = args.join(" ");
     if question.trim().is_empty() {
-        bail!("usage: torq doctor \"<question>\" — e.g. torq doctor \"why is my wifi flaky?\"");
+        bail!(if propose {
+            "usage: torq agent propose \"<what you want changed>\" — e.g. torq agent propose \"install htop for me\""
+        } else {
+            "usage: torq doctor \"<question>\" — e.g. torq doctor \"why is my wifi flaky?\""
+        });
     }
     if !Path::new(DOCTOR).exists() {
         bail!("doctor mode is off on this machine: configure; set torq agent doctor enable true; commit (ADR-042)");
     }
+    let mut doctor: Vec<String> = vec![DOCTOR.into()];
+    if propose {
+        doctor.push("--propose".into());
+    }
+    doctor.extend(["--".into(), question]);
     if crate::me()? == AGENT {
         use std::os::unix::process::CommandExt;
-        let e = Command::new(DOCTOR).arg(&question).exec();
+        let e = Command::new(&doctor[0]).args(&doctor[1..]).exec();
         return Err(anyhow::Error::from(e).context("starting the doctor"));
     }
-    run(&["run".into(), "--".into(), DOCTOR.into(), question])
+    run(&[vec!["run".to_string(), "--".to_string()], doctor].concat())
 }
 
 /// `torq break-glass "<reason>"` (ADR-035): a root shell, after the record. The launcher, through
@@ -239,7 +252,8 @@ mod tests {
     #[test]
     fn the_doctor_needs_a_question() {
         for q in [vec![], vec!["  ".to_string()]] {
-            assert!(format!("{:#}", doctor(&q).unwrap_err()).starts_with("usage: torq doctor"));
+            assert!(format!("{:#}", doctor_mode(&q, false).unwrap_err()).starts_with("usage: torq doctor"));
+            assert!(format!("{:#}", doctor_mode(&q, true).unwrap_err()).starts_with("usage: torq agent propose"));
         }
     }
 
