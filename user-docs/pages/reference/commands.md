@@ -7,6 +7,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | Command | Does |
 |---|---|
 | `configure` / `config` | enter configuration mode |
+| `configure exclusive` | enter configuration mode with your candidate held by this session alone until you leave it: your other sessions can read it but not change or commit it, and are told which session holds it |
 | `show configuration` | the active configuration (<code>&#124; display set</code> prints it as `set` lines) |
 | `show system alarms` | whether the machine is exactly as its history says, and any pending confirmed commit |
 | `show system ledger [<count>]` | every recorded change, newest first, with its number (`#85`) |
@@ -20,7 +21,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `show services` | the services the configuration turns on, and how SSH is protected |
 | `show users` | people with an account, who is logged in, and their groups |
 | `request system password [<user>]` | change a password (kept outside the configuration) |
-| `request system update [all]` | load the newest signed TorqOS release (`all`: and nixpkgs) into the candidate |
+| `request system update [all]` | load the newest signed TorqOS release (`all`: and nixpkgs) into the candidate; <code>show &#124; compare</code> names its version beside the running one, and says when it is older (a downgrade) |
 | `request system software rollback <n>` | load configuration `<n>`'s software into the candidate (a downgrade) |
 | `request system revert <change>` | undo one recorded change (`#85` or `85`) |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |

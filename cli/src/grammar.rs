@@ -212,7 +212,7 @@ const COMPARISON: &[Display] = &[Display::Diff];
 
 static ROOTS: &[Node] = &[
     fixed("commit", "Make the candidate the machine's configuration", In::Cf).whole(commit).then(COMMIT_FIRST),
-    fixed("configure", "Edit the configuration (a candidate, until you commit it)", In::Op).top_only().whole(|_| Ok(Op::Configure)),
+    fixed("configure", "Edit the configuration (a candidate, until you commit it)", In::Op).top_only().whole(|_| Ok(Op::Configure { exclusive: false })).then(&[fixed("exclusive", "With the candidate yours alone: your other sessions cannot change it until you leave", In::Op).whole(|_| Ok(Op::Configure { exclusive: true }))]),
     fixed("delete", "Remove a value, a setting, or everything below a place", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() })).then(&[node(Word::Path, "What to remove", In::Cf).whole(|r| Ok(Op::Delete { words: r.path.clone() }))]),
     fixed("edit", "Go down to a part of the configuration", In::Cf).then(&[node(Word::Path, "Where to go", In::Cf).whole(|r| Ok(Op::Edit { words: r.path.clone() }))]),
     fixed("exit", "Leave torqcli", In::Op).top_only().whole(|_| Ok(Op::Exit)),

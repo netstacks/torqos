@@ -29,6 +29,7 @@ mod whole;
 mod attach;
 mod software;
 mod release;
+mod exclusive;
 mod saved;
 mod paint;
 mod pkg;

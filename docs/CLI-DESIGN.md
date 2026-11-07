@@ -43,7 +43,7 @@ $ torqcli -c "configure; set users users viper packages htop; commit"
 | | |
 |---|---|
 | operational prompt | `viper@torq-utm>` |
-| enter configuration | `configure` (or `config`) |
+| enter configuration | `configure` (or `config`); `configure exclusive`: the shared candidate yours alone until you leave |
 | configuration prompt | `[edit networking]` line, then `viper@torq-utm#` |
 | add / change | `set environment systemPackages jq` |
 | remove | `delete environment systemPackages jq` (one value); `delete environment systemPackages`, `delete networking` (everything below); not set: a warning |
@@ -168,6 +168,34 @@ the same way (`torqcli show system alarms`, `torqcli show configuration '|' grep
 your shell split them, or one argument read as a whole line (`torqcli "show configuration | grep
 host"`); its exit code says whether it worked. Configuration needs `-c`. Interactive sessions of the same user share one
 candidate (as `configure` on a network device); `configure private` is for later.
+
+**`configure exclusive`** (built, cli/src/exclusive.rs): configuration mode with the shared candidate
+held by this session alone, until it leaves configuration mode (`exit`, `exit configuration-mode`,
+Ctrl-D, `commit and-quit`) or torqcli ends. It says so on entering, and on leaving that it let go.
+The person's other interactive sessions can enter configuration mode and read the candidate — as the
+holder saved it, re-read at each command — but every command that would change it (`set`, `delete`,
+`rollback`, `load`, `file edit|delete`, `request system update`, `software rollback`, `pull`) or
+commit it is refused, naming the holder (`torqcli process 4242 on pts/3, since 2026-11-07 14:02:51`);
+`configure` there says the same, and `configure exclusive` is refused. `commit check`, and a `commit`
+of nothing (confirming a commit confirmed: the machine's, not the candidate's), are not refused. The
+lock is the kernel's (`flock` on `candidate.lock` beside the candidate, in the same private folder),
+so it goes with the process that took it: a session killed holding it leaves only what it wrote,
+which the next `configure exclusive` finds free and takes over, saying whose it was ("A lock left by
+a session that ended without leaving configuration mode (…, gone) was taken over"). A reused
+process number cannot keep a lock. A script's private candidate (`-c`) is never locked, nor stopped
+by a lock (`configure exclusive` there says it is private already). Unlike some network devices,
+leaving keeps uncommitted changes, as `configure` does.
+
+The lock is checked again at every write, not only when a command starts, since a command may wait
+(at a question, in the editor, for a paste, for a fetch): the candidate is saved, or removed, while
+holding the lock shared (so a `configure exclusive` meanwhile waits for the write, or the write is
+refused naming the holder), and a commit checks again after its question, before the broker is
+asked. And every interactive session reads the shared candidate afresh at each command, and writes
+it only if it is still as it read it (its bytes' hash, checked and written one session at a time):
+a session idle since another saved it never writes back its old copy ("another session changed the
+candidate since this one read it": the next command reads it as it is now) — with or without a
+lock. A commit made while another session changed or took the candidate keeps that session's
+candidate, and says so.
 
 ## The configuration tree
 
@@ -437,15 +465,29 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
 | `request system revert <change>` | undo one change, `#85` or `85` (a new change that reverses it; asks unless it only touches your own settings) |
 | `configure` / `config` | enter configuration mode |
+| `configure exclusive` | enter it with the shared candidate held by this session alone, until it leaves: your other sessions read it, cannot change or commit it, and are told which session holds it |
 | `help [<command> \| <words>]` | (both modes) the commands; one command; or a search of commands and settings |
 
-Later: `commit at <time>`, `configure exclusive`. (`save` / `load`: built, S5.)
+Later: `commit at <time>`. (`save` / `load`: built, S5; `configure exclusive`: built, above.)
 
 As built (3e, 4a, 4e): all of the above. The candidate holds the software too (4e): `request system
 update [all]` runs `nix flake update` on the commit the candidate is based on and loads the new
 `flake.lock`; `request system software rollback <n>` loads commit <n>'s; `show | compare` shows it as
 `[edit system software]` (each input's date, a downgrade said so), `| display diff` as the raw
-`flake.lock` diff, and `commit` (system tier: it asks) installs it. `rollback <n>` loads a configuration and keeps the
+`flake.lock` diff, and `commit` (system tier: it asks) installs it. TorqOS itself is named by its
+version where one is known (audit A3): `-   torq 0.2.1 (2026-11-05);` `+   torq 0.2.2 (2026-11-07);`.
+The version before is the running one (`/etc/os-release`, only where it is TorqOS's, and only
+against the configuration in effect); the one after is the release's, read from the very commit
+fetched to check its signature (no second fetch): its number from `cli/Cargo.toml`, and the whole
+tag from the signed commit's message (`TorqOS v0.3.0-rc1`, as release.yml writes it), where it names
+that number — else the number alone, shown as `0.3.0, a release or a pre-release`. It is kept with
+the candidate beside that commit (another commit in the lock: dates), and named when the release is
+checked (`TorqOS release 0123456789ab (TorqOS 0.2.2): signed by …`). Two numbers that differ
+decide, not the dates: an older one says `## TorqOS 0.1.9 is older than 0.2.1, which runs now: a
+downgrade`. Only the numbers: the running version is its source's, which never says a pre-release
+(a machine on 0.3.0-rc1 says 0.3.0), so a pre-release and its release, or the same number rebuilt,
+go by date (`## older software than now: a downgrade`). A source that is not the releases, `request
+system software rollback`, or a release without a version: dates, as before. `rollback <n>` loads a configuration and keeps the
 software loaded into the candidate (and says so); `rollback 0` starts over without it. Loading onto a
 candidate whose base is no longer the active configuration warns that `commit` will be refused.
 
