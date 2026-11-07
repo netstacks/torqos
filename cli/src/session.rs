@@ -209,6 +209,9 @@ pub struct Session<'a> {
     pub done: bool,
     /// Whether the last command's output may be shown a screenful at a time (not `| no-more`).
     pub page: bool,
+    /// This session's hold on the shared candidate (`configure exclusive`), until it leaves
+    /// configuration mode.
+    exclusive: Option<crate::exclusive::Lock>,
 }
 
 /// Split a command line into words as a shell does: whitespace-separated, "double" or 'single'
@@ -287,7 +290,7 @@ fn word(out: &mut Vec<String>, w: String) -> Result<()> {
 
 impl<'a> Session<'a> {
     pub fn new(schema: Schema, tree: crate::nixos::Tree, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str) -> Self {
-        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true }
+        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true, exclusive: None }
     }
 
     /// The whole tree over both kinds of files (whole.rs).
@@ -415,8 +418,9 @@ impl<'a> Session<'a> {
     }
 
     fn run(&mut self, op: Op) -> Result<String> {
+        self.guard(&op)?;
         match op {
-            Op::Configure => self.configure(),
+            Op::Configure { exclusive } => self.configure(exclusive),
             Op::ShowActive { path, display } => {
                 // The commit named is the one shown: read at that id, not at HEAD again.
                 let head = self.repo.head()?;
@@ -548,7 +552,7 @@ impl<'a> Session<'a> {
                 }
                 self.mode = Mode::Operational;
                 self.edit.clear();
-                Ok(format!("{out}{}", self.said("Exiting configuration mode")))
+                Ok(format!("{out}{}{}", self.said("Exiting configuration mode"), self.let_go()))
             }
             Op::Run(op) => {
                 let was = self.mode;
@@ -585,12 +589,13 @@ impl<'a> Session<'a> {
         self.mode = Mode::Operational;
         self.edit.clear();
         let changed = self.uncommitted().unwrap_or(true);
-        Ok(match (changed, self.saved.is_some()) {
+        let kept = match (changed, self.saved.is_some()) {
             (false, _) => String::new(),
             (true, true) => self.pending_note(Pending::Leaving),
             // (A script's: said once, when it ends.)
             (true, false) => String::new(),
-        })
+        };
+        Ok(format!("{kept}{}", self.let_go()))
     }
 
     /// What a whole configuration at `rev` does not show in its tree, as comments: the software it
@@ -653,10 +658,13 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn configure(&mut self) -> Result<String> {
+    fn configure(&mut self, exclusive: bool) -> Result<String> {
+        // Held first, so a refusal leaves the session where it was.
+        let held = self.hold(exclusive)?;
         self.mode = Mode::Configuration;
         let head = self.repo.head()?;
         let mut out = self.said("Entering configuration mode");
+        out.push_str(&held);
         let base = self.candidate()?.base.clone();
         if base == head && self.pending()? > 0 {
             out.push_str(&self.pending_note(Pending::Entering));
@@ -671,6 +679,89 @@ impl<'a> Session<'a> {
             )));
         }
         Ok(out)
+    }
+
+    /// Where the shared candidate's lock is (exclusive.rs); None: a private candidate (`-c`), which
+    /// nothing else can change.
+    fn lock_path(&self) -> Option<PathBuf> {
+        self.saved.as_deref().map(crate::exclusive::path_for)
+    }
+
+    /// Entering configuration mode: with `exclusive`, the shared candidate taken for this session
+    /// alone (refused if another holds it); without, said if another holds it. What it says.
+    fn hold(&mut self, exclusive: bool) -> Result<String> {
+        let Some(path) = self.lock_path() else {
+            return Ok(if exclusive { self.said("This candidate is private already (`torqcli -c`): no other session can change it.") } else { String::new() });
+        };
+        if self.exclusive.is_some() {
+            return Ok(String::new());
+        }
+        if !exclusive {
+            // (A lock that cannot be read is no reason to stay out: changes are refused, by guard.)
+            return Ok(match crate::exclusive::seen(&path).ok() {
+                Some(crate::exclusive::Seen::Held(who)) => self.said(&format!(
+                    "The candidate is held exclusively by {}: you can read it here, not change it, until that session leaves configuration mode.",
+                    holder(&who, &crate::history::Clock::system())
+                )),
+                _ => String::new(),
+            });
+        }
+        let clock = crate::history::Clock::system();
+        let (lock, stale) = crate::exclusive::take(&path, &crate::exclusive::Holder::me(), &clock)?;
+        self.exclusive = Some(lock);
+        // As saved: what this session had in memory may be older than what another one left.
+        self.candidate = None;
+        let mut out = self.said("The candidate is yours alone until you leave configuration mode: your other sessions can read it, not change it.");
+        if let Some(h) = stale {
+            out.push_str(&self.said(&format!("A lock left by a session that ended without leaving configuration mode ({}, gone) was taken over.", h.describe(&clock))));
+        }
+        Ok(out)
+    }
+
+    /// Out of configuration mode: an exclusive hold on the candidate let go, and said so.
+    fn let_go(&mut self) -> String {
+        match self.exclusive.take() {
+            Some(lock) => {
+                drop(lock);
+                self.said("The candidate is no longer held exclusively: your other sessions can change it again.")
+            }
+            None => String::new(),
+        }
+    }
+
+    /// Another session's `configure exclusive`: the candidate is read here as that session saved it,
+    /// and a command that would change it (or commit it) is refused, naming the session.
+    fn guard(&mut self, op: &Op) -> Result<()> {
+        let Some(path) = self.lock_path().filter(|_| self.exclusive.is_none()) else { return Ok(()) };
+        // (A lock that cannot be read refuses only a change: it must never keep anyone from looking,
+        // or from leaving.)
+        let who = match crate::exclusive::seen(&path) {
+            Ok(crate::exclusive::Seen::Held(who)) => who,
+            Ok(_) => return Ok(()),
+            Err(e) if self.changes_candidate(op)? => return Err(e),
+            Err(_) => return Ok(()),
+        };
+        self.candidate = None;
+        if self.changes_candidate(op)? {
+            bail!(
+                "not done: the candidate is held exclusively by {} (`configure exclusive`): it can be read here, not changed, until that session leaves configuration mode",
+                holder(&who, &crate::history::Clock::system())
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether `op` changes the shared candidate, or commits it (`run` and `top` are read through
+    /// when the command inside runs).
+    fn changes_candidate(&mut self, op: &Op) -> Result<bool> {
+        Ok(match op {
+            Op::Set { .. } | Op::Delete { .. } | Op::Rollback { .. } | Op::Load { .. } => true,
+            Op::File { action, .. } => matches!(action, FileAction::Edit | FileAction::Delete),
+            // (A commit of nothing confirms a commit confirmed: the machine's, not the candidate's.)
+            Op::Commit(o) => !o.check && self.uncommitted()?,
+            Op::Request(r) => matches!(r, syntax::Request::Update { .. } | syntax::Request::SoftwareRollback { .. } | syntax::Request::Pull),
+            _ => false,
+        })
     }
 
     fn show_operational(&mut self, op: Op) -> Result<String> {
@@ -1913,6 +2004,11 @@ fn summary(compare: &str) -> String {
     if s.chars().count() > 120 { format!("{}…", s.chars().take(119).collect::<String>()) } else { s }
 }
 
+/// Who holds the candidate exclusively, as another session is told (exclusive.rs).
+fn holder(who: &Option<crate::exclusive::Holder>, clock: &crate::history::Clock) -> String {
+    who.as_ref().map_or("another session of yours".to_string(), |h| h.describe(clock))
+}
+
 fn short(id: &str) -> &str {
     &id[..id.len().min(12)]
 }
@@ -2340,6 +2436,73 @@ mod tests {
         let mut s = session(d.path(), None, &m);
         let e = format!("{:#}", run_err(&mut s, &["configure"], "delete"));
         assert_eq!(e, "not deleted: this needs a person to approve it at a terminal");
+    }
+
+    /// `configure exclusive`: the shared candidate held by one session until it leaves configuration
+    /// mode. The person's other sessions read it, cannot change or commit it, and are told which
+    /// session holds it; leaving lets go; a lock whose session died is taken over, said so; the
+    /// private candidate of `-c` has nothing to lock.
+    #[test]
+    fn configure_exclusive() {
+        let (d, m) = (repo(), Fake { answer: true, ..Default::default() });
+        let home = tempfile::tempdir().unwrap();
+        let saved = home.path().join("torq/candidate.json");
+        let me = std::process::id();
+        let mut a = session(d.path(), Some(saved.clone()), &m);
+        let mut b = session(d.path(), Some(saved.clone()), &m);
+        b.exec("configure").unwrap();
+        assert_eq!(
+            a.exec("conf excl").unwrap(),
+            "Entering configuration mode\nThe candidate is yours alone until you leave configuration mode: your other sessions can read it, not change it.\n"
+        );
+        a.exec("set time timeZone UTC").unwrap();
+
+        // Another session, already in configuration mode: reads what the holder saved, changes nothing.
+        let held = format!("the candidate is held exclusively by torqcli process {me}");
+        assert!(b.exec("show | compare").unwrap().contains("+   timeZone UTC;"), "the holder's candidate, as saved");
+        for line in ["set networking hostName three", "delete time", "rollback 0", "commit", "run request system update", "top load merge terminal", "file edit a.nix"] {
+            let e = format!("{:#}", b.exec(line).unwrap_err());
+            assert!(e.starts_with(&format!("not done: {held}")) && e.ends_with("until that session leaves configuration mode"), "{line}: {e}");
+        }
+        assert!(m.commits.borrow().is_empty() && m.asked.borrow().is_empty(), "nothing committed, nothing asked");
+        b.exec("commit check").unwrap();
+        // Nor can it take the lock; and entering says who has it.
+        b.exec("exit").unwrap();
+        let e = format!("{:#}", b.exec("configure exclusive").unwrap_err());
+        assert!(e.starts_with(&held), "{e}");
+        assert_eq!(b.mode, Mode::Operational, "refused: still where it was");
+        let entered = b.exec("configure").unwrap();
+        assert!(entered.contains(&format!("The candidate is held exclusively by torqcli process {me}")) && entered.contains("you can read it here, not change it"), "{entered}");
+
+        // The private candidate of `-c` is not the shared one: nothing holds it.
+        let mut c = session(d.path(), None, &m);
+        assert_eq!(c.exec("configure exclusive").unwrap(), "Entering configuration mode\nThis candidate is private already (`torqcli -c`): no other session can change it.\n");
+        c.exec("set networking hostName three").unwrap();
+
+        // Leaving lets go, and says so; then the others change it again.
+        assert!(a.exec("exit").unwrap().ends_with("The candidate is no longer held exclusively: your other sessions can change it again.\n"));
+        b.exec("set networking hostName three").unwrap();
+        assert!(b.exec("show | compare").unwrap().contains("timeZone UTC"), "the holder's changes kept");
+        // `commit and-quit` leaves too.
+        b.exec("exit").unwrap();
+        b.exec("configure exclusive").unwrap();
+        assert!(b.exec("commit and-quit").unwrap().ends_with("Exiting configuration mode\nThe candidate is no longer held exclusively: your other sessions can change it again.\n"));
+        a.exec("configure").unwrap();
+        a.exec("set time timeZone Europe/Paris").unwrap();
+
+        // A session that died holding it (its process gone, the kernel's lock with it): taken over.
+        let mut gone = Command::new("true").spawn().unwrap();
+        let pid = gone.id();
+        gone.wait().unwrap();
+        std::fs::write(crate::exclusive::path_for(&saved), format!(r#"{{"pid":{pid},"terminal":"pts/9","since":"2026-11-07T09:00:00Z"}}"#)).unwrap();
+        a.exec("exit").unwrap();
+        let out = a.exec("configure exclusive").unwrap();
+        assert!(out.contains(&format!("A lock left by a session that ended without leaving configuration mode (torqcli process {pid} on pts/9, since ")) && out.contains(", gone) was taken over."), "{out}");
+        assert!(format!("{:#}", b.exec("request system update").unwrap_err()).contains(&held), "held again");
+        // And a session dropped (torqcli ended) lets go too.
+        drop(a);
+        b.exec("configure").unwrap();
+        b.exec("set time timeZone UTC").unwrap();
     }
 
     /// Every command says what it did, and every way out says what is kept: rollback (what it loaded or

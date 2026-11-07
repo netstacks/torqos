@@ -389,7 +389,7 @@ impl Candidate {
 }
 
 /// Make sure `dir` exists, belongs to this user and only they can write it (created 0700).
-fn private_dir(dir: &Path) -> Result<()> {
+pub fn private_dir(dir: &Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     if !dir.exists() {
         if let Some(parent) = dir.parent() {

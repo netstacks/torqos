@@ -47,7 +47,8 @@ pub struct CommitOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     // Operational mode.
-    Configure,
+    /// `configure [exclusive]`: with `exclusive`, the shared candidate held by this session alone.
+    Configure { exclusive: bool },
     /// `show configuration [path] [| display set|detail]`.
     ShowActive { path: Vec<String>, display: Option<Display> },
     ShowCommits { display: Option<Display> },
@@ -222,7 +223,8 @@ pub fn render(op: &Op) -> String {
         s
     };
     match op {
-        Op::Configure => "configure".into(),
+        Op::Configure { exclusive: false } => "configure".into(),
+        Op::Configure { exclusive: true } => "configure exclusive".into(),
         Op::ShowActive { path, display } => format!("{}{}", sep("show configuration", path), display_text(display)),
         Op::ShowCommits { display } => format!("show system commit{}", display_text(display)),
         Op::ShowRollback { n, compare: None, display } => format!("show system rollback {n}{}", display_text(display)),
@@ -314,7 +316,8 @@ mod tests {
         let v = |s: &str| w(s);
         let (set, detail, diff) = (Some(Display::Set), Some(Display::Detail), Some(Display::Diff));
         vec![
-            (Mode::Operational, Op::Configure),
+            (Mode::Operational, Op::Configure { exclusive: false }),
+            (Mode::Operational, Op::Configure { exclusive: true }),
             (Mode::Operational, Op::ShowActive { path: vec![], display: None }),
             (Mode::Operational, Op::ShowActive { path: v("users dev"), display: set }),
             (Mode::Operational, Op::ShowActive { path: v("system"), display: detail }),

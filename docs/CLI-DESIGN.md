@@ -43,7 +43,7 @@ $ torqcli -c "configure; set users users viper packages htop; commit"
 | | |
 |---|---|
 | operational prompt | `viper@torq-utm>` |
-| enter configuration | `configure` (or `config`) |
+| enter configuration | `configure` (or `config`); `configure exclusive`: the shared candidate yours alone until you leave |
 | configuration prompt | `[edit networking]` line, then `viper@torq-utm#` |
 | add / change | `set environment systemPackages jq` |
 | remove | `delete environment systemPackages jq` (one value); `delete environment systemPackages`, `delete networking` (everything below); not set: a warning |
@@ -168,6 +168,23 @@ the same way (`torqcli show system alarms`, `torqcli show configuration '|' grep
 your shell split them, or one argument read as a whole line (`torqcli "show configuration | grep
 host"`); its exit code says whether it worked. Configuration needs `-c`. Interactive sessions of the same user share one
 candidate (as `configure` on a network device); `configure private` is for later.
+
+**`configure exclusive`** (built, cli/src/exclusive.rs): configuration mode with the shared candidate
+held by this session alone, until it leaves configuration mode (`exit`, `exit configuration-mode`,
+Ctrl-D, `commit and-quit`) or torqcli ends. It says so on entering, and on leaving that it let go.
+The person's other interactive sessions can enter configuration mode and read the candidate — as the
+holder saved it, re-read at each command — but every command that would change it (`set`, `delete`,
+`rollback`, `load`, `file edit|delete`, `request system update`, `software rollback`, `pull`) or
+commit it is refused, naming the holder (`torqcli process 4242 on pts/3, since 2026-11-07 14:02:51`);
+`configure` there says the same, and `configure exclusive` is refused. `commit check`, and a `commit`
+of nothing (confirming a commit confirmed: the machine's, not the candidate's), are not refused. The
+lock is the kernel's (`flock` on `candidate.lock` beside the candidate, in the same private folder),
+so it goes with the process that took it: a session killed holding it leaves only what it wrote,
+which the next `configure exclusive` finds free and takes over, saying whose it was ("A lock left by
+a session that ended without leaving configuration mode (…, gone) was taken over"). A reused
+process number cannot keep a lock. A script's private candidate (`-c`) is never locked, nor stopped
+by a lock (`configure exclusive` there says it is private already). Unlike some network devices,
+leaving keeps uncommitted changes, as `configure` does.
 
 ## The configuration tree
 
@@ -437,9 +454,10 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
 | `request system revert <change>` | undo one change, `#85` or `85` (a new change that reverses it; asks unless it only touches your own settings) |
 | `configure` / `config` | enter configuration mode |
+| `configure exclusive` | enter it with the shared candidate held by this session alone, until it leaves: your other sessions read it, cannot change or commit it, and are told which session holds it |
 | `help [<command> \| <words>]` | (both modes) the commands; one command; or a search of commands and settings |
 
-Later: `commit at <time>`, `configure exclusive`. (`save` / `load`: built, S5.)
+Later: `commit at <time>`. (`save` / `load`: built, S5; `configure exclusive`: built, above.)
 
 As built (3e, 4a, 4e): all of the above. The candidate holds the software too (4e): `request system
 update [all]` runs `nix flake update` on the commit the candidate is based on and loads the new

@@ -7,6 +7,7 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | Command | Does |
 |---|---|
 | `configure` / `config` | enter configuration mode |
+| `configure exclusive` | enter configuration mode with your candidate held by this session alone until you leave it: your other sessions can read it but not change or commit it, and are told which session holds it |
 | `show configuration` | the active configuration (<code>&#124; display set</code> prints it as `set` lines) |
 | `show system alarms` | whether the machine is exactly as its history says, and any pending confirmed commit |
 | `show system ledger [<count>]` | every recorded change, newest first, with its number (`#85`) |
