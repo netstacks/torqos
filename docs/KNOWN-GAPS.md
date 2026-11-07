@@ -672,16 +672,17 @@ Its §5 lists claims without a test.
    has no network, its fixed flags last and the dangerous ones refused, a memory bound; each tool's
    program is bounded in bytes and time, at most 8 calls a round, curl's answer at most 4 MiB; the
    configuration taints too; invisible characters are cleaned. Open:
-   - **The taint record is the agent's own.** It lives in the agent's home, which the agent can write:
-     any program run as `torq-agent` (Claude Code under `torq agent run`) can rewrite or delete it, so
-     it is no record against the agent. Before Proposals ship, the taint must be held where the agent
-     cannot write — the broker (ADR-042, 6). Not built.
+   - ~~**The taint record is the agent's own.**~~ Fixed on `work/w5` (2026-11-07, ADR-042 amended): the
+     broker holds each session's taint in its own state directory (root's, 0600), sticky, ledgered; the
+     doctor reports each tainting read there before the model sees it, and a proposal is judged by the
+     broker's record. The record in the agent's home stays, as its account of itself only. What is
+     left of it is 6zq's first item.
    - **The journal, once on, is the whole account's**: every program run as the agent reads every log,
      Claude Code included (which sends what it reads to its own service). A reader only the doctor has
      is later.
    - **With a remote endpoint the configuration leaves the machine**, a wifi network's key in it
      included, as well as anything else a tool returns.
-   - **`tests/doctor.nix` has not been run** yet, and no real model has been tried: the unit tests and
+   - **`tests/doctor.nix` has not been run** yet (amended on `work/w5` for the broker's sessions), and no real model has been tried: the unit tests and
      the VM test use a scripted endpoint. Whether a given local model calls tools well is untested.
    - **Anyone on the machine can use the local model** (its socket is 0666); restricting it to the
      agent's group needs the service off DynamicUser.
@@ -715,3 +716,28 @@ Its §5 lists claims without a test.
      waiting, marked past its time, in `show system commit`.
    - **Adopted with one waiting:** a machine adopting a repository whose ledger holds a schedule arms it
      at its first boot; adopt's own commit moves HEAD, so it is refused at its time, not applied.
+6zq. **Proposals and session trust (ADR-042 6 and 7, amended; built on `work/w5` 2026-11-07).** Open:
+   - **A session's taint is what was reported.** The broker cannot see what a program of the agent's
+     reads; it holds what it is told, where the agent cannot undo it. TorqOS's doctor reports every
+     tainting read before the model sees it, and stops if a report fails. But any program run as
+     `torq-agent` (Claude Code under `torq agent run`) can start a session over the socket and never
+     report, so its proposals look untainted — and under a person's trust, a user-tier change in that
+     person's folder (their packages) would then apply without asking. Same-uid programs cannot be
+     told apart: checking the caller's executable (ADR-042, 7 as first designed) is defeated by a
+     parent that traces TorqOS's own doctor. What bounds it: trust is the person's own folder, at
+     most 60 minutes, given with their password, each change ledgered and revertible; never system
+     tier. A real fix would run TorqOS's own agent as an account other tools cannot run as.
+   - **Expiry is ledgered late.** A grant is over at its time whatever the ledger says; its
+     `trust_expired` is written by the next operation that may apply under trust (a proposal, a grant,
+     a revoke), not at the time itself.
+   - **What counts as cutting the machine off** is a fixed list (broker/src/agent.rs `CUTS_OFF`:
+     networking, systemd.network, hardware, boot, ssh, resolved, the display's services, niri), not a
+     setting, and only for the agent's proposals: a person's own commit is theirs to confirm or not. A
+     service's settings that a network depends on elsewhere (a VPN's, say) are not on it.
+   - **`tests/agent-proposals.nix` is written and registered, not yet run.** No VM test runs the
+     doctor's own propose step (torqcli's commit as the agent evaluates the configuration, which the
+     test VM cannot): it is covered by the agent crate's tests, with torqcli stubbed.
+   - **Sessions are never ended or removed**: one small record per session stays in the broker's state
+     directory, at most 60 started an hour.
+   - **The doctor's values are words**: `propose_change` sets one word, number or boolean per setting;
+     a value with spaces or quotes (a description, a list at once) cannot be proposed.

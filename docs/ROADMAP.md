@@ -210,11 +210,17 @@ acceptance tests, each a VM test.
       tools only (the journal, hardware, `show configuration`, the ledger, alarms, NixOS option docs);
       explains, proposes nothing; the session tainted once it reads untrusted text. Local model by
       default (ADR-005, llama-server on a unix socket); a remote one as a setting.
-- [ ] **Proposals**: `config.propose` → the broker, as `torq-agent`; the allow-list enforced; shown
-      and approved in torqcli or the desktop dialog; `commit confirmed` by default for anything that
-      could lose the screen or the network. Taint tracking (AI-LAYER.md). Designed in ADR-042, 6.
-- [ ] **Session trust**: "for the next hour, user-tier changes without asking" — ledgered, revertible,
-      never for system tier. Designed in ADR-042, 7.
+- [x] **Proposals**, non-GUI (built 2026-11-07 on `work/w5`, ADR-042 6 as amended; `tests/agent-proposals.nix`
+      written, not yet run): `torq agent propose "<ask>"` — the doctor with `propose_change`, structured
+      words of the tree, through torqcli as the agent, which proposes and stops; the allow-list enforced
+      at the broker; the taint held by the broker (sessions, `broker/src/session.rs`), sessionless
+      proposals tainted; `request system apply` says why one is tainted; an agent's change to the
+      network, boot, hardware, SSH or the display applied only as a `commit confirmed`. Left: the
+      desktop dialog (M4); a VM test of the doctor's own commit (KNOWN-GAPS 6zq).
+- [x] **Session trust**, non-GUI (built 2026-11-07 on `work/w5`, ADR-042 7 as amended): `request system
+      agent trust <minutes>` (at most 60, the person's password, their own folder) and `… revoke`;
+      ledgered (grant, each apply under it, revoke, expiry), shown in `show system alarms`, never system
+      tier, never tainted.
 - [ ] **Build me an application**: the agent writes and builds in the person's home, installs via
       rung 3 (ADR-037), tests, undoes.
 - [ ] **Watch the desktop**: screenshot and input through the compositor's protocols, in the

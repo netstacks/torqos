@@ -27,6 +27,9 @@ Every command can be abbreviated to a unique beginning, and `?` or `help` works 
 | `request system restore <backup> [<snapshot>] <path>` | put a path back from a backup, what is there set aside |
 | `request system software rollback <n>` | load configuration `<n>`'s software into the candidate (a downgrade) |
 | `request system revert <change>` | undo one recorded change (`#85` or `85`) |
+| `request system apply <n>` | apply a proposal of the agent's, after showing what it does (says why, if its session read untrusted text; one that could cut you off is applied as a commit confirmed) |
+| `request system agent trust <minutes>` | for up to 60 minutes, the agent's untainted proposals in your own folder apply without asking (asks your password) |
+| `request system agent trust revoke` | end that trust now |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
 | `clear system commit` | cancel the commit scheduled with `commit at` (asks first; yours, or an administrator's with their password) |
 | <code>help [&lt;command&gt; &#124; &lt;words&gt;]</code> | the commands, one command, or a search of commands and settings |

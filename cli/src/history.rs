@@ -233,6 +233,8 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         "data_restored" => ("↺", clean(&e.reason)),
         "snapshot_taken" | "snapshot_deleted" => ("✓", clean(&e.reason)),
         "snapshot_delete_failed" => ("✗", clean(&e.reason)),
+        "session_started" | "trust_revoked" | "trust_expired" => ("·", clean(&e.reason)),
+        "session_tainted" | "trust_granted" => ("⚠", clean(&e.reason)),
         "ledger_mended" => ("⚠", clean(&e.reason)),
         "disagreement_acknowledged" => ("✓", clean(&e.reason)),
         "password" => ("✓", clean(&e.reason)),

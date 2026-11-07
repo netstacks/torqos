@@ -15,7 +15,7 @@ Three things a person says to their machine; each is an acceptance test (ROADMAP
 | "Build me an application for this." | writes and builds it in the person's home, installs it through the tree (ADR-037, rung 3) | none: user tier; every step a ledger line; `rollback` undoes it |
 | "Watch while I try it." | screenshots and input through the compositor's protocols | the person's session; nothing of the broker's |
 
-In order: **doctor mode** (read, explain, propose nothing; built, ADR-042: `torq doctor "<question>"`), **proposals**, **session trust** ("for
+In order: **doctor mode** (read, explain, propose nothing; built, ADR-042: `torq doctor "<question>"`), **proposals** (built: `torq agent propose "<ask>"`), **session trust** (built: `request system agent trust <minutes>`; "for
 the next hour, user-tier changes without asking" — ledgered, revertible, never for system tier).
 On a desktop the approval is a dialog with the owner's password, the one thing a program in the
 owner's shell does not have; in a terminal it is torqcli's prompt, the same text.
@@ -41,16 +41,25 @@ owner's shell does not have; in a terminal it is torqcli's prompt, the same text
 
 ## Taint tracking
 
-Any agent session that has ingested untrusted content (web pages, email, downloaded files,
-clipboard from unknown sources) is marked **tainted**. Tainted sessions cannot use
+Any agent session that has ingested untrusted content (logs, device names, the ledger, configuration
+values; web pages, email, downloaded files) is marked **tainted**. Tainted sessions cannot use
 "approve once" shortcuts: every `user` or `system` action requires explicit per-step approval
 with the taint source displayed.
+
+Built (ADR-042 6, amended): the taint is the **broker's**. TorqOS's agent starts its session at the
+broker (`session_started`) and reports each tainting read there before the model sees it
+(`session_tainted`); the broker keeps the record in its own state directory, where the agent cannot
+write, and nothing clears it. A proposal names its session and is tainted as the broker's record says;
+one that names no session — any other program run as the agent — is tainted. `request system apply`
+says what the session read; session trust never covers a tainted proposal. The broker holds what it
+is told, and cannot see what a program reads: KNOWN-GAPS 6zq.
 
 ## Ledger format (v0)
 
 Append-only JSON Lines at `/var/lib/torq/state/ledger.jsonl`, owned by the broker.
 Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `reverted`, `revert_failed`,
-`interrupted`, `repaired`, `confirmed`, `rolled_back` (an unconfirmed `commit confirmed`)
+`interrupted`, `repaired`, `confirmed`, `rolled_back` (an unconfirmed `commit confirmed`), the agent's
+`session_started` and `session_tainted`, and a person's `trust_granted`, `trust_revoked`, `trust_expired`
 (failures and restores carry `restored: true|false` — see ADR-008).
 
 ```json
@@ -85,5 +94,6 @@ Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `reverted`, `revert_
 Built (doctor mode, ADR-042, `agent/src/tools.rs`; all read-only): `read_journal`,
 `hardware_facts`, `show_configuration`, `show_ledger`, `show_alarms`, `nixos_option_docs`. All but
 the option docs return untrusted text (a configuration value too) and
-taint the session. Next (Proposals, ADR-042 6): `propose_change`, structured operations on the tree.
+taint the session. In propose mode (ADR-042 6): `propose_change`, structured words of the tree, a
+proposal through torqcli as the agent.
 Later: `logs.coredump`, `pkg.search`, `power.status`, `secureboot.status`, `files.read_scoped`.
