@@ -259,7 +259,7 @@ pub struct Candidate {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Release {
     pub rev: String,
-    pub version: String,
+    pub version: crate::release::Version,
 }
 
 impl Candidate {
@@ -354,8 +354,8 @@ impl Candidate {
         let release = match &v["release"] {
             serde_json::Value::Null => None,
             serde_json::Value::Object(r) => match (r.get("rev").and_then(|x| x.as_str()), r.get("version").and_then(|x| x.as_str())) {
-                (Some(rev), Some(version)) if rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit()) && crate::release::is_version(version) => {
-                    Some(Release { rev: rev.to_string(), version: version.to_string() })
+                (Some(rev), Some(number)) if rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit()) && crate::release::is_version(number) => {
+                    Some(Release { rev: rev.to_string(), version: crate::release::Version { number: number.to_string(), exact: r.get("exact").and_then(|x| x.as_bool()).unwrap_or(false) } })
                 }
                 _ => bail!("{}: its release is not what torqcli writes; `rollback 0` starts a new candidate", path.display()),
             },
@@ -371,7 +371,7 @@ impl Candidate {
         private_dir(dir)?;
         let files: serde_json::Map<String, serde_json::Value> =
             self.config.files.iter().map(|(p, d)| (p.clone(), d.render().into())).collect();
-        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 6, "base": self.base, "files": files, "lock": self.lock, "settings": self.settings, "attached": self.attached, "nix": self.nix, "source": self.source, "release": self.release.as_ref().map(|r| serde_json::json!({ "rev": r.rev, "version": r.version })) }))?;
+        let body = serde_json::to_vec_pretty(&serde_json::json!({ "version": 6, "base": self.base, "files": files, "lock": self.lock, "settings": self.settings, "attached": self.attached, "nix": self.nix, "source": self.source, "release": self.release.as_ref().map(|r| serde_json::json!({ "rev": r.rev, "version": r.version.number, "exact": r.version.exact })) }))?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?; // created 0600
         tmp.write_all(&body)?;
         tmp.as_file().sync_all()?;
@@ -385,6 +385,22 @@ impl Candidate {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
             _ => Ok(()),
         }
+    }
+}
+
+/// What a saved candidate is, as one session last read or wrote it: its bytes' SHA-256 (None: there
+/// is none). A session writes the shared candidate only if it is still what it read, so it never
+/// overwrites what another session saved meanwhile.
+pub type Print = Option<[u8; 32]>;
+
+/// The saved candidate at `path` as it is now (never through a link: a link is not a candidate).
+pub fn print_of(path: &Path) -> Result<Print> {
+    use sha2::{Digest, Sha256};
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        Ok(m) if !m.file_type().is_file() => bail!("{} is not a plain file; remove it", path.display()),
+        Ok(_) => Ok(Some(Sha256::digest(fs::read(path).with_context(|| format!("reading {}", path.display()))?).into())),
     }
 }
 
@@ -648,12 +664,12 @@ mod review_tests {
     fn the_release_checked_is_kept() {
         let state = tempfile::tempdir().unwrap();
         let p = state.path().join("torq/candidate.json");
-        let release = Release { rev: "0123456789abcdef0123456789abcdef01234567".into(), version: "0.2.2".into() };
+        let release = Release { rev: "0123456789abcdef0123456789abcdef01234567".into(), version: crate::release::Version { number: "0.3.0-rc1".into(), exact: true } };
         let c = Candidate { base: "x".into(), config: Config::default(), lock: None, settings: Default::default(), attached: Default::default(), nix: Default::default(), source: None, release: Some(release.clone()) };
         c.save(&p).unwrap();
         assert_eq!(Candidate::load(&p, &schema()).unwrap().unwrap().release, Some(release));
         let text = fs::read_to_string(&p).unwrap();
-        for bad in [text.replace("\"0.2.2\"", "\"0.2.2\\u001b[2J\""), text.replace("0123456789abcdef0123", "--upload-pack=x")] {
+        for bad in [text.replace("\"0.3.0-rc1\"", "\"0.3.0\\u001b[2J\""), text.replace("0123456789abcdef0123", "--upload-pack=x")] {
             fs::write(&p, bad).unwrap();
             assert!(format!("{:#}", Candidate::load(&p, &schema()).unwrap_err()).contains("its release is not what torqcli writes"));
         }

@@ -125,34 +125,67 @@ fn try_lock(f: &File, shared: bool) -> Result<bool> {
     Ok(false)
 }
 
-/// How the lock at `path` stands, to a session that does not hold it. Locked with nobody written in
-/// it is a moment, not a holder — a session between taking and writing it, or a process just
-/// started (fork) holding a copy of a session's file until it runs its program (which closes it) —
-/// so it is looked at again, briefly, before it is called held by someone unknown.
+/// Whether another session holds the lock file `f` (who, if it wrote itself in), else None — and then
+/// this one holds it shared, until `f` is closed. Locked with nobody written in it is a moment, not
+/// a holder — a session between taking and writing it, or a process just started (fork) holding a
+/// copy of a session's file until it runs its program (which closes it) — so it is looked at
+/// again, briefly, before it is called held by someone unknown.
+fn holder_of(f: &mut File) -> Result<Option<Option<Holder>>> {
+    for _ in 0..40 {
+        if try_lock(f, true)? {
+            return Ok(None);
+        }
+        if let Some(who) = written(f)? {
+            return Ok(Some(Some(who)));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Ok(Some(None))
+}
+
+/// How the lock at `path` stands, to a session that does not hold it.
 pub fn seen(path: &Path) -> Result<Seen> {
     if std::fs::symlink_metadata(path).is_err() {
         return Ok(Seen::Free);
     }
-    let mut f = open(path)?;
-    for _ in 0..40 {
-        if try_lock(&f, true)? {
-            return Ok(Seen::Free);
+    Ok(holder_of(&mut open(path)?)?.map_or(Seen::Free, Seen::Held))
+}
+
+/// A write of the shared `candidate` (saved, or removed), by `write`: refused while another session
+/// holds it exclusively (`holding`: this one does), and kept from it while it runs — the lock is
+/// held shared meanwhile, so a session taking it waits for the write (`take` tries again) — and one
+/// write at a time (beside it, `candidate.saving`), so what `write` checks it is still what it
+/// writes over.
+pub fn writing<T>(candidate: &Path, holding: bool, write: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _shared = if holding {
+        None
+    } else {
+        let mut f = open(&path_for(candidate))?;
+        if let Some(who) = holder_of(&mut f)? {
+            bail!(
+                "not done: the candidate is held exclusively by {} (`configure exclusive`): it can be read here, not changed, until that session leaves configuration mode",
+                who.map_or("another session of yours".to_string(), |h| h.describe(&crate::history::Clock::system()))
+            );
         }
-        if let Some(who) = written(&mut f)? {
-            return Ok(Seen::Held(Some(who)));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    Ok(Seen::Held(None))
+        Some(f)
+    };
+    let one = open(&candidate.with_extension("saving"))?;
+    one.lock().context("waiting for another session's write of the candidate")?;
+    write()
 }
 
 /// Take the lock at `path` as `me`: the lock, and the stale holder it took over, if one was there.
 /// Held by another session: refused, naming it.
 pub fn take(path: &Path, me: &Holder, clock: &crate::history::Clock) -> Result<(Lock, Option<Holder>)> {
+    use std::os::unix::fs::MetadataExt;
     let mut f = open(path)?;
     if !try_lock(&f, false)? {
         let who = written(&mut f)?.map_or("another session of yours".to_string(), |h| h.describe(clock));
         bail!("the candidate is held exclusively by {who}: it is yours to change again when that session leaves configuration mode (or ends)");
+    }
+    // The file locked is the one others will open: nothing put another in its place meanwhile.
+    if f.metadata()?.ino() != std::fs::symlink_metadata(path)?.ino() {
+        bail!("{} was replaced while it was being locked: not taken; `configure exclusive` again", path.display());
     }
     let stale = written(&mut f)?;
     f.set_len(0)?;

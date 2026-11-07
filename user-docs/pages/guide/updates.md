@@ -27,7 +27,9 @@ named by version — the one running, then the release's:
 
 If the release is an older version than the one running, it says so plainly
 (`## TorqOS 0.1.9 is older than 0.2.1, which runs now: a downgrade`), whatever its date. Where no
-version can be read (a source other than the releases), each side is shown by its date.
+version can be read (a source other than the releases), each side is shown by its date. A
+pre-release is named by its tag (`0.3.0-rc1`); since a machine reports only the number of what it
+runs (`0.3.0` on a release candidate too), a pre-release and its release are compared by date.
 
 `request system update all` also updates the NixOS packages (nixpkgs) along with TorqOS.
 

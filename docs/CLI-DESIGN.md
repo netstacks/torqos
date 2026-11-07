@@ -186,6 +186,17 @@ process number cannot keep a lock. A script's private candidate (`-c`) is never 
 by a lock (`configure exclusive` there says it is private already). Unlike some network devices,
 leaving keeps uncommitted changes, as `configure` does.
 
+The lock is checked again at every write, not only when a command starts, since a command may wait
+(at a question, in the editor, for a paste, for a fetch): the candidate is saved, or removed, while
+holding the lock shared (so a `configure exclusive` meanwhile waits for the write, or the write is
+refused naming the holder), and a commit checks again after its question, before the broker is
+asked. And every interactive session reads the shared candidate afresh at each command, and writes
+it only if it is still as it read it (its bytes' hash, checked and written one session at a time):
+a session idle since another saved it never writes back its old copy ("another session changed the
+candidate since this one read it": the next command reads it as it is now) — with or without a
+lock. A commit made while another session changed or took the candidate keeps that session's
+candidate, and says so.
+
 ## The configuration tree
 
 **Since S3c (docs/CONFIG-IS-THE-DEVICE.md) the tree is every NixOS setting of the system, one to one**
@@ -466,13 +477,17 @@ update [all]` runs `nix flake update` on the commit the candidate is based on an
 `flake.lock` diff, and `commit` (system tier: it asks) installs it. TorqOS itself is named by its
 version where one is known (audit A3): `-   torq 0.2.1 (2026-11-05);` `+   torq 0.2.2 (2026-11-07);`.
 The version before is the running one (`/etc/os-release`, only where it is TorqOS's, and only
-against the configuration in effect); the one after is the release's, read from `cli/Cargo.toml` of
-the very commit fetched to check its signature (no second fetch), kept with the candidate beside
-that commit, and named when the release is checked (`TorqOS release 0123456789ab (TorqOS 0.2.2):
-signed by …`). With both, the versions decide (SemVer: a pre-release is older than its release),
-not the dates: an older one says `## TorqOS 0.1.9 is older than 0.2.1, which runs now: a
-downgrade`, the same version goes by date. A source that is not the releases, `request system
-software rollback`, or a release without a version: dates, as before. `rollback <n>` loads a configuration and keeps the
+against the configuration in effect); the one after is the release's, read from the very commit
+fetched to check its signature (no second fetch): its number from `cli/Cargo.toml`, and the whole
+tag from the signed commit's message (`TorqOS v0.3.0-rc1`, as release.yml writes it), where it names
+that number — else the number alone, shown as `0.3.0, a release or a pre-release`. It is kept with
+the candidate beside that commit (another commit in the lock: dates), and named when the release is
+checked (`TorqOS release 0123456789ab (TorqOS 0.2.2): signed by …`). Two numbers that differ
+decide, not the dates: an older one says `## TorqOS 0.1.9 is older than 0.2.1, which runs now: a
+downgrade`. Only the numbers: the running version is its source's, which never says a pre-release
+(a machine on 0.3.0-rc1 says 0.3.0), so a pre-release and its release, or the same number rebuilt,
+go by date (`## older software than now: a downgrade`). A source that is not the releases, `request
+system software rollback`, or a release without a version: dates, as before. `rollback <n>` loads a configuration and keeps the
 software loaded into the candidate (and says so); `rollback 0` starts over without it. Loading onto a
 candidate whose base is no longer the active configuration warns that `commit` will be refused.
 

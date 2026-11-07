@@ -14,9 +14,34 @@ pub const SIGNERS: &str = "/etc/torq/release-signers";
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signed {
     pub said: String,
-    /// TorqOS's version at that commit: `cli/Cargo.toml`'s `[package] version`, read from the commit
-    /// fetched to check it (no second fetch). None: it has none, or not one in a form compared here.
-    pub version: Option<String>,
+    /// TorqOS's version at that commit, read from the commit fetched to check it (no second fetch).
+    /// None: it has none, or not one in a form compared here.
+    pub version: Option<Version>,
+}
+
+/// A release's version. The source says only its number (`cli/Cargo.toml`: a pre-release, `rc1`, is
+/// the tag's, not the source's); the release workflow names the whole tag in the signed commit's
+/// message (`TorqOS v0.3.0-rc1`). Where the message names it, for that number, it is the version,
+/// `exact`; otherwise the number alone, which may be a release or a pre-release of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Version {
+    pub number: String,
+    pub exact: bool,
+}
+
+/// A release's version, from its source's `cli/Cargo.toml` and its signed commit's message.
+pub fn release_version(cargo_toml: &str, message: &str) -> Option<Version> {
+    let number = package_version(cargo_toml)?;
+    let tagged = message.lines().next()?.strip_prefix("TorqOS v").filter(|t| is_version(t) && core(t) == number);
+    Some(match tagged {
+        Some(t) => Version { number: t.to_string(), exact: true },
+        None => Version { number, exact: false },
+    })
+}
+
+/// A version's three numbers, without its pre-release (`0.3.0-rc1` → `0.3.0`).
+pub fn core(v: &str) -> &str {
+    v.split('-').next().unwrap_or(v)
 }
 
 /// Where a TorqOS source says its version (scripts/bump-version sets it; release.yml checks the tag
@@ -66,12 +91,14 @@ pub fn check(repo: &str, rev: &str, signers: &Path) -> Result<Signed> {
     git(&["fetch", "-q", "--depth=1", "--no-tags", repo, rev]).with_context(|| format!("fetching release {} from {repo}", &rev[..12]))?;
     // Only an SSH signature is the release key's (ADR-028): an OpenPGP or X.509 one is refused
     // before git is asked to verify anything.
-    if !ssh_signed(&raw_commit(dir.path(), rev)?) {
+    let raw = raw_commit(dir.path(), rev)?;
+    if !ssh_signed(&raw) {
         bail!("release {} is not signed by the TorqOS release key ({}): its signature, if any, is not an SSH signature", &rev[..12], SIGNERS);
     }
     let said = git(&["verify-commit", rev]).with_context(|| format!("release {} is not signed by the TorqOS release key ({})", &rev[..12], SIGNERS))?;
     // Read only once the signature holds: the version is the signed commit's own.
-    let version = git_out(dir.path(), &["cat-file", "blob", &format!("{rev}:{VERSION_FILE}")]).ok().and_then(|t| package_version(&t));
+    let message = raw.split_once("\n\n").map_or("", |(_, m)| m);
+    let version = git_out(dir.path(), &["cat-file", "blob", &format!("{rev}:{VERSION_FILE}")]).ok().and_then(|t| release_version(&t, message));
     Ok(Signed { said: said.lines().find(|l| l.starts_with("Good")).unwrap_or("signed").to_string(), version })
 }
 
@@ -198,7 +225,7 @@ mod tests {
             };
             git(&["rev-parse", "HEAD"])
         };
-        (commit("signed", Some(key)), commit("other", Some(other)), commit("unsigned", None))
+        (commit("TorqOS v0.2.2", Some(key)), commit("other", Some(other)), commit("unsigned", None))
     }
 
     fn key(dir: &Path, name: &str) -> std::path::PathBuf {
@@ -225,7 +252,7 @@ mod tests {
         };
         tip(&good);
         let signed = check(&repo, &good, &signers).unwrap();
-        assert_eq!(signed.version.as_deref(), Some("0.2.2"), "read from the commit fetched to check it");
+        assert_eq!(signed.version, Some(Version { number: "0.2.2".into(), exact: true }), "read from the commit fetched to check it: its source and its message");
         let said = signed.said;
         assert!(said.starts_with("Good \"git\" signature for torqos-release"), "{said}");
         tip(&wrong);
@@ -281,6 +308,15 @@ mod tests {
             assert_eq!(order(a, b), Some(want), "{a} against {b}");
         }
         assert_eq!(order("0.2.0", "26.05"), None);
+        // The tag the signed commit's message names, for the source's number, is the version: a
+        // pre-release says so. A message without one, or naming another number: the number alone.
+        let toml = "[package]\nversion = \"0.3.0\"\n";
+        assert_eq!(release_version(toml, "TorqOS v0.3.0-rc1\n"), Some(Version { number: "0.3.0-rc1".into(), exact: true }));
+        assert_eq!(release_version(toml, "TorqOS v0.3.0"), Some(Version { number: "0.3.0".into(), exact: true }));
+        assert_eq!(release_version(toml, "TorqOS v0.4.0-rc1"), Some(Version { number: "0.3.0".into(), exact: false }), "not this source's number");
+        assert_eq!(release_version(toml, "some commit"), Some(Version { number: "0.3.0".into(), exact: false }));
+        assert_eq!(release_version("[package]\n", "TorqOS v0.3.0"), None, "no number in the source: none");
+        assert_eq!(core("0.3.0-rc.1"), "0.3.0");
         // The running version is TorqOS's own, never NixOS's.
         assert_eq!(os_release_version("NAME=TorqOS\nID=torqos\nID_LIKE=nixos\nVERSION_ID=\"0.2.1\"\n").as_deref(), Some("0.2.1"));
         assert_eq!(os_release_version("NAME=NixOS\nID=nixos\nVERSION_ID=\"26.05\"\n"), None);

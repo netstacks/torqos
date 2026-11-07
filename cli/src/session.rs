@@ -212,6 +212,9 @@ pub struct Session<'a> {
     /// This session's hold on the shared candidate (`configure exclusive`), until it leaves
     /// configuration mode.
     exclusive: Option<crate::exclusive::Lock>,
+    /// The saved candidate as this session last read or wrote it (None: not read since the command
+    /// began).
+    print: Option<candidate::Print>,
 }
 
 /// Split a command line into words as a shell does: whitespace-separated, "double" or 'single'
@@ -290,7 +293,7 @@ fn word(out: &mut Vec<String>, w: String) -> Result<()> {
 
 impl<'a> Session<'a> {
     pub fn new(schema: Schema, tree: crate::nixos::Tree, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str) -> Self {
-        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true, exclusive: None }
+        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true, exclusive: None, print: None }
     }
 
     /// The whole tree over both kinds of files (whole.rs).
@@ -301,7 +304,12 @@ impl<'a> Session<'a> {
     fn candidate(&mut self) -> Result<&mut Candidate> {
         if self.candidate.is_none() {
             let c = match &self.saved {
-                Some(p) => Candidate::load(p, &self.schema)?,
+                Some(p) => {
+                    // What it is, read before it: a change after this is one this session has not
+                    // seen, so it is never written over (save).
+                    self.print = Some(candidate::print_of(p)?);
+                    Candidate::load(p, &self.schema)?
+                }
                 None => None,
             };
             self.candidate = Some(match c {
@@ -312,20 +320,47 @@ impl<'a> Session<'a> {
         Ok(self.candidate.as_mut().unwrap())
     }
 
-    fn save(&self) -> Result<()> {
-        if let (Some(p), Some(c)) = (&self.saved, &self.candidate) {
-            c.save(p)?;
+    /// A write of the shared candidate (exclusive.rs `writing`), if it is still as this session read
+    /// it; else refused, and the next command reads it as it is now.
+    fn write_shared<T>(&mut self, write: impl FnOnce(&Path, Option<&Candidate>) -> Result<T>) -> Result<Option<T>> {
+        let Some(p) = self.saved.clone() else { return Ok(None) };
+        let known = self.print;
+        let r = crate::exclusive::writing(&p, self.exclusive.is_some(), || {
+            if known.is_some() && known != Some(candidate::print_of(&p)?) {
+                bail!("not done: another session changed the candidate since this one read it, so nothing here was written over it; the next command reads it as it is now");
+            }
+            let out = write(&p, self.candidate.as_ref())?;
+            Ok((out, candidate::print_of(&p)?))
+        });
+        match r {
+            Ok((out, now)) => {
+                self.print = Some(now);
+                Ok(Some(out))
+            }
+            Err(e) => {
+                self.candidate = None;
+                self.print = None;
+                Err(e)
+            }
         }
-        Ok(())
+    }
+
+    fn save(&mut self) -> Result<()> {
+        self.write_shared(|p, c| c.map_or(Ok(()), |c| c.save(p))).map(drop)
     }
 
     /// Throw the candidate away: the next edit starts from the active configuration.
     fn discard(&mut self) -> Result<()> {
+        self.write_shared(|p, _| Candidate::discard(p))?;
         self.candidate = None;
-        if let Some(p) = &self.saved {
-            Candidate::discard(p)?;
-        }
+        self.print = None;
         Ok(())
+    }
+
+    /// Whether the shared candidate may still be written by this session (nobody else holds it, and it
+    /// is as this session read it): checked before what a write follows — a commit — is done.
+    fn may_write(&mut self) -> Result<()> {
+        self.write_shared(|_, _| Ok(())).map(drop)
     }
 
     /// Run one command line; returns what to print.
@@ -711,6 +746,7 @@ impl<'a> Session<'a> {
         self.exclusive = Some(lock);
         // As saved: what this session had in memory may be older than what another one left.
         self.candidate = None;
+        self.print = None;
         let mut out = self.said("The candidate is yours alone until you leave configuration mode: your other sessions can read it, not change it.");
         if let Some(h) = stale {
             out.push_str(&self.said(&format!("A lock left by a session that ended without leaving configuration mode ({}, gone) was taken over.", h.describe(&clock))));
@@ -732,6 +768,12 @@ impl<'a> Session<'a> {
     /// Another session's `configure exclusive`: the candidate is read here as that session saved it,
     /// and a command that would change it (or commit it) is refused, naming the session.
     fn guard(&mut self, op: &Op) -> Result<()> {
+        // The shared candidate is read afresh by every command: another session may have saved it
+        // since (and what this one writes is checked against what it read: save).
+        if self.saved.is_some() {
+            self.candidate = None;
+            self.print = None;
+        }
         let Some(path) = self.lock_path().filter(|_| self.exclusive.is_none()) else { return Ok(()) };
         // (A lock that cannot be read refuses only a change: it must never keep anyone from looking,
         // or from leaving.)
@@ -741,7 +783,6 @@ impl<'a> Session<'a> {
             Err(e) if self.changes_candidate(op)? => return Err(e),
             Err(_) => return Ok(()),
         };
-        self.candidate = None;
         if self.changes_candidate(op)? {
             bail!(
                 "not done: the candidate is held exclusively by {} (`configure exclusive`): it can be read here, not changed, until that session leaves configuration mode",
@@ -1096,8 +1137,8 @@ impl<'a> Session<'a> {
         let repo = crate::software::releases_repo(&self.machine.releases()?);
         let Some(rev) = crate::software::release_commit(lock, &repo) else { return Ok(String::new()) };
         let signed = self.machine.check_release(&repo, &rev)?;
-        let version = signed.version.filter(|v| crate::release::is_version(v));
-        let named = version.as_ref().map(|v| format!(" (TorqOS {v})")).unwrap_or_default();
+        let version = signed.version.filter(|v| crate::release::is_version(&v.number));
+        let named = version.as_ref().map(|v| format!(" (TorqOS {})", shown_version(v))).unwrap_or_default();
         self.candidate()?.release = version.map(|v| candidate::Release { rev: rev.clone(), version: v });
         Ok(self.said(&format!("TorqOS release {}{named}: signed by the TorqOS release key.", short(&rev))))
     }
@@ -1440,9 +1481,10 @@ impl<'a> Session<'a> {
             let scratch = tempfile::tempdir()?;
             let diff = candidate::unified_diff(scratch.path(), &changes)?;
             let reason = crate::history::one_line(&o.comment.clone().unwrap_or_else(|| summary(&compare)), usize::MAX);
+            self.may_write()?;
             let seq = self.machine.propose(&diff, &base, &reason)?;
-            self.discard()?;
-            return Ok(warned + &self.said(&format!("proposed as #{seq}: a person applies it (request system apply {seq})")));
+            let kept = self.discard_committed();
+            return Ok(warned + &self.said(&format!("proposed as #{seq}: a person applies it (request system apply {seq})")) + &kept);
         }
         // Asked: the warnings were shown with the question; not asked, they come with the outcome.
         let warned = if why.is_some() { String::new() } else { warned };
@@ -1456,8 +1498,11 @@ impl<'a> Session<'a> {
         let diff = candidate::unified_diff(scratch.path(), &changes)?;
         // One line of text, as the broker takes it (a tab or an escape typed in a comment: shown, not sent).
         let reason = crate::history::one_line(&comment.unwrap_or_else(|| summary(&compare)), usize::MAX);
+        // Checked again after the question, which may have waited: another session may hold the
+        // candidate now, or have changed it.
+        self.may_write()?;
         let seq = self.machine.commit(&diff, &base, tier, &reason, confirm)?;
-        self.discard()?;
+        let kept = self.discard_committed();
         Ok(warned + &match confirm {
             Some(m) => format!(
                 "{}{}",
@@ -1465,7 +1510,16 @@ impl<'a> Session<'a> {
                 self.said("commit complete")
             ),
             None => self.said(&format!("commit complete (change #{seq})")),
-        })
+        } + &kept)
+    }
+
+    /// The candidate discarded once it is committed (or proposed) — unless another session changed or
+    /// took it while the broker worked: then it is that session's, kept, and said so.
+    fn discard_committed(&mut self) -> String {
+        match self.discard() {
+            Ok(()) => String::new(),
+            Err(_) => self.said("The candidate was changed or taken by another session meanwhile: it is kept as that session left it."),
+        }
     }
 
     /// What the configuration warns of (NixOS's `warnings`, as `check` read them), one `!` line each.
@@ -1881,6 +1935,12 @@ struct Versions {
     release: Option<candidate::Release>,
 }
 
+/// A release's version as shown: the tag where the signed release names it (`0.3.0-rc1`), else its
+/// number, said to be a release or a pre-release of it (release.rs `Version`).
+fn shown_version(v: &crate::release::Version) -> String {
+    if v.exact { v.number.clone() } else { format!("{}, a release or a pre-release", v.number) }
+}
+
 /// The node a lock takes TorqOS from (the root's `torq` input), and the commit it is locked at.
 fn torq_node(lock: &str) -> Option<(String, Option<String>)> {
     let v: serde_json::Value = serde_json::from_str(lock).ok()?;
@@ -1914,22 +1974,24 @@ fn software_compare(old: Option<&[u8]>, new: &Option<String>, versions: &Version
         // Names come from upstream flakes: one line each, cleaned, so none can draw a line of its own.
         let name = crate::history::one_line(&m.name, 40);
         let (before, after) = crate::pkg::move_dates(m);
-        let named = |v: &Option<String>, date: String| match v {
+        let named = |v: Option<String>, date: String| match v {
             Some(v) => format!("{v} ({date})"),
             None => date,
         };
         let torq = |n: &Option<(String, Option<String>)>| n.as_ref().is_some_and(|(node, _)| *node == m.name);
         let (vb, va) = (before_version.clone().filter(|_| torq(&was_torq)), after_version.clone().filter(|_| torq(&is_torq)));
         if m.was {
-            out.push_str(&format!("-   {name} {};\n", named(&vb, before)));
+            out.push_str(&format!("-   {name} {};\n", named(vb.clone(), before)));
         }
         if m.is {
-            out.push_str(&format!("+   {name} {};\n", named(&va, after)));
+            out.push_str(&format!("+   {name} {};\n", named(va.as_ref().map(shown_version), after)));
         }
-        // Two versions that differ decide; the same version (a commit rebuilt) goes by date.
-        let by_version = vb.as_deref().zip(va.as_deref()).and_then(|(b, a)| crate::release::order(a, b).filter(|o| o.is_ne()).map(|o| (o, a, b)));
+        // Two version numbers that differ decide. Their numbers only: the running version is its
+        // source's (`cli/Cargo.toml`, /etc/os-release), which never says a pre-release, so a
+        // pre-release and its release, or the same number rebuilt, go by date.
+        let by_version = vb.as_deref().zip(va.as_ref()).and_then(|(b, a)| crate::release::order(crate::release::core(&a.number), crate::release::core(b)).filter(|o| o.is_ne()).map(|o| (o, a, b)));
         match by_version {
-            Some((std::cmp::Ordering::Less, a, b)) => downgrade = Some(format!("## TorqOS {a} is older than {b}, which runs now: a downgrade\n")),
+            Some((std::cmp::Ordering::Less, a, b)) => downgrade = Some(format!("## TorqOS {} is older than {b}, which runs now: a downgrade\n", a.number)),
             Some(_) => {}
             // Older to the second; an input whose date is unknown on either side says nothing.
             None => older |= matches!((m.before, m.after), (Some(b), Some(a)) if a < b),
@@ -2167,6 +2229,13 @@ mod tests {
     /// Tree files a change writes (None: deletes), as the machine is given them.
     type Files = Vec<(String, Option<String>)>;
 
+    /// Another session, at the moment this one waits: it takes the lock of the candidate saved at the
+    /// path, or saves that candidate as the text.
+    enum Meanwhile {
+        Take(PathBuf),
+        Write(PathBuf, String),
+    }
+
     #[derive(Default)]
     struct Fake {
         commits: RefCell<Vec<(String, String, String, String, Option<u32>)>>,
@@ -2206,12 +2275,20 @@ mod tests {
         release: Option<(String, bool)>,
         /// The version the release holds (None: none read), and the one the machine runs.
         release_version: Option<String>,
+        /// Its signed commit does not name its tag (an older release): the number alone.
+        release_inexact: bool,
+        /// When the release is from (else NEWER).
+        release_date: Option<u64>,
         running: Option<String>,
         release_checks: RefCell<Vec<String>>,
         /// What the configuration warns of, when checked.
         warnings: Vec<String>,
         /// The commit `fetch_incoming` answers.
         incoming: Option<String>,
+        /// What another session does while this one waits (a question, an editor, a paste, a fetch).
+        meanwhile: RefCell<Option<Meanwhile>>,
+        /// The locks it took.
+        taken: RefCell<Vec<crate::exclusive::Lock>>,
     }
     impl Machine for Fake {
         fn check(&self, _base: &str, files: &[(String, Option<String>)]) -> Result<Vec<String>> {
@@ -2234,6 +2311,7 @@ mod tests {
         }
         /// (A test's "no" is a script's: nobody to ask; `no` says a person declined.)
         fn ask(&self, q: &str) -> Answer {
+            self.meanwhile();
             self.asked.borrow_mut().push(q.into());
             match (self.answer, self.no) {
                 (true, _) => Answer::Yes,
@@ -2243,6 +2321,7 @@ mod tests {
         }
         /// (The first edit leaves `edit_to`; any later one, `edit_again`.)
         fn edit(&self, path: &str, text: &str) -> Result<Option<String>> {
+            self.meanwhile();
             self.edited.borrow_mut().push((path.into(), text.into()));
             Ok(if self.edited.borrow().len() > 1 && self.edit_again.is_some() { self.edit_again.clone() } else { self.edit_to.clone() })
         }
@@ -2251,6 +2330,7 @@ mod tests {
             Ok((text.matches('{').count() != text.matches('}').count()).then(|| format!("unexpected end of file, at {path}:3:1")))
         }
         fn read_terminal(&self, _: usize) -> Result<String> {
+            self.meanwhile();
             self.typed.clone().context("no terminal")
         }
         fn alarms(&self, detail: bool, _: Option<usize>) -> Result<String> {
@@ -2348,6 +2428,7 @@ mod tests {
             Ok(History { configurations, at })
         }
         fn update_lock(&self, base: &str, all: bool) -> Result<String> {
+            self.meanwhile();
             self.bases.borrow_mut().push(base.into());
             Ok(self.newest(all))
         }
@@ -2363,7 +2444,7 @@ mod tests {
             assert_eq!(repo, "https://github.com/netstacks/torqos-releases", "the machine's releases");
             self.release_checks.borrow_mut().push(rev.into());
             match &self.release {
-                Some((r, true)) if r == rev => Ok(crate::release::Signed { said: "Good \"git\" signature for torqos-release".into(), version: self.release_version.clone() }),
+                Some((r, true)) if r == rev => Ok(crate::release::Signed { said: "Good \"git\" signature for torqos-release".into(), version: self.release_version.clone().map(|number| crate::release::Version { number, exact: !self.release_inexact }) }),
                 _ => bail!("release {} is not signed by the TorqOS release key", &rev[..12]),
             }
         }
@@ -2372,10 +2453,17 @@ mod tests {
         }
     }
     impl Fake {
+        fn meanwhile(&self) {
+            match self.meanwhile.borrow_mut().take() {
+                Some(Meanwhile::Take(p)) => self.taken.borrow_mut().push(crate::exclusive::take(&crate::exclusive::path_for(&p), &crate::exclusive::Holder::me(), &crate::history::Clock::system()).unwrap().0),
+                Some(Meanwhile::Write(p, text)) => std::fs::write(p, text).unwrap(),
+                None => {}
+            }
+        }
         /// What locking finds newest: the release, if a test gives one.
         fn newest(&self, all: bool) -> String {
             match &self.release {
-                Some((rev, _)) => format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"type":"git","url":"https://github.com/netstacks/torqos-releases","rev":"{rev}","lastModified":{NEWER},"narHash":"r"}}}}}},"version":7}}"#),
+                Some((rev, _)) => format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"type":"git","url":"https://github.com/netstacks/torqos-releases","rev":"{rev}","lastModified":{},"narHash":"r"}}}}}},"version":7}}"#, self.release_date.unwrap_or(NEWER)),
                 None => lock(if all { NEWER_ALL } else { NEWER }),
             }
         }
@@ -2438,6 +2526,79 @@ mod tests {
         assert_eq!(e, "not deleted: this needs a person to approve it at a terminal");
     }
 
+    /// A command that waits — at a question, in the editor, for a paste, for a fetch — checks the
+    /// shared candidate again before it writes it: taken meanwhile by `configure exclusive`, or saved
+    /// meanwhile by another session, nothing is written over it and nothing is committed. An idle
+    /// session never writes back an old copy: every command reads it afresh.
+    #[test]
+    fn a_command_that_waits_checks_again() {
+        let home = tempfile::tempdir().unwrap();
+        let saved = home.path().join("torq/candidate.json");
+        let held = "not done: the candidate is held exclusively by torqcli process";
+        let fresh = || Fake { answer: true, edit_to: Some("{ }\n".into()), typed: Some("set time timeZone UTC\n".into()), ..Default::default() };
+        let arm = |m: &Fake, then: Meanwhile| *m.meanwhile.borrow_mut() = Some(then);
+
+        // At "Commit?", answered yes after another session took the candidate: not committed, and its
+        // candidate not deleted.
+        let (d, m) = (repo(), fresh());
+        let mut b = session(d.path(), Some(saved.clone()), &m);
+        run(&mut b, &["configure", "set networking hostName three"]);
+        arm(&m, Meanwhile::Take(saved.clone()));
+        let e = format!("{:#}", b.exec("commit").unwrap_err());
+        assert!(e.starts_with(held), "{e}");
+        assert!(m.commits.borrow().is_empty(), "nothing committed");
+        assert!(saved.exists(), "the holder's candidate kept");
+        // `delete` asked, `load … terminal`, `file edit`, `request system update`: each refused at its
+        // write.
+        for (line, mode) in [("delete", "configure"), ("load merge terminal", "configure"), ("file edit a.nix", "configure"), ("request system update", "")] {
+            let d = repo();
+            let home = tempfile::tempdir().unwrap();
+            let saved = home.path().join("torq/candidate.json");
+            let m = fresh();
+            let mut b = session(d.path(), Some(saved.clone()), &m);
+            if !mode.is_empty() {
+                b.exec(mode).unwrap();
+            }
+            arm(&m, Meanwhile::Take(saved.clone()));
+            let e = format!("{:#}", b.exec(line).unwrap_err());
+            assert!(e.starts_with(held), "{line}: {e}");
+            assert!(!saved.exists(), "{line}: nothing written");
+        }
+
+        // Saved meanwhile by another session (the editor open here): not written over.
+        let home = tempfile::tempdir().unwrap();
+        let saved = home.path().join("torq/candidate.json");
+        let d = repo();
+        let other = tempfile::tempdir().unwrap();
+        let theirs = {
+            let p = other.path().join("torq/candidate.json");
+            let m = Fake::default();
+            let mut s = session(d.path(), Some(p.clone()), &m);
+            run(&mut s, &["configure", "set time timeZone Europe/Paris"]);
+            std::fs::read_to_string(p).unwrap()
+        };
+        let m = fresh();
+        let mut b = session(d.path(), Some(saved.clone()), &m);
+        run(&mut b, &["configure", "set networking hostName three"]);
+        arm(&m, Meanwhile::Write(saved.clone(), theirs.clone()));
+        let e = format!("{:#}", b.exec("file edit a.nix").unwrap_err());
+        assert!(e.starts_with("not done: another session changed the candidate since this one read it"), "{e}");
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), theirs, "theirs, not written over");
+        assert!(b.exec("show | compare").unwrap().contains("Europe/Paris"), "the next command reads it as it is now");
+
+        // An idle session: what another saved since it last looked is not lost when it writes.
+        let d = repo();
+        let m = Fake::default();
+        let home = tempfile::tempdir().unwrap();
+        let saved = home.path().join("torq/candidate.json");
+        let (mut a, mut b) = (session(d.path(), Some(saved.clone()), &m), session(d.path(), Some(saved.clone()), &m));
+        run(&mut b, &["configure", "show | compare"]);
+        run(&mut a, &["configure", "set time timeZone UTC"]);
+        b.exec("set networking hostName three").unwrap();
+        let both = a.exec("show | compare").unwrap();
+        assert!(both.contains("timeZone UTC") && both.contains("hostName three"), "{both}");
+    }
+
     /// `configure exclusive`: the shared candidate held by one session until it leaves configuration
     /// mode. The person's other sessions read it, cannot change or commit it, and are told which
     /// session holds it; leaving lets go; a lock whose session died is taken over, said so; the
@@ -2451,16 +2612,30 @@ mod tests {
         let mut a = session(d.path(), Some(saved.clone()), &m);
         let mut b = session(d.path(), Some(saved.clone()), &m);
         b.exec("configure").unwrap();
-        assert_eq!(
-            a.exec("conf excl").unwrap(),
-            "Entering configuration mode\nThe candidate is yours alone until you leave configuration mode: your other sessions can read it, not change it.\n"
+        b.exec("set networking hostName early").unwrap();
+        let entered = a.exec("conf excl").unwrap();
+        assert!(
+            entered.starts_with("Entering configuration mode\nThe candidate is yours alone until you leave configuration mode: your other sessions can read it, not change it.\n"),
+            "{entered}"
         );
+        assert!(a.exec("show | compare").unwrap().contains("hostName early"), "the holder reads what another session saved before it took the lock");
         a.exec("set time timeZone UTC").unwrap();
 
         // Another session, already in configuration mode: reads what the holder saved, changes nothing.
         let held = format!("the candidate is held exclusively by torqcli process {me}");
         assert!(b.exec("show | compare").unwrap().contains("+   timeZone UTC;"), "the holder's candidate, as saved");
-        for line in ["set networking hostName three", "delete time", "rollback 0", "commit", "run request system update", "top load merge terminal", "file edit a.nix"] {
+        for line in [
+            "set networking hostName three",
+            "delete time",
+            "rollback 0",
+            "commit",
+            "run request system update",
+            "run request system pull",
+            "run request system software rollback 1",
+            "top load merge terminal",
+            "file edit a.nix",
+            "file delete x.nix",
+        ] {
             let e = format!("{:#}", b.exec(line).unwrap_err());
             assert!(e.starts_with(&format!("not done: {held}")) && e.ends_with("until that session leaves configuration mode"), "{line}: {e}");
         }
@@ -2627,7 +2802,8 @@ mod tests {
 
     /// Audit A3: the software is shown as versions — the running one, and the release's, read from the
     /// commit fetched to check its signature — in `show | compare` and at `commit`; an older version is
-    /// a downgrade, said plainly, whatever the dates say. Without a version, dates, as before.
+    /// a downgrade, said plainly, whatever the dates say. The same number goes by date. Without a
+    /// version, dates, as before.
     #[test]
     fn software_is_shown_as_versions() {
         let rev = "0123456789abcdef0123456789abcdef01234567";
@@ -2665,10 +2841,35 @@ mod tests {
         assert!(s.exec("commit").is_ok());
         assert!(m.asked.borrow().last().unwrap().contains("## TorqOS 0.1.9 is older than 0.2.1, which runs now: a downgrade"), "{:?}", m.asked.borrow());
 
-        // A pre-release of the running version is older than it.
+        // A pre-release is named by the tag its signed commit gives. Its number is the running one's
+        // (which never says a pre-release: its source's), so the dates decide: newer, no downgrade;
+        // older, the date's downgrade, as for the same number rebuilt.
         let (d, m) = (on_releases(), Fake { running: Some("0.3.0".into()), ..fake("0.3.0-rc1") });
         let mut s = session(d.path(), None, &m);
-        assert!(s.exec("request system update").unwrap().contains("## TorqOS 0.3.0-rc1 is older than 0.3.0, which runs now: a downgrade\n"));
+        let out = s.exec("request system update").unwrap();
+        assert!(out.starts_with(&format!("[edit system software]\n-   torq 0.3.0 ({now});\n+   torq 0.3.0-rc1 ({newer});\n")) && !out.contains("downgrade"), "{out}");
+        for release in ["0.3.0-rc1", "0.3.0"] {
+            let (d, m) = (on_releases(), Fake { running: Some("0.3.0".into()), release_date: Some(OLD), ..fake(release) });
+            let mut s = session(d.path(), None, &m);
+            let out = s.exec("request system update").unwrap();
+            assert!(out.contains("## older software than now: a downgrade\n") && !out.contains("## TorqOS"), "{release}, older by date: {out}");
+        }
+        // A release whose signed commit does not name its tag: its number, said to be either.
+        let (d, m) = (on_releases(), Fake { release_inexact: true, ..fake("0.2.2") });
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("request system update").unwrap();
+        assert!(out.starts_with(&format!("[edit system software]\n-   torq 0.2.1 ({now});\n+   torq 0.2.2, a release or a pre-release ({newer});\n")), "{out}");
+        assert!(out.contains("TorqOS release 0123456789ab (TorqOS 0.2.2, a release or a pre-release): signed"), "{out}");
+
+        // The running version names the old side only against the configuration in effect: a candidate
+        // based on an older configuration compares with that one, not with what runs.
+        let (d, m) = (on_releases(), fake("0.2.2"));
+        let saved = d.path().join("saved.json");
+        let mut s = session(d.path(), Some(saved), &m);
+        run(&mut s, &["configure", "set time timeZone UTC", "exit"]);
+        sh(d.path(), "printf '{ \"host-name\": \"three\" }\\n' > system/host.json && git commit -qam third");
+        let out = s.exec("request system update").unwrap();
+        assert!(out.starts_with(&format!("[edit system software]\n-   torq {now};\n+   torq 0.2.2 ({newer});\n")), "{out}");
 
         // No version read from the release, or none known running: dates, as before.
         for m in [Fake { release_version: None, ..fake("") }, Fake { running: None, ..fake("0.2.2") }] {
@@ -2809,6 +3010,20 @@ mod tests {
         assert_eq!(s.exec("rollback 0").unwrap(), "Discarded 2 changes: the candidate is the configuration in effect.\n");
         assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.
 ");
+    }
+
+    /// The release's version names the new side only while the lock is at the very commit that was
+    /// checked: a lock at another commit (loaded since, or written by someone else) shows its date.
+    #[test]
+    fn a_release_version_belongs_to_its_commit() {
+        let lock = |rev: &str, t: u64| format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"type":"git","rev":"{rev}","lastModified":{t},"narHash":"h{t}"}}}}}},"version":7}}"#);
+        let (checked, other) = ("a".repeat(40), "b".repeat(40));
+        let v = Versions { running: Some("0.2.1".into()), release: Some(candidate::Release { rev: checked.clone(), version: crate::release::Version { number: "0.1.0".into(), exact: true } }) };
+        let old = lock(&"c".repeat(40), NOW);
+        let at = software_compare(Some(old.as_bytes()), &Some(lock(&checked, NEWER)), &v);
+        assert!(at.contains("+   torq 0.1.0 (") && at.contains("## TorqOS 0.1.0 is older than 0.2.1"), "{at}");
+        let elsewhere = software_compare(Some(old.as_bytes()), &Some(lock(&other, NEWER)), &v);
+        assert_eq!(elsewhere, format!("[edit system software]\n-   torq 0.2.1 ({});\n+   torq {};\n", crate::pkg::ymd(NOW), crate::pkg::ymd(NEWER)));
     }
 
     #[test]
