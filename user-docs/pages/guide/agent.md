@@ -34,7 +34,7 @@ alice@torq> request system apply 42
 and asks. For a tainted proposal it says what the session read, and you answer for that step alone.
 A system change asks your password.
 
-A change the agent proposes to the network, the boot, the hardware, SSH or the display could cut you
+A change the agent proposes to the network or SSH, a service's unit or a file in `/etc`, the boot, the hardware, the console or the display could cut you
 off. It is applied as a **commit confirmed**: it rolls itself back in 10 minutes unless you confirm
 it (`configure`, then `commit`) — so if it cuts you off, you get your machine back by waiting.
 

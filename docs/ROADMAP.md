@@ -215,7 +215,7 @@ acceptance tests, each a VM test.
       words of the tree, through torqcli as the agent, which proposes and stops; the allow-list enforced
       at the broker; the taint held by the broker (sessions, `broker/src/session.rs`), sessionless
       proposals tainted; `request system apply` says why one is tainted; an agent's change to the
-      network, boot, hardware, SSH or the display applied only as a `commit confirmed`. Left: the
+      network, SSH, units, /etc, boot, hardware, the console or the display applied only as a `commit confirmed`. Left: the
       desktop dialog (M4); a VM test of the doctor's own commit (KNOWN-GAPS 6zq).
 - [x] **Session trust**, non-GUI (built 2026-11-07 on `work/w5`, ADR-042 7 as amended): `request system
       agent trust <minutes>` (at most 60, the person's password, their own folder) and `… revoke`;

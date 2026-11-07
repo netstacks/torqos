@@ -47,9 +47,10 @@ values; web pages, email, downloaded files) is marked **tainted**. Tainted sessi
 with the taint source displayed.
 
 Built (ADR-042 6, amended): the taint is the **broker's**. TorqOS's agent starts its session at the
-broker (`session_started`) and reports each tainting read there before the model sees it
-(`session_tainted`); the broker keeps the record in its own state directory, where the agent cannot
-write, and nothing clears it. A proposal names its session and is tainted as the broker's record says;
+broker and reports each tainting read there before the model sees it; the broker keeps the record in
+its own state directory, where the agent cannot write, and nothing clears it. The ledger holds a
+session where a proposal cites it: the proposal's entry carries the session and what tainted it.
+A proposal names its session and is tainted as the broker's record says;
 one that names no session — any other program run as the agent — is tainted. `request system apply`
 says what the session read; session trust never covers a tainted proposal. The broker holds what it
 is told, and cannot see what a program reads: KNOWN-GAPS 6zq.
@@ -58,8 +59,8 @@ is told, and cannot see what a program reads: KNOWN-GAPS 6zq.
 
 Append-only JSON Lines at `/var/lib/torq/state/ledger.jsonl`, owned by the broker.
 Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `reverted`, `revert_failed`,
-`interrupted`, `repaired`, `confirmed`, `rolled_back` (an unconfirmed `commit confirmed`), the agent's
-`session_started` and `session_tainted`, and a person's `trust_granted`, `trust_revoked`, `trust_expired`
+`interrupted`, `repaired`, `confirmed`, `rolled_back` (an unconfirmed `commit confirmed`), and a
+person's `trust_granted`, `trust_revoked`, `trust_expired`
 (failures and restores carry `restored: true|false` — see ADR-008).
 
 ```json

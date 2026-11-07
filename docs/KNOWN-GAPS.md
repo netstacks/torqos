@@ -730,14 +730,24 @@ Its §5 lists claims without a test.
    - **Expiry is ledgered late.** A grant is over at its time whatever the ledger says; its
      `trust_expired` is written by the next operation that may apply under trust (a proposal, a grant,
      a revoke), not at the time itself.
-   - **What counts as cutting the machine off** is a fixed list (broker/src/agent.rs `CUTS_OFF`:
-     networking, systemd.network, hardware, boot, ssh, resolved, the display's services, niri), not a
-     setting, and only for the agent's proposals: a person's own commit is theirs to confirm or not. A
-     service's settings that a network depends on elsewhere (a VPN's, say) are not on it.
+   - **What counts as cutting the machine off** is a fixed list (broker/src/agent.rs `CUTS_OFF`, widened
+     by the review of w5): the network and the ways in over it (networking, systemd.network, ssh and
+     its alias `services.sshd`, sshguard, resolved, tailscale, a person's `openssh` keys under
+     `users.users` and `users.extraUsers`), what runs (`systemd.services`, `environment.etc`),
+     hardware and boot, the screen and the console (console, getty, kmscon, the display's services,
+     niri). Not a setting, and only for the agent's proposals: a person's own commit is theirs to
+     confirm or not. A setting not on it that a network or a login still depends on (another VPN's,
+     a `systemd.sockets` or `systemd.user` unit, `security.pam`) is not caught; NixOS's other aliases
+     of a listed option are caught only where listed.
    - **`tests/agent-proposals.nix` is written and registered, not yet run.** No VM test runs the
      doctor's own propose step (torqcli's commit as the agent evaluates the configuration, which the
      test VM cannot): it is covered by the agent crate's tests, with torqcli stubbed.
-   - **Sessions are never ended or removed**: one small record per session stays in the broker's state
-     directory, at most 60 started an hour.
+   - **Sessions share one budget.** At most 600 are started an hour and 2000 records kept (the oldest
+     go; a proposal naming a gone one is refused). The doctor's and any other agent program's are one
+     account's, so no separate budget by uid: a program run as the agent can keep the doctor from
+     starting a session for the rest of an hour — it is refused then, never less careful. The ledger
+     holds a session only in the proposals that cite it.
+   - **A trusted apply already started finishes** after a revoke: the revoke is on the record at once
+     (the sessions' own lock), and every later trusted apply reads it, but one in its build goes on.
    - **The doctor's values are words**: `propose_change` sets one word, number or boolean per setting;
      a value with spaces or quotes (a description, a list at once) cannot be proposed.
