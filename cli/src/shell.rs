@@ -435,14 +435,7 @@ impl Machine for Real<'_> {
             history::one_line(body["ts"].as_str().unwrap_or_default(), 25),
             files.join(", "),
         );
-        // What its session read, as the broker holds it (ADR-042): the reason it is tainted, said.
-        let read = match body["data"]["session"].as_str() {
-            Some(id) if tainted => done(run::broker_json(broker(self.cli, &["session", id])?, &log)?, "apply").ok().map(|r| {
-                r["tainted_by"].as_array().into_iter().flatten().filter_map(|s| s.as_str()).map(|s| history::one_line(s, 40)).collect::<Vec<_>>()
-            }),
-            _ => None,
-        };
-        let (why, confirm) = apply_warning(body, read.as_deref());
+        let (why, confirm) = apply_warning(body);
         if let Some(stop) = self.ask(&format!("{what}{why}Apply? ")).go_on("applied")? {
             return Ok(stop);
         }
@@ -1034,12 +1027,13 @@ fn agent_session(var: Option<String>) -> Option<String> {
 }
 
 /// What a person is told before applying a proposal, and the minutes of the commit confirmed it is
-/// applied as, if it could cut the machine off (ADR-042, 6). `read`: what its session read, as the
-/// broker holds it (None: the broker holds no session for it).
-fn apply_warning(body: &serde_json::Value, read: Option<&[String]>) -> (String, Option<u32>) {
+/// applied as, if it could cut the machine off (ADR-042, 6).
+fn apply_warning(body: &serde_json::Value) -> (String, Option<u32>) {
+    // What its session read, as the broker recorded it in the proposal's own entry.
+    let read: Option<Vec<String>> = body["data"]["session"]["tainted_by"].as_array().map(|a| a.iter().filter_map(|s| s.as_str()).map(|s| history::one_line(s, 40)).collect());
     let mut why = String::new();
     if body["tainted"].as_bool().unwrap_or(false) {
-        let from = match read {
+        let from = match read.as_deref() {
             Some(r) if !r.is_empty() => format!("Before proposing this, the agent read text that anyone could have written ({}): a log line, a device's name, a web page can carry instructions meant for it. ", r.join(", ")),
             _ if body["actor"] == "agent" => "The broker cannot vouch for what the program that proposed this read (it named no session TorqOS's agent keeps): treat it as if it read the web. ".into(),
             _ => "The one who proposed it said it came from untrusted text (the web, mail, a download). ".into(),
@@ -1094,16 +1088,16 @@ const CUTS_OFF_MINUTES: u32 = 10;
 #[test]
 fn a_person_is_told_why_before_applying() {
     use serde_json::json;
-    let (w, c) = apply_warning(&json!({"tier": "user", "tainted": false, "actor": "agent", "data": {}}), None);
+    let (w, c) = apply_warning(&json!({"tier": "user", "tainted": false, "actor": "agent", "data": {}}));
     assert_eq!((w.as_str(), c), ("", None));
-    let (w, c) = apply_warning(&json!({"tier": "user", "tainted": true, "actor": "agent", "data": {"session": "s"}}), Some(&["read_journal".into(), "show_ledger".into()]));
+    let (w, c) = apply_warning(&json!({"tier": "user", "tainted": true, "actor": "agent", "data": {"session": {"id": "s", "tainted_by": ["read_journal", "show_ledger"]}}}));
     assert!(w.contains("(read_journal, show_ledger)") && w.contains("not the reason") && c.is_none(), "{w}");
-    let (w, _) = apply_warning(&json!({"tier": "user", "tainted": true, "actor": "agent", "data": {}}), None);
+    let (w, _) = apply_warning(&json!({"tier": "user", "tainted": true, "actor": "agent", "data": {}}));
     assert!(w.contains("named no session"), "{w}");
-    let (w, c) = apply_warning(&json!({"tier": "system", "tainted": false, "actor": "agent", "data": {"cuts_off": ["networking.wireless.enable"]}}), None);
+    let (w, c) = apply_warning(&json!({"tier": "system", "tainted": false, "actor": "agent", "data": {"cuts_off": ["networking.wireless.enable"]}}));
     assert!(w.contains("networking.wireless.enable") && w.contains("commit confirmed"), "{w}");
     assert_eq!(c, Some(CUTS_OFF_MINUTES));
-    let (w, _) = apply_warning(&json!({"tier": "system", "tainted": false, "actor": "user", "data": {}}), None);
+    let (w, _) = apply_warning(&json!({"tier": "system", "tainted": false, "actor": "user", "data": {}}));
     assert!(w.contains("all users"));
     assert_eq!(agent_session(Some("a".repeat(32))), Some("a".repeat(32)));
     for bad in ["A".repeat(32), "a".repeat(31), format!("{}; x", "a".repeat(29)), String::new()] {
@@ -1307,7 +1301,7 @@ fn a_command_on_the_command_line() {
 /// <source>`: the agent's session at the broker, which keeps its record (ADR-042, amended). The
 /// agent's alone: the broker refuses anyone else's.
 fn agent_session_command(args: &[String]) -> Result<i32> {
-    let usage = "usage: torq agent session start | torq agent session taint <id> <source> (the agent's, run by torq-doctor)";
+    let usage = "usage: torq agent session start | torq agent session taint <id> <source> | torq agent session show <id> (the agent's, run by torq-doctor)";
     let cli = Cli { repo: PathBuf::from(REPO), broker: if cfg!(debug_assertions) { std::env::var("TORQ_BROKER").unwrap_or_else(|_| BROKER.into()) } else { BROKER.into() } };
     let log = run::start_log()?;
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1321,6 +1315,11 @@ fn agent_session_command(args: &[String]) -> Result<i32> {
             let id = agent_session(Some(id.to_string())).with_context(|| format!("{usage}: not a session's id"))?;
             let source = format!("--source={source}");
             done(run::broker_json(broker(&cli, &["session-taint", &id, &source])?, &log)?, "reporting what the session read")?;
+        }
+        ["show", id] => {
+            let id = agent_session(Some(id.to_string())).with_context(|| format!("{usage}: not a session's id"))?;
+            let v = done(run::broker_json(broker(&cli, &["session", &id])?, &log)?, "reading the session")?;
+            println!("{v}");
         }
         _ => bail!("{usage}"),
     }

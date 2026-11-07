@@ -49,7 +49,7 @@ impl tools::Host for Machine {
     fn propose(&self, script: &str, session: &str) -> Result<String> {
         let mut cmd = self.command(Path::new(tools::TORQCLI), &["-c".into(), script.into()]);
         cmd.env("TORQ_AGENT_SESSION", session);
-        tools::bounded(cmd, tools::MAX_PROGRAM_BYTES, tools::PROGRAM_TIMEOUT).context("running torqcli to propose")
+        tools::bounded(cmd, tools::MAX_PROGRAM_BYTES, tools::PROPOSE_TIMEOUT).context("running torqcli to propose")
     }
 
     fn session(&self, args: &[&str]) -> Result<String> {

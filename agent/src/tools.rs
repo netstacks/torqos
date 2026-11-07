@@ -342,6 +342,9 @@ pub fn perform(action: &Action, host: &dyn Host, schema: &Path, session: &str) -
 pub const MAX_PROGRAM_BYTES: usize = 1 << 20;
 /// How long a tool's program may run.
 pub const PROGRAM_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a proposal may take: torqcli evaluates the configuration before it proposes, and under a
+/// person's trust the broker applies it then and there — a build and a switch.
+pub const PROPOSE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Run `cmd`, its input closed, in a process group of its own; its standard output and error
 /// together, read only up to `cap` bytes — past that, or past `timeout`, the whole group is killed
