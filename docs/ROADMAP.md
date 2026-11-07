@@ -203,14 +203,16 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. Can run 
 On the account M3 made, over the configuration M4 made. The three scenarios of ADR-034 are the
 acceptance tests, each a VM test.
 
-- [ ] **Doctor mode**: `torq-agent` with read-only tools (logs, hardware, config.read, the ledger);
-      "why is my wifi flaky?" — diagnose and explain, propose nothing. Local model by default
-      (ADR-005, llama.cpp); a remote one as a setting.
+- [x] **Doctor mode** (built 2026-11-07 on `work/w3`, ADR-042; `agent/`, `tests/doctor.nix` written,
+      not yet run): `torq doctor "why is my wifi flaky?"` — `torq-doctor` as `torq-agent`, read-only
+      tools only (the journal, hardware, `show configuration`, the ledger, alarms, NixOS option docs);
+      explains, proposes nothing; the session tainted once it reads untrusted text. Local model by
+      default (ADR-005, llama-server on a unix socket); a remote one as a setting.
 - [ ] **Proposals**: `config.propose` → the broker, as `torq-agent`; the allow-list enforced; shown
       and approved in torqcli or the desktop dialog; `commit confirmed` by default for anything that
-      could lose the screen or the network. Taint tracking (AI-LAYER.md).
+      could lose the screen or the network. Taint tracking (AI-LAYER.md). Designed in ADR-042, 6.
 - [ ] **Session trust**: "for the next hour, user-tier changes without asking" — ledgered, revertible,
-      never for system tier.
+      never for system tier. Designed in ADR-042, 7.
 - [ ] **Build me an application**: the agent writes and builds in the person's home, installs via
       rung 3 (ADR-037), tests, undoes.
 - [ ] **Watch the desktop**: screenshot and input through the compositor's protocols, in the

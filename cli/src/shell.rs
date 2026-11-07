@@ -1138,6 +1138,10 @@ fn run_shell(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str) == Some("agent") {
         return crate::agent::run(&args[1..]);
     }
+    // Doctor mode (ADR-042): the agent asked one question, as the agent's account.
+    if args.first().map(String::as_str) == Some("doctor") {
+        return crate::agent::doctor(&args[1..]);
+    }
     if args == ["install"] {
         return crate::install::run().map(|()| 0);
     }
