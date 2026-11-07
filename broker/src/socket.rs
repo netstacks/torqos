@@ -128,7 +128,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups", "scheduled"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups", "scheduled", "session", "trust"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
@@ -145,7 +145,8 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         return Gate::Open;
     }
     if who.agent {
-        return if cmd == "propose" {
+        // It proposes, and keeps the broker told of what its sessions read (session.rs).
+        return if matches!(cmd, "propose" | "session-start" | "session-taint") {
             Gate::Open
         } else {
             Gate::Refused("the agent proposes; a person applies".into())
@@ -158,6 +159,11 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
     }
     match cmd {
         "propose" => Gate::Open,
+        // A session is the agent's: its record is its reports, and no one else's.
+        "session-start" | "session-taint" => Gate::Refused("a session is the agent's: a person's reads are their own".into()),
+        // Trust in the agent with their own folder: theirs alone to give, with their password; ending it, at any time.
+        "trust-grant" => Gate::Password,
+        "trust-revoke" => Gate::Open,
         // A person's, not everyone's: it goes to the network, as root (the review of pull).
         "fetch-incoming" => Gate::Open,
         "apply-confirmed" => match change {
@@ -231,7 +237,7 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--key-file".into(), key.context("a backup's key comes in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
         }
-        "apply" | "revert" | "schedule" | "cancel-scheduled" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
+        "apply" | "revert" | "schedule" | "cancel-scheduled" | "trust-grant" | "trust-revoke" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
         _ => {}
     }
     Ok(a)
@@ -421,6 +427,37 @@ mod tests {
         assert_eq!(a, ["schedule", "3", "--at=x", "--approved-by", "sam"]);
         assert!(check_args(&["schedule".into(), "--commit-at-cmd=true".into()]).is_err());
         assert!(check_args(&["schedule".into(), "--commit-at-cancel-cmd".into()]).is_err());
+    }
+
+    /// ADR-042 (amended): the agent's sessions are the agent's; trust in it is a person's, given with
+    /// their own password, for their own folder (the approver, as the kernel says), ended without one.
+    #[test]
+    fn sessions_are_the_agents_and_trust_a_persons() {
+        let a = who(990);
+        for cmd in ["session-start", "session-taint"] {
+            assert_eq!(gate(&a, cmd, None, None), Gate::Open, "{cmd}");
+            for uid in [1000, 1001, 65534] {
+                assert!(matches!(gate(&who(uid), cmd, None, None), Gate::Refused(_)), "{cmd} {uid}");
+            }
+        }
+        for cmd in ["trust-grant", "trust-revoke"] {
+            assert!(matches!(gate(&a, cmd, None, None), Gate::Refused(_)), "the agent trusts itself with nothing: {cmd}");
+            assert!(matches!(gate(&who(65534), cmd, None, None), Gate::Refused(_)), "{cmd}");
+        }
+        // Not only an administrator's: any person's, for their own folder, with their password.
+        assert_eq!(gate(&who(1001), "trust-grant", None, None), Gate::Password);
+        assert_eq!(gate(&who(1000), "trust-grant", None, None), Gate::Password);
+        assert_eq!(gate(&who(1001), "trust-revoke", None, None), Gate::Open);
+        for uid in [1000, 1001, 990] {
+            assert_eq!(gate(&who(uid), "trust", None, None), Gate::Open);
+            assert_eq!(gate(&who(uid), "session", None, None), Gate::Open);
+        }
+        // Whose trust it is, is the kernel's answer, never the caller's.
+        let g = with_identity(&["trust-grant".into(), "--minutes=30".into()], "trust-grant", &who(1001), None, None, None).unwrap();
+        assert_eq!(g, ["trust-grant", "--minutes=30", "--approved-by", "sam"]);
+        assert!(check_args(&["trust-grant".into(), "--minutes=30".into(), "--approved-by=viper".into()]).is_err());
+        let r = with_identity(&["trust-revoke".into()], "trust-revoke", &who(1000), None, None, None).unwrap();
+        assert_eq!(r, ["trust-revoke", "--approved-by", "viper"]);
     }
 
     /// The review of pull: a fetch goes to the network, as root — a person's, not everyone's.

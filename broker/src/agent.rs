@@ -114,6 +114,37 @@ pub fn refusal(limits: &Limits, touched: &[Touched]) -> Option<String> {
     None
 }
 
+/// The settings whose change could lose the network (and with it a person reaching the machine) or
+/// the screen (ADR-042, 6): an agent's change in one of them is applied as a commit confirmed, which
+/// rolls itself back unless the person, still able to reach the machine, confirms it. `boot` and
+/// `hardware` act at the next start too: the boot default is not moved until the commit is confirmed.
+pub const CUTS_OFF: &[&str] = &[
+    "networking",
+    "systemd.network",
+    "hardware",
+    "boot",
+    "services.openssh",
+    "services.resolved",
+    "services.xserver",
+    "services.displayManager",
+    "services.desktopManager",
+    "services.greetd",
+    "programs.niri",
+];
+
+/// The settings of `touched` that lie inside `CUTS_OFF`, as dotted paths (none: an empty list).
+pub fn cuts_off(touched: &[Touched]) -> Vec<String> {
+    let risky: Vec<String> = CUTS_OFF.iter().map(|s| s.to_string()).collect();
+    let mut out = Vec::new();
+    for t in touched {
+        let Some(prefix) = settings_prefix(&t.path) else { continue };
+        let mut settings = Vec::new();
+        changed(&prefix, t.before.as_ref(), t.after.as_ref(), &mut settings);
+        out.extend(settings.iter().filter(|s| inside(s, &risky)).map(|s| s.join(".")));
+    }
+    out
+}
+
 fn list(items: &[String]) -> String {
     if items.is_empty() {
         "nothing, until the owner lists some (torq.agent.mayPropose)".into()
@@ -176,6 +207,19 @@ mod tests {
         // torq's own tree (system/*.json) by its own prefix.
         assert_eq!(refusal(&limits(&[], &["system.host"]), &[t("system/host.json", Some(json!({"host-name": "a"})), Some(json!({"host-name": "b"})))]), None);
         assert!(refusal(&limits(&[], &["system.host"]), &[t("system/packages.json", Some(json!([])), Some(json!(["jq"])))]).is_some());
+    }
+
+    /// ADR-042, 6: what could lose the network or the screen is named, and nothing else is.
+    #[test]
+    fn what_could_cut_the_machine_off() {
+        let wifi = t("nixos/networking.json", Some(json!({"wireless": {"enable": false}})), Some(json!({"wireless": {"enable": true}})));
+        assert_eq!(cuts_off(&[wifi]), ["networking.wireless.enable"]);
+        let ssh = t("nixos/services.json", Some(json!({})), Some(json!({"openssh": {"settings": {"PasswordAuthentication": false}}, "nginx": {"enable": true}})));
+        assert_eq!(cuts_off(&[ssh]), ["services.openssh.settings.PasswordAuthentication"]);
+        assert!(cuts_off(&[t("nixos/services.json", Some(json!({})), Some(json!({"openssh2": {"enable": true}})))]).is_empty());
+        assert!(cuts_off(&[t("users/viper/packages.json", None, Some(json!(["htop"])))]).is_empty());
+        assert!(cuts_off(&[t("nixos/time.json", Some(json!({})), Some(json!({"timeZone": "UTC"})))]).is_empty());
+        assert_eq!(cuts_off(&[t("nixos/boot.json", Some(json!({})), Some(json!({"kernelParams": ["quiet"]})))]), ["boot.kernelParams"]);
     }
 
     #[test]

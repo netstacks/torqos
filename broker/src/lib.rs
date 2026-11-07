@@ -20,6 +20,7 @@ pub mod inputs;
 pub mod ledger;
 pub mod policy;
 pub mod repo;
+pub mod session;
 pub mod socket;
 
 use anyhow::{bail, Context, Result};
@@ -1758,15 +1759,16 @@ impl Broker {
         Ok(())
     }
 
-    /// Why the agent may not propose the change in `diff_path` (touching `files`), or None: each file
-    /// as HEAD has it and as the change leaves it, read as JSON; a file that is not JSON is no
-    /// setting, and never the agent's.
-    fn agent_refusal(&self, diff_path: &Path, files: &[String]) -> Result<Option<String>> {
+    /// The agent's change in `diff_path` (touching `files`) judged (ADR-041) — each file as HEAD has
+    /// it and as the change leaves it, read as JSON; a file that is not JSON is no setting, and never
+    /// the agent's: why it may not be proposed (Err), or the settings it changes that could lose the
+    /// network or the screen (Ok; empty: none), which a person applies as a commit confirmed (ADR-042, 6).
+    fn agent_check(&self, diff_path: &Path, files: &[String]) -> Result<std::result::Result<Vec<String>, String>> {
         const MAX: u64 = 1 << 20;
         let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).ok();
         let mut touched = Vec::new();
         for (path, after) in self.repo.proposed_files(diff_path, files, MAX)? {
-            let not_a_setting = || Ok(Some(format!("{path}: not a setting (a regular JSON file of the tree) — never the agent's")));
+            let not_a_setting = || Ok(Err(format!("{path}: not a setting (a regular JSON file of the tree) — never the agent's")));
             let before = match self.repo.file_at_head(&path, MAX) {
                 Ok(None) => None,
                 Ok(Some(b)) => match json(&b) {
@@ -1785,7 +1787,10 @@ impl Broker {
             };
             touched.push(agent::Touched { path, before, after });
         }
-        Ok(agent::refusal(&self.agent_limits, &touched))
+        Ok(match agent::refusal(&self.agent_limits, &touched) {
+            Some(why) => Err(why),
+            None => Ok(agent::cuts_off(&touched)),
+        })
     }
 
     pub fn propose(&self, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
@@ -1797,8 +1802,18 @@ impl Broker {
     /// on top of a newer configuration, a change prepared against an older one can silently undo or
     /// mix with the commit in between. Without a base, the diff is applied wherever it applies.
     pub fn propose_on(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
+        self.propose_in(base, diff_path, reason, actor, tainted, None)
+    }
+
+    /// `propose_on`, naming the agent's `session` (session.rs): an agent's proposal is tainted as
+    /// the broker's record of its session says — `tainted` (the caller's word) only adds to it — and
+    /// one that names no session is tainted.
+    pub fn propose_in(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool, session: Option<&str>) -> Result<Entry> {
         let _l = Lock::acquire(&self.state_dir)?;
-        let proposed = self.propose_locked(base, diff_path, reason, actor, tainted);
+        session::settle_trust(self)?;
+        let judged = session::tainted(self, actor, tainted, session);
+        let tainted = *judged.as_ref().unwrap_or(&true);
+        let proposed = judged.and_then(|t| self.propose_locked(base, diff_path, reason, actor, t, session));
         // Every refusal of the agent's is on the record, whatever refused it — the forbidden paths,
         // bad data, a diff that does not apply, the list (the audit of ADR-041): an agent that tries
         // is seen trying. (Busy is not a refusal: nothing was looked at.)
@@ -1973,7 +1988,7 @@ impl Broker {
         out.into_iter().collect()
     }
 
-    fn propose_locked(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
+    fn propose_locked(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool, session: Option<&str>) -> Result<Entry> {
         self.refuse_if_interrupted()?;
         // An agent always says what it prepared its change against: without a base, a diff applies on
         // top of whatever the configuration has become (second audit, M2; KNOWN-GAPS 6g).
@@ -2045,13 +2060,13 @@ impl Broker {
         let checked = self.repo.diff_files(&copy).and_then(|files| {
             self.check_user_data(&copy, &files)?;
             // The agent's proposals: only what its list allows (ADR-041), judged by what changes.
-            let refused = if actor == Actor::Agent { self.agent_refusal(&copy, &files)? } else { None };
+            let judged = if actor == Actor::Agent { self.agent_check(&copy, &files)? } else { Ok(vec![]) };
             // What it does, as git writes it: what a person is shown before applying it.
             let effect = self.repo.proposal_effect(&copy)?;
-            Ok((files, refused, effect))
+            Ok((files, judged, effect))
         });
         let _ = fs::remove_file(&copy);
-        let (files, refused, effect) = checked?;
+        let (files, judged, effect) = checked?;
         if files.is_empty() {
             bail!("diff changes no files");
         }
@@ -2059,23 +2074,25 @@ impl Broker {
         // agent's list comes after.
         let tier = policy::tier_for_paths(&files);
         policy::check_allowed(tier)?;
-        if let Some(why) = refused {
-            bail!("refused: {why}");
+        let cuts_off = match judged {
+            Err(why) => bail!("refused: {why}"),
+            Ok(c) => c,
+        };
+        let mut data = json!({
+            "files": files,
+            "diff_sha256": self.keep_proposal_text(&diff)?,
+            "effect_sha256": self.keep_proposal_text(&effect)?,
+            "base": base,
+        });
+        // The agent's session, the broker's record of what it read (session.rs), and what of the
+        // change could cut the machine off.
+        if let Some(s) = session {
+            data["session"] = s.into();
         }
-        self.ledger.append(NewEntry {
-            actor: actor.to_string(),
-            approved_by: None,
-            kind: "proposal".into(),
-            tier: tier.to_string(),
-            tainted,
-            reason: reason.into(),
-            data: json!({
-                "files": files,
-                "diff_sha256": self.keep_proposal_text(&diff)?,
-                "effect_sha256": self.keep_proposal_text(&effect)?,
-                "base": base,
-            }),
-        })
+        if !cuts_off.is_empty() {
+            data["cuts_off"] = cuts_off.into();
+        }
+        self.ledger.append(NewEntry { actor: actor.to_string(), approved_by: None, kind: "proposal".into(), tier: tier.to_string(), tainted, reason: reason.into(), data })
     }
 
     /// The config repo must be at the last ledgered commit before anything builds on it: a commit made
@@ -2498,8 +2515,9 @@ impl Broker {
         self.apply_locked(&lock, proposal_seq, approved_by, confirm_tainted, confirm, None)
     }
 
-    /// Apply under a lock already held; `scheduled`: the `commit at` schedule this is the run of (at.rs).
-    fn apply_locked(&self, lock: &Lock, proposal_seq: u64, approved_by: &str, confirm_tainted: bool, confirm: Option<u32>, scheduled: Option<u64>) -> Result<Entry> {
+    /// Apply under a lock already held; `scheduled`: what applies it with no person there — the `commit
+    /// at` schedule this is the run of (at.rs), or the trust it is applied under (session.rs).
+    fn apply_locked(&self, lock: &Lock, proposal_seq: u64, approved_by: &str, confirm_tainted: bool, confirm: Option<u32>, scheduled: Option<(&str, u64)>) -> Result<Entry> {
         self.reconcile_locked(lock, approved_by)?;
         self.refuse_unledgered_head()?;
         // An outside `nixos-rebuild` switching now would interleave with this one, and the system
@@ -2588,9 +2606,15 @@ impl Broker {
         // The agent's list as it is now, not as it was when it proposed: the limits may have been
         // narrowed since (the audit of ADR-041).
         if actor == Actor::Agent {
-            if let Some(why) = self.agent_refusal(&tmp, &files)? {
-                let _ = fs::remove_file(&tmp);
-                bail!("refused: the agent's limits no longer allow this — {why}");
+            match self.agent_check(&tmp, &files)? {
+                Err(why) => bail!("refused: the agent's limits no longer allow this — {why}"),
+                // What could lose the network or the screen rolls itself back unless a person, still
+                // reaching the machine, confirms it (ADR-042, 6).
+                Ok(cuts) if !cuts.is_empty() && confirm.is_none() => bail!(
+                    "refused: proposal {proposal_seq} could lose the network or the screen ({}): it is applied as a commit confirmed (apply --confirm <minutes>), which rolls itself back unless you confirm it",
+                    cuts.join(", ")
+                ),
+                Ok(_) => {}
             }
         }
 
