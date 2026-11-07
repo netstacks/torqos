@@ -72,6 +72,33 @@ pub struct Broker {
     remote: Option<String>,
 }
 
+/// The fields the broker reads back from an entry, each in the shape the broker writes: anything else
+/// in a ledger from elsewhere is refused before it is trusted.
+fn shapes_ok(data: &serde_json::Value) -> Result<()> {
+    let commits = ["commit", "anchor_commit", "reverted_commit", "from", "base", "before"];
+    let systems = ["system", "anchor_system"];
+    let check = |key: &str, v: &serde_json::Value| -> Result<()> {
+        let Some(s) = v.as_str() else { return Ok(()) };
+        if commits.contains(&key) {
+            repo::revision(s).ok().filter(|r| r.len() == 40).with_context(|| format!("its {key} is not a commit"))?;
+        }
+        if systems.contains(&key) && !(s.starts_with("/nix/store/") && !s.contains("..") && s.bytes().all(|b| b.is_ascii_graphic())) {
+            bail!("its {key} is not a store path");
+        }
+        if key == "label" && !snapshot::label_ok(s) {
+            bail!("its label is not a snapshot's");
+        }
+        Ok(())
+    };
+    for (k, v) in data.as_object().into_iter().flatten() {
+        check(k, v)?;
+        for (k2, v2) in v.as_object().into_iter().flatten() {
+            check(k2, v2)?;
+        }
+    }
+    Ok(())
+}
+
 /// `data`, with the snapshot taken for it, if there is one: a change that failed has one too, and it
 /// must stay reachable, as it holds a slot.
 fn with_snapshot(mut data: serde_json::Value, snapshot: &serde_json::Value) -> serde_json::Value {
@@ -79,6 +106,14 @@ fn with_snapshot(mut data: serde_json::Value, snapshot: &serde_json::Value) -> s
         data["snapshot"] = snapshot.clone();
     }
     data
+}
+
+/// A file of the broker's own, gone when it is dropped.
+struct DropFile(PathBuf);
+impl Drop for DropFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 /// What the last check of the running system's store paths found (`Broker::verify_store`).
@@ -713,9 +748,9 @@ impl Broker {
                 }
             }
             // One ledger at a time: each push since the last check must start with the one before.
-            let mut prev = since.as_deref().map(|v| self.repo.ledger_at(v)).transpose()?;
+            let mut prev = since.as_deref().map(|v| self.repo.ledger_at_most(v, remote::MAX_LEDGER)).transpose()?;
             for (i, c) in self.repo.ledger_commits(since.as_deref(), &tip)?.iter().enumerate() {
-                let text = self.repo.ledger_at(c)?;
+                let text = self.repo.ledger_at_most(c, remote::MAX_LEDGER)?;
                 if let Some(p) = &prev {
                     if let remote::Anchor::Differs { why } = remote::anchor(Some(p), &text) {
                         return Ok(differs(format!("the remote's ledger was rewritten by a later push ({} after the last check): {why}", i + 1)));
@@ -791,7 +826,7 @@ impl Broker {
     /// root), and `main` the commit it ends at. Its tree: no path no one may change, and this
     /// machine's own files plain files or absent (a link there would be followed, as root).
     pub fn check_stage(&self, stage: &Repo, url: &str) -> Result<Adoptable> {
-        const MAX_LEDGER: u64 = 64 << 20;
+        const MAX_LEDGER: u64 = remote::MAX_LEDGER;
         const MAX_PUSHES: usize = 100_000;
         const MAX_SETTING: u64 = 1 << 20;
         let tip = stage.commit_of("refs/torq/remote-ledger")?;
@@ -825,6 +860,12 @@ impl Broker {
         let staged = Ledger::open(&file);
         let entries = staged.verify().context("the repository's ledger does not verify")?;
         let list = staged.read_all()?;
+        // Every field a broker reads back, in the shape a broker writes it: a commit a commit, a system
+        // a store path, a label digits. Text here is someone else's, and reaches git and the switch as
+        // root (the review of 0.2.1, H1).
+        for e in &list {
+            shapes_ok(&e.body.data).with_context(|| format!("the repository's ledger, entry #{}", e.body.seq))?;
+        }
         if pending_confirm(&list).is_some() {
             bail!("the repository's ledger has a commit confirmed still waiting: refused");
         }
@@ -1962,7 +2003,7 @@ impl Broker {
         // What no one's proposal may touch (the policy, the ledger) is refused as that first: the
         // agent's list comes after.
         let tier = policy::tier_for_paths(&files);
-        policy::check_allowed(actor, tier)?;
+        policy::check_allowed(tier)?;
         if let Some(why) = refused {
             bail!("refused: {why}");
         }
@@ -2452,13 +2493,15 @@ impl Broker {
         }
 
         // Re-validate against the current repo state (it may have changed since proposing).
-        let tmp = self.state_dir.join(format!("proposal-{proposal_seq}.diff"));
-        fs::write(&tmp, &diff)?;
+        // Gone however this ends (the review of 0.2.1, L1).
+        let tmp = DropFile(self.state_dir.join(format!("proposal-{proposal_seq}.diff")));
+        let tmp = &tmp.0;
+        fs::write(tmp, &diff)?;
         let files = self.repo.diff_files(&tmp)?;
         self.check_user_data(&tmp, &files)?;
         let tier = policy::tier_for_paths(&files);
         let actor = if p.body.actor == "agent" { Actor::Agent } else { Actor::User };
-        policy::check_allowed(actor, tier)?;
+        policy::check_allowed(tier)?;
         // What was judged is what is applied. The gate decided on the proposal's tier and files, as they
         // were on the commit it was made on, and a diff means what it does at HEAD: nothing there can be
         // something here (the audit of M3, H1). Refused, never judged again: a proposal is to be made anew.

@@ -234,7 +234,8 @@ pkgs.testers.runNixOSTest {
         gitserver.wait_for_unit("sshd.service")
         out = machine.fail("torq-broker push")
         assert "host key" in out, out
-        machine.succeed("rm -f /var/lib/torq/state/remote/*/known_hosts")
+        # A person decides it is the new key: forgets the old pin, then clears the alarm (in fresh()).
+        machine.succeed("rm -f /var/lib/torq/state/remote/known_hosts /var/lib/torq/state/remote/*/known_hosts")
 
     with subtest("a day without a push is an alarm; late is not"):
         fresh("/tmp/ledger.good3")

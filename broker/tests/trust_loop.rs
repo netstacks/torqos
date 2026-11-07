@@ -2400,6 +2400,12 @@ fn a_hostile_repository_is_refused_before_anything_is_adopted() {
         sh(&stage, &format!("b=$(git hash-object -w {}) && t=$(printf '100644 blob %s\\tledger.jsonl\\n' $b | git mktree) && c=$(git -c user.name=t -c user.email=t@t commit-tree $t -m l) && git update-ref refs/torq/remote-ledger $c", l.display()));
         assert!(new_machine.check_stage(&Repo::new(stage), url).unwrap().ssh, "{name}");
     }
+    // A ledger whose entry names an option for a commit, a chain well made: refused before it is trusted.
+    let optioned = dir.path().join("optioned.jsonl");
+    fs::copy(&ledger, &optioned).unwrap();
+    torq_broker::ledger::Ledger::open(&optioned).append(torq_broker::ledger::NewEntry { actor: "user".into(), approved_by: None, kind: "proposal".into(), tier: "user".into(), tainted: false, reason: "x".into(), data: serde_json::json!({ "commit": "--output=/root/.ssh/authorized_keys" }) }).unwrap();
+    let e = format!("{:#}", new_machine.check_stage(&stage_with("optioned", "", &optioned), url).unwrap_err());
+    assert!(e.contains("is not a commit"), "{e}");
     // A chain that does not verify: an entry's reason changed, and its hash with it.
     let broken = dir.path().join("broken.jsonl");
     fs::write(&broken, fs::read_to_string(&ledger).unwrap().replacen("\"init\"", "\"init\"", 1).replacen("Config repository initialised", "Config repository INITIALISED", 1)).unwrap();
@@ -2417,7 +2423,7 @@ fn a_hostile_repository_is_refused_before_anything_is_adopted() {
     let forged = torq_broker::ledger::Ledger::open(&waiting);
     forged.append(torq_broker::ledger::NewEntry {
         actor: "user".into(), approved_by: Some("alice".into()), kind: "applied".into(), tier: "system".into(), tainted: false, reason: "x".into(),
-        data: serde_json::json!({ "commit": b.repo.head().unwrap(), "confirm": { "deadline": "2099-01-01T00:00:00Z", "anchor_commit": "a", "anchor_system": "/tmp/x", "boot_id": "b" } }),
+        data: serde_json::json!({ "commit": b.repo.head().unwrap(), "confirm": { "deadline": "2099-01-01T00:00:00Z", "anchor_commit": "a".repeat(40), "anchor_system": "/nix/store/x-system", "boot_id": "b" } }),
     }).unwrap();
     let e = format!("{:#}", new_machine.check_stage(&stage_with("waiting", "", &waiting), url).unwrap_err());
     assert!(e.contains("still waiting"), "{e}");
@@ -2840,4 +2846,32 @@ fn an_entry_before_a_commit_confirmed_does_not_settle_it() {
     let a = m.b.apply_confirmed(seq, "casey", false, 10).unwrap();
     assert_eq!(a.body.seq, next);
     assert!(m.b.status().unwrap().pending_confirm.is_some(), "still waiting");
+}
+
+/// The review of 0.2.1, M2: a forbidden path is no one's, by sudo too, not the socket's rule alone.
+#[test]
+fn a_person_may_not_change_forbidden_paths_either() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "attr.diff", "--- /dev/null\n+++ b/.gitattributes\n@@ -0,0 +1 @@\n+* -diff\n");
+    let e = format!("{:#}", b.propose_on(Some(&head), &d, "attributes", Actor::User, false).unwrap_err());
+    assert!(e.contains("no one may change forbidden paths"), "{e}");
+}
+
+/// The review of 0.2.1, H1: a commit named in a ledger is text whoever wrote the ledger chose, and an
+/// option to git given as one (`--output=<file>`) wrote that file as root. Refused at git, and at adopt.
+#[test]
+fn a_commit_named_in_the_ledger_is_never_an_option_to_git() {
+    let (dir, b) = setup("true");
+    let target = dir.path().join("written");
+    let e = b.ledger.append(torq_broker::ledger::NewEntry { actor: "user".into(), approved_by: None, kind: "proposal".into(), tier: "user".into(), tainted: false, reason: "x".into(), data: serde_json::json!({ "commit": format!("--output={}", target.display()) }) }).unwrap();
+    let out = run_cli(dir.path(), "true", &["show", &e.body.seq.to_string()]);
+    assert!(!target.exists(), "git wrote {}: {out:?}", target.display());
+    assert!(b.repo.show(&format!("--output={}", target.display())).is_err());
+    for bad in ["--output=/x", "HEAD~1", "main", "-S", "refs/../x", &"a".repeat(39)] {
+        assert!(torq_broker::repo::revision(bad).is_err(), "{bad}");
+    }
+    for good in ["HEAD", "refs/torq/ledger", &"a".repeat(40)] {
+        assert!(torq_broker::repo::revision(good).is_ok(), "{good}");
+    }
 }

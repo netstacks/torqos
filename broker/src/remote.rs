@@ -210,13 +210,23 @@ pub struct Alarm {
 fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // Written whole, synced, renamed, and the folder synced: an alarm a power cut lost would be one cleared
+    // without a person (the review of 0.2.1, L5).
     let tmp = dir.join(format!("{name}.tmp"));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, dir.join(name)).with_context(|| format!("writing {}", dir.join(name).display()))
+    let mut f = std::fs::File::create(&tmp)?;
+    std::io::Write::write_all(&mut f, bytes)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, dir.join(name)).with_context(|| format!("writing {}", dir.join(name).display()))?;
+    std::fs::File::open(dir)?.sync_all()?;
+    Ok(())
 }
 
 /// Compare the remote's ledger (its text) with this machine's: it must be this one's first lines,
 /// exactly.
+/// The largest ledger read from a remote, into root's memory: whoever can push there could otherwise
+/// make it any size (the review of 0.2.1, L3). The same as adopt's.
+pub const MAX_LEDGER: u64 = 64 << 20;
+
 pub fn anchor(remote: Option<&str>, local: &str) -> Anchor {
     let Some(remote) = remote else { return Anchor::Empty };
     let r: Vec<&str> = remote.lines().filter(|l| !l.trim().is_empty()).collect();

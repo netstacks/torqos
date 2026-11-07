@@ -31,6 +31,19 @@ pub struct ProposedFile {
 const NAME: &str = "torq-broker";
 const EMAIL: &str = "broker@torq.local";
 
+/// A revision as git is given one here: a full commit id, `HEAD`, or a ref by its full name. Never
+/// anything git could read as an option: a commit named in a ledger is text whoever wrote the ledger
+/// chose (an adopted one, someone else's), and `--output=<file>` given to `git show` as root writes
+/// that file (the review of 0.2.1, H1).
+pub fn revision(r: &str) -> Result<&str> {
+    let id = r.len() == 40 && r.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let named = r == "HEAD" || (r.starts_with("refs/") && r.bytes().all(|b| b.is_ascii_alphanumeric() || b"/_.-".contains(&b)) && !r.contains(".."));
+    if !(id || named) {
+        bail!("{r:?} is not a commit: refused");
+    }
+    Ok(r)
+}
+
 impl Repo {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -168,6 +181,7 @@ impl Repo {
     /// `main` the remote refuses (another history there) must not keep the ledger from it (the second
     /// review of ADR-036).
     pub fn push_main(&self, url: &str, ssh_command: &str, rev: &str) -> Result<()> {
+        revision(rev)?;
         self.git_net(ssh_command, &["push", "--porcelain", "--no-recurse-submodules", "--", url, &format!("{rev}:refs/heads/main")])?;
         Ok(())
     }
@@ -208,11 +222,13 @@ impl Repo {
 
     /// The size of a file of commit `rev` (None: it has none).
     pub fn size_at(&self, rev: &str, path: &str) -> Option<u64> {
+        revision(rev).ok()?;
         self.git(&["cat-file", "-s", &format!("{rev}:{path}")]).ok()?.trim().parse().ok()
     }
 
     /// A file of commit `rev` as text, if it is at most `max` bytes (None: none, or larger).
     pub fn text_at_most(&self, rev: &str, path: &str, max: u64) -> Option<String> {
+        revision(rev).ok()?;
         let object = format!("{rev}:{path}");
         let size: u64 = self.git(&["cat-file", "-s", &object]).ok()?.trim().parse().ok()?;
         if size > max {
@@ -223,6 +239,7 @@ impl Repo {
 
     /// The ledger of a ledger commit, refused above `max` bytes.
     pub fn ledger_at_most(&self, commit: &str, max: u64) -> Result<String> {
+        revision(commit)?;
         self.text_at_most(commit, "ledger.jsonl", max).with_context(|| format!("the ledger at {commit} is missing, or larger than {max} bytes"))
     }
 
@@ -242,6 +259,7 @@ impl Repo {
 
     /// Every path of commit `rev`'s tree, with its mode (100644, 100755, 120000 a link, 160000 …).
     pub fn tree_paths(&self, rev: &str) -> Result<Vec<(String, String)>> {
+        revision(rev)?;
         let out = self.git(&["ls-tree", "-r", "-z", rev])?;
         Ok(out.split('\0').filter(|l| !l.is_empty()).filter_map(|l| {
             let (meta, path) = l.split_once('\t')?;
@@ -283,16 +301,23 @@ impl Repo {
     /// Whether the remote's ledger history is one line — no merge anywhere in it: a merge would let a
     /// rewrite sit beside the history it rewrites (the review of ADR-036, H1).
     pub fn ledger_history_linear(&self, tip: &str) -> Result<bool> {
+        revision(tip)?;
         Ok(self.git(&["rev-list", "--count", "--min-parents=2", tip])?.trim() == "0")
     }
 
     /// Whether `ancestor` is in `tip`'s history.
     pub fn has_ancestor(&self, ancestor: &str, tip: &str) -> Result<bool> {
+        revision(ancestor)?;
+        revision(tip)?;
         self.is_ancestor(ancestor, tip)
     }
 
     /// The ledger commits after `since` (exclusive; None: from the first), oldest first, up to `tip`.
     pub fn ledger_commits(&self, since: Option<&str>, tip: &str) -> Result<Vec<String>> {
+        revision(tip)?;
+        if let Some(s) = since {
+            revision(s)?;
+        }
         let range = since.map_or(tip.to_string(), |s| format!("{s}..{tip}"));
         Ok(self.git(&["rev-list", "--reverse", &range])?.lines().map(String::from).collect())
     }
@@ -300,6 +325,7 @@ impl Repo {
     /// The ledger a ledger commit holds.
     /// The proposals' texts a ledger commit keeps (N19): each name, and its size.
     pub fn ledger_text_sizes(&self, commit: &str) -> Result<Vec<(String, u64)>> {
+        revision(commit)?;
         let out = self.git(&["ls-tree", "-l", "-z", commit, "proposals/"])?;
         Ok(out
             .split('\0')
@@ -314,10 +340,12 @@ impl Repo {
 
     /// One of them.
     pub fn ledger_text(&self, commit: &str, name: &str) -> Result<String> {
+        revision(commit)?;
         self.git(&["cat-file", "blob", &format!("{commit}:proposals/{name}")])
     }
 
     pub fn ledger_at(&self, commit: &str) -> Result<String> {
+        revision(commit)?;
         self.git(&["cat-file", "blob", &format!("{commit}:ledger.jsonl")])
     }
 
@@ -483,6 +511,7 @@ impl Repo {
     }
 
     pub fn revert_and_commit(&self, commit: &str, message: &str) -> Result<String> {
+        revision(commit)?;
         self.ensure_clean()?;
         if let Err(e) = self.git(&["revert", "--no-commit", commit]) {
             // A conflicting revert leaves REVERT_HEAD and conflict markers behind, which would
@@ -499,6 +528,7 @@ impl Repo {
     }
 
     pub fn hard_reset(&self, commit: &str) -> Result<()> {
+        revision(commit)?;
         self.git(&["reset", "-q", "--hard", commit])?;
         self.sync()?;
         Ok(())
@@ -506,11 +536,14 @@ impl Repo {
 
     /// Keep a commit reachable after a reset: the reflog alone expires, and `git gc` would drop it.
     pub fn keep(&self, commit: &str) -> Result<()> {
+        revision(commit)?;
         self.git(&["update-ref", &format!("refs/torq/discarded/{commit}"), commit])?;
         self.sync()
     }
 
     pub fn is_ancestor(&self, ancestor: &str, of: &str) -> Result<bool> {
+        revision(ancestor)?;
+        revision(of)?;
         let st = crate::config::command("git")
             .arg("-C")
             .arg(&self.root)
@@ -552,6 +585,7 @@ impl Repo {
     }
 
     pub fn show(&self, commit: &str) -> Result<String> {
+        revision(commit)?;
         self.git(&["show", "--stat", "--patch", commit])
     }
 }
