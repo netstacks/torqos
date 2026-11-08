@@ -1312,6 +1312,8 @@ impl<'a> Session<'a> {
         }
         match self.machine.ask(&format!("{loaded}{}", self.ui().line("", "Install it now? "))) {
             Answer::Yes => self.commit_as(CommitOptions::default(), true),
+            // (`torqcli <command>`: its candidate is its own, gone when it ends.)
+            Answer::No if self.saved.is_none() => Ok(self.said("Not installed, and not kept: this run's candidate ends with it (in the shell, an update waits in your candidate for `configure; commit`).")),
             Answer::No => Ok(self.said("Not installed: it stays in the candidate, and `configure; commit` installs it later.")),
             Answer::NobodyToAsk => Ok(loaded),
         }
@@ -4962,6 +4964,10 @@ mod tests {
         let mut s = session(d.path(), Some(saved), &m);
         s.asks = true;
         assert_eq!(s.exec("request system update").unwrap(), "Not installed: it stays in the candidate, and `configure; commit` installs it later.\n");
+        let (d2, m2) = (repo_with_software(), Fake { no: true, ..Default::default() });
+        let mut one = session(d2.path(), None, &m2);
+        one.asks = true;
+        assert!(one.exec("request system update").unwrap().starts_with("Not installed, and not kept"), "a candidate of its own says so");
         assert!(m.commits.borrow().is_empty() && m.checks.borrow().is_empty());
         assert!(s.uncommitted().unwrap(), "still in the candidate");
         // Other changes in the candidate: never committed by surprise — loaded, and said why it waits.
