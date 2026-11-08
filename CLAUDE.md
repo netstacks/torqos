@@ -133,8 +133,10 @@ done (`docs/AUDIT-2026-11-04.md`); **left of M2:** the `v0.2.0` tag.
 **Then M3 — trust** (ADR-035, ADR-036): the broker as a socket service with identity from
 `SO_PEERCRED`, the agent's account, the config repo's remote (push after every change, the ledger
 anchored there, pull as a proposal, adopt at setup), strict mode and `torq break-glass`, data
-snapshots. **M4 — the desktop as a configuration** (`torqos-desktop`; applications by rung,
-ADR-037; data declared, ADR-038). **M5 — the agent** (doctor, proposals, session trust; the three
+snapshots. **M3.5 — the install** (ADR-046, ADR-047): a console UI for installer and setup, firmware
+and Wi-Fi on real hardware (the owner's Zenbook S 16 is the target), recipes — anyone's shared
+configuration repository as a starting point. **M4 — the desktop as a configuration** (COSMIC only,
+ADR-045; `torqos-desktop`, the official recipe; applications by rung, ADR-037; data declared, ADR-038). **M5 — the agent** (doctor, proposals, session trust; the three
 scenarios of ADR-034 as VM tests). `docs/ROADMAP.md` has each. What is left of M1.5 is human
 polish, below these.
 
