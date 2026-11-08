@@ -377,9 +377,12 @@ per place (one name, the first form, still reads as a list of one).
   read from: the owner, their home and uid, the key files sshd reads, the keys declared), and
   whether it reads the tree (`configDir`). SSH *before* the change is needed only when SSH is on
   after it; it is a committed configuration with its lock, so it is kept by commit id in the
-  person's own cache folder (`$XDG_CACHE_HOME/torq`, else `~/.cache/torq`; 0700, files never
-  opened through a link; an entry that cannot be read is evaluated again). After a commit the
-  broker lands, its SSH is kept under the new HEAD (when HEAD is that commit: its parent the base,
+  person's own cache folder (`$XDG_CACHE_HOME/torq`, else `~/.cache/torq`: made 0700, and used
+  only while it is theirs with no group or other bits at all; each entry read and written through
+  the folder held open, never through a link; an entry that cannot be read is evaluated again).
+  Entries, and a check's result in the candidate, are named by a hash of the Nix that read them
+  (and the configuration name), so another torqcli's are never taken for this one's.
+  After a commit the broker lands, its SSH is kept under the new HEAD (when HEAD is that commit: its parent the base,
   its files the change's), so the next commit evaluates once. A commit therefore evaluates once;
   twice when SSH is on after it and the commit it is based on was never evaluated here; not at all
   after a `commit check` of the same changes. The broker's own build of the ledgered commit is
@@ -516,7 +519,7 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `set torq unfree packages [ <name> … ]` · `set torq unfree all true` | (configuration mode) allow unfree software (Postman, VS Code, …): by name, or all of it; refused otherwise, saying so (modules/unfree.nix) |
 | `show services` | the services the configuration turns on (NixOS's `services <name> enable` and `virtualisation <name> enable`, and the old list), SSH with how it is protected |
 | `request system password [<user>]` | change a person's password (kept in /var/lib/torq/secrets, never in the configuration) |
-| `request system update [all] [\| display detail]` | load the newest TorqOS (and its nixpkgs) into the candidate; in operational mode at a terminal, with the software the candidate's only change, `Install it now? [y/N]` — yes commits it (one check; the password a system change asks), no leaves it for `configure; commit`. Other uncommitted changes in the candidate, configuration mode (`run request …`), a `-c` script or input that is not a terminal: loaded only, never committed by surprise, never a question a script could hang on |
+| `request system update [all] [\| display detail]` | load the newest TorqOS (and its nixpkgs) into the candidate; in operational mode at a terminal, with the software the candidate's only change, `Install it now? [y/N]` — yes commits it (one check; the password a system change asks), no leaves it for `configure; commit`. Other uncommitted changes in the candidate, configuration mode (`run request …`), a `-c` script or input that is not a terminal: loaded only, never committed by surprise, never a question a script could hang on. `torqcli request system update` as one command, its input and output a terminal (run from a bash script at one, too), does ask; `-c` never asks, nor does input that is not a terminal (`</dev/null`) |
 | `request system software rollback <n> [\| display detail]` | load commit <n>'s software into the candidate (a downgrade); offered for install as an update is |
 | `set system software torq source <source>` | (configuration mode) where TorqOS comes from: locks that source into the candidate |
 | `save <file>` | (configuration mode) the whole candidate and its config files' content to a file, private |

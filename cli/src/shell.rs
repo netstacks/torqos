@@ -136,7 +136,7 @@ impl Machine for Real<'_> {
 
     fn ssh_at(&self, base: &str) -> Result<SshFacts> {
         let (_scratch, copy) = self.changed_copy(base, &[])?;
-        let log = run::start_log()?;
+        let log = run::go_on_log()?;
         let _p = self.progress("Reading the SSH settings");
         crate::ssh_state(&copy, &log, self.detail.get())
     }
@@ -1225,6 +1225,23 @@ fn describe(e: &anyhow::Error) -> String {
     out
 }
 
+/// Whether a run may ask a person what a command offers to go on with (Session::asks): the shell, or
+/// one command, with standard input and output a terminal — never a script (`-c`), whatever it runs at.
+fn asks(run: &Invocation, stdin_terminal: bool, stdout_terminal: bool) -> bool {
+    !matches!(run, Invocation::Script(_)) && stdin_terminal && stdout_terminal
+}
+
+#[cfg(test)]
+#[test]
+fn a_script_is_never_asked() {
+    let script = Invocation::Script("request system update; configure; commit".into());
+    assert!(!asks(&script, true, true), "a -c script, even at a terminal");
+    for run in [Invocation::Interactive, Invocation::Command(vec!["request".into(), "system".into(), "update".into()])] {
+        assert!(asks(&run, true, true));
+        assert!(!asks(&run, false, true) && !asks(&run, true, false), "input or output not a terminal");
+    }
+}
+
 /// The command line (`name`: as torqcli was run). A refusal says why, then how torqcli is run.
 fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
     // (One line, as every message: the usage after the reason.)
@@ -1377,7 +1394,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
     s.cache = crate::evalcache::Cache::personal();
     // Offered to go on (install what an update loaded) only where a person is at a terminal: never a
     // script, which must not stop on a question it was not written to answer.
-    s.asks = !matches!(run, Invocation::Script(_)) && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    s.asks = asks(&run, std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
     let fail = |line: &str, e: anyhow::Error| {
         say_error(&format!("{}: {}", history::one_line(line, 80), describe(&e)));
         Ok(1)

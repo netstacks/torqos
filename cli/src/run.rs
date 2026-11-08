@@ -28,6 +28,16 @@ pub fn log_path() -> Result<PathBuf> {
 /// Start a fresh log for this command: private to the user (0600), and never written through a
 /// symlink.
 pub fn start_log() -> Result<PathBuf> {
+    open_log(true)
+}
+
+/// The log as this command has it so far, added to (made as `start_log` makes it if there is none):
+/// a step after another, whose output belongs with the first's.
+pub fn go_on_log() -> Result<PathBuf> {
+    open_log(false)
+}
+
+fn open_log(fresh: bool) -> Result<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
     let p = log_path()?;
     fs::create_dir_all(p.parent().unwrap()).with_context(|| format!("creating {}", p.display()))?;
@@ -37,7 +47,7 @@ pub fn start_log() -> Result<PathBuf> {
     let f = fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
+        .truncate(fresh)
         .mode(0o600)
         .open(&p)
         .with_context(|| format!("writing {}", p.display()))?;
@@ -93,6 +103,9 @@ impl Drop for Progress {
     }
 }
 
+/// The longest line kept before it is shown.
+const LINE: usize = 8192;
+
 /// What a command writes as it runs, kept in the log, and with `live` (`| display detail`) shown on
 /// the terminal line by line as it comes, each line cleaned of anything that could fool a terminal
 /// (history::clean) — Nix's and the broker's text are not ours.
@@ -122,7 +135,9 @@ impl<W: Write> Write for Live<W> {
         if self.live {
             for &b in buf {
                 self.line.push(b);
-                if b == b'\n' {
+                // A line that never ends (a progress bar redrawn with `\r` alone) is shown as it
+                // stands once it is long, not kept growing.
+                if b == b'\n' || self.line.len() >= LINE {
                     self.show();
                 }
             }
@@ -145,30 +160,51 @@ impl<W: Write> Drop for Live<W> {
 /// Run `cmd`: its exit status, standard output, and standard error — which is also appended to
 /// `log`, and with `live` shown as it comes (Live).
 pub fn output(cmd: &mut Command, log: &std::path::Path, live: bool) -> Result<std::process::Output> {
-    use std::io::Read;
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let mut stdout = child.stdout.take().context("the command's output")?;
-    let reading = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        stdout.read_to_end(&mut out).map(|_| out)
-    });
+    // (The log opened first: nothing is started that could not be followed.)
+    let log = fs::OpenOptions::new().append(true).create(true).open(log).context("opening the log")?;
+    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let mut stderr = Vec::new();
-    {
-        let log = fs::OpenOptions::new().append(true).create(true).open(log).context("opening the log")?;
-        let mut shown = Live::new(log, live);
-        let mut err = child.stderr.take().context("the command's errors")?;
+    let (status, stdout) = streamed(child, &mut Live::new(log, live), Some(&mut stderr))?;
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
+/// A started child's standard output, collected, and its standard error through `err` as it comes
+/// (and into `keep`). However that goes, the child is waited for — stopped first if its errors
+/// could not be read, so nothing is left running unwatched.
+fn streamed(mut child: std::process::Child, err: &mut dyn Write, mut keep: Option<&mut Vec<u8>>) -> Result<(std::process::ExitStatus, Vec<u8>)> {
+    use std::io::Read;
+    let reading = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            stdout.read_to_end(&mut out).map(|_| out)
+        })
+    });
+    let copied = (|| -> Result<()> {
+        let mut errors = child.stderr.take().context("the command's errors")?;
         let mut buf = [0u8; 8192];
         loop {
-            let n = err.read(&mut buf)?;
+            let n = errors.read(&mut buf)?;
             if n == 0 {
-                break;
+                return Ok(());
             }
-            stderr.extend_from_slice(&buf[..n]);
-            shown.write_all(&buf[..n])?;
+            if let Some(k) = keep.as_deref_mut() {
+                k.extend_from_slice(&buf[..n]);
+            }
+            err.write_all(&buf[..n])?;
         }
+    })();
+    if copied.is_err() {
+        let _ = child.kill();
     }
-    let stdout = reading.join().map_err(|_| anyhow::anyhow!("reading the command's output failed"))??;
-    Ok(std::process::Output { status: child.wait()?, stdout, stderr })
+    let status = child.wait();
+    let out = reading.map(|r| r.join());
+    copied?;
+    let out = match out {
+        Some(Ok(o)) => o?,
+        Some(Err(_)) => anyhow::bail!("reading the command's output failed"),
+        None => Vec::new(),
+    };
+    Ok((status?, out))
 }
 
 /// How a broker command ended, read from its exit code and JSON (CLI-DESIGN.md, "The broker's
@@ -308,16 +344,9 @@ fn exec(call: Call, err: &mut dyn Write, err_stdio: impl Fn() -> Result<Stdio>, 
             c.stdin(Stdio::inherit()); // sudo may need to ask for a password
             if live {
                 // Its standard error through `err` as it comes (shown, and logged).
-                use std::io::Read;
-                let mut child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("running the broker")?;
-                let mut stdout = child.stdout.take().context("the broker's output")?;
-                let reading = std::thread::spawn(move || {
-                    let mut out = Vec::new();
-                    stdout.read_to_end(&mut out).map(|_| out)
-                });
-                std::io::copy(&mut child.stderr.take().context("the broker's errors")?, err)?;
-                let out = reading.join().map_err(|_| anyhow::anyhow!("reading the broker's output failed"))??;
-                return Ok((child.wait()?.code(), out));
+                let child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("running the broker")?;
+                let (status, out) = streamed(child, err, None)?;
+                return Ok((status.code(), out));
             }
             let out = c.stdout(Stdio::piped()).stderr(err_stdio()?).output().context("running the broker")?;
             Ok((out.status.code(), out.stdout))

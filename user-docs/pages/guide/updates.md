@@ -32,7 +32,8 @@ committed, it loads the update next to them and says so: they are never committe
 `configure`, `show | compare`, `commit` installs them together. From configuration mode
 (`run request system update`), in a script (`torqcli -c "request system update; configure; show |
 compare; commit"`) or with input that is not a terminal, it only loads, as before, and never stops
-to ask.
+to ask. `torqcli request system update` run as one command is not a `-c` script: at a terminal
+(even from inside a shell script) it asks; add `< /dev/null`, or use `-c`, where nobody will answer.
 
 To watch what it does — each step, how long it took, and the build's own output — add
 `| display detail`: `request system update | display detail`, or `commit | display detail`.

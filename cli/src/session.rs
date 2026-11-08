@@ -216,7 +216,7 @@ pub struct Checked {
     pub before: Option<SshFacts>,
 }
 
-/// What a check is of: the base and the exact changes (each file's path and content, or deleted),
+/// What a check is of: what read it (`check_form`), the base, and the exact changes (each file's path and content, or deleted),
 /// hashed. Any change to the candidate, or another base, is another key.
 pub fn check_key(base: &str, files: &[(String, Option<String>)]) -> String {
     use sha2::{Digest, Sha256};
@@ -227,6 +227,8 @@ pub fn check_key(base: &str, files: &[(String, Option<String>)]) -> String {
         h.update((b.len() as u64).to_le_bytes());
         h.update(b);
     };
+    // What read it: a result of another torqcli's Nix is another key.
+    part(crate::check_form().as_bytes());
     part(base.as_bytes());
     for (p, c) in sorted {
         part(p.as_bytes());
@@ -2633,6 +2635,8 @@ mod tests {
         cancelled: RefCell<Vec<u64>>,
         /// The repo a commit lands in, as the broker would make it (else: none does).
         lands_in: Option<PathBuf>,
+        /// What happens in that repo once it has landed (another commit, the change amended).
+        then_sh: Option<String>,
     }
     impl Machine for Fake {
         /// One evaluation: the warnings a test gives, and SSH after the change — as the evaluator would:
@@ -2680,6 +2684,9 @@ mod tests {
             if let Some(repo) = &self.lands_in {
                 std::fs::write(repo.join(".change.diff"), diff).unwrap();
                 sh(repo, "git apply .change.diff && rm .change.diff && git add -A && git commit -qm change");
+                if let Some(script) = &self.then_sh {
+                    sh(repo, script);
+                }
             }
             if self.detail.get() {
                 self.show("  (the broker's build output)");
@@ -4856,24 +4863,24 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let (d, m) = (repo(), Fake { answer: true, ssh_state: Some((keys_only, keys_only)), keys: vec![key.clone()], lands_in: None, ..Default::default() });
         let mut s = session(d.path(), None, &m);
-        s.cache = crate::evalcache::Cache::at(cache.path());
+        s.cache = crate::evalcache::Cache::at(&cache.path().join("torq"));
         run(&mut s, &["configure", "set system host-name three", "commit"]);
         assert_eq!((m.checks.borrow().len(), *m.ssh_calls.borrow()), (1, 1), "the check, and SSH before it");
         let mut s = session(d.path(), None, &m);
-        s.cache = crate::evalcache::Cache::at(cache.path());
+        s.cache = crate::evalcache::Cache::at(&cache.path().join("torq"));
         run(&mut s, &["configure", "set system host-name four", "commit"]);
         assert_eq!((m.checks.borrow().len(), *m.ssh_calls.borrow()), (2, 1), "the same base again: SSH before it from the cache");
         // The commit the broker made keeps SSH as it has it: the next commit, on it, evaluates once.
         let m = Fake { answer: true, ssh_state: Some((keys_only, keys_only)), keys: vec![key], lands_in: Some(d.path().to_path_buf()), ..Default::default() };
         let mut s = session(d.path(), None, &m);
-        s.cache = crate::evalcache::Cache::at(cache.path());
+        s.cache = crate::evalcache::Cache::at(&cache.path().join("torq"));
         let before = Repo::new(d.path()).head().unwrap();
         run(&mut s, &["configure", "set system host-name five", "commit"]);
         let after = Repo::new(d.path()).head().unwrap();
         assert_ne!(before, after, "the change landed");
-        assert_eq!(crate::evalcache::Cache::at(cache.path()).get(&after).map(|f| f.admits["when"].clone()), Some(serde_json::json!("after")), "kept as the commit has it");
+        assert_eq!(crate::evalcache::Cache::at(&cache.path().join("torq")).get(&after).map(|f| f.admits["when"].clone()), Some(serde_json::json!("after")), "kept as the commit has it");
         let mut s = session(d.path(), None, &m);
-        s.cache = crate::evalcache::Cache::at(cache.path());
+        s.cache = crate::evalcache::Cache::at(&cache.path().join("torq"));
         run(&mut s, &["configure", "set system host-name six", "commit"]);
         assert_eq!((m.checks.borrow().len(), *m.ssh_calls.borrow()), (2, 0), "one evaluation each, nothing before");
         // Without a cache, SSH before is evaluated each time.
@@ -5029,5 +5036,68 @@ mod tests {
         assert!(s.exec("commit check | display detail").is_err());
         assert!(m.shown.borrow().iter().any(|l| l.starts_with("Evaluating the configuration, as the broker will build it: failed (")));
         assert!(!m.detail.get(), "off again after an error");
+    }
+
+    /// SSH after a commit is kept under the new HEAD only when HEAD is that commit: its parent the
+    /// base, its files the change's. Not when nothing landed, when what landed differs, or when another
+    /// commit came after it.
+    #[test]
+    fn ssh_is_kept_only_under_the_commit_that_landed() {
+        let cache = tempfile::tempdir().unwrap();
+        let kept = crate::evalcache::Cache::at(&cache.path().join("torq"));
+        let commit = |lands: bool, then: Option<&str>| {
+            let d = repo();
+            let m = Fake { answer: true, lands_in: lands.then(|| d.path().to_path_buf()), then_sh: then.map(String::from), ..Default::default() };
+            let mut s = session(d.path(), None, &m);
+            s.cache = kept.clone();
+            let base = Repo::new(d.path()).head().unwrap();
+            run(&mut s, &["configure", "set system host-name three", "commit"]);
+            let head = Repo::new(d.path()).head().unwrap();
+            let parent = Repo::new(d.path()).parent_of(&head).unwrap().unwrap();
+            (base, head, parent, d)
+        };
+        // Landed as it was: kept (SSH off after it, so nothing was kept before it).
+        let (base, head, _, _d) = commit(true, None);
+        assert!(kept.get(&base).is_none() && kept.get(&head).is_some());
+        // Nothing landed: HEAD is still the base, which is not the change.
+        let (base, head, _, _d) = commit(false, None);
+        assert_eq!(base, head);
+        assert!(kept.get(&base).is_none());
+        // Landed on the base, but with other content.
+        let (base, head, parent, _d) = commit(true, Some("printf '{ \"host-name\": \"other\" }\\n' > system/host.json && git commit -q --amend -am amended"));
+        assert_eq!(parent, base);
+        assert!(kept.get(&head).is_none() && kept.get(&base).is_none());
+        // Landed, then another commit after it (its files the change's, its parent not the base).
+        let (base, head, parent, _d) = commit(true, Some("printf x > other && git add -A && git commit -qm later"));
+        assert_ne!(parent, base);
+        assert!(kept.get(&head).is_none() && kept.get(&parent).is_none());
+    }
+
+    /// The install is offered only on a candidate based on the configuration in effect, and never for
+    /// an image's first update (it moves the machine to the releases: its flake.nix too).
+    #[test]
+    fn the_install_is_offered_only_where_the_update_is_all_there_is() {
+        // The configuration moved since the candidate was started: loaded, said, not offered.
+        let (d, m) = (repo_with_software(), Fake { no: true, ..Default::default() });
+        let saved = d.path().join("candidate.json");
+        let mut s = session(d.path(), Some(saved.clone()), &m);
+        s.asks = true;
+        s.exec("request system update").unwrap();
+        assert_eq!(m.asked.borrow().len(), 1);
+        sh(d.path(), "printf x > other && git add -A && git commit -qm moved");
+        let mut s = session(d.path(), Some(saved), &m);
+        s.asks = true;
+        let out = s.exec("request system update").unwrap();
+        assert!(out.contains("`commit` will be refused"), "{out}");
+        assert_eq!(m.asked.borrow().len(), 1, "not offered");
+        // An image's first update: loaded, not offered, and not called other changes.
+        let d = repo_with_software();
+        sh(d.path(), "printf '{\\n  inputs = {\\n    torq.url = \"path:/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source\";\\n  };\\n}\\n' > flake.nix && git add -A && git commit -qm flake");
+        let m = Fake { answer: true, release: Some(("0123456789abcdef0123456789abcdef01234567".into(), true)), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        s.asks = true;
+        let out = s.exec("request system update").unwrap();
+        assert!(out.starts_with("This machine runs the TorqOS it was installed with") && !out.contains("other changes"), "{out}");
+        assert!(m.asked.borrow().is_empty() && m.commits.borrow().is_empty());
     }
 }
