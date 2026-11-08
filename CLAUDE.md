@@ -43,7 +43,7 @@ flake.nix              entry point: images, VMs, checks, packages, the dev shell
 modules/               the distribution, as NixOS modules (torq.* options)
   base.nix             nix settings, users, locale, core packages
   security.nix         hardening (boot chain and TPM: later)
-  desktop.nix          a desktop (niri), off in the base; the torqos-desktop configuration's (ADR-034, M4)
+  desktop.nix          a desktop (COSMIC, ADR-045), off in the base; the torqos-desktop configuration's (ADR-034, M4)
   broker.nix           the privileged change broker service + config repo
   shell.nix            the login shell: zsh + oh-my-zsh and the TorqOS prompt (shell/torq.zsh-theme)
   setup.nix            first-boot setup, at the console of a machine made from the image

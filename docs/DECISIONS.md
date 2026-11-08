@@ -1478,3 +1478,78 @@ other is a silent mistake: a configuration the CLI does not see, a proposal show
   (M4's, M5's) add to the strings to move.
 - **Not:** a crate shared with the outside (the socket is TorqOS's own, ADR-040); the broker's logic in
   the shared crate; a change of the ledger's format or field order, ever, for this.
+
+## ADR-045 — The desktop is COSMIC, and only COSMIC; TorqOS Settings is torqcli in a window
+
+**Status:** accepted, 2026-11-08 (the owner). Amends ADR-034 (its compositor), ADR-040 ("Not: polkit", for
+a desktop session only) and ADR-019's history (niri and Quickshell). The design is decided here; the code is M4's.
+**Context:** ADR-034 named niri as `torqos-desktop`'s compositor, and `modules/desktop.nix` still carries
+niri, tuigreet and Quickshell from before ADR-019. Nothing of it has been built since. The owner runs Pop!_OS
+with COSMIC on their own laptop and wants that refinement: smooth scrolling, a good display, a conventional
+desktop a person who does not tile can use. The pinned nixpkgs (nixos-26.05) carries COSMIC 1.2.0
+(`cosmic-comp`, `cosmic-settings`, `xdg-desktop-portal-cosmic`, `cosmic-greeter`, `cosmic-osd`) with NixOS
+modules of its own (`services.desktopManager.cosmic`, `services.displayManager.cosmic-greeter`). Three
+things the desktop must do weighed more than the compositor's taste: an approval for a system change that an
+ordinary application cannot imitate as easily as a window; capture and input for the agent (ADR-034's
+*watch the desktop*) that are granted, not open to every client; and settings that are the tree's, not a GUI's
+own state. niri gives none of these by itself: wlr screencopy and virtual input, and a dialog that is one
+more client. COSMIC has a polkit agent in its shell (`cosmic-osd`) and goes through portals.
+- **Decision:**
+  1. **COSMIC is the desktop, and the only one.** `torqos-desktop` is COSMIC on Wayland with the
+     cosmic-greeter, through NixOS's own modules, at the version the release's nixpkgs pins. TorqOS builds,
+     tests and documents no other desktop: no niri, no GNOME, no KDE, no "any compositor" abstraction. What
+     TorqOS adds to the desktop (below) is written for COSMIC, with libcosmic, and may use what only COSMIC
+     has. A person may still install another desktop through the tree like any NixOS setting; TorqOS does
+     not support it. Flatpak and the portal per ADR-037; Firefox from Flathub; COSMIC's own terminal, files
+     and launcher instead of foot and fuzzel.
+  2. **TorqOS Settings (`torq-settings`): torqcli in a window.** A COSMIC application (Rust, libcosmic,
+     `settings/` crate) for the person at the machine: the tree (browse, search, change), the candidate and
+     `show | compare`, commit with a reason, history and the ledger, `rollback`, the pending proposals (the
+     agent's among them) to approve or refuse with the reason each is tainted, alarms, backups and snapshots,
+     `commit confirmed`'s countdown with its confirm. It is **a client of the broker's socket and nothing
+     more**: the person's own uid by `SO_PEERCRED` (ADR-040), the same requests torqcli sends, the types of
+     `torq-wire` (ADR-044, which therefore comes first), no privilege, no setuid, no D-Bus service of its
+     own, no second path to a commit. What it shows is what torqcli would print — the same prompt text, the
+     same refusals, word for word, from the broker; a word the GUI has and the CLI does not is a bug in one
+     of them. Every action it offers is a torqcli command the person could type, and it can show that command.
+  3. **COSMIC Settings, wrapped: a setting the tree owns is changed through the tree.** COSMIC Settings'
+     pages that change the system — date and time zone, the host name, users, and others as they are found —
+     call systemd's and accounts-daemon's D-Bus services, which on NixOS either refuse (the setting is
+     declared) or change a file the next switch overwrites. TorqOS carries a small patch to cosmic-settings
+     (in its overlay, offered upstream as a hook if upstream wants one) so that each such page shows the
+     tree's value and, on a change, opens TorqOS Settings at that setting with the new value in the
+     candidate — a proposal, committed like any other. No D-Bus shim that answers in systemd's name, and
+     no polkit rule that lets a page through: the tree is the only writer of the system (ADR-016).
+     Network connections (Wi-Fi and its secrets) stay NetworkManager's state, not configuration (the fence).
+  4. **A person's COSMIC look is theirs, and can be saved.** cosmic-config keeps one file per setting under
+     `~/.config/cosmic/`. The tree may set defaults for them (system-wide, through COSMIC's defaults
+     directory); a change in COSMIC Settings' own pages (theme, panel, dock, shortcuts) is the person's and
+     needs nothing. `show | compare` on the desktop says where the person's settings differ from the
+     tree's defaults, and **"save my desktop"** (`request users <name> desktop save`) turns them into
+     settings of `users <name> desktop …`, user tier, no password, so a machine adopted from the repository
+     (ADR-036) comes back looking the same. The tree's COSMIC words are generated from cosmic-config's keys
+     at the pinned version, not written by hand: COSMIC is young and its keys move between releases.
+  5. **Approval on the desktop goes through polkit and COSMIC's agent.** A system-tier request from a
+     graphical session is approved by the person's own password asked by COSMIC's polkit agent (the action
+     `org.torqos.approve`, `auth_self`, so the caller's password as in ADR-040, never an administrator's),
+     not by a box TorqOS Settings draws: the application never holds the password. The broker asks polkit
+     for the caller's process; the terminal keeps PAM as today (`torq-approve`), and faillock counts both.
+     ADR-040's "Not: polkit" stands for the server; on a desktop session polkit is the dialog's way in.
+     The dialog's text is the broker's prompt, the same as torqcli's. Open, before code: whether a graphical
+     session's requests then refuse a password in the request outright, so a password phished by a lookalike
+     window cannot be replayed over the socket (the trusted-path problem is not solved by any dialog;
+     SECURITY-MODEL says so); and polkit's PAM service set to count as `torq-approve` does.
+  6. **The agent's view of the desktop goes through COSMIC's portal** (`xdg-desktop-portal-cosmic`:
+     ScreenCast, Screenshot, RemoteDesktop where it is complete), granted by the person per session in the
+     portal's own dialog and ledgered as a grant like session trust (ADR-042 7). Not the compositor's
+     privileged protocols handed to the agent's account. What the portal lacks today (remote input first) is
+     checked before M5 relies on it, and upstreamed rather than bypassed.
+- **Consequences:** `modules/desktop.nix` is rewritten for COSMIC (niri, tuigreet, Quickshell, foot and
+  fuzzel go); KNOWN-GAPS 7 (niri's stock config) is moot. New code: `settings/` (TorqOS Settings), the
+  cosmic-settings patch, the polkit action and the broker's polkit check, the generated COSMIC words of the
+  tree. ADR-044's `torq-wire` becomes a prerequisite of M4. The desktop's weight is COSMIC's (more than niri,
+  well under GNOME), in the configuration, not the base (ADR-032). The VM test boots to a COSMIC session;
+  smoothness is judged on real hardware (.37), not in a VM. COSMIC's pace is the risk: TorqOS follows the
+  version nixpkgs pins, and a COSMIC upgrade is a TorqOS release's change, tested like one.
+- **Not:** a second desktop, now; TorqOS Settings as a privileged program or a D-Bus service; replacing
+  COSMIC Settings (it stays for what is the person's); a password entered in a window TorqOS draws.

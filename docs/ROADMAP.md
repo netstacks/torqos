@@ -189,12 +189,21 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
 - [x] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
       the `Ledger-Entry` trailer cross-check.
 
-### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038)
-Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. Can run alongside M3.
+### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038, ADR-045)
+Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, and only COSMIC
+(ADR-045). Needs `torq-wire` (ADR-044) first.
 
-- [ ] **`torqos-desktop`**: niri, a terminal, a launcher, the portal, Flatpak on; `modules/desktop.nix`
-      brought back as its module set (KNOWN-GAPS 7: a TorqOS niri config). Loaded with `load
-      override` on an image machine, or adopted at setup (M3). A VM test that it boots to a session.
+- [ ] **`torqos-desktop`**: COSMIC and cosmic-greeter through NixOS's modules, its portal, Flatpak on;
+      `modules/desktop.nix` rewritten as its module set (niri, tuigreet, Quickshell, foot, fuzzel go).
+      Loaded with `load override` on an image machine, or adopted at setup (M3). A VM test that it
+      boots to a COSMIC session; smoothness judged on real hardware (.37).
+- [ ] **TorqOS Settings** (`settings/`, libcosmic; ADR-045 2): the tree, the candidate, commit,
+      history, rollback, pending proposals, alarms, backups — a client of the broker's socket only,
+      its words the broker's. A VM test that each action it offers is the torqcli request it names.
+- [ ] **COSMIC Settings wrapped** (ADR-045 3): the pages that change what the tree owns (time zone,
+      host name, users, …) hand the change to TorqOS Settings as a proposal; a patch in the overlay.
+- [ ] **The person's COSMIC settings** (ADR-045 4): tree defaults, drift in `show | compare`,
+      `request users <name> desktop save`; the tree's COSMIC words generated from cosmic-config's keys.
 - [ ] **Applications by rung** (ADR-037): `users <name> flatpaks` reconciled at switch; the design
       for a person's own builds in the tree (`users <name> projects`), user tier; what TorqOS refuses
       (`curl | sh`, self-updaters) said where it can see it.
@@ -202,8 +211,9 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. Can run 
       backup (`services restic backups`) with its key outside the repo and `request system restore`
       (built 2026-11-07: `request system backup key`, `show system backups`, `tests/backup.nix`; KNOWN-GAPS 6zm);
       the restore step in setup's from-a-repository path.
-- [ ] **Approval as a dialog**: a system-tier commit on a desktop asks in a window, with the
-      owner's password; the same prompt text torqcli prints.
+- [ ] **Approval as a dialog** (ADR-045 5): a system-tier commit on a desktop asks through polkit and
+      COSMIC's agent (`org.torqos.approve`, `auth_self`), with the person's password; the same prompt
+      text torqcli prints. Its two open questions settled first.
 - [ ] **Releases carry the desktop configuration** as a second artifact, versioned with TorqOS.
 
 ### M5 — The agent (AI-LAYER.md)
@@ -228,8 +238,9 @@ acceptance tests, each a VM test.
       tier, never tainted.
 - [ ] **Build me an application**: the agent writes and builds in the person's home, installs via
       rung 3 (ADR-037), tests, undoes.
-- [ ] **Watch the desktop**: screenshot and input through the compositor's protocols, in the
-      person's session; the agent's tooling, not the broker's.
+- [ ] **Watch the desktop**: screenshot and input through COSMIC's portal (ADR-045 6), granted per
+      session and ledgered; remote input checked first. In the person's session; the agent's
+      tooling, not the broker's.
 
 ## After 0.3.0: first in the next cycle
 

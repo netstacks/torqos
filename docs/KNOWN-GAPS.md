@@ -316,8 +316,8 @@ Its §5 lists claims without a test.
    statement and CI's unfree check (ROADMAP M2).
 
 ## Desktop (off in the base; the torqos-desktop configuration's, ADR-034, M4)
-7. niri runs its stock config: `Mod+T` spawns `alacritty` (not installed; we ship `foot`), no
-   `xwayland-satellite` (X11 apps fail), no cursor theme. Ship a TorqOS niri config.
+7. ~~niri runs its stock config.~~ Moot: the desktop is COSMIC (ADR-045); `modules/desktop.nix`
+   still carries niri until M4 rewrites it.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
 
