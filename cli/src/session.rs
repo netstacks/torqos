@@ -5043,9 +5043,11 @@ mod tests {
     /// commit came after it.
     #[test]
     fn ssh_is_kept_only_under_the_commit_that_landed() {
-        let cache = tempfile::tempdir().unwrap();
-        let kept = crate::evalcache::Cache::at(&cache.path().join("torq"));
+        // Each case its own cache: the cases' repositories are alike, and commits made within one
+        // second (as in the build sandbox) get the same ids, so one cache would answer across cases.
         let commit = |lands: bool, then: Option<&str>| {
+            let cache = tempfile::tempdir().unwrap();
+            let kept = crate::evalcache::Cache::at(&cache.path().join("torq"));
             let d = repo();
             let m = Fake { answer: true, lands_in: lands.then(|| d.path().to_path_buf()), then_sh: then.map(String::from), ..Default::default() };
             let mut s = session(d.path(), None, &m);
@@ -5054,21 +5056,21 @@ mod tests {
             run(&mut s, &["configure", "set system host-name three", "commit"]);
             let head = Repo::new(d.path()).head().unwrap();
             let parent = Repo::new(d.path()).parent_of(&head).unwrap().unwrap();
-            (base, head, parent, d)
+            (base, head, parent, kept, (d, cache))
         };
         // Landed as it was: kept (SSH off after it, so nothing was kept before it).
-        let (base, head, _, _d) = commit(true, None);
+        let (base, head, _, kept, _d) = commit(true, None);
         assert!(kept.get(&base).is_none() && kept.get(&head).is_some());
         // Nothing landed: HEAD is still the base, which is not the change.
-        let (base, head, _, _d) = commit(false, None);
+        let (base, head, _, kept, _d) = commit(false, None);
         assert_eq!(base, head);
         assert!(kept.get(&base).is_none());
         // Landed on the base, but with other content.
-        let (base, head, parent, _d) = commit(true, Some("printf '{ \"host-name\": \"other\" }\\n' > system/host.json && git commit -q --amend -am amended"));
+        let (base, head, parent, kept, _d) = commit(true, Some("printf '{ \"host-name\": \"other\" }\\n' > system/host.json && git commit -q --amend -am amended"));
         assert_eq!(parent, base);
         assert!(kept.get(&head).is_none() && kept.get(&base).is_none());
         // Landed, then another commit after it (its files the change's, its parent not the base).
-        let (base, head, parent, _d) = commit(true, Some("printf x > other && git add -A && git commit -qm later"));
+        let (base, head, parent, kept, _d) = commit(true, Some("printf x > other && git add -A && git commit -qm later"));
         assert_ne!(parent, base);
         assert!(kept.get(&head).is_none() && kept.get(&parent).is_none());
     }
