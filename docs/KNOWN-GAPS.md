@@ -790,3 +790,25 @@ Its §5 lists claims without a test.
    - **A grant lasted as long as its `until` said:** it lasts its minutes from its own entry, at most 60.
    - **Adopt took a ledger with a trust grant standing or a commit at waiting:** refused.
    - **The doctor's limits** are tested as numbers.
+6zt. **One check per commit, the install question, `| display detail` (torqcli, `work/w8`,
+   2026-11-08).** A commit evaluates the configuration once (docs/CLI-DESIGN.md, "The commit
+   model"); `commit check` then `commit` once in all; `request system update` asks to install. Open:
+   - **Kept results are the person's own files:** SSH before a change (`~/.cache/torq`) and a
+     check's result (in the candidate) are trusted as the candidate itself is — whoever can write
+     them can already change what that person commits. A tampered or stale one can make the review
+     show less: SSH off after the change (a reused check's) makes the SSH review return early, so
+     the refusal of a change that locks everyone out (keys only, none) is skipped, and so is the
+     refusal of tree files the configuration does not read (`reads_tree`); a key list or the
+     passwords notice can be left out. The same-user trust model holds — it is that person's own
+     approval of their own candidate — and the broker builds the commit itself. Kept results are
+     named by a hash of the Nix that read them, so another torqcli's are not reused.
+   - **The cache folder** is held open and checked (this user's, 0700, not a link) before each
+     entry is read or written by name in it; `~/.cache` above it is the person's own and is not
+     checked (a link there points into their own files, or nowhere they could not already write).
+   - **Not yet seen at a real terminal or in a VM test:** the live output of `| display detail`
+     (Nix's and the broker's lines, the password asked between them) and the install question are
+     tested through the fake machine only; the one `nix eval` was run against this repository's
+     dev-vm configuration by hand. tests/trust-loop.nix could run `commit | display detail` and an
+     update answered at a terminal.
+   - **What the broker streams** during its build is what it sends as frames: if it sends its build
+     output only at the end, detail shows it then.
