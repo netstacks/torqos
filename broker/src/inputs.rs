@@ -3,7 +3,7 @@
 //! hash of other source already in the store, and Nix builds that source. So each input the lock
 //! changes is fetched again by what names it (its `rev`), its hash recomputed and compared; and
 //! TorqOS's own releases are checked to be signed by the release key, here, as root, not only by the
-//! torqcli that wrote the lock. A folder (`path:`, dev mode only) is what it is: nothing to fetch.
+//! torqcli that wrote the lock. A folder (`path:`, dev mode only) is hashed again too.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -44,11 +44,12 @@ pub fn is_release(locked: &Value, releases: Option<&str>) -> bool {
 }
 
 /// The inputs to fetch again, as `builtins.fetchTree` takes them: what locked them, but the hash, which
-/// is what is checked. A folder has nothing to fetch.
+/// is what is checked. A folder (dev mode's `path:`) is hashed again too.
 pub fn to_fetch(changes: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
     changes
         .iter()
-        .filter(|(_, l)| l["type"] != "path")
+        // A folder too: fetched again it is hashed again, and a lock naming a store path for a folder is
+        // that folder's hash or refused (the audit of 0.3.0: it was skipped, whatever path it named).
         .map(|(n, l)| {
             let mut a = l.clone();
             if let Some(o) = a.as_object_mut() {
@@ -140,10 +141,12 @@ mod tests {
         assert_eq!(mismatched(&c, &json!({ "nixpkgs": "sha256-n2" })), Vec::<String>::new());
         assert_eq!(mismatched(&c, &json!({ "nixpkgs": "sha256-older" })), ["nixpkgs"]);
         assert_eq!(mismatched(&c, &json!({})), ["nixpkgs"], "not fetched is not agreed");
-        // A folder, dev mode's: nothing to fetch, nothing mismatched.
+        // A folder, dev mode's: hashed again too, so a lock naming a store path for it is checked.
         let dev = lock("sha256-n", json!({ "type": "path", "path": "/home/x/torq", "narHash": "sha256-p" }));
         let c = changed(&old, &dev).unwrap();
-        assert!(to_fetch(&c).is_empty() && mismatched(&c, &json!({})).is_empty());
+        assert_eq!(to_fetch(&c).keys().collect::<Vec<_>>(), ["torq"]);
+        assert_eq!(mismatched(&c, &json!({ "torq": "sha256-p" })), Vec::<String>::new());
+        assert_eq!(mismatched(&c, &json!({})), ["torq"], "a folder not hashed again is not agreed");
         // A new machine's first lock: everything is new.
         assert_eq!(changed("", &old).unwrap().len(), 2);
     }

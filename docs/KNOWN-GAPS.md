@@ -779,3 +779,14 @@ Its §5 lists claims without a test.
      (the sessions' own lock), and every later trusted apply reads it, but one in its build goes on.
    - **The doctor's values are words**: `propose_change` sets one word, number or boolean per setting;
      a value with spaces or quotes (a description, a list at once) cannot be proposed.
+
+6zs. **The audit of 0.3.0 (2026-11-08).** Its report was cut short; its tests were kept
+   (broker/tests/audit_030.rs), and each failed against the candidate. Fixed from it:
+   - **A2 went around twice:** a flake.lock padded past 1 MiB was read as no lock, so nothing in it was
+     checked; and an input given the type `path` was skipped, whatever store path it named. A lock too
+     large is refused, and a folder is hashed again like any input.
+   - **One session's record could stop every session:** a thousand sources reported grew it past what
+     the broker reads. A session names at most 32; past them it is tainted all the same.
+   - **A grant lasted as long as its `until` said:** it lasts its minutes from its own entry, at most 60.
+   - **Adopt took a ledger with a trust grant standing or a commit at waiting:** refused.
+   - **The doctor's limits** are tested as numbers.

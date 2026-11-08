@@ -165,6 +165,9 @@ pub fn start(b: &Broker) -> Result<Record> {
     Ok(r)
 }
 
+/// How many distinct sources a session's record names; past them it is tainted all the same.
+pub const SOURCES_KEPT: usize = 32;
+
 /// Session `id` read untrusted text (from `source`): tainted, for good.
 pub fn taint(b: &Broker, id: &str, source: &str) -> Result<Record> {
     if !source_ok(source) {
@@ -172,7 +175,9 @@ pub fn taint(b: &Broker, id: &str, source: &str) -> Result<Record> {
     }
     let _l = lock(b)?;
     let mut r = read(b, id)?.context("refused: no such session")?;
-    if !r.tainted_by.iter().any(|s| s == source) {
+    // Bounded: a record any agent program can report into must not grow until no one can start a
+    // session (the audit of 0.3.0). Tainted is tainted; past the bound, what tainted it is said as "more".
+    if !r.tainted_by.iter().any(|s| s == source) && r.tainted_by.len() < SOURCES_KEPT {
         r.tainted_by.push(source.into());
     }
     r.tainted = true;
@@ -216,11 +221,20 @@ pub struct Grant {
     pub person: String,
     pub minutes: u64,
     pub until: String,
+    /// When it was granted: its entry's time. A grant lasts no longer than its minutes from then,
+    /// whatever its `until` says (a ledger from elsewhere is someone else's text: the audit of 0.3.0).
+    pub at: String,
 }
 
 impl Grant {
     fn over(&self, at: chrono::DateTime<chrono::Utc>) -> bool {
-        chrono::DateTime::parse_from_rfc3339(&self.until).map_or(true, |u| u <= at)
+        let minutes = i64::try_from(self.minutes.min(u64::from(TRUST_MAX_MINUTES))).unwrap_or(0);
+        let ends = chrono::DateTime::parse_from_rfc3339(&self.at).map(|t| t + chrono::Duration::minutes(minutes));
+        let until = chrono::DateTime::parse_from_rfc3339(&self.until);
+        match (until, ends) {
+            (Ok(u), Ok(e)) => u.min(e) <= at,
+            _ => true,
+        }
     }
 }
 
@@ -236,6 +250,7 @@ pub fn unsettled(entries: &[Entry]) -> Vec<Grant> {
                 person: e.body.data["person"].as_str()?.into(),
                 minutes: e.body.data["minutes"].as_u64()?,
                 until: e.body.data["until"].as_str()?.into(),
+                at: e.body.ts.clone(),
             })
         })
         .collect()
@@ -368,4 +383,22 @@ pub fn apply_trusted(b: &Broker, p: &Entry) -> Result<Option<Entry>> {
         cite(b, id, p.body.seq, Some(e.body.seq))?;
     }
     Ok(Some(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A grant lasts its minutes from when it was made, whatever its `until` says: a ledger from
+    /// elsewhere is someone else's text (the audit of 0.3.0).
+    #[test]
+    fn a_grant_lasts_its_minutes_whatever_its_until_says() {
+        let g = |at: &str, minutes: u64, until: &str| Grant { seq: 1, person: "casey".into(), minutes, until: until.into(), at: at.into() };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-08T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert!(g("2026-11-08T10:00:00Z", 60, "2099-01-01T00:00:00Z").over(now), "60 minutes from 10:00 is over at 12:00");
+        assert!(!g("2026-11-08T11:30:00Z", 60, "2099-01-01T00:00:00Z").over(now));
+        assert!(g("2026-11-08T11:30:00Z", 6000, "2099-01-01T00:00:00Z").over(now + chrono::Duration::minutes(61)), "never more than the most a grant may be");
+        assert!(g("2026-11-08T11:30:00Z", 60, "2026-11-08T11:45:00Z").over(now), "nor past its until");
+        assert!(g("not a time", 60, "2099-01-01T00:00:00Z").over(now), "unreadable is over");
+    }
 }

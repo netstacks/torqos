@@ -881,6 +881,14 @@ impl Broker {
         for e in &list {
             shapes_ok(&e.body.data).with_context(|| format!("the repository's ledger, entry #{}", e.body.seq))?;
         }
+        // Nothing standing that a new machine would carry out for someone else: a trust grant not
+        // settled, or a commit at still waiting (the audit of 0.3.0). The old machine's are its own.
+        if !session::unsettled(&list).is_empty() {
+            bail!("the repository's ledger has a trust grant still standing: refused");
+        }
+        if !at::pending(&list).is_empty() {
+            bail!("the repository's ledger has a commit at still waiting: refused");
+        }
         if pending_confirm(&list).is_some() {
             bail!("the repository's ledger has a commit confirmed still waiting: refused");
         }
@@ -1871,8 +1879,17 @@ impl Broker {
     /// (`inputs`; the audit of 2026-11-04, A2). Each input it changes is fetched again by its `rev` and
     /// its hash compared; TorqOS's own releases are checked to be signed by the release key.
     fn check_inputs(&self, before: &str, commit: &str) -> Result<()> {
-        let old = self.repo.text_at_most(before, "flake.lock", 1 << 20).unwrap_or_default();
-        let new = self.repo.text_at_most(commit, "flake.lock", 1 << 20).unwrap_or_default();
+        // A lock that cannot be read whole is not one with nothing to check: refused (the audit of 0.3.0;
+        // padded past the limit, it was taken for no lock at all).
+        let lock_at = |rev: &str| -> Result<String> {
+            match self.repo.size_at(rev, "flake.lock") {
+                None => Ok(String::new()),
+                Some(n) if n > 1 << 20 => bail!("refused: flake.lock is {n} bytes, larger than a lock is"),
+                Some(_) => self.repo.text_at_most(rev, "flake.lock", 1 << 20).context("reading flake.lock"),
+            }
+        };
+        let old = lock_at(before)?;
+        let new = lock_at(commit)?;
         let changes = inputs::changed(&old, &new)?;
         let fetch = inputs::to_fetch(&changes);
         if !fetch.is_empty() {

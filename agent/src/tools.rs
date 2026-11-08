@@ -414,6 +414,12 @@ pub fn bounded(mut cmd: Command, cap: usize, timeout: Duration) -> Result<String
 mod tests {
     use super::*;
 
+    /// The doctor's limits as numbers: changing one is a decision (the audit of 0.3.0).
+    #[test]
+    fn the_limits_are_these_numbers() {
+        assert_eq!((PROGRAM_TIMEOUT.as_secs(), PROPOSE_TIMEOUT.as_secs()), (30, 30 * 60));
+    }
+
     #[test]
     fn a_program_is_stopped_at_its_bounds() {
         let sh = |script: &str| {
