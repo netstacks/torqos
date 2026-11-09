@@ -1572,6 +1572,26 @@ more client. COSMIC has a polkit agent in its shell (`cosmic-osd`) and goes thro
   version nixpkgs pins, and a COSMIC upgrade is a TorqOS release's change, tested like one.
 - **Not:** a second desktop, now; TorqOS Settings as a privileged program or a D-Bus service; replacing
   COSMIC Settings (it stays for what is the person's); a password entered in a window TorqOS draws.
+- **Amended (2026-11-09, the owner): COSMIC from nixos-unstable, not the release's nixpkgs.** On the
+  laptop the release's COSMIC (1.2.0, NixOS 26.05) was nine releases behind COSMIC's own (1.11.0, two
+  weeks apart each) and behind Pop!_OS, which the owner compared it with (transparency first). A NixOS
+  release keeps its COSMIC for six months; COSMIC is young and moves fast. So:
+  - **A second input, `nixpkgs-cosmic` (nixos-unstable), for the desktop alone.** From it: every
+    `cosmic-*` package, `xdg-desktop-portal-cosmic`, `pop-launcher` and `pop-icon-theme` (an overlay,
+    `modules/desktop.nix`); COSMIC's two NixOS modules, in place of the release's (`flake.nix`), since a
+    newer COSMIC names packages and settings the older modules do not know; and **Mesa**, as the graphics
+    driver (`hardware.graphics.package`), because COSMIC's compositor and the driver it loads must be one
+    Mesa. Everything else, the base and a CLI machine whole, stays on the release's nixpkgs: with the desktop
+    off, nothing of the second input is used.
+  - **The weekly nixpkgs bump moves both**, and a COSMIC upgrade is still a TorqOS release's change, tested
+    like one (`checks.desktop`).
+  - The risk taken: programs of the release built against its Mesa (26.1) drive the newer one (26.2); most
+    go through libglvnd, which does not care. Watched on real hardware; if it breaks, the release's Mesa
+    comes back and COSMIC's packages are built against it.
+  - Unstable's COSMIC module sets `security.polkit.enablePkexecWrapper`, an option 26.05's polkit lacks
+    (it installs setuid pkexec with polkit always): declared for 26.05 only, as what it does, `false`
+    refused.
+  - When the release's nixpkgs carries a COSMIC as new as unstable's, the second input may go again.
 
 ## ADR-046 — Real hardware: firmware on metal, Wi-Fi in the base, a reference laptop
 
