@@ -49,6 +49,8 @@
         # takes. `nix build .#image`: a qcow2, compressed (a download a third the size or less; UTM,
         # QEMU and Proxmox run it as it is). `nix build .#image-vmdk`: the same disk for VMware ESXi
         # (a sparse VMDK, which `vmkfstools -i` makes the host's own disk).
+        # TorqOS Settings (ADR-045 2): from the nixpkgs the desktop's COSMIC comes from.
+        torq-settings = nixpkgs-cosmic.legacyPackages.${pkgs.stdenv.hostPlatform.system}.callPackage ./settings/package.nix { };
         image = imageAs pkgs "qcow2" "-c -O qcow2";
         image-vmdk = imageAs pkgs "vmdk" "-O vmdk -o adapter_type=lsilogic";
         # The ISO installer (ADR-031): `nix build .#iso`, for a USB stick or disc; it installs the image

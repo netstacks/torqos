@@ -12,6 +12,7 @@ fn cli() -> Cli {
 }
 
 /// The machine at a glance: `show system alarms`.
+#[derive(Debug, Clone)]
 pub struct Machine {
     /// TorqOS's version (this program's: the system's own torqcli).
     pub version: &'static str,

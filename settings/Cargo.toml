@@ -1,0 +1,19 @@
+[package]
+name = "torq-settings"
+version = "0.3.2"
+edition = "2024"
+description = "TorqOS Settings: torqcli in a COSMIC window, a client of the broker's socket and nothing more (ADR-045 2)"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+# The command line's own calls and words (cli/src/app.rs): what the window shows is what torqcli prints.
+torq = { path = "../cli" }
+
+# COSMIC's toolkit, at the revision COSMIC's own Settings 1.11.0 uses (the desktop's, ADR-045 amended).
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+rev = "430f3d48a97d8779f9c1985473912e594ccca1ae"
+default-features = false
+features = ["winit", "tokio", "dbus-config", "wayland"]
