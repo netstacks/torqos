@@ -1578,7 +1578,7 @@ more client. COSMIC has a polkit agent in its shell (`cosmic-osd`) and goes thro
   release keeps its COSMIC for six months; COSMIC is young and moves fast. So:
   - **A second input, `nixpkgs-cosmic` (nixos-unstable), for the desktop alone.** From it: every
     `cosmic-*` package, `xdg-desktop-portal-cosmic`, `pop-launcher` and `pop-icon-theme` (an overlay,
-    `modules/desktop.nix`); COSMIC's two NixOS modules, in place of the release's (`flake.nix`), since a
+    `modules/desktop.nix`); COSMIC's two NixOS modules, in place of the release's (carried in `modules/cosmic/`, so a CLI machine never needs this nixpkgs; `checks.cosmic-modules`, `scripts/bump-cosmic`), since a
     newer COSMIC names packages and settings the older modules do not know; and **Mesa**, as the graphics
     driver (`hardware.graphics.package`), because COSMIC's compositor and the driver it loads must be one
     Mesa. Everything else, the base and a CLI machine whole, stays on the release's nixpkgs: with the desktop

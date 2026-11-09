@@ -63,15 +63,6 @@
       nixosModules.default = { pkgs, lib, ... }: {
         imports = [
           ./modules
-          # COSMIC's NixOS modules from the nixpkgs its packages come from (ADR-045, amended): a newer
-          # COSMIC names packages and settings the release's modules do not know. Each does nothing
-          # unless the desktop is on.
-          "${nixpkgs-cosmic}/nixos/modules/services/desktop-managers/cosmic.nix"
-          "${nixpkgs-cosmic}/nixos/modules/services/display-managers/cosmic-greeter.nix"
-        ];
-        disabledModules = [
-          "services/desktop-managers/cosmic.nix"
-          "services/display-managers/cosmic-greeter.nix"
         ];
         torq.desktop.cosmicNixpkgs = nixpkgs-cosmic;
         torq.desktop.settingsPackage = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-settings;
@@ -142,6 +133,12 @@
       # ── Tests ────────────────────────────────────────────────────────────────
       checks = forSystems linuxSystems (pkgs: {
         broker = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
+        # The COSMIC modules TorqOS carries are nixpkgs-cosmic's, unchanged (ADR-045, amended).
+        cosmic-modules = pkgs.runCommand "torq-cosmic-modules" { } ''
+          cmp ${./modules/cosmic/cosmic.nix} ${nixpkgs-cosmic}/nixos/modules/services/desktop-managers/cosmic.nix
+          cmp ${./modules/cosmic/cosmic-greeter.nix} ${nixpkgs-cosmic}/nixos/modules/services/display-managers/cosmic-greeter.nix
+          touch $out
+        '';
         # torq-wire's own tests (ADR-044): the bytes on the socket, pinned. The ledger's fixtures are the broker's tests.
         wire = pkgs.rustPlatform.buildRustPackage {
           pname = "torq-wire";

@@ -38,6 +38,7 @@ jobs:
           release=$(jq -r .nodes.nixpkgs.original.ref flake.lock)
           old=$(jq -r .nodes.nixpkgs.locked.rev flake.lock)
           nix flake update nixpkgs
+          scripts/bump-cosmic
           new=$(jq -r .nodes.nixpkgs.locked.rev flake.lock)
           printf "old=%s\nnew=%s\nrelease=%s\n" "$old" "$new" "$release" >> "$GITHUB_OUTPUT"
           if [ "$old" = "$new" ]; then echo "nixpkgs is at the newest $release commit already ($new)."; fi
@@ -52,7 +53,7 @@ jobs:
           bot="github-actions[bot]"
           email="41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git add flake.lock
+          git add flake.lock modules/cosmic
           git -c user.name="$bot" -c user.email="$email" commit -q -s -F - <<MSG
           nixpkgs: $RELEASE at ${NEW:0:12}
 

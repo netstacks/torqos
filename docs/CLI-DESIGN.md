@@ -159,6 +159,8 @@ torqcli; `-c` ends saying its uncommitted changes are discarded. `save` and `loa
 relative file name as in the home folder, as on a network device, wherever torqcli was started; `save`
 says the full path.
 
+**`torqcli --candidate -c "…"`** runs a script on your own saved candidate, as the shell's, kept when it ends: how TorqOS Settings hands a commit of the draft to a terminal (ADR-045, amended).
+
 **Scripts (`torqcli -c`)** use a private candidate that exists only for that invocation — never your
 interactive candidate, so a script cannot commit your half-done edits or leave edits behind. They
 stop at the first command that fails, saying how many after it did not run, and quote
