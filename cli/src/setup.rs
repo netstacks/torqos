@@ -216,14 +216,10 @@ pub fn run() -> Result<()> {
         match done {
             Ok(()) => {
                 let sbin = "/run/current-system/sw/bin";
-                // Real hardware restarts into the installed system (ADR-048, amended): the image's boot had no
-                // firmware, so drivers that wanted it (graphics, Wi-Fi) gave up, and only a new boot loads
-                // them. A virtual machine has nothing of the kind and goes on as it is.
-                let metal = std::process::Command::new(format!("{sbin}/systemd-detect-virt")).arg("--quiet").status().is_ok_and(|s| !s.success());
-                if metal {
+                // On real hardware the broker's unit restarts the machine (`broker_run`); if setup is still here to
+                // see it, it says so.
+                if metal() {
                     println!("\n{what}. Restarting into it; then log in as {user}.\n");
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    let _ = std::process::Command::new(format!("{sbin}/systemctl")).arg("reboot").status();
                     return Ok(());
                 }
                 println!("\n{what}. Log in as {user}.\n");
@@ -370,7 +366,7 @@ fn adopt(a: &Adopting) -> Result<()> {
     let ok = {
         let _p = crate::run::Progress::start("Building this machine's system and switching to it");
         std::process::Command::new(SYSTEMD_RUN)
-            .args(["--wait", "--collect", "--quiet", &format!("--unit={BROKER_UNIT}"), "--property=StandardOutput=journal", "--property=StandardError=journal", BROKER, "adopt", "--url", &a.url, "--own", "/run/torq-adopt", "--head", &a.head, "--tip", &a.tip, "--user", &a.user])
+            .args(broker_run(&["adopt", "--url", &a.url, "--own", "/run/torq-adopt", "--head", &a.head, "--tip", &a.tip, "--user", &a.user], metal()))
             .status()
             .context("running the broker")?
             .success()
@@ -458,7 +454,7 @@ fn apply(a: &Answers) -> Result<()> {
     let ok = {
         let _p = crate::run::Progress::start("Building this machine's system and switching to it");
         std::process::Command::new(SYSTEMD_RUN)
-            .args(["--wait", "--collect", "--quiet", &format!("--unit={BROKER_UNIT}"), "--property=StandardOutput=journal", "--property=StandardError=journal", BROKER, "setup"])
+            .args(broker_run(&["setup"], metal()))
             .status()
             .context("running the broker")?
             .success()
@@ -469,6 +465,31 @@ fn apply(a: &Answers) -> Result<()> {
     }
     Ok(())
 }
+
+/// Whether this is real hardware (`systemd-detect-virt` finds no virtual machine or container).
+fn metal() -> bool {
+    std::process::Command::new("/run/current-system/sw/bin/systemd-detect-virt").arg("--quiet").status().is_ok_and(|s| !s.success())
+}
+
+/// systemd-run's arguments for the broker's setup or adoption (`args`), as a unit of its own: the switch
+/// to the new system starts the console's login prompt, which stops setup's unit, and the broker finishes
+/// regardless. On real hardware (`metal`) that unit then restarts the machine into what it built (ADR-048,
+/// amended): the image's boot had no firmware, so drivers that wanted it (graphics, Wi-Fi) gave up, and only
+/// a new boot loads them. Setup itself cannot: by then the switch has stopped it.
+fn broker_run(args: &[&str], metal: bool) -> Vec<String> {
+    let mut v: Vec<String> = ["--wait", "--collect", "--quiet", &format!("--unit={BROKER_UNIT}"), "--property=StandardOutput=journal", "--property=StandardError=journal"].iter().map(|s| s.to_string()).collect();
+    if metal {
+        v.extend(["/run/current-system/sw/bin/sh".to_string(), "-c".to_string(), RESTART_AFTER.to_string(), BROKER.to_string()]);
+    } else {
+        v.push(BROKER.to_string());
+    }
+    v.extend(args.iter().map(|s| s.to_string()));
+    v
+}
+
+/// The broker (`$0`, its arguments `$@`), then, if it succeeded, a restart: what the console says, a few
+/// seconds to read it, and the restart. The broker's own exit status otherwise.
+const RESTART_AFTER: &str = "\"$0\" \"$@\" || exit; echo 'TorqOS is set up: restarting into it.' > /dev/console; sleep 5; exec /run/current-system/sw/bin/systemctl reboot";
 
 /// The broker's log of this setup (its unit's journal): enough of it to hold the cause, which Nix
 /// prints before its summary, not after.
@@ -836,5 +857,27 @@ mod cause_of_a_failure {
         assert!(shown.lines().count() <= 25 && shown.ends_with("more lines: journalctl -u torq-setup-broker)"), "{shown}");
         let quiet: String = (0..30).map(|i| format!("line {i}\n")).collect();
         assert_eq!(cause(&quiet).lines().next(), Some("line 18"), "no error: the last 12");
+    }
+}
+
+#[cfg(test)]
+mod restart_after_setup {
+    use super::*;
+
+    /// On real hardware the broker's unit restarts the machine after a setup that succeeded, never after one
+    /// that failed (its status kept); in a VM the broker runs alone.
+    #[test]
+    fn the_broker_unit_restarts_only_real_hardware_and_only_on_success() {
+        let vm = broker_run(&["setup"], false);
+        assert_eq!(&vm[vm.len() - 2..], [BROKER, "setup"]);
+        assert!(!vm.iter().any(|a| a.contains("reboot")));
+        let metal = broker_run(&["adopt", "--url", "u"], true);
+        let at = metal.iter().position(|a| a == "-c").unwrap();
+        assert_eq!(metal[at + 1], RESTART_AFTER);
+        assert_eq!(&metal[at + 2..], [BROKER, "adopt", "--url", "u"], "the broker is $0, its arguments $@");
+        assert!(metal.iter().any(|a| a == &format!("--unit={BROKER_UNIT}")));
+        // A failed broker: its status, and no restart (nothing after `|| exit` runs).
+        let st = std::process::Command::new("sh").args(["-c", RESTART_AFTER, "false"]).status().unwrap();
+        assert_eq!(st.code(), Some(1));
     }
 }
