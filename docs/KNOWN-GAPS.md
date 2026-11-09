@@ -604,7 +604,7 @@ Its §5 lists claims without a test.
      reach of the file system, not of someone reading the raw disk.
    - **Not built:** offering data at `rollback`. The declared backup and `request system restore`: 6zm.
 
-6zl. **The audit of M3 (2026-11-06).** Fixed from it:
+6zl. **The audit of M3 (2026-11-06, `docs/AUDIT-2026-11-06.md`).** Fixed from it:
    - **H1:** a proposal's gate read the tier it was proposed with, while `apply` used what the diff did
      at HEAD. The socket refuses a proposal with no `--base`; `apply` refuses one that no longer does
      what was judged, ledgered as `apply_refused`.

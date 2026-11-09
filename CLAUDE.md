@@ -110,7 +110,7 @@ virtualisation). Without it QEMU falls back to TCG and they take minutes.
 As of 2026-11-07 the owner set 0.3.0's scope: everything that is not desktop or GUI. M3's build list is done
 (the socket broker, the agent's account and `torq agent run`, the remote with push, anchor, pull and adopt,
 strict mode and break-glass, btrfs images with data snapshots, ledger hardening) and its audit
-(`~/torq-audit-m3/`, kept off the repository until its findings are fixed; KNOWN-GAPS 6zl) is being
+(`docs/AUDIT-2026-11-06.md`, in the repository since its findings were fixed or recorded, KNOWN-GAPS 6zl) was
 worked through. Then: the release path (A2, A3), `commit at`, `configure exclusive`, systemd-repart;
 the declared backup and `request system restore` (ADR-038); the agent's doctor mode, proposals with
 taint tracking, and session trust (M5, AI-LAYER.md). The desktop (M4) and the agent's GUI parts come after.
