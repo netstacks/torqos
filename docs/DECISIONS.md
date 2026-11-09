@@ -1779,3 +1779,14 @@ prebuilds it), so on real hardware it may fetch build tools from the network.
   a CLI machine and says how to add a desktop later (`request system recipe torqos-desktop`). A profile's
   desktop part (ADR-046 3) comes with the desktop, from the network. The ISO's size stays what the CLI
   needs, well under GitHub's 2 GiB a file.
+- **Amended (2026-11-09, the owner: "the install is the CLI only, then the installer can ask if the user
+  wants the UI; if so it can pull the official recipe from the torqos-releases repo").** The question is
+  asked once, in the installer's first screens: *a CLI machine, or with the TorqOS Desktop?* The answer is
+  written beside the hardware file (`/var/lib/torq/install/answers.json`), so the person is not asked twice.
+  The installer itself stays offline (ADR-031); with the desktop chosen, setup's network step is required,
+  not skippable. Once online after change #1 (the CLI machine), setup fetches **the official recipe from
+  the torqos-releases repository** — the same repository and the same check every machine already uses
+  for updates (ADR-028: a signed release commit, verified against the release signers), at the commit of
+  this machine's own TorqOS version, so desktop and base match — shows what it adds, and applies it as
+  change #2 (ADR-047 3: the person's password, `commit confirmed` for the display). If the network fails
+  there, the machine is a working CLI machine and says `request system recipe torqos-desktop` adds it later.
