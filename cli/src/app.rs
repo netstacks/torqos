@@ -70,7 +70,7 @@ impl Needs {
     /// What is ready for the next start: nothing to do about it.
     pub fn note(&self) -> Option<String> {
         match self {
-            Needs::NextStart(what) => Some(format!("A new {} is installed, for the next time this machine starts. There is no need to restart for it.", and(what))),
+            Needs::NextStart(what) => Some(format!("A new {} is installed: it takes effect the next time this machine starts.", and(what))),
             _ => None,
         }
     }
@@ -104,11 +104,13 @@ pub fn needs(booted: &std::path::Path, current: &std::path::Path, session: Optio
             return Needs::LogOut(what);
         }
     }
-    // Only a new kernel waits for a start. A boot image, the firmware and the modules of a new one are not
-    // news: the first is read only at boot, NixOS keeps the running kernel's modules, and firmware is read
-    // when a driver loads.
+    // Only a new kernel, or a module added to the running one, waits for a start. A boot image and firmware are
+    // not news: the first is read only at boot, and firmware when a driver loads.
     if link(booted, "kernel") != link(current, "kernel") {
         return Needs::NextStart(vec!["Linux kernel"]);
+    }
+    if link(booted, "kernel-modules") != link(current, "kernel-modules") {
+        return Needs::NextStart(vec!["kernel module"]);
     }
     Needs::Nothing
 }
@@ -177,7 +179,7 @@ mod needs_tests {
         let kernel = system(r, "kernel", "b", "m1", Some("c1"));
         assert_eq!(needs(&old, &kernel, Some(&old)), Needs::NextStart(vec!["Linux kernel"]));
         assert_eq!(Needs::NextStart(vec!["Linux kernel"]).line(), None, "said, not asked for");
-        assert!(Needs::NextStart(vec!["Linux kernel"]).note().unwrap().contains("no need to restart"));
+        assert!(Needs::NextStart(vec!["Linux kernel"]).note().unwrap().contains("next time this machine starts"));
         // The one case: the desktop turned on, from a machine booted without it.
         let console = system(r, "console", "a", "m1", None);
         assert_eq!(needs(&console, &old, None), Needs::Restart(vec!["desktop"]));

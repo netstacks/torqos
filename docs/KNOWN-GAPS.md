@@ -842,4 +842,6 @@ Its §5 lists claims without a test.
    broker from the desktop is refused, so one a lookalike window took cannot be replayed there. It can still be used
    from a text console, or by `ssh localhost` where SSH accepts passwords: a program of the person's that has their
    password can reach a session the broker treats as a terminal. And a lookalike of the dialog is still possible: no
-   dialog is a trusted path. The dialog's text is the broker's, cleaned; the agent never gets here (it is not a person).
+   dialog is a trusted path. The dialog leads with the broker's facts; the reason in it is the proposer's words (the
+   agent's, if it proposed), shown as such. One person can still spend another's tries at the helper (its socket is open
+   to `users`), and be locked out of the dialog, sudo and `torq-approve` for ten minutes; a service or the agent cannot.

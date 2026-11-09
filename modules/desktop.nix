@@ -62,6 +62,14 @@ in
     # A wrong password in COSMIC's dialog counts toward the same lockout as one at a terminal (ADR-045 5): no
     # more guesses for changing where they are made.
     security.pam.services.polkit-1.text = config.security.pam.services.torq-approve.text;
+    # polkit's helper runs sandboxed, with the file system read-only: without this it can neither count a wrong
+    # password nor read a count another left. And its socket is open to every account by default: to people only,
+    # or a service or the agent could spend the owner's tries.
+    systemd.services."polkit-agent-helper@".serviceConfig.ReadWritePaths = [ "-/run/torq/faillock" ];
+    systemd.sockets.polkit-agent-helper.socketConfig = {
+      SocketMode = "0660";
+      SocketGroup = "users";
+    };
     services.desktopManager.cosmic.showExcludedPkgsWarning = false;
 
     # A desktop's network: NetworkManager, for COSMIC's network applet and settings page, with iwd as its

@@ -241,8 +241,8 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, 
       (built 2026-11-07: `request system backup key`, `show system backups`, `tests/backup.nix`; KNOWN-GAPS 6zm);
       the restore step in setup's from-a-repository path.
 - [x] **Approval as a dialog** (2026-11-09; `tests/desktop.nix` drives the real one) (ADR-045 5): a system-tier commit on a desktop asks through polkit and
-      COSMIC's agent (`org.torqos.approve`, `auth_self`), with the person's password; the same prompt
-      text torqcli prints. Its two open questions settled first.
+      COSMIC's agent (`org.torqos.approve`, `auth_self`), with the person's password; the broker's facts as its text
+      (not torqcli's prompt word for word). Its two open questions settled by the owner.
 - [ ] **Releases carry the desktop configuration** as a second artifact, versioned with TorqOS.
 
 ### M5 — The agent (AI-LAYER.md)

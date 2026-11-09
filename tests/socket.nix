@@ -26,7 +26,7 @@ pkgs.testers.runNixOSTest {
     # through a burst of the build's output (the third review of ADR-040).
     torq.broker.rebuildCommand = "seq 1 6000 >&2";
     # socat speaks to the socket; jq reads the answers; tmux is a terminal to type a password at.
-    environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.tmux pkgs.pam ];
+    environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.tmux pkgs.pam pkgs.python3Minimal ];
     # su asks at a terminal: the password typed into one, as dev (the su check, below).
     environment.etc."torq-test/su-as-dev".text = ''
       (sleep 1; printf '%s\n' "$1") | script -qec "su dev -c 'touch /tmp/su-$2'" /dev/null
@@ -116,6 +116,27 @@ pkgs.testers.runNixOSTest {
         p = propose("sam", own_diff("dev"), "hello for dev, by sam")
         code, v = answer(ask("sam", {"args": ["--json", "apply", str(p["seq"])]}))
         assert code == 1 and "not an administrator" in v["error"], (code, v)
+
+    with subtest("a caller that handed its connection on and left cannot use the password path"):
+        # Who connected has gone: there is no record of where it was, so it must not pass for a terminal.
+        p = propose("dev", machine.succeed("cat /etc/torq-test/system.diff"), "handed on")
+        request = json.dumps({"args": ["--json", "apply", str(p["seq"])], "password": "Torq-sock-2210"})
+        script = (
+            "import os,socket,sys,time\n"
+            "s=socket.socket(socket.AF_UNIX);s.connect('/run/torq/broker.sock')\n"
+            "if os.fork():os._exit(0)\n"
+            "time.sleep(1)\n"
+            "s.sendall(sys.argv[1].encode()+b'\\n')\n"
+            "d=bytes()\n"
+            "while True:\n"
+            " c=s.recv(65536)\n"
+            " if not c:break\n"
+            " d+=c\n"
+            "print(d.decode())\n"
+        )
+        machine.succeed(f"printf %s {shlex.quote(script)} > /tmp/handed-on.py && chmod 644 /tmp/handed-on.py")
+        out = machine.succeed(f"su -s /bin/sh dev -c {shlex.quote('python3 /tmp/handed-on.py ' + shlex.quote(request) + ' > /tmp/handed-on.out; true')}; sleep 3; cat /tmp/handed-on.out")
+        assert "the caller has gone" in out, out
 
     with subtest("a system change asks an administrator's password, checked by PAM"):
         p = propose("dev", machine.succeed("cat /etc/torq-test/system.diff"), "night light")

@@ -9,7 +9,7 @@ use cosmic::widget::segmented_button::{Entity, SingleSelectModel};
 use cosmic::widget::{self, icon, nav_bar, settings};
 use cosmic::iced::futures::channel::mpsc::Sender;
 use cosmic::iced::futures::SinkExt as _;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use torq::app::{self, Action, At, Choice, Console, Glance, How, Machine, Mode, Needs, Proposal, Typed, View, VIEWS};
 use torq::history::Row;
@@ -142,8 +142,8 @@ pub struct Settings {
     log: Vec<(String, String)>,
     /// Ask to restart once the terminal has confirmed the change (`Confirm, then restart`).
     restart_after: bool,
-    /// What a running command is asking.
-    question: Option<(String, Reply)>,
+    /// What running commands are asking, one at a time.
+    questions: VecDeque<(String, Reply)>,
 }
 
 /// The way back to a command waiting for a person's yes or no.
@@ -329,7 +329,7 @@ impl cosmic::Application for Settings {
             asked: 0,
             log: vec![],
             restart_after: false,
-            question: None,
+            questions: VecDeque::new(),
         };
         let title = match app.core.main_window_id() {
             Some(id) => app.set_window_title("TorqOS Settings".into(), id),
@@ -360,7 +360,7 @@ impl cosmic::Application for Settings {
     /// What a running command asks a person (commit's review, an undo, a delete): the yes or no a terminal
     /// would ask. An approval the system needs comes after it, in COSMIC's own dialog.
     fn dialog(&self) -> Option<Element<'_, Message>> {
-        let (question, _) = self.question.as_ref()?;
+        let (question, _) = self.questions.front()?;
         let body = widget::container(widget::scrollable(widget::text::monotext(question.trim_end().to_string()).width(Length::Fill))).max_height(360.0);
         Some(
             widget::dialog()
@@ -448,9 +448,9 @@ impl cosmic::Application for Settings {
                 });
                 return self.load();
             }
-            Message::Asked(question, reply) => self.question = Some((question, reply)),
+            Message::Asked(question, reply) => self.questions.push_back((question, reply)),
             Message::Answer(yes) => {
-                if let Some((_, reply)) = self.question.take() {
+                if let Some((_, reply)) = self.questions.pop_front() {
                     reply.send(yes);
                 }
             }

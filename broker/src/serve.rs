@@ -211,10 +211,13 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     // A commit confirmed holds everyone else's changes back while it waits: its own case.
     let confirmed = name == "apply" && sub.try_get_one::<u32>("confirm").ok().flatten().is_some();
 
-    match socket::gate(&who, if confirmed { "apply-confirmed" } else { name }, change.as_ref(), user.as_deref()) {
+    let gate = socket::gate(&who, if confirmed { "apply-confirmed" } else { name }, change.as_ref(), user.as_deref());
+    // A caller that has gone is not one the password path may be reached by: it could be anyone's (the review).
+    let desktop = matches!(gate, Gate::Password) && desktop_caller(pid, uid).map_err(&refused)?;
+    match gate {
         Gate::Open => {}
         Gate::Refused(why) => return Err(refused(anyhow::anyhow!(why))),
-        Gate::Password if socket::on_the_desktop(&read(&format!("/proc/{pid}/cgroup")).unwrap_or_default(), |id| read(&format!("/run/systemd/sessions/{id}")).ok(), read(&format!("/run/systemd/users/{uid}")).ok().as_deref()) => {
+        Gate::Password if desktop => {
             // From the desktop, COSMIC's own dialog and nothing else (ADR-045 5): a password sent here could
             // have been typed into any window, and one a lookalike took cannot be replayed.
             if req.password.is_some() {
@@ -241,15 +244,44 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
 /// How long a person has to answer the dialog.
 const DIALOG_SECONDS: u64 = 120;
 
-/// What the dialog says is being approved: the broker's own words, the change's reason cleaned.
+/// Where the desktop's approval is registered: TorqOS Desktop's. Without it (another desktop, set up by
+/// hand) there is no dialog to send anyone to, and the password is asked at a terminal, as on a server.
+const APPROVAL_REGISTERED: &str = "/run/current-system/sw/share/polkit-1/actions/org.torqos.policy";
+
+/// Whether the caller is on the desktop. Its process must still be there, and the caller's: one that handed
+/// its connection on and left has no record to read, and must not pass for a terminal.
+fn desktop_caller(pid: i32, uid: u32) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    let gone = "the caller has gone";
+    let proc = std::fs::metadata(format!("/proc/{pid}")).context(gone)?;
+    if proc.uid() != uid {
+        bail!("{gone}");
+    }
+    let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).context(gone)?;
+    if !Path::new(APPROVAL_REGISTERED).exists() {
+        return Ok(false);
+    }
+    let read = |p: String| std::fs::read_to_string(p).ok();
+    Ok(socket::on_the_desktop(&cgroup, |id| read(format!("/run/systemd/sessions/{id}")), read(format!("/run/systemd/users/{uid}")).as_deref()))
+}
+
+/// What the dialog says is being approved. The broker's facts first: what is being done, and to what, by whom.
+/// The reason is the proposer's own words, and is shown as theirs.
 fn approval_text(cmd: &str, state_dir: &Path, seq: Option<u64>) -> String {
-    let reason = seq.and_then(|s| Ledger::open(state_dir.join("ledger.jsonl")).get(s).ok()).map(|e| e.body.reason);
-    let what = match (cmd, reason) {
-        ("apply" | "schedule", Some(r)) => format!("Apply this change to the system: {r}"),
-        ("revert", Some(r)) => format!("Undo this change to the system: {r}"),
-        (other, _) => format!("Approve `{other}` on this machine"),
+    let entry = seq.and_then(|s| Ledger::open(state_dir.join("ledger.jsonl")).get(s).ok());
+    let verb = match cmd {
+        "apply" => "Apply",
+        "schedule" => "Schedule",
+        "revert" => "Undo",
+        other => return crate::printable(&format!("Approve `{other}` on this machine")),
     };
-    crate::printable(&what).chars().take(240).collect()
+    let Some(e) = entry else { return format!("{verb} a change to this machine") };
+    let by = e.body.data["caller"].as_str().unwrap_or(&e.body.actor);
+    let files: Vec<&str> = e.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).collect();
+    let shown = files.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+    let more = if files.len() > 3 { format!(" and {} more", files.len() - 3) } else { String::new() };
+    let what = format!("{verb} change #{} ({} tier), proposed by {by}, to {shown}{more}. It says: \"{}\"", e.body.seq, e.body.tier, e.body.reason);
+    crate::printable(&what).chars().take(400).collect()
 }
 
 /// Ask polkit, and through it COSMIC's agent, for the caller's approval: its own process, named so that a
@@ -279,9 +311,10 @@ fn approve_in_dialog(pid: i32, uid: u32, text: &str) -> Result<()> {
     };
     match status.code() {
         Some(0) => Ok(()),
-        Some(2) => bail!("not approved: the dialog was dismissed"),
+        Some(3) => bail!("not approved: the dialog was dismissed"),
         Some(1) => bail!("not approved"),
-        _ => bail!("not approved: polkit could not ask (is an agent running in this session?)"),
+        Some(2) => bail!("not approved: nothing in this session can ask (no authentication agent is running); use a text console"),
+        _ => bail!("not approved: polkit could not ask"),
     }
 }
 

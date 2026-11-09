@@ -115,6 +115,9 @@ pkgs.testers.runNixOSTest {
         assert code == 1 and "dialog" in v["error"], (code, v)
         machine.fail(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = true'")
 
+        # Only people reach the password helper: not a service, and not the agent.
+        machine.succeed("test \"$(stat -c %a:%G /run/polkit/agent-helper.socket)\" = 660:users")
+        machine.fail("su -s /bin/sh torq-agent -c '${pkgs.socat}/bin/socat -u OPEN:/dev/null UNIX-CONNECT:/run/polkit/agent-helper.socket'")
         # A wrong password in the dialog counts toward the same lockout as one at a terminal.
         ask = on_the_desktop({"args": ["--json", "apply", seq]})
         machine.succeed(f"(setsid {ask} > /tmp/refused.out 2>&1 < /dev/null &)")
@@ -122,7 +125,7 @@ pkgs.testers.runNixOSTest {
         machine.sleep(8)
         machine.screenshot("approval")
         machine.send_chars("wrong-password\n", delay=0.1)
-        machine.wait_until_succeeds("faillock --dir /run/torq/faillock --user alice | grep -q ' V$\\| V '", timeout=30)
+        machine.wait_until_succeeds("test $(faillock --dir /run/torq/faillock --user alice | wc -l) -gt 2", timeout=30)
         machine.fail(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = true'")
         machine.succeed("pkill -x pkcheck || true")
         machine.sleep(3)
