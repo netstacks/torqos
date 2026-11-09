@@ -1618,6 +1618,13 @@ hardware file leaves CPU microcode off with it), and the base has networkd but n
   the laptop. TorqOS still runs wherever NixOS runs: a machine without a profile gets detection and
   firmware, as any NixOS install.
 - **Not:** profiles for hardware nobody has tried; a vendor kernel; proprietary drivers in the base.
+- **Amended (2026-11-09): firmware was already on.** On real hardware nixos-generate-config imports
+  `not-detected.nix`, which sets `hardware.enableRedistributableFirmware = mkDefault true` (and the CPU's
+  microcode follows it); nothing in TorqOS turns it off. So 1 needs no code: the installer's hardware file
+  already carries it, and only a VM goes without. What was missing is Wi-Fi (2): the installer now finds a
+  Wi-Fi device — a wireless interface, or a PCI device of the wireless class before its firmware is up —
+  and its hardware file turns on iwd (`cli/src/install.rs` `found`). The firmware and iwd are not in the
+  image's closure: ADR-048 5's carried build closure must hold them.
 
 ## ADR-047 — The install: one console UI, and recipes — anyone's setup as a starting point
 
@@ -1763,10 +1770,12 @@ prebuilds it), so on real hardware it may fetch build tools from the network.
   and the Zenbook's known issues are kept, in HARDWARE.md.
 - **Not:** a graphical installer; resizing encrypted, LVM or RAID volumes; moving a partition's start;
   BIOS (non-UEFI) machines; installing over another TorqOS beside it (one per disk, for now).
-- **Amended (2026-11-09): firmware was already on.** On real hardware nixos-generate-config imports
-  `not-detected.nix`, which sets `hardware.enableRedistributableFirmware = mkDefault true` (and the CPU's
-  microcode follows it); nothing in TorqOS turns it off. So 1 needs no code: the installer's hardware file
-  already carries it, and only a VM goes without. What was missing is Wi-Fi (2): the installer now finds a
-  Wi-Fi device — a wireless interface, or a PCI device of the wireless class before its firmware is up —
-  and its hardware file turns on iwd (`cli/src/install.rs` `found`). The firmware and iwd are not in the
-  image's closure: ADR-048 5's carried build closure must hold them.
+- **Amended (2026-11-09, the owner: "I do not want the COSMIC in the ISO"): the ISO is the CLI machine
+  only.** What is carried for 5 is the build closure of a *CLI* first configuration — the base, firmware,
+  iwd, the hardware profiles' base parts — never the desktop. So the offline path ends at a working CLI
+  machine on the network. **TorqOS Desktop and every recipe come over the network, after it**: setup offers
+  ADR-047 3's "TorqOS Desktop" and "a recipe at a URL" only once the machine is online (Ethernet, or the
+  Wi-Fi joined in setup's network step), applied after change #1 as change #2; offline, setup finishes as
+  a CLI machine and says how to add a desktop later (`request system recipe torqos-desktop`). A profile's
+  desktop part (ADR-046 3) comes with the desktop, from the network. The ISO's size stays what the CLI
+  needs, well under GitHub's 2 GiB a file.
