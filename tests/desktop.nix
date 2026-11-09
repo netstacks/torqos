@@ -52,6 +52,10 @@ pkgs.testers.runNixOSTest {
         machine.succeed("NetworkManager --print-config | grep -qx 'wifi.backend=iwd'")
         machine.fail("systemctl cat wpa_supplicant.service")
 
+    with subtest("TorqOS Settings is in the menu"):
+        machine.succeed("test -e /run/current-system/sw/share/applications/org.torqos.Settings.desktop")
+        machine.succeed("test -x /run/current-system/sw/bin/torq-settings")
+
     with subtest("Flathub is the person's, not the system's"):
         machine.wait_until_succeeds("su - alice -c 'flatpak remotes --user' | grep -q flathub", timeout=60)
         machine.fail("flatpak remotes --system | grep -q flathub")

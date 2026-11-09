@@ -74,6 +74,7 @@
           "services/display-managers/cosmic-greeter.nix"
         ];
         torq.desktop.cosmicNixpkgs = nixpkgs-cosmic;
+        torq.desktop.settingsPackage = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-settings;
         torq.broker.package =
           lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         torq.cli.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq;

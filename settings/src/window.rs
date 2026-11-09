@@ -156,7 +156,8 @@ impl Settings {
             .align_y(Alignment::Center);
         // `show system alarms`, line by line, as it prints them.
         let mut alarms = settings::section().title("Alarms");
-        for line in m.alarms.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        // The all-well line is the headline above it already.
+        for line in m.alarms.lines().map(str::trim).filter(|l| !l.is_empty() && !(m.well && l.trim_start_matches("✓ ").trim_end_matches('.') == headline)) {
             alarms = alarms.add(settings::item_row(vec![widget::text::body(line.to_string()).width(Length::Fill).into()]));
         }
         widget::column::with_capacity(2).push(banner).push(alarms).spacing(spacing.space_l).into()

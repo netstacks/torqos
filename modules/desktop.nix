@@ -22,6 +22,11 @@ in
       internal = true;
       description = "The nixpkgs COSMIC's packages, its NixOS modules and Mesa come from (flake.nix).";
     };
+    settingsPackage = lib.mkOption {
+      type = lib.types.package;
+      internal = true;
+      description = "TorqOS Settings (ADR-045 2), built from the nixpkgs COSMIC comes from (flake.nix).";
+    };
   };
 
   # COSMIC's module from the newer nixpkgs sets `security.polkit.enablePkexecWrapper` (true), an option the
@@ -89,6 +94,8 @@ in
     environment.systemPackages = [
       # TorqOS's icons (branding/), for what shows the system's logo (os-release's LOGO).
       config.torq.branding.package
+      # TorqOS Settings (ADR-045 2): torqcli in a COSMIC window, the person's own, no privilege.
+      cfg.settingsPackage
     ];
   };
 }
