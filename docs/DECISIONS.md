@@ -1831,3 +1831,59 @@ prebuilds it), so on real hardware it may fetch build tools from the network.
   4. The answers, the summary; the build (offline-capable, 5).
   5. **A restart** into the installed system, automatic, so every driver loads with its firmware and the
      console comes up on the real system.
+
+## ADR-049 — TorqOS in COSMIC: what a switch needs, and the panel that says so
+
+**Status:** accepted, 2026-11-09 (the owner: "fully integrate TorqOS into the COSMIC desktop … make the panel
+reflect it in a nice elegant way … and the TorqOS app have all the detailed information"). Builds on ADR-045.
+**Context:** A commit switches the running system the NixOS way: changed services restart at once; an app's new
+version waits until it is opened again, and COSMIC's launcher does not see a new menu entry until it restarts;
+COSMIC itself (compositor, panel, greeter) changes only at the next login, because restarting the session would
+close everything open; a kernel, initrd, firmware or the graphics driver changes only at the next boot; and
+turning the desktop on leaves the console until a restart. A rollback, or an expired `commit confirmed`, is the
+same in reverse. Nothing says any of this: on the laptop a commit finished with the desktop still running the old
+COSMIC (1.11 needed a restart), and a restart before confirming silently undid a change (#7, rolled back as #8).
+A server's person reads torqcli's output; a desktop's person looks at the screen.
+- **Decision:**
+  1. **What a switch needs, worked out, never guessed.** From the systems themselves, unprivileged:
+     - **restart** — the running system's kernel, initrd, kernel modules or firmware differ from the booted
+       system's (`/run/current-system` against `/run/booted-system`), or the graphics driver does
+       (`/run/opengl-driver`, ADR-045 amended), or the desktop was turned on while the machine runs without it;
+     - **log out** — COSMIC's session or greeter differs from what the person's session started with (the applet
+       records the system it started on, since it starts with the session);
+     - **nothing** — services restart themselves; apps take the new version when opened next.
+     One function in torqcli's library (`torq::app`), so torqcli's commit output, the applet and TorqOS Settings
+     say it in the same words ("Done. Restart to use the new kernel.").
+  2. **A panel applet, `torq-applet`: the machine's state at a glance, and the one action that settles it.**
+     A COSMIC applet (libcosmic), in the panel by default on TorqOS Desktop (COSMIC's defaults, the person may
+     move or remove it). Its icon is TorqOS's mark, quiet when all is well; a state shows as a small badge in the
+     theme's own colours, never a flashing thing. In order, the first that holds:
+     - **a commit waiting for confirmation** — its countdown; **Confirm** (and "Confirm and restart" when a
+       restart is also needed, so a restart can never undo a change unasked);
+     - **a restart or a log-out needed** — what changed, and **Restart** / **Log out** (asking first; never
+       on its own);
+     - **alarms** — the first, and **Open TorqOS Settings**;
+     - **proposals waiting** (the agent's among them, tainted ones marked) — how many, and **Review**;
+     - **an uncommitted draft** (the person's candidate) — **Review**;
+     - **all well** — "This machine is exactly as its history says", the last change, TorqOS's version.
+     Its popup holds those lines and a button to TorqOS Settings at the matching page; nothing more.
+  3. **TorqOS Settings holds the detail**: every alarm with its fix, the confirmation with what it changed,
+     what a restart or log-out is for and which packages caused it, each proposal with its diff and taint, the
+     draft with `show | compare`. The applet only points there.
+  4. **A notification when a state starts** (COSMIC's notifications): a switch that needs a restart or log-out,
+     a confirmation about to expire (two minutes before), an alarm, a proposal from the agent. Once per state,
+     with the same action.
+  5. **The menu refreshed after a switch**, so a new application appears without logging out (how COSMIC's
+     app library is made to re-read its entries is checked against its code before it is built: no patch if a
+     signal it already watches will do).
+  6. **Privilege stays where it is.** The applet and TorqOS Settings are the person's own programs, clients of
+     the broker's socket (status, confirm) and readers of `/run`; a confirmation that asks a password asks it in
+     a terminal until approval through polkit (ADR-045 5) exists. The applet runs no command as root, and
+     Restart and Log out are the session's own (logind), as COSMIC's power menu does.
+- **Consequences:** New code: `torq::app::needs()`, the applet (a second binary of `settings/` or its own crate,
+  sharing the page words), the panel default in the desktop module, notifications, the menu refresh. VM tests:
+  each case of 1 detected (a kernel change, a COSMIC change, a package change, a pending confirmation); the
+  applet in the panel after login.
+- **Not:** restarting or logging out on the person's behalf; a second status daemon (the applet asks the broker
+  as torqcli does); the applet as a way to change the system (it confirms, opens TorqOS Settings, or asks the
+  session to log out or restart).
