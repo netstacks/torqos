@@ -3,13 +3,13 @@
 //! COSMIC's own dialog (ADR-045 5): a password is never typed in a window TorqOS draws.
 
 use cosmic::app::context_drawer;
-use cosmic::iced::{Alignment, Length, Padding};
+use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget::segmented_button::{Entity, SingleSelectModel};
 use cosmic::widget::{self, icon, nav_bar, settings};
 use cosmic::iced::futures::channel::mpsc::Sender;
 use cosmic::iced::futures::SinkExt as _;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use torq::app::{self, Action, At, Choice, Console, Glance, How, Machine, Mode, Needs, Proposal, Typed, View, VIEWS};
 use torq::history::Row;
@@ -72,14 +72,6 @@ type Path = Vec<String>;
 /// The configuration, each setting's path and its values.
 type Values = BTreeMap<Path, Vec<String>>;
 
-/// One row of the configuration tree.
-struct TreeRow {
-    path: Path,
-    branch: bool,
-    open: bool,
-    value: Option<String>,
-    change: Change,
-}
 
 /// How a setting in the draft differs from the configuration in effect.
 #[derive(Clone, Copy, PartialEq)]
@@ -110,14 +102,11 @@ pub struct Settings {
     // The tree:
     draft: Values,
     active: Values,
-    /// Every setting NixOS has, as far as anyone has opened it (`Show all settings`).
-    known: HashMap<Path, Vec<Choice>>,
-    all: bool,
-    /// In `all`: what is open. Otherwise: what has been closed (what is set is open at first).
-    open: HashSet<Path>,
-    closed: HashSet<Path>,
     filter: String,
-    search: String,
+    /// The area of the configuration being shown.
+    area: &'static str,
+    /// Narrows the side panel's choices.
+    pick_filter: String,
     // The side panel:
     selected: Option<Path>,
     own: Vec<Choice>,
@@ -201,9 +190,6 @@ pub enum Message {
     Fill(How, String),
     Filled(String, Typed),
     // The tree:
-    All(bool),
-    Toggle(Path, bool),
-    Known(Path, Vec<Choice>),
     Select(Path),
     Selected(Path, Vec<Choice>, Vec<Choice>),
     CloseDrawer,
@@ -213,7 +199,10 @@ pub enum Message {
     Entry(String),
     SetEntry,
     SetBool(bool),
-    Search(String),
+    SetAt(Path, bool),
+    Area(&'static str),
+    AddSetting,
+    PickFilter(String),
     Find,
     // Changes:
     Comment(String),
@@ -305,12 +294,9 @@ impl cosmic::Application for Settings {
             diff_tabs,
             draft: Values::new(),
             active: Values::new(),
-            known: HashMap::new(),
-            all: false,
-            open: HashSet::new(),
-            closed: HashSet::new(),
             filter: String::new(),
-            search: String::new(),
+            area: app::AREAS[0],
+            pick_filter: String::new(),
             selected: None,
             own: vec![],
             help: String::new(),
@@ -378,7 +364,8 @@ impl cosmic::Application for Settings {
             return None;
         }
         let path = self.selected.as_ref()?;
-        Some(context_drawer::context_drawer(self.inspector(path), Message::CloseDrawer).title(path.last().cloned().unwrap_or_default()))
+        let title = path.last().map_or("Add a setting".to_string(), |w| app::label(w));
+        Some(context_drawer::context_drawer(self.inspector(path), Message::CloseDrawer).title(title))
     }
 
     fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
@@ -500,30 +487,11 @@ impl cosmic::Application for Settings {
                 return self.offer();
             }
 
-            Message::All(on) => {
-                self.all = on;
-                return self.learn(vec![]);
-            }
-            Message::Toggle(path, open) => {
-                if self.all {
-                    if open {
-                        self.open.insert(path.clone());
-                        return self.learn(path);
-                    }
-                    self.open.remove(&path);
-                } else if open {
-                    self.closed.remove(&path);
-                } else {
-                    self.closed.insert(path);
-                }
-            }
-            Message::Known(path, got) => {
-                self.known.insert(path, got);
-            }
             Message::Select(path) => {
                 self.entry.clear();
                 self.own.clear();
                 self.help.clear();
+                self.pick_filter.clear();
                 self.selected = Some(path.clone());
                 self.set_show_context(true);
                 return self.read_selected(path);
@@ -563,6 +531,16 @@ impl cosmic::Application for Settings {
                 return self.update(Message::Select(below));
             }
             Message::Filter(s) => self.filter = s,
+            Message::Area(a) => {
+                self.area = a;
+                self.filter.clear();
+            }
+            Message::AddSetting => return self.update(Message::Select(vec![])),
+            Message::PickFilter(s) => self.pick_filter = s,
+            Message::SetAt(path, on) => {
+                let line = self.line_at("set", &path, Some(if on { "true" } else { "false" }));
+                return self.act(At::Draft, line);
+            }
             Message::Entry(s) => self.entry = s,
             Message::SetEntry => {
                 let value = self.entry.trim().to_string();
@@ -578,9 +556,8 @@ impl cosmic::Application for Settings {
                     return self.act(At::Draft, line);
                 }
             }
-            Message::Search(s) => self.search = s,
             Message::Find => {
-                let terms = self.search.trim().to_string();
+                let terms = self.filter.trim().to_string();
                 if !terms.is_empty() {
                     return self.read(At::Read, format!("help {terms}"));
                 }
@@ -721,19 +698,7 @@ fn words_of(c: &[Choice]) -> impl Iterator<Item = &Choice> {
     c.iter().filter(|c| !c.is_placeholder() && c.word != "|")
 }
 
-/// Whether what follows a place is its value, not settings below it.
-fn is_value(c: &[Choice]) -> bool {
-    c.iter().any(|c| c.is_placeholder()) || (!c.is_empty() && words_of(c).all(|c| c.word == "true" || c.word == "false"))
-}
 
-/// The next words below `path` in a configuration.
-fn below(values: &Values, path: &[String], out: &mut BTreeSet<String>) {
-    for key in values.keys() {
-        if key.len() > path.len() && key[..path.len()] == *path {
-            out.insert(key[path.len()].clone());
-        }
-    }
-}
 
 impl Settings {
     fn page(&self) -> Page {
@@ -777,9 +742,6 @@ impl Settings {
                 Tab::Settings => {
                     tasks.push(self.read(At::Draft, DRAFT.into()));
                     tasks.push(self.read(At::Read, ACTIVE.into()));
-                    if self.all {
-                        tasks.push(self.learn(vec![]));
-                    }
                     if let Some(path) = self.selected.clone() {
                         tasks.push(self.read_selected(path));
                     }
@@ -812,19 +774,6 @@ impl Settings {
         w.extend(path.iter().map(String::as_str));
         w.extend(last);
         app::line(&w)
-    }
-
-    /// What torqcli would offer below a place, for the tree.
-    fn learn(&self, path: Path) -> Task<cosmic::Action<Message>> {
-        if self.known.contains_key(&path) {
-            return Task::none();
-        }
-        let console = self.console.clone();
-        let before = format!("{} ", self.line_at("set", &path, None));
-        cosmic::task::future(async move {
-            let got = off(move || console.choices(At::Draft, &before)).await.unwrap_or_default();
-            Message::Known(path, got)
-        })
     }
 
     /// What the side panel needs of a setting: what may follow it, and its help, from the place above it.
@@ -923,90 +872,13 @@ impl Settings {
         }
     }
 
-    /// The rows from `path` down. Whether anything there matched the filter.
-    fn walk(&self, path: &mut Path, wanted: &str, rows: &mut Vec<TreeRow>) -> bool {
-        let mut next = BTreeSet::new();
-        below(&self.draft, path, &mut next);
-        below(&self.active, path, &mut next);
-        if self.all {
-            if let Some(known) = self.known.get(path.as_slice()).filter(|k| !is_value(k)) {
-                next.extend(words_of(known).map(|c| c.word.clone()));
-            }
-        }
-        let mut any = false;
-        for word in next {
-            if rows.len() >= LISTED {
-                break;
-            }
-            path.push(word);
-            let values = self.draft.get(path.as_slice()).or_else(|| self.active.get(path.as_slice()));
-            let mut deeper = BTreeSet::new();
-            below(&self.draft, path, &mut deeper);
-            below(&self.active, path, &mut deeper);
-            let unknown = self.all && values.is_none() && !self.known.get(path.as_slice()).is_some_and(|k| is_value(k));
-            let branch = !deeper.is_empty() || unknown;
-            let open = !wanted.is_empty() || if self.all { self.open.contains(path.as_slice()) } else { !self.closed.contains(path.as_slice()) };
-            let at = rows.len();
-            let joined = path.join(" ").to_lowercase();
-            let matched = wanted.is_empty() || joined.contains(wanted) || values.is_some_and(|v| v.iter().any(|x| x.to_lowercase().contains(wanted)));
-            rows.push(TreeRow { path: path.clone(), branch, open, value: values.map(|v| v.join(", ")), change: self.change_at(path) });
-            let inside = branch && open && self.walk(path, wanted, rows);
-            if matched || inside {
-                any = true;
-            } else {
-                rows.truncate(at);
-            }
-            path.pop();
-        }
-        any
-    }
-
-    fn tree(&self) -> Element<'_, Message> {
-        let spacing = cosmic::theme::spacing();
-        let mut rows = vec![];
-        self.walk(&mut vec![], &self.filter.to_lowercase(), &mut rows);
-        if rows.is_empty() {
-            return widget::text::body(if self.filter.is_empty() { "Nothing is set yet." } else { "Nothing here matches." }).into();
-        }
-        let mut list = widget::list_column();
-        for r in rows {
-            let depth = (r.path.len() - 1) as f32 * 20.0;
-            let chevron: Element<'_, Message> = if r.branch {
-                let glyph = if r.open { "pan-down-symbolic" } else { "pan-end-symbolic" };
-                widget::mouse_area(icon::from_name(glyph).size(16).icon()).on_press(Message::Toggle(r.path.clone(), !r.open)).into()
-            } else {
-                widget::container(widget::text::body("")).width(Length::Fixed(16.0)).into()
-            };
-            let name = r.path.last().cloned().unwrap_or_default();
-            let mut line = widget::row::with_capacity(5).spacing(spacing.space_xs).align_y(Alignment::Center);
-            line = line.push(chevron);
-            let selected = self.selected.as_ref() == Some(&r.path);
-            line = line.push(if selected { widget::text::heading(name) } else { widget::text::body(name) });
-            if let Some(v) = r.value.filter(|_| !r.branch || r.change != Change::Same) {
-                line = line.push(widget::text::monotext(v));
-            }
-            line = line.push(widget::container(widget::text::body("")).width(Length::Fill));
-            match r.change {
-                Change::Same => {}
-                Change::New => line = line.push(tagged("new", Colour::Good)),
-                Change::Changed => line = line.push(tagged("changed", Colour::Warn)),
-                Change::Removed => line = line.push(tagged("removed", Colour::Bad)),
-            }
-            let on_press = if r.branch { Message::Toggle(r.path.clone(), !r.open) } else { Message::Select(r.path.clone()) };
-            if r.branch {
-                line = line.push(widget::button::icon(icon::from_name("document-properties-symbolic")).tooltip("About this setting").on_press(Message::Select(r.path.clone())));
-            }
-            let body = widget::container(line).padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: depth });
-            list = list.add(widget::mouse_area(body).on_press(on_press));
-        }
-        list.into()
-    }
-
     /// The side panel for a setting.
     fn inspector(&self, path: &Path) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let mut col = widget::column::with_capacity(8).spacing(spacing.space_m);
-        col = col.push(widget::text::caption(path.join(" › ")));
+        if !path.is_empty() {
+            col = col.push(widget::text::caption(path.iter().map(|w| app::label(w)).collect::<Vec<_>>().join(" › ")));
+        }
         if !self.help.is_empty() {
             col = col.push(widget::text::body(self.help.clone()));
         }
@@ -1034,12 +906,17 @@ impl Settings {
                         ),
                 );
             }
-            let words: Vec<&Choice> = words_of(&self.own).filter(|c| c.word != "<[Enter]>").collect();
+            let wanted = self.pick_filter.to_lowercase();
+            let all: Vec<&Choice> = words_of(&self.own).filter(|c| c.word != "<[Enter]>").collect();
+            if all.len() > 8 {
+                col = col.push(widget::search_input("Filter", &self.pick_filter).on_input(Message::PickFilter).on_clear(Message::PickFilter(String::new())));
+            }
+            let words: Vec<&Choice> = all.into_iter().filter(|c| wanted.is_empty() || c.word.to_lowercase().contains(&wanted) || c.help.to_lowercase().contains(&wanted)).collect();
             if !words.is_empty() {
                 let mut list = settings::section().title("Choose");
                 for c in words.iter().take(LISTED) {
                     let row = settings::item_row(vec![
-                        widget::column::with_capacity(2).push(widget::text::body(c.word.clone())).push(widget::text::caption(c.help.clone())).width(Length::Fill).into(),
+                        widget::column::with_capacity(2).push(widget::text::body(app::label(&c.word))).push(widget::text::caption(c.help.clone())).width(Length::Fill).into(),
                         icon::from_name("go-next-symbolic").size(16).icon().into(),
                     ])
                     .spacing(spacing.space_s);
@@ -1074,12 +951,15 @@ impl Settings {
         if active != draft {
             buttons = buttons.push(widget::button::standard("Undo my change").on_press(Message::Act(At::Draft, format!("rollback 0 {}", app::line(&path.iter().map(String::as_str).collect::<Vec<_>>())))));
         }
-        let anything_here = draft.is_some() || self.draft.keys().any(|k| k.len() > path.len() && k[..path.len()] == **path);
+        let anything_here = !path.is_empty() && (draft.is_some() || self.draft.keys().any(|k| k.len() > path.len() && k[..path.len()] == **path));
         if anything_here {
             buttons = buttons.push(widget::button::destructive("Remove").on_press(Message::Act(At::Draft, self.line_at("delete", path, None))));
         }
         col = col.push(buttons);
-        col.push(widget::text::caption(format!("The same as: set {}", path.join(" ")))).into()
+        if !path.is_empty() {
+            col = col.push(widget::text::caption(format!("The same as: set {}", path.join(" "))));
+        }
+        col.into()
     }
 
     // ── The pages ────────────────────────────────────────────────────────────────────────────────
@@ -1166,38 +1046,103 @@ impl Settings {
         widget::column::with_capacity(2).push(tabs).push(body).spacing(spacing.space_m).into()
     }
 
+    /// What is set, in the area chosen or, while searching, in every area: its path, values and change.
+    fn shown_settings(&self) -> Vec<(Path, Option<Vec<String>>, Change)> {
+        let wanted = self.filter.trim().to_lowercase();
+        let paths: BTreeSet<&Path> = self.draft.keys().chain(self.active.keys()).collect();
+        paths
+            .into_iter()
+            .filter(|p| {
+                if wanted.is_empty() {
+                    return app::area_of(p) == self.area;
+                }
+                let values = self.draft.get(*p).into_iter().flatten();
+                p.join(" ").to_lowercase().contains(&wanted) || app::card_and_row(p).1.to_lowercase().contains(&wanted) || values.into_iter().any(|v| v.to_lowercase().contains(&wanted))
+            })
+            .map(|p| (p.clone(), self.draft.get(p).cloned(), self.change_at(p)))
+            .collect()
+    }
+
+    /// One setting on its card: a switch for what is on or off; anything else, its value and a way in.
+    fn setting_row<'a>(&self, path: &Path, values: Option<&Vec<String>>, change: Change, row: String) -> Element<'a, Message> {
+        let spacing = cosmic::theme::spacing();
+        let mut line = widget::row::with_capacity(4).spacing(spacing.space_s).align_y(Alignment::Center);
+        line = line.push(widget::text::body(row).width(Length::Fill));
+        match change {
+            Change::Same => {}
+            Change::New => line = line.push(tagged("new", Colour::Good)),
+            Change::Changed => line = line.push(tagged("changed", Colour::Warn)),
+            Change::Removed => line = line.push(tagged("removed", Colour::Bad)),
+        }
+        let on_off = values.filter(|v| v.len() == 1).map(|v| v[0].as_str()).filter(|v| *v == "true" || *v == "false");
+        if let Some(v) = on_off {
+            let at = path.clone();
+            line = line.push(widget::toggler(v == "true").on_toggle(move |on| Message::SetAt(at.clone(), on)));
+            return settings::item_row(vec![widget::mouse_area(line.width(Length::Fill)).on_press(Message::Select(path.clone())).into()]).into();
+        }
+        if let Some(v) = values {
+            line = line.push(widget::text::body(v.join(", ")));
+        }
+        line = line.push(icon::from_name("go-next-symbolic").size(16).icon());
+        widget::mouse_area(settings::item_row(vec![line.into()])).on_press(Message::Select(path.clone())).into()
+    }
+
     fn settings_tab(&self) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
-        let mut page = widget::column::with_capacity(5).spacing(spacing.space_m);
-        page = page.push(widget::text::body(if self.all {
-            "Every setting NixOS has. Open a branch to see what is inside it."
-        } else {
-            "What is set on this machine. Choose a setting to change it: nothing takes effect until you commit it under Your Changes."
-        }));
-        page = page.push(
-            widget::row::with_capacity(3)
-                .spacing(spacing.space_s)
-                .align_y(Alignment::Center)
-                .push(widget::search_input("Filter", &self.filter).on_input(Message::Filter).on_clear(Message::Filter(String::new())).width(Length::Fill))
-                .push(widget::text::body("Show all settings"))
-                .push(widget::toggler(self.all).on_toggle(Message::All)),
-        );
-        page = page.push(self.tree());
-        page = page.push(
-            widget::row::with_capacity(2)
-                .spacing(spacing.space_xs)
-                .align_y(Alignment::Center)
-                .push(widget::search_input("Search every setting and command", &self.search).on_input(Message::Search).on_submit(|_| Message::Find).width(Length::Fill))
-                .push(widget::button::standard("Search").on_press(Message::Find)),
-        );
-        let terms = self.search.trim();
-        if !terms.is_empty() {
-            let c = format!("help {terms}");
-            if self.outputs.contains_key(&c) {
-                page = page.push(self.output(&c));
+        let mut counts: BTreeMap<&str, (usize, bool)> = BTreeMap::new();
+        for p in self.draft.keys().chain(self.active.keys().filter(|k| !self.draft.contains_key(*k))) {
+            let e = counts.entry(app::area_of(p)).or_default();
+            e.0 += 1;
+            e.1 |= self.change_at(p) != Change::Same;
+        }
+
+        // The areas: only those with something in them, and always the one being looked at.
+        let mut areas = widget::column::with_capacity(app::AREAS.len()).spacing(spacing.space_xxxs).width(Length::Fixed(170.0));
+        for &area in app::AREAS.iter().filter(|a| counts.contains_key(*a) || **a == self.area) {
+            let (count, changed) = counts.get(area).copied().unwrap_or_default();
+            let chosen = area == self.area && self.filter.trim().is_empty();
+            let name = if chosen { widget::text::heading(area) } else { widget::text::body(area) };
+            let mut line = widget::row::with_capacity(3).spacing(spacing.space_xs).align_y(Alignment::Center).push(name.width(Length::Fill));
+            if changed {
+                line = line.push(tagged("●", Colour::Warn));
+            }
+            line = line.push(widget::text::caption(count.to_string()));
+            areas = areas.push(widget::button::custom(line).class(if chosen { cosmic::theme::Button::Standard } else { cosmic::theme::Button::Text }).width(Length::Fill).on_press(Message::Area(area)));
+        }
+
+        // The cards: a setting's place decides which, in the order of the first it holds.
+        let mut cards: Vec<(String, Vec<_>)> = vec![];
+        let settings = self.shown_settings();
+        for (path, values, change) in &settings {
+            let (card, row) = app::card_and_row(path);
+            let entry = (path, values.as_ref(), *change, row);
+            match cards.iter_mut().find(|(c, _)| *c == card) {
+                Some((_, rows)) => rows.push(entry),
+                None => cards.push((card, vec![entry])),
             }
         }
-        page.into()
+        let mut right = widget::column::with_capacity(cards.len() + 2).spacing(spacing.space_m).width(Length::Fill);
+        if cards.is_empty() {
+            right = right.push(widget::text::body(if self.filter.trim().is_empty() { "Nothing is set here yet." } else { "Nothing that is set matches. Press Enter to search every setting." }));
+        }
+        for (card, rows) in cards {
+            let mut section = settings::section().title(card);
+            for (path, values, change, row) in rows {
+                section = section.add(self.setting_row(path, values, change, row));
+            }
+            right = right.push(section);
+        }
+        let terms = self.filter.trim();
+        if !terms.is_empty() && self.outputs.contains_key(&format!("help {terms}")) {
+            right = right.push(self.output(&format!("help {terms}")));
+        }
+        right = right.push(widget::row::with_capacity(1).push(widget::button::standard("Add a setting").on_press(Message::AddSetting)));
+
+        widget::column::with_capacity(3)
+            .spacing(spacing.space_m)
+            .push(widget::search_input("Search settings", &self.filter).on_input(Message::Filter).on_clear(Message::Filter(String::new())).on_submit(|_| Message::Find))
+            .push(widget::row::with_capacity(2).spacing(spacing.space_l).push(areas).push(right))
+            .into()
     }
 
     fn changes_tab(&self) -> Element<'_, Message> {

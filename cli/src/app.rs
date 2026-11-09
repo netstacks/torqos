@@ -1010,3 +1010,101 @@ mod live_parts {
         assert_eq!(LIVE_PARTS.last().unwrap().0, "cosmic-panel");
     }
 }
+
+// ── The configuration, as a person reads it ──────────────────────────────────────────────────────
+
+/// The areas Settings groups a configuration into, in the order they are listed.
+pub const AREAS: &[&str] = &["Network", "Services", "Software", "Desktop", "Boot", "People", "Other"];
+
+/// Which area a setting is in.
+pub fn area_of(path: &[String]) -> &'static str {
+    match (path.first().map(String::as_str), path.get(1).map(String::as_str)) {
+        (Some("networking"), _) => "Network",
+        (Some("services" | "virtualisation"), _) => "Services",
+        (Some("environment" | "programs" | "nixpkgs"), _) | (Some("system"), Some("software")) => "Software",
+        (Some("torq"), Some("desktop")) | (Some("xdg" | "fonts" | "hardware"), _) => "Desktop",
+        (Some("boot"), _) => "Boot",
+        (Some("users" | "security"), _) => "People",
+        _ => "Other",
+    }
+}
+
+/// A word of a setting's path as a person reads it: `hostName` is "Host name".
+pub fn label(word: &str) -> String {
+    match word {
+        "openssh" => return "SSH".into(),
+        "enable" => return "Enabled".into(),
+        _ => {}
+    }
+    let mut parts: Vec<String> = vec![];
+    let mut current = String::new();
+    let mut lower_before = false;
+    for c in word.chars() {
+        if c == '-' || c == '_' || c == '.' {
+            parts.extend((!current.is_empty()).then(|| std::mem::take(&mut current)));
+            lower_before = false;
+            continue;
+        }
+        if c.is_uppercase() && lower_before {
+            parts.push(std::mem::take(&mut current));
+        }
+        lower_before = c.is_lowercase() || c.is_ascii_digit();
+        current.push(c);
+    }
+    parts.extend((!current.is_empty()).then_some(current));
+    let shown: Vec<String> = parts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match p.to_lowercase().as_str() {
+            a @ ("ssh" | "efi" | "uefi" | "dns" | "dhcp" | "ip" | "tcp" | "udp" | "api" | "url" | "gpu" | "cpu" | "usb" | "vpn" | "tls" | "gid" | "uid") => a.to_uppercase(),
+            "nix" | "nixos" | "nixpkgs" | "cosmic" if p.chars().all(char::is_lowercase) => p.clone(),
+            lower if i == 0 => {
+                let mut c = lower.chars();
+                c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
+            }
+            lower => lower.to_string(),
+        })
+        .collect();
+    shown.join(" ")
+}
+
+/// A setting's card and its row on it: `services openssh enable` is on "SSH", as "Enabled".
+pub fn card_and_row(path: &[String]) -> (String, String) {
+    let row = |words: &[String]| words.iter().map(|w| label(w)).collect::<Vec<_>>().join(" › ");
+    match path {
+        [_, group, rest @ ..] if !rest.is_empty() => (label(group), row(rest)),
+        [_, last] => ("General".into(), label(last)),
+        other => ("General".into(), row(other)),
+    }
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+
+    fn path(s: &str) -> Vec<String> {
+        s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn a_setting_is_in_an_area() {
+        for (p, area) in [("networking hostName", "Network"), ("services openssh enable", "Services"), ("system software torq source", "Software"), ("environment systemPackages", "Software"), ("torq desktop enable", "Desktop"), ("boot loader efi canTouchEfiVariables", "Boot"), ("users users casey packages", "People"), ("time timeZone", "Other"), ("torq dev enable", "Other")] {
+            assert_eq!(area_of(&path(p)), area, "{p}");
+            assert!(AREAS.contains(&area));
+        }
+    }
+
+    #[test]
+    fn names_read_as_words() {
+        for (w, shown) in [("hostName", "Host name"), ("timeZone", "Time zone"), ("systemPackages", "System packages"), ("PasswordAuthentication", "Password authentication"), ("canTouchEfiVariables", "Can touch EFI variables"), ("systemd-boot", "Systemd boot"), ("openssh", "SSH"), ("enable", "Enabled"), ("ssh", "SSH")] {
+            assert_eq!(label(w), shown);
+        }
+    }
+
+    #[test]
+    fn a_setting_has_a_card_and_a_row() {
+        assert_eq!(card_and_row(&path("services openssh enable")), ("SSH".to_string(), "Enabled".to_string()));
+        assert_eq!(card_and_row(&path("services openssh settings PasswordAuthentication")), ("SSH".to_string(), "Settings › Password authentication".to_string()));
+        assert_eq!(card_and_row(&path("networking hostName")), ("General".to_string(), "Host name".to_string()));
+    }
+}
