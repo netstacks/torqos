@@ -28,7 +28,7 @@ The desktop's target machine for now, the owner's: a target to make work, not re
 | Known good | Pop!_OS 24.04, kernel 7.2.15 (2026-11-08); nothing out of tree |
 
 Which of it the base carries and which the desktop: ADR-046 3. The profile is `hardware/asus-zenbook-s16-um5606wa.nix` (M3.5).
-TorqOS's first install on it goes alongside Pop!_OS (ADR-048), on its one NVMe disk.
+TorqOS takes its whole NVMe disk (the owner, 2026-11-09: Pop!_OS is wiped), with the installer's erase mode (ADR-048). Pop!_OS was LUKS + LVM over the whole disk, which ADR-048 does not shrink.
 
 ### Known for this model (community reports, not yet seen on this unit)
 
@@ -45,7 +45,7 @@ Sources: the Arch wiki's "ASUS Zenbook UM5606"; `github.com/BNieuwenhuizen/zenbo
 
 | Function | How to check | Status |
 |---|---|---|
-| Boots TorqOS beside Pop!_OS, both in the menu | the installer, then the menu | — |
+| Boots TorqOS, installed by erasing the disk | the installer, then the disk | — |
 | GPU accelerated (amdgpu, radeonsi, RADV) | `dmesg \| grep amdgpu`, `vulkaninfo --summary` | — |
 | The panel at its native mode, 120 Hz; scale | COSMIC's display settings | — |
 | Brightness keys (OLED) | `/sys/class/backlight`, the keys | — |

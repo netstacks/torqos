@@ -1703,8 +1703,8 @@ it lacks is a way to take *someone else's* repository, which is untrusted, where
 
 **Status:** accepted, 2026-11-09 (the owner: "dual boot or multi boot or a wipe, just like any other installer";
 "install work without any networking"; our own console UI on proven tools rather than a ported installer).
-Amends ADR-031 ("whole disks only") and builds on ADR-047's console UI. The first real install it serves:
-TorqOS alongside Pop!_OS on the owner's Zenbook (ADR-046).
+Amends ADR-031 ("whole disks only") and builds on ADR-047's console UI. It was first meant for
+TorqOS alongside Pop!_OS on the owner's Zenbook (ADR-046); the owner then chose to erase that disk.
 **Context:** No installer does this for NixOS from a console. Calamares (graphical, Qt) is the one mature
 installer with erase / alongside / replace / manual, and NixOS has extensions for it, but it needs a graphical
 live ISO (ours is ~1.9 GiB of GitHub's 2 GiB a file), cannot run on a server's console or a serial line,

@@ -209,7 +209,7 @@ Before M4: it serves CLI and desktop installs alike. The owner's laptop (HARDWAR
       a recipe at a URL, my own repository); `request system recipe <url>`, `… recipe update`,
       `torq recipe publish`, `torq recipe list`; what is never taken refused (SSH keys, remote, users,
       caches' keys …). VM tests for each refusal, a recipe reverting itself, an update shown not applied.
-- [ ] **TorqOS installed on the laptop itself**, alongside Pop!_OS, CLI only first; then TorqOS Desktop from setup.
+- [ ] **TorqOS installed on the laptop itself**, erasing its disk (Pop!_OS goes), CLI only first; then TorqOS Desktop from setup.
 
 ### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038, ADR-045)
 Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, and only COSMIC
