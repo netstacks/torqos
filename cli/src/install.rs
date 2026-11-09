@@ -180,10 +180,40 @@ fn describe(d: &Disk, needed: u64) -> String {
     format!("{:<10} {:>8}  {:<7} {model}, {now}{small}", d.name, size(d.bytes), d.bus)
 }
 
+/// What the installer finds on this machine that NixOS's detection does not say (ADR-046).
+/// Firmware it does: on real hardware nixos-generate-config imports `not-detected.nix`, which turns on
+/// redistributable firmware, and the CPU's microcode with it.
+#[derive(Debug, Default, PartialEq)]
+pub struct Found {
+    /// A Wi-Fi device: a wireless network interface, or a PCI device of the wireless class (0x0280),
+    /// seen even before its driver has its firmware.
+    pub wireless: bool,
+}
+
+/// What `Found` says, looked for under `sys` (`/sys`, or a test's folder).
+pub fn found(sys: &Path) -> Found {
+    let any = |dir: &str, is: &dyn Fn(&Path) -> bool| {
+        std::fs::read_dir(sys.join(dir)).map(|d| d.flatten().any(|e| is(&e.path()))).unwrap_or(false)
+    };
+    let interface = any("class/net", &|p| p.join("wireless").exists() || p.join("phy80211").exists());
+    let pci = any("bus/pci/devices", &|p| std::fs::read_to_string(p.join("class")).is_ok_and(|c| c.trim().starts_with("0x0280")));
+    Found { wireless: interface || pci }
+}
+
+/// `found` as a NixOS module, or nothing when there is nothing to say.
+fn found_module(f: &Found) -> Option<String> {
+    f.wireless.then(|| {
+        "\x20   # A Wi-Fi device was found here (ADR-046): iwd joins networks (`iwctl`), networkd configures\n\
+         \x20   # them; the networks and their passphrases are iwd's state, never the repository's.\n\
+         \x20   ({ ... }: { networking.wireless.iwd.enable = true; })\n"
+            .to_string()
+    })
+}
+
 /// This machine's hardware file: what NixOS detected here (`detected`: nixos-generate-config
-/// `--show-hardware-config --no-filesystems`) and the image's disk (`file_systems`), each a NixOS
-/// module as it was written, one file.
-pub fn hardware_file(detected: &str, file_systems: &str) -> Result<String> {
+/// `--show-hardware-config --no-filesystems`), what the installer found (`found`) and the image's disk
+/// (`file_systems`), each a NixOS module as it was written, one file.
+pub fn hardware_file(detected: &str, found: &Found, file_systems: &str) -> Result<String> {
     if detected.trim().is_empty() {
         bail!("NixOS detected no hardware here (nixos-generate-config said nothing)");
     }
@@ -201,6 +231,7 @@ pub fn hardware_file(detected: &str, file_systems: &str) -> Result<String> {
          \x20   (\n\
          {}\n\
          \x20   )\n\
+         {}\
          \x20   # The TorqOS image's disk:\n\
          \x20   (\n\
          {}\n\
@@ -208,6 +239,7 @@ pub fn hardware_file(detected: &str, file_systems: &str) -> Result<String> {
          \x20 ];\n\
          }}\n",
         detected.trim_end(),
+        found_module(found).unwrap_or_default(),
         file_systems.trim_end()
     ))
 }
@@ -671,7 +703,7 @@ fn detect(d: &Disk) -> Result<()> {
         .find(|f| devno(f).and_then(|now| part_of(d, &now, Path::new("/sys"))).is_ok() && label(&fd_path(f)).as_deref() == Some(TORQ_LABEL))
         .with_context(|| format!("TorqOS's record file system is not on {} after writing it", d.name))?;
     let detected = tool("nixos-generate-config", &["--show-hardware-config", "--no-filesystems"])?;
-    let file = hardware_file(&detected, &read_meta("file-systems.nix")?)?;
+    let file = hardware_file(&detected, &found(Path::new("/sys")), &read_meta("file-systems.nix")?)?;
     let mnt = tempfile::tempdir().context("a place to mount the new disk")?;
     let at = mnt.path().to_path_buf();
     // The kernel mounts the partition opened above, through its open file.
@@ -990,12 +1022,39 @@ mod tests {
     fn the_hardware_file() {
         let detected = "# Do not modify this file!\n{ config, lib, pkgs, modulesPath, ... }:\n\n{\n  imports = [ (modulesPath + \"/installer/scan/not-detected.nix\") ];\n  boot.initrd.availableKernelModules = [ \"nvme\" \"xhci_pci\" ];\n}\n";
         let fs = "{ ... }:\n{\n  fileSystems.\"/\" = { device = \"/dev/disk/by-label/nixos\"; fsType = \"ext4\"; };\n}\n";
-        let f = hardware_file(detected, fs).unwrap();
+        let none = Found::default();
+        let f = hardware_file(detected, &none, fs).unwrap();
         assert!(f.contains(detected.trim_end()) && f.contains(fs.trim_end()), "{f}");
         assert!(f.find("not-detected.nix").unwrap() < f.find("by-label/nixos").unwrap());
         assert!(f.trim_end().ends_with("];\n}"), "{f}");
-        assert!(hardware_file("  \n", fs).is_err(), "nothing detected");
-        assert!(hardware_file("{ ... }: { fileSystems.\"/\" = { }; }", fs).is_err(), "the image's file systems only");
-        assert!(hardware_file("{ ... }: { swapDevices = [ ]; }", fs).is_err());
+        assert!(!f.contains("iwd"), "no Wi-Fi found, none turned on: {f}");
+        assert!(hardware_file("  \n", &none, fs).is_err(), "nothing detected");
+        assert!(hardware_file("{ ... }: { fileSystems.\"/\" = { }; }", &none, fs).is_err(), "the image's file systems only");
+        assert!(hardware_file("{ ... }: { swapDevices = [ ]; }", &none, fs).is_err());
+        // Wi-Fi found: iwd on, between the detected hardware and the image's disk.
+        let w = hardware_file(detected, &Found { wireless: true }, fs).unwrap();
+        let at = w.find("networking.wireless.iwd.enable = true;").expect("iwd on");
+        assert!(w.find("not-detected.nix").unwrap() < at && at < w.find("by-label/nixos").unwrap(), "{w}");
+    }
+
+    /// Wi-Fi is found by a wireless interface, or by a PCI device of the wireless class before its driver
+    /// is up (its firmware missing); an Ethernet card or nothing at all is no Wi-Fi.
+    #[test]
+    fn wifi_is_found() {
+        let sys = tempfile::tempdir().unwrap();
+        let s = sys.path();
+        let mk = |p: &str| std::fs::create_dir_all(s.join(p)).unwrap();
+        assert_eq!(found(s), Found { wireless: false }, "an empty /sys");
+        mk("class/net/lo");
+        mk("class/net/enp1s0");
+        mk("bus/pci/devices/0000:01:00.0");
+        std::fs::write(s.join("bus/pci/devices/0000:01:00.0/class"), "0x020000\n").unwrap();
+        assert_eq!(found(s), Found { wireless: false }, "Ethernet only");
+        mk("bus/pci/devices/0000:c3:00.0");
+        std::fs::write(s.join("bus/pci/devices/0000:c3:00.0/class"), "0x028000\n").unwrap();
+        assert_eq!(found(s), Found { wireless: true }, "the MT7925 by its PCI class");
+        std::fs::remove_dir_all(s.join("bus/pci/devices/0000:c3:00.0")).unwrap();
+        mk("class/net/wlan0/wireless");
+        assert_eq!(found(s), Found { wireless: true }, "a USB Wi-Fi stick by its interface");
     }
 }

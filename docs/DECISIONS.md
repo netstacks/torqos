@@ -1748,3 +1748,10 @@ prebuilds it), so on real hardware it may fetch build tools from the network.
   and the Zenbook's known issues are kept, in HARDWARE.md.
 - **Not:** a graphical installer; resizing encrypted, LVM or RAID volumes; moving a partition's start;
   BIOS (non-UEFI) machines; installing over another TorqOS beside it (one per disk, for now).
+- **Amended (2026-11-09): firmware was already on.** On real hardware nixos-generate-config imports
+  `not-detected.nix`, which sets `hardware.enableRedistributableFirmware = mkDefault true` (and the CPU's
+  microcode follows it); nothing in TorqOS turns it off. So 1 needs no code: the installer's hardware file
+  already carries it, and only a VM goes without. What was missing is Wi-Fi (2): the installer now finds a
+  Wi-Fi device — a wireless interface, or a PCI device of the wireless class before its firmware is up —
+  and its hardware file turns on iwd (`cli/src/install.rs` `found`). The firmware and iwd are not in the
+  image's closure: ADR-048 5's carried build closure must hold them.
