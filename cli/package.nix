@@ -15,7 +15,10 @@ rustPlatform.buildRustPackage {
   pname = "torq";
   # One place: Cargo.toml (scripts/bump-version sets it).
   version = (lib.importTOML ./Cargo.toml).package.version;
-  src = lib.cleanSource ./.;
+  # This crate and torq-wire (ADR-044), nothing else of the repository: a change elsewhere rebuilds nothing.
+  src = lib.fileset.toSource { root = ../.; fileset = lib.fileset.unions [ ./. ../wire ]; };
+  cargoRoot = "cli";
+  buildAndTestSubdir = "cli";
   cargoLock.lockFile = ./Cargo.lock;
 
   env = filterEnv;

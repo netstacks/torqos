@@ -726,6 +726,8 @@ Its §5 lists claims without a test.
    kind added on one side only would go unnoticed by the compiler. ADR-044's crate `torq-wire` closes it,
    fixtures first so the ledger's bytes are proven unchanged; not in 0.3.0 (it changes all three Nix
    packages' sources and touches `lib.rs` while the release's branches do).
+   **Steps 0 and 1 done (2026-11-09):** the fixtures, and the socket's types and exit codes in `torq-wire`, shared
+   by the broker and torqcli. Open: the kinds, tiers and actors (step 2) and the newtypes (step 3).
 
 6zr. **Python out of a new machine (ADR-032/033, amended 2026-11-07, `work/w6`).** The root is grown by
    systemd-repart in the initrd, not growpart; the SSH greeting runs fastfetch's program without its

@@ -124,6 +124,15 @@
       # ── Tests ────────────────────────────────────────────────────────────────
       checks = forSystems linuxSystems (pkgs: {
         broker = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
+        # torq-wire's own tests (ADR-044): the bytes on the socket, pinned. The ledger's fixtures are the broker's tests.
+        wire = pkgs.rustPlatform.buildRustPackage {
+          pname = "torq-wire";
+          version = (lib.importTOML ./wire/Cargo.toml).package.version;
+          src = lib.cleanSource ./wire;
+          cargoLock.lockFile = ./wire/Cargo.lock;
+          # A library: nothing to install, its tests are the point.
+          installPhase = "touch $out";
+        };
         trust-loop = import ./tests/trust-loop.nix { inherit pkgs self; };
         socket = import ./tests/socket.nix { inherit pkgs self; };
         commit-at = import ./tests/commit-at.nix { inherit pkgs self; };

@@ -9,18 +9,15 @@
 
 use crate::policy::{self, Tier};
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+// The socket's words, shared with its callers (ADR-044).
+pub use torq_wire::socket::{Frame, Request, NEED_PASSWORD, SOCKET};
 
-/// Where the socket is (modules/broker.nix sets the unit to it).
-pub const SOCKET: &str = "/run/torq/broker.sock";
 /// The agent's account (ADR-035): whatever arrives from it is the agent.
 pub const AGENT: &str = "torq-agent";
 /// The PAM service a system change's password is checked against (modules/broker.nix).
 pub const PAM_SERVICE: &str = "torq-approve";
 /// The group whose members may approve a system change (with their password).
 pub const ADMINS: &str = "wheel";
-/// The exit code that says: this needs your password (none was sent, or it was wrong).
-pub const NEED_PASSWORD: i32 = 77;
 /// A request is a line, and no line is longer than this (a large diff, with room).
 pub const MAX_REQUEST: u64 = 8 << 20;
 /// The uids NixOS gives normal accounts (people): `isNormalUser` starts at 1000; Nix's build users
@@ -32,32 +29,6 @@ pub const FAILLOCK_DIR: &str = "/run/torq/faillock";
 /// How long a caller has to send its request, and to take each piece of the reply, in seconds.
 pub const TIMEOUT_SECONDS: u64 = 10;
 
-/// What a caller sends: the broker's arguments, without who it is or any file. A diff or a
-/// password hash comes in the request itself, never as a path for root to open (N16).
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Request {
-    pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
-    /// A backup's key (`backup-key`): its passphrase, kept root's alone, never in the ledger.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-}
-
-/// What comes back, one JSON line at a time: the broker's standard output and error as they come,
-/// and how it ended, last.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Frame {
-    Out(String),
-    Err(String),
-    Exit(i32),
-}
 
 /// The account at the other end of the socket, as the kernel and the machine's own files say.
 #[derive(Debug, Clone, PartialEq)]

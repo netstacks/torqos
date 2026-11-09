@@ -227,34 +227,9 @@ pub enum Call {
     Exec(Command),
 }
 
-/// The broker's socket (modules/broker.nix).
-pub const SOCKET: &str = "/run/torq/broker.sock";
-/// The exit code that says the broker needs the caller's password (torq_broker::socket).
-const NEED_PASSWORD: i32 = 77;
-
-/// What goes over the socket (torq_broker::socket::Request): the arguments without who is asking,
-/// which the broker takes from the kernel, and files' contents rather than their paths.
-#[derive(serde::Serialize, Default)]
-struct Request {
-    args: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    diff: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    password: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    key: Option<String>,
-}
-
-/// What comes back (torq_broker::socket::Frame).
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Frame {
-    Out(String),
-    Err(String),
-    Exit(i32),
-}
+/// The broker's socket and its words, the broker's own (ADR-044).
+pub use torq_wire::socket::SOCKET;
+use torq_wire::socket::{Frame, Request, BUSY, NEED_PASSWORD, OK, REFUSED, USAGE};
 
 /// The arguments torqcli builds for any broker, as a socket request: `--actor` and `--approved-by`
 /// left out (the broker decides them), `--diff`, `--hash-file` and `--key-file` sent as what they hold.
@@ -396,7 +371,7 @@ pub fn read(broker: Call) -> Result<(Option<i32>, Vec<u8>)> {
 fn broken(code: Option<i32>) -> String {
     match code {
         // 2: it did not understand the request — an installed broker older than this command.
-        Some(2) => "the installed broker is older than this torq command (update the machine first)".into(),
+        Some(USAGE) => "the installed broker is older than this torq command (update the machine first)".into(),
         Some(code) => format!("the broker stopped unexpectedly (exit code {code})"),
         None => "the broker was stopped before it finished".into(),
     }
@@ -411,10 +386,10 @@ pub fn broker_json(broker: Call, log: &std::path::Path) -> Result<Outcome> {
 pub fn broker_json_live(broker: Call, log: &std::path::Path, live: bool) -> Result<Outcome> {
     let (code, v) = call(broker, log, live)?;
     Ok(match (code, v) {
-        (Some(0), Some(v)) => Outcome::Done(v),
-        (Some(75), _) => Outcome::Busy,
+        (Some(OK), Some(v)) => Outcome::Done(v),
+        (Some(BUSY), _) => Outcome::Busy,
         // 77: it needs the caller's password, and none was given or it was wrong (ADR-040).
-        (Some(1 | 77), Some(v)) => Outcome::Refused(v["error"].as_str().unwrap_or_default().to_string()),
+        (Some(REFUSED | NEED_PASSWORD), Some(v)) => Outcome::Refused(v["error"].as_str().unwrap_or_default().to_string()),
         (code, _) => Outcome::Broken(broken(code)),
     })
 }
@@ -424,8 +399,8 @@ pub fn broker_json_live(broker: Call, log: &std::path::Path, live: bool) -> Resu
 pub fn broker_status(broker: Call, log: &std::path::Path) -> Result<std::result::Result<Value, String>> {
     let (code, v) = call(broker, log, false)?;
     Ok(match (code, v) {
-        (Some(0 | 1 | 75), Some(v)) if v.get("error").is_none() => Ok(v),
-        (Some(1), Some(v)) => Err(crate::history::one_line(v["error"].as_str().unwrap_or("the broker refused"), 200)),
+        (Some(OK | REFUSED | BUSY), Some(v)) if v.get("error").is_none() => Ok(v),
+        (Some(REFUSED), Some(v)) => Err(crate::history::one_line(v["error"].as_str().unwrap_or("the broker refused"), 200)),
         (code, _) => Err(broken(code)),
     })
 }

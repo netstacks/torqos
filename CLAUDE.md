@@ -62,6 +62,7 @@ templates/config/      the per-machine config repo the broker manages
 broker/                Rust crate: torq-broker (ledger, policy, git, rebuild, rollback)
 cli/                   Rust crate: torqcli — the grammar, the candidate, the tree (ADR-025)
 agent/                 Rust crate: torq-doctor — the agent: doctor mode, propose mode, its session at the broker (ADR-042)
+wire/                  Rust crate: torq-wire — the socket's types and the ledger's words, shared by the three (ADR-044)
 tests/                 NixOS VM tests
 release/               allowed_signers: the keys a machine trusts a release from
 .github/workflows/     test (pull requests, by hand, each release), weekly nixpkgs bump, release on a v* tag

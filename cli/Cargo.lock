@@ -476,6 +476,15 @@ dependencies = [
  "sha-crypt",
  "sha2",
  "tempfile",
+ "torq-wire",
+]
+
+[[package]]
+name = "torq-wire"
+version = "0.3.2"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@ mod serve;
 
 use torq_broker::config::{self, Requested, Settings};
 use torq_broker::{ledger::Entry, policy::Actor, Broker, Busy};
+use torq_wire::socket::{BUSY, OK, REFUSED};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -342,7 +343,7 @@ fn main() {
         } else {
             eprintln!("Error: {e:?}");
         }
-        std::process::exit(if busy { 75 } else { 1 });
+        std::process::exit(if busy { BUSY } else { REFUSED });
     }
 }
 
@@ -437,7 +438,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             (Some(p), false) if p.ok => println!("pushed: the remote has the configuration and {} ledger entries", p.entries),
             (Some(p), false) => {
                 println!("not pushed: {}", printable(p.error.as_deref().unwrap_or("?")));
-                std::process::exit(1);
+                std::process::exit(REFUSED);
             }
         },
         Cmd::AdoptKey { url } => {
@@ -469,7 +470,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             let c = b.verify_store()?;
             println!("{}", serde_json::to_string(&c)?);
             if !c.modified.is_empty() {
-                std::process::exit(1);
+                std::process::exit(REFUSED);
             }
         }
         Cmd::SnapshotTake { approved_by } => println!("{}", serde_json::to_string(&b.snapshot_now(&approved_by)?)?),
@@ -718,7 +719,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 // Mid-operation, pending.json exists and the tree may be half-applied: reporting
                 // `interrupted` or `dirty` now would describe a running change as a broken one.
                 println!("{}", json!({ "ok": false, "busy": s.busy, "problems": [] }));
-                std::process::exit(75);
+                std::process::exit(BUSY);
             }
             if json {
                 println!(
@@ -747,11 +748,11 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                         "trust": torq_broker::session::active(&b.ledger.read_all().unwrap_or_default()),
                     })
                 );
-                std::process::exit(if s.busy.is_some() { 75 } else if problems.is_empty() { 0 } else { 1 });
+                std::process::exit(if s.busy.is_some() { BUSY } else if problems.is_empty() { OK } else { REFUSED });
             }
             if let Some(who) = &s.busy {
                 println!("a broker operation is running ({who}); not checked — try again when it is done");
-                std::process::exit(75); // EX_TEMPFAIL: "busy" without parsing the text
+                std::process::exit(BUSY); // EX_TEMPFAIL: "busy" without parsing the text
             }
             let or = |v: &Option<String>, none: &str| v.clone().unwrap_or_else(|| none.to_string());
             println!("ledger          {}", match &s.ledger { Ok(n) => format!("OK, {n} entries"), Err(e) => e.clone() });
@@ -776,7 +777,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 for p in &problems {
                     println!("PROBLEM: {p}");
                 }
-                std::process::exit(1);
+                std::process::exit(REFUSED);
             }
         }
     }

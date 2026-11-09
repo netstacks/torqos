@@ -1429,7 +1429,11 @@ configuration it was not prepared for.
 
 ## ADR-044 — One vocabulary: a shared crate for the socket and the ledger, after 0.3.0
 
-**Status:** accepted, 2026-11-07; **deferred until after 0.3.0** (KNOWN-GAPS 6zp, ROADMAP "After 0.3.0").
+**Status:** accepted, 2026-11-07; deferred until after 0.3.0 (KNOWN-GAPS 6zp, ROADMAP "After 0.3.0"). **Steps 0 and 1
+built 2026-11-09** (`work/wire`): the fixtures (`wire/tests/fixtures/`, fifteen ledgers covering every kind the
+broker's tests write, one with a kind, tier and actor no torq knows; `broker/tests/ledger_fixtures.rs`), and the
+socket's types and exit codes in `wire/src/socket.rs`, taken by the broker and torqcli. The agent takes the crate
+in step 2, when it matches kinds. Step 2 next: TorqOS Settings (ADR-045 2) reads the ledger through it.
 **Context:** A code review found the wire protocol and the ledger's words written twice, by hand.
 `cli/src/run.rs` re-declares `Request`, `Frame`, `SOCKET` and `NEED_PASSWORD` from
 `broker/src/socket.rs` (and the exit codes 1, 2, 75, 77 as bare numbers); `cli/src/shell.rs`'s
