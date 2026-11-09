@@ -785,3 +785,61 @@ fn the_window_keeps_what_would_lock_it_out() {
     assert!(loads_draft("request system update") && loads_draft("request system pull"));
     assert!(!loads_draft("show version") && !loads_draft("request system repair"));
 }
+
+// ── What the window's tree and diff viewer read ──────────────────────────────────────────────────
+
+/// The settings of a configuration, from its `| display set` lines: each one's path and its value.
+/// A list has one line per value.
+pub fn settings_of(shown: &str) -> Vec<(Vec<String>, String)> {
+    shown
+        .lines()
+        .filter_map(|l| {
+            let mut w = crate::session::words(l.strip_prefix("set ")?).ok()?;
+            let value = w.pop()?;
+            (!w.is_empty()).then_some((w, value))
+        })
+        .collect()
+}
+
+/// A change's configuration number, from `show system commit`'s lines (0 is the one in effect); None: it
+/// made no configuration.
+pub fn rollback_of(shown: &str, seq: u64) -> Option<u32> {
+    let wanted = format!("#{seq}");
+    configurations(shown).into_iter().find(|(_, rest)| rest.split_whitespace().next() == Some(wanted.as_str())).map(|(n, _)| n)
+}
+
+/// What a proposal does, as the broker had git write it when it was proposed: never the proposer's own
+/// text, which can say one thing while git does another (ADR-041).
+pub fn proposal_effect(seq: u64) -> Result<String> {
+    let cli = cli();
+    let log = crate::run::watch_log()?;
+    let v = match crate::run::broker_json(crate::broker(&cli, &["show", &seq.to_string()])?, &log)? {
+        crate::run::Outcome::Done(v) => v,
+        crate::run::Outcome::Busy => anyhow::bail!("another change is being made right now; try again in a moment"),
+        crate::run::Outcome::Refused(m) | crate::run::Outcome::Broken(m) => anyhow::bail!("{}", history::one_line(&m, 300)),
+    };
+    Ok(cleaned(v["data"]["effect"].as_str().unwrap_or_default().to_string()))
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    #[test]
+    fn a_configuration_read_as_settings() {
+        let shown = "set networking hostName torqtop\nset environment systemPackages htop\nset environment systemPackages jq\nset users users casey description \"Casey D\"\n## software: torq 2026\n";
+        let s = settings_of(shown);
+        assert_eq!(s[0], (vec!["networking".to_string(), "hostName".to_string()], "torqtop".to_string()));
+        assert_eq!((s[1].1.as_str(), s[2].1.as_str()), ("htop", "jq"), "a list, a line for each");
+        assert_eq!(s[3].1, "Casey D", "a value with a space is one value");
+        assert_eq!(s.len(), 4, "a comment is not a setting");
+    }
+
+    #[test]
+    fn a_change_finds_its_configuration() {
+        let shown = "Rollback  Change  When  By  What\n0         #16     then  me  One\n1         #14     then  me  Two\n";
+        assert_eq!(rollback_of(shown, 16), Some(0));
+        assert_eq!(rollback_of(shown, 14), Some(1));
+        assert_eq!(rollback_of(shown, 1), None, "not #1 of #14 or #16");
+    }
+}
