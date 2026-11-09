@@ -22,6 +22,7 @@ const PASSWORDS: &str = "/var/lib/torq/secrets/passwords";
 const BROKER: &str = "/run/current-system/sw/bin/torq-broker";
 const SYSTEMD_RUN: &str = "/run/current-system/sw/bin/systemd-run";
 const JOURNALCTL: &str = "/run/current-system/sw/bin/journalctl";
+const NIX_STORE: &str = "/run/current-system/sw/bin/nix-store";
 /// The broker's own service while it sets the machine up (its log: `journalctl -u torq-setup-broker`).
 const BROKER_UNIT: &str = "torq-setup-broker";
 const WELCOME: &str = "Welcome to TorqOS. This machine has no configuration yet: a few questions set it up.";
@@ -426,6 +427,7 @@ fn apply(a: &Answers) -> Result<()> {
         std::fs::DirBuilder::new().recursive(true).mode(0o755).create(p.parent().unwrap_or(Path::new(REPO)))?;
         std::fs::write(&p, bytes).with_context(|| format!("writing {}", p.display()))?;
     }
+    register_carried(&Path::new("/").join(crate::install::REGISTRATION))?;
     // The broker as a service of its own, not a child of this console program: the switch starts the
     // console's login prompt, which takes the console from setup (and stops this unit) — the broker
     // finishes regardless, and records change #1.
@@ -443,6 +445,21 @@ fn apply(a: &Answers) -> Result<()> {
         bail!("the new configuration did not build:\n{}", log.trim_end());
     }
     Ok(())
+}
+
+/// What the installer copied onto this disk for the first build (ADR-048 5, install.rs `carry`): its
+/// registration (`reg`) loaded into this disk's Nix database, so change #1 builds from it with no
+/// network. Once: the file goes after. None (an image, not an install from the ISO), nothing to do.
+fn register_carried(reg: &Path) -> Result<()> {
+    if !reg.is_file() {
+        return Ok(());
+    }
+    let f = std::fs::File::open(reg).with_context(|| format!("reading {}", reg.display()))?;
+    let o = std::process::Command::new(NIX_STORE).arg("--load-db").stdin(f).output().context("running nix-store")?;
+    if !o.status.success() {
+        bail!("registering what the installer copied for the first build: {}", String::from_utf8_lossy(&o.stderr).trim());
+    }
+    std::fs::remove_file(reg).with_context(|| format!("removing {}", reg.display()))
 }
 
 /// Ask until `check` takes the answer, saying why it did not.

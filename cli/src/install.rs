@@ -17,6 +17,12 @@ const INSTALLER: &str = "/etc/torq/installer";
 const BIN: &str = "/run/current-system/sw/bin";
 /// Where, inside the new disk's root, first-boot setup finds the hardware detected here.
 pub const DETECTED: &str = "var/lib/torq/install/hardware-configuration.nix";
+/// Beside it: the registration of what the installer copied for the first build (ADR-048 5), which
+/// setup loads into the new disk's Nix database before building change #1.
+pub const REGISTRATION: &str = "var/lib/torq/install/first-build.registration";
+/// What a first boot builds from, as the installer carries it (modules/installer.nix: closureInfo's
+/// `store-paths` and `registration`).
+const FIRST_BUILD: &str = "/etc/torq/installer/first-build";
 const WELCOME: &str = "Welcome to the TorqOS installer. It puts TorqOS on one of this machine's disks, erasing everything on it.";
 /// The label of `/var/lib/torq`'s own file system on the new disk (hosts/installer/file-systems.nix).
 const TORQ_LABEL: &str = "torq";
@@ -696,37 +702,94 @@ fn detect(d: &Disk) -> Result<()> {
     settle();
     // The record's file system, by its label, among this disk's partitions only: each checked to be one
     // of the disk written, and from then on used as what was opened, not by its name.
-    let root = (1..=16)
-        .map(|n| format!("/dev/{}", partition(&d.name, n)))
-        .filter(|p| Path::new(p).exists())
-        .filter_map(|p| std::fs::File::open(&p).ok())
-        .find(|f| devno(f).and_then(|now| part_of(d, &now, Path::new("/sys"))).is_ok() && label(&fd_path(f)).as_deref() == Some(TORQ_LABEL))
-        .with_context(|| format!("TorqOS's record file system is not on {} after writing it", d.name))?;
+    // A file system by its label, among this disk's partitions only: each checked to be one of the disk
+    // written, and from then on used as what was opened, not by its name.
+    let own = |want: &str, what: &str| {
+        (1..=16)
+            .map(|n| format!("/dev/{}", partition(&d.name, n)))
+            .filter(|p| Path::new(p).exists())
+            .filter_map(|p| std::fs::File::open(&p).ok())
+            .find(|f| devno(f).and_then(|now| part_of(d, &now, Path::new("/sys"))).is_ok() && label(&fd_path(f)).as_deref() == Some(want))
+            .with_context(|| format!("TorqOS's {what} is not on {} after writing it", d.name))
+    };
+    let record = own(TORQ_LABEL, "record file system")?;
     let detected = tool("nixos-generate-config", &["--show-hardware-config", "--no-filesystems"])?;
     let file = hardware_file(&detected, &found(Path::new("/sys")), &read_meta("file-systems.nix")?)?;
+    // What a first boot builds from (ADR-048 5), where this installer carries it; none on a platform
+    // it is not computed for.
+    let first = Path::new(FIRST_BUILD);
+    let carried = first.join("store-paths").is_file().then(|| std::fs::read_to_string(first.join("store-paths"))).transpose().context("reading what the installer carries")?;
+    on(&record, "ext4", None, d, "record file system", |at| {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let put = |rel: &str, bytes: &[u8]| -> Result<()> {
+            let p = at.join(rel.strip_prefix("var/lib/torq/").context("where it goes")?);
+            std::fs::DirBuilder::new().recursive(true).mode(0o755).create(p.parent().context("its folder")?)?;
+            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o644).open(&p)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            Ok(())
+        };
+        put(DETECTED, file.as_bytes()).context("writing the detected hardware to the new disk")?;
+        if carried.is_some() {
+            let reg = std::fs::read(first.join("registration")).context("reading the carried paths' registration")?;
+            put(REGISTRATION, &reg).context("writing the carried paths' registration to the new disk")?;
+        }
+        Ok(())
+    })?;
+    if let Some(paths) = carried {
+        let root = own(ROOT_LABEL, "root file system")?;
+        on(&root, "btrfs", Some(c"subvol=@"), d, "root file system", |at| {
+            println!("  Copying what this machine's first build needs ...");
+            let n = carry(&paths, Path::new("/"), &at.join("nix/store"))?;
+            println!("  {n} added to the new disk's store.");
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// `run` with `fs` (a partition of `d`, opened) mounted at a folder of its own, as `fstype` with `data`;
+/// unmounted after, whatever happened.
+fn on(fs: &std::fs::File, fstype: &str, data: Option<&std::ffi::CStr>, d: &Disk, what: &str, run: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
     let mnt = tempfile::tempdir().context("a place to mount the new disk")?;
     let at = mnt.path().to_path_buf();
     // The kernel mounts the partition opened above, through its open file.
-    rustix::mount::mount(fd_path(&root).as_str(), &at, "ext4", rustix::mount::MountFlags::empty(), None)
-        .with_context(|| format!("mounting TorqOS's root file system from {} at {}", d.name, at.display()))?;
-    let wrote = (|| -> Result<()> {
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        let p = at.join(DETECTED.strip_prefix("var/lib/torq/").context("where the hardware goes")?);
-        std::fs::DirBuilder::new().recursive(true).mode(0o755).create(p.parent().context("its folder")?)?;
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o644).open(&p)?;
-        f.write_all(file.as_bytes())?;
-        f.sync_all()?;
-        Ok(())
-    })();
+    rustix::mount::mount(fd_path(fs).as_str(), &at, fstype, rustix::mount::MountFlags::empty(), data)
+        .with_context(|| format!("mounting TorqOS's {what} from {} at {}", d.name, at.display()))?;
+    let done = run(&at);
     // Unmounted whatever happened: lazily if it is still busy, so the disk is not left held.
     if rustix::mount::unmount(&at, rustix::mount::UnmountFlags::empty()).is_err() {
         if let Err(e) = rustix::mount::unmount(&at, rustix::mount::UnmountFlags::DETACH) {
-            // Still mounted: the folder is kept, not emptied (which would empty the new root).
+            // Still mounted: the folder is kept, not emptied (which would empty the new disk).
             let _ = mnt.keep();
-            return Err(anyhow::Error::from(e).context(format!("unmounting TorqOS's root file system from {}", at.display())));
+            return Err(anyhow::Error::from(e).context(format!("unmounting TorqOS's {what} from {}", at.display())));
         }
     }
-    wrote.context("writing the detected hardware to the new disk")
+    done
+}
+
+/// Copy into `store` (the new disk's /nix/store) each of `paths` (one store path a line, as
+/// closureInfo's `store-paths`) that it does not have, from under `from` (`/`: the installer's own
+/// store). Each is copied under a name of its own first and renamed whole, so a path half copied
+/// is never there by its name. How many were added.
+pub fn carry(paths: &str, from: &Path, store: &Path) -> Result<usize> {
+    let mut added = 0;
+    for p in paths.lines().map(str::trim).filter(|p| !p.is_empty()) {
+        let name = p.strip_prefix("/nix/store/").filter(|n| !n.is_empty() && !n.contains('/') && !n.starts_with('.')).with_context(|| format!("{p:?} is not a store path"))?;
+        let to = store.join(name);
+        if to.symlink_metadata().is_ok() {
+            continue;
+        }
+        let part = store.join(format!(".{name}.torq-copy"));
+        if part.symlink_metadata().is_ok() {
+            tool("rm", &["-rf", &part.to_string_lossy()])?;
+        }
+        let src = from.join(p.trim_start_matches('/'));
+        tool("cp", &["-a", "--no-target-directory", &src.to_string_lossy(), &part.to_string_lossy()]).with_context(|| format!("copying {name} to the new disk"))?;
+        std::fs::rename(&part, &to).with_context(|| format!("putting {name} in the new disk's store"))?;
+        added += 1;
+    }
+    Ok(added)
 }
 
 #[cfg(test)]
@@ -1035,6 +1098,33 @@ mod tests {
         let w = hardware_file(detected, &Found { wireless: true }, fs).unwrap();
         let at = w.find("networking.wireless.iwd.enable = true;").expect("iwd on");
         assert!(w.find("not-detected.nix").unwrap() < at && at < w.find("by-label/nixos").unwrap(), "{w}");
+    }
+
+    /// What a first boot builds from is copied into the new store only where it is missing, whole under
+    /// its own name (links and modes kept), and nothing outside the store is taken.
+    #[test]
+    fn carried_paths_are_copied_where_missing() {
+        if !Path::new(BIN).join("cp").exists() {
+            return;
+        }
+        let from = tempfile::tempdir().unwrap();
+        let to = tempfile::tempdir().unwrap();
+        let src = from.path().join("nix/store");
+        std::fs::create_dir_all(src.join("aaaa-iwd-3.12/bin")).unwrap();
+        std::fs::write(src.join("aaaa-iwd-3.12/bin/iwd"), "iwd").unwrap();
+        symlink("iwd", src.join("aaaa-iwd-3.12/bin/iwctl")).unwrap();
+        std::fs::write(src.join("bbbb-firmware"), "fw").unwrap();
+        std::fs::create_dir_all(to.path().join("bbbb-firmware")).unwrap();
+        let paths = "/nix/store/aaaa-iwd-3.12\n/nix/store/bbbb-firmware\n\n";
+        assert_eq!(carry(paths, from.path(), to.path()).unwrap(), 1, "the firmware is there already");
+        assert_eq!(std::fs::read_to_string(to.path().join("aaaa-iwd-3.12/bin/iwd")).unwrap(), "iwd");
+        assert_eq!(std::fs::read_link(to.path().join("aaaa-iwd-3.12/bin/iwctl")).unwrap(), Path::new("iwd"));
+        assert!(to.path().join("bbbb-firmware").is_dir(), "what was there is left as it was");
+        assert!(std::fs::read_dir(to.path()).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with('.')), "no copy left half done");
+        assert_eq!(carry(paths, from.path(), to.path()).unwrap(), 0, "again: nothing to add");
+        for bad in ["/etc/shadow", "/nix/store/", "/nix/store/../x", "/nix/store/a/b", "/nix/store/.hidden"] {
+            assert!(carry(bad, from.path(), to.path()).is_err(), "{bad}");
+        }
     }
 
     /// Wi-Fi is found by a wireless interface, or by a PCI device of the wireless class before its driver
