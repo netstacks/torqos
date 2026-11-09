@@ -10,6 +10,8 @@ publish = false
 anyhow = "1"
 # The command line's own calls and words (cli/src/app.rs): what the window shows is what torqcli prints.
 torq = { path = "../cli" }
+# COSMIC's notifications, from the panel's applet (ADR-049 4).
+zbus = "5"
 
 # COSMIC's toolkit, at the revision COSMIC's own Settings 1.11.0 uses (the desktop's, ADR-045 amended).
 [dependencies.libcosmic]

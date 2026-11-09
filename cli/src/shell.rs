@@ -12,11 +12,11 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 /// The schema of the running system (modules/schema.nix).
-const SCHEMA: &str = "/etc/torq/schema.json";
+pub(crate) const SCHEMA: &str = "/etc/torq/schema.json";
 /// Every NixOS setting of the running system (modules/nixos-schema.nix): the tree's paths.
-const NIXOS_SCHEMA: &str = "/etc/torq/nixos-schema.json";
+pub(crate) const NIXOS_SCHEMA: &str = "/etc/torq/nixos-schema.json";
 
-struct Real<'a> {
+pub(crate) struct Real<'a> {
     cli: &'a Cli,
     /// `| display detail`: steps and Nix's and the broker's output shown as they come (no spinner).
     detail: std::cell::Cell<bool>,
@@ -115,7 +115,19 @@ fn done(o: run::Outcome, what: &str) -> Result<serde_json::Value> {
     }
 }
 
+impl<'a> Real<'a> {
+    /// The machine, as TorqOS Settings' sessions use it too (app.rs).
+    pub(crate) fn new(cli: &'a Cli) -> Self {
+        Real { cli, detail: std::cell::Cell::new(false) }
+    }
+}
+
 impl Machine for Real<'_> {
+    fn needs(&self) -> Option<String> {
+        let session = crate::app::session_recorded();
+        crate::app::needs(std::path::Path::new("/run/booted-system"), std::path::Path::new("/run/current-system"), session.as_deref()).line()
+    }
+
     fn evaluate(&self, base: &str, files: &[(String, Option<String>)]) -> Result<Evaluated> {
         let (_scratch, copy) = self.changed_copy(base, files)?;
         let log = run::start_log()?;
@@ -1152,6 +1164,9 @@ enum Invocation {
     Interactive,
     /// `--help`: how torqcli is run, on standard output.
     Help,
+    /// `--candidate -c "<command>; …"`: a script on the person's own saved candidate, as the shell's, kept when
+    /// it ends: how TorqOS Settings hands a commit of the draft to a terminal (ADR-045 2).
+    Draft(String),
     /// `-c "<command>; <command>…"`.
     Script(String),
     /// `torqcli <command>`: one operational command, its words as the calling shell split them (one
@@ -1161,7 +1176,7 @@ enum Invocation {
 
 /// How torqcli is run, named as it was (`torq` or `torqcli`).
 fn usage(name: &str) -> String {
-    format!("usage: {name} [--verbose] [-c \"<command>; <command>…\" | <command>]")
+    format!("usage: {name} [--verbose] [[--candidate] -c \"<command>; <command>…\" | <command>]")
 }
 
 /// The name torqcli was run by (`torq`, `torqcli`).
@@ -1210,7 +1225,7 @@ fn describe(e: &anyhow::Error) -> String {
 /// Whether a run may ask a person what a command offers to go on with (Session::asks): the shell, or
 /// one command, with standard input and output a terminal — never a script (`-c`), whatever it runs at.
 fn asks(run: &Invocation, stdin_terminal: bool, stdout_terminal: bool) -> bool {
-    !matches!(run, Invocation::Script(_)) && stdin_terminal && stdout_terminal
+    !matches!(run, Invocation::Script(_) | Invocation::Draft(_)) && stdin_terminal && stdout_terminal
 }
 
 #[cfg(test)]
@@ -1224,11 +1239,24 @@ fn a_script_is_never_asked() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn a_script_on_the_persons_candidate_is_asked_for_by_name() {
+    let a = |x: &[&str]| parse_args("torqcli", &x.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert_eq!(a(&["--candidate", "-c", "configure; commit"]).unwrap(), Invocation::Draft("configure; commit".into()));
+    assert_eq!(a(&["-c", "configure; commit", "--candidate"]).unwrap(), Invocation::Draft("configure; commit".into()), "in either order");
+    assert_eq!(a(&["-c", "configure; commit"]).unwrap(), Invocation::Script("configure; commit".into()), "without it, a script's candidate stays its own");
+    assert!(a(&["--candidate"]).is_err(), "it goes with -c");
+    assert!(a(&["--candidate", "show", "version"]).is_err(), "it goes with -c");
+    assert!(!asks(&Invocation::Draft("commit".into()), true, true), "a script is never asked to go on");
+}
+
 /// The command line (`name`: as torqcli was run). A refusal says why, then how torqcli is run.
 fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
     // (One line, as every message: the usage after the reason.)
     let refuse = |why: String| anyhow::anyhow!("{why}; {}", usage(name));
     let mut run = Invocation::Interactive;
+    let mut on_candidate = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1239,8 +1267,9 @@ fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
                 run = Invocation::Script(line.clone());
             }
             "-c" => return Err(refuse("-c once: every command in one -c, separated by ;".into())),
+            "--candidate" => on_candidate = true,
             "-h" | "--help" => return Ok(Invocation::Help),
-            o if o.starts_with('-') => return Err(refuse(format!("'{o}' is not an option of {name} (--verbose, -c, --help)"))),
+            o if o.starts_with('-') => return Err(refuse(format!("'{o}' is not an option of {name} (--verbose, -c, --candidate, --help)"))),
             _ if run == Invocation::Interactive => {
                 let rest: Vec<String> = std::iter::once(a).chain(it).cloned().collect();
                 let w = if rest.len() == 1 { crate::session::words(&rest[0])? } else { rest };
@@ -1250,12 +1279,19 @@ fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
                 if w.is_empty() {
                     return Err(refuse("an empty command".into()));
                 }
+                if on_candidate {
+                    return Err(refuse("--candidate goes with -c".into()));
+                }
                 return Ok(Invocation::Command(w));
             }
             _ => return Err(refuse(format!("'{a}' after -c's commands: every command goes in -c, separated by ;"))),
         }
     }
-    Ok(run)
+    match run {
+        Invocation::Script(line) if on_candidate => Ok(Invocation::Draft(line)),
+        _ if on_candidate => Err(refuse("--candidate goes with -c".into())),
+        run => Ok(run),
+    }
 }
 
 #[cfg(test)]
@@ -1287,7 +1323,7 @@ fn a_command_on_the_command_line() {
         (&["-c"][..], "-c needs the commands to run, as in -c \"show system alarms\"; usage: torq [--verbose]"),
         (&["-c", "x", "-c", "y"], "-c once: every command in one -c, separated by ;"),
         (&["-c", "x", "show"], "'show' after -c's commands: every command goes in -c"),
-        (&["-x"], "'-x' is not an option of torq (--verbose, -c, --help)"),
+        (&["-x"], "'-x' is not an option of torq (--verbose, -c, --candidate, --help)"),
         (&[""], "an empty command"),
     ] {
         let e = format!("{:#}", a(bad).unwrap_err());
@@ -1370,19 +1406,26 @@ fn run_shell(args: &[String]) -> Result<i32> {
     let machine = Real { cli: &cli, detail: std::cell::Cell::new(false) };
     let who = me()?;
     // Only the interactive shell keeps a candidate between runs; a script's is its own.
-    let saved = if run == Invocation::Interactive { Some(Candidate::default_path()?) } else { None };
+    let saved = if matches!(run, Invocation::Interactive | Invocation::Draft(_)) { Some(Candidate::default_path()?) } else { None };
     let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who);
     s.screen = || crate::ui::columns(false);
     s.cache = crate::evalcache::Cache::personal();
     // Offered to go on (install what an update loaded) only where a person is at a terminal: never a
     // script, which must not stop on a question it was not written to answer.
     s.asks = asks(&run, std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
+    #[derive(Clone, Copy)]
+    enum RunKind {
+        Draft,
+        Other,
+    }
+    let run_kind = if matches!(run, Invocation::Draft(_)) { RunKind::Draft } else { RunKind::Other };
     let fail = |line: &str, e: anyhow::Error| {
         say_error(&format!("{}: {}", history::one_line(line, 80), describe(&e)));
         Ok(1)
     };
     match run {
-        Invocation::Script(script) => {
+        Invocation::Script(script) | Invocation::Draft(script) => {
+            let keeps = matches!(run_kind, RunKind::Draft);
             let lines = script_lines(&script);
             for (i, line) in lines.iter().enumerate() {
                 match s.exec(line) {
@@ -1400,7 +1443,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
                 }
             }
             // A script's candidate is its own: what it changed and did not commit is gone. Say so.
-            if s.uncommitted().unwrap_or(false) {
+            if !keeps && s.uncommitted().unwrap_or(false) {
                 eprint!("{}", s.pending_note(crate::session::Pending::Discarded));
             }
             Ok(0)

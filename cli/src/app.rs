@@ -160,8 +160,10 @@ pub struct Glance {
     pub well: bool,
     /// The first thing `show system alarms` says is wrong, when something is.
     pub alarm: Option<String>,
-    /// A commit confirmed waiting: its change number and deadline (`commit` confirms it).
-    pub confirm: Option<(u64, String)>,
+    /// A commit confirmed waiting (`commit` confirms it).
+    pub confirm: Option<Confirm>,
+    /// The person's draft differs from the configuration in effect.
+    pub draft: bool,
     /// What the running system needs before it is all in use.
     pub needs: Needs,
     /// Proposals waiting for a person, and how many of them are tainted.
@@ -170,14 +172,34 @@ pub struct Glance {
     pub last: Option<String>,
 }
 
+/// A commit confirmed waiting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Confirm {
+    pub seq: u64,
+    /// Its deadline, in local time.
+    pub deadline: String,
+    /// Its deadline, seconds since the epoch, for a countdown.
+    pub at: Option<i64>,
+}
+
+/// Seconds since the epoch, now.
+pub fn now() -> i64 {
+    history::Clock::system().now
+}
+
 /// `session`: the system the desktop session started on, for what a log-out would take into use.
-pub fn glance(session: Option<&std::path::Path>) -> Result<Glance> {
+/// `draft`: `Console::uncommitted`, as the caller asked it.
+pub fn glance(session: Option<&std::path::Path>, draft: bool) -> Result<Glance> {
     let cli = cli();
     let (v, report) = crate::status_report(&cli, None)?;
     let well = matches!(report.fix, status::Fix::Nothing) && report.exit == 0;
     let alarm = if well { None } else { report.text.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from) };
     let p = &v["pending_confirm"];
-    let confirm = p["applied"].as_u64().map(|seq| (seq, history::one_line(p["deadline"].as_str().unwrap_or("?"), 40)));
+    let clock = history::Clock::system();
+    let confirm = p["applied"].as_u64().map(|seq| {
+        let ts = p["deadline"].as_str().unwrap_or("?");
+        Confirm { seq, deadline: history::one_line(&history::local_stamp(ts, &clock), 40), at: history::parse_ts(ts) }
+    });
     let entries = crate::read_ledger(&cli)?;
     let w = history::waiting_proposals(&entries);
     let needs = needs(std::path::Path::new("/run/booted-system"), std::path::Path::new("/run/current-system"), session);
@@ -186,11 +208,508 @@ pub fn glance(session: Option<&std::path::Path>) -> Result<Glance> {
         well,
         alarm,
         confirm,
+        draft,
         needs,
         waiting: (w.len(), w.iter().filter(|e| e.tainted).count()),
         last: history::last_change(&entries),
     })
 }
 
-/// The command that confirms a commit confirmed waiting, as a person would type it.
-pub const CONFIRM: &str = "torqcli -c \"configure; commit\"";
+/// What confirms a commit confirmed waiting: torqcli's `-c` script.
+pub const CONFIRM: &str = "configure; commit";
+/// That confirmation, as configuration mode reads it.
+pub const CONFIRM_LINE: &str = "commit";
+
+// ── What a session started on ────────────────────────────────────────────────────────────────────
+
+/// Where this login's system is recorded: the login's runtime directory outlives a logout while an SSH
+/// session is open, so the name is the login's own.
+fn session_file() -> Option<PathBuf> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")?;
+    let id = std::env::var("XDG_SESSION_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "desktop".into());
+    Some(PathBuf::from(dir).join(format!("torq-session-system-{id}")))
+}
+
+/// The system this login's desktop started on, if the applet has recorded one.
+pub fn session_recorded() -> Option<PathBuf> {
+    std::fs::read_link(session_file()?).ok()
+}
+
+/// The system this login's desktop started on, recorded the first time it is asked (the applet, which
+/// starts with the session), so an applet restarted mid-session still knows it.
+pub fn session_system() -> Option<PathBuf> {
+    if let Some(s) = session_recorded() {
+        return Some(s);
+    }
+    let now = std::fs::read_link("/run/current-system").ok()?;
+    if let Some(f) = session_file() {
+        let _ = std::os::unix::fs::symlink(&now, f);
+    }
+    Some(now)
+}
+
+// ── The command line, in a window ────────────────────────────────────────────────────────────────
+
+pub use crate::complete::Choice;
+pub use crate::session::Mode;
+
+/// Words as one line of a command, quoted where a word needs it.
+pub fn line(words: &[&str]) -> String {
+    words.iter().map(|w| crate::syntax::quote(w)).collect::<Vec<_>>().join(" ")
+}
+
+/// Which of torqcli's sessions a line runs in. The draft is the person's own saved candidate, shared with
+/// their terminal's shell.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum At {
+    /// What the pages read: operational mode.
+    Read,
+    /// What the pages change: configuration mode, from the top.
+    Draft,
+    /// The Commands page's: whichever mode the person has gone to.
+    Typed,
+}
+
+/// What a typed line did: its output or why not, and where the session is now.
+#[derive(Debug, Clone)]
+pub struct Typed {
+    pub output: Result<String, String>,
+    pub configuration: bool,
+    pub edit: Vec<String>,
+}
+
+enum Job {
+    Run(At, String, std::sync::mpsc::Sender<Result<String, String>>),
+    Typed(String, std::sync::mpsc::Sender<Typed>),
+    Choices(At, String, std::sync::mpsc::Sender<Vec<Choice>>),
+    Uncommitted(std::sync::mpsc::Sender<bool>),
+}
+
+/// torqcli's own sessions, on threads of their own (a session is not to be shared between threads, and a
+/// `commit check` must not hold up what a page reads). Cloned freely; each call blocks its caller.
+#[derive(Clone)]
+pub struct Console {
+    reads: std::sync::mpsc::Sender<Job>,
+    edits: std::sync::mpsc::Sender<Job>,
+}
+
+impl Default for Console {
+    fn default() -> Self {
+        Self::start()
+    }
+}
+
+impl Console {
+    pub fn start() -> Self {
+        let spawn = |sessions: &'static [At]| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || serve(sessions, rx));
+            tx
+        };
+        Console { reads: spawn(&[At::Read]), edits: spawn(&[At::Draft, At::Typed]) }
+    }
+
+    fn queue(&self, at: At) -> &std::sync::mpsc::Sender<Job> {
+        if at == At::Read { &self.reads } else { &self.edits }
+    }
+
+    /// Run a line, its output cleaned as the terminal's is.
+    pub fn run(&self, at: At, line: &str) -> Result<String, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.queue(at).send(Job::Run(at, line.to_string(), tx)).map_err(|_| GONE.to_string())?;
+        rx.recv().unwrap_or_else(|_| Err(GONE.to_string()))
+    }
+
+    /// A line typed on the Commands page.
+    pub fn typed(&self, line: &str) -> Typed {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let gone = || Typed { output: Err(GONE.to_string()), configuration: false, edit: vec![] };
+        if self.edits.send(Job::Typed(line.to_string(), tx)).is_err() {
+            return gone();
+        }
+        rx.recv().unwrap_or_else(|_| gone())
+    }
+
+    /// What may come next after `before` (the line up to the cursor): `?` and Tab's answer.
+    pub fn choices(&self, at: At, before: &str) -> Vec<Choice> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.queue(at).send(Job::Choices(at, before.to_string(), tx)).is_err() {
+            return vec![];
+        }
+        rx.recv().unwrap_or_default()
+    }
+
+    /// Whether the person's draft differs from the configuration in effect.
+    pub fn uncommitted(&self) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.edits.send(Job::Uncommitted(tx)).is_err() {
+            return false;
+        }
+        rx.recv().unwrap_or(false)
+    }
+}
+
+const GONE: &str = "torqcli's session in this window has stopped";
+
+/// Lines cleaned of anything that could fool the eye: the ledger's reasons are not ours.
+fn cleaned(out: String) -> String {
+    out.lines().map(|l| format!("{}\n", history::clean(l))).collect()
+}
+
+/// A worker: its sessions, and the jobs for them, in order.
+fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
+    let cli = cli();
+    let real = crate::shell::Real::new(&cli);
+    let session = |at: At| -> Result<crate::session::Session<'_>> {
+        use anyhow::Context as _;
+        let schema = crate::tree::Schema::parse(&std::fs::read_to_string(crate::shell::SCHEMA).with_context(|| format!("reading {} (is this TorqOS?)", crate::shell::SCHEMA))?)?;
+        let tree = crate::nixos::Tree::parse(&std::fs::read_to_string(crate::shell::NIXOS_SCHEMA).with_context(|| format!("reading {}", crate::shell::NIXOS_SCHEMA))?)?;
+        let who = crate::me()?;
+        let saved = crate::candidate::Candidate::default_path()?;
+        let mut s = crate::session::Session::new(schema, tree, crate::candidate::Repo::new(&cli.repo), Some(saved), &real, &who);
+        s.cache = crate::evalcache::Cache::personal();
+        if at == At::Draft {
+            s.exec("configure")?;
+        }
+        Ok(s)
+    };
+    let mut made: Vec<(At, Result<crate::session::Session<'_>, String>)> = sessions.iter().map(|&at| (at, session(at).map_err(|e| format!("{e:#}")))).collect();
+    for job in jobs {
+        match job {
+            Job::Run(at, line, reply) => {
+                let r = match of(&mut made, at) {
+                    Some(Ok(s)) => {
+                        s.reread();
+                        s.exec(&line).map(cleaned).map_err(|e| format!("{e:#}"))
+                    }
+                    Some(Err(e)) => Err(e.clone()),
+                    None => Err(GONE.to_string()),
+                };
+                let _ = reply.send(r);
+            }
+            Job::Typed(line, reply) => {
+                let t = match of(&mut made, At::Typed) {
+                    Some(Ok(s)) => {
+                        s.reread();
+                        let output = s.exec(&line).map(cleaned).map_err(|e| format!("{e:#}"));
+                        // `exit` at the top of operational mode: the window stays, and so does the session.
+                        s.done = false;
+                        Typed { output, configuration: s.mode == Mode::Configuration, edit: s.edit_path().to_vec() }
+                    }
+                    Some(Err(e)) => Typed { output: Err(e.clone()), configuration: false, edit: vec![] },
+                    None => Typed { output: Err(GONE.to_string()), configuration: false, edit: vec![] },
+                };
+                let _ = reply.send(t);
+            }
+            Job::Choices(at, before, reply) => {
+                let c = match of(&mut made, at) {
+                    Some(Ok(s)) => {
+                        s.reread();
+                        choices_of(s, &before)
+                    }
+                    _ => vec![],
+                };
+                let _ = reply.send(c);
+            }
+            Job::Uncommitted(reply) => {
+                let u = match of(&mut made, At::Draft) {
+                    Some(Ok(s)) => {
+                        s.reread();
+                        s.uncommitted().unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                let _ = reply.send(u);
+            }
+        }
+    }
+}
+
+/// The complete words before the cursor, and the word being typed; None inside an open quote.
+fn at_cursor(before: &str) -> Option<(Vec<String>, String)> {
+    crate::session::words(before).ok()?;
+    let partial = if before.ends_with(char::is_whitespace) { "" } else { before.rsplit(char::is_whitespace).next().unwrap_or("") };
+    let done = &before[..before.len() - partial.len()];
+    Some((crate::session::words(done).ok()?, partial.to_string()))
+}
+
+fn choices_of(s: &mut crate::session::Session<'_>, before: &str) -> Vec<Choice> {
+    let Some((words, partial)) = at_cursor(before) else { return vec![] };
+    let at = crate::complete::At {
+        mode: s.mode,
+        edit: s.edit_path().to_vec(),
+        data: s.help_data(),
+        configurations: crate::complete::Later::new(Vec::new),
+        files: s.nix_files(),
+        interfaces: vec![],
+    };
+    crate::complete::choices_at(&crate::complete::Know { schema: &s.schema, tree: &s.tree }, &at, &words, &partial)
+}
+
+/// Whether a line must go to a terminal: it asks a person something (y/N), or their password, or opens
+/// their editor. A password is never typed in a window TorqOS draws (ADR-045 5); everything else runs here.
+pub fn needs_terminal(mode: Mode, line: &str) -> bool {
+    fn asks(op: &crate::syntax::Op) -> bool {
+        use crate::syntax::{FileAction, LoadFrom, Op, Request};
+        match op {
+            Op::Commit(o) => !o.check,
+            Op::ClearCommit => true,
+            Op::Request(Request::Update { .. } | Request::Pull | Request::SoftwareRollback { .. }) => false,
+            Op::Request(_) => true,
+            Op::File { action: FileAction::Edit, .. } => true,
+            Op::Load { from: LoadFrom::Terminal, .. } => true,
+            Op::Run(op) => asks(op),
+            Op::Top { then: Some(op) } => asks(op),
+            _ => false,
+        }
+    }
+    crate::session::words(line).ok().and_then(|w| crate::grammar::read_line(mode, &w).ok()).is_some_and(|l| asks(&l.op))
+}
+
+/// Run `script` (torqcli's `-c`) in COSMIC's terminal and wait until it is closed: `draft`, on the person's
+/// saved candidate. It stays open at the end, for what happened to be read.
+pub fn in_terminal(script: &str, draft: bool) -> Result<(), String> {
+    let run = if draft { "torqcli --candidate -c \"$1\"" } else { "torqcli -c \"$1\"" };
+    let shell = format!("{run}; echo; read -r -p 'Press Enter to close. ' _");
+    std::process::Command::new("cosmic-term")
+        .args(["-e", "sh", "-c", &shell, "sh", script])
+        .status()
+        .map_err(|e| format!("opening COSMIC's terminal: {e}"))
+        .map(drop)
+}
+
+/// The line `in_terminal` runs for a line of the given mode (the draft's, from configuration mode).
+pub fn terminal_script(mode: Mode, line: &str) -> (String, bool) {
+    match mode {
+        Mode::Configuration => (format!("configure; {line}"), true),
+        Mode::Operational => (line.to_string(), false),
+    }
+}
+
+// ── The pages that are the command line's output ─────────────────────────────────────────────────
+
+/// How a button acts on its command.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum How {
+    /// Run it (in a terminal, if it asks: `needs_terminal`).
+    Run,
+    /// Open the Commands page with it typed so far, to finish: operational mode.
+    FillOp,
+    /// The same, in configuration mode.
+    FillCf,
+}
+
+/// A button: its label, the torqcli command, and how it acts.
+#[derive(Clone, Copy, Debug)]
+pub struct Action {
+    pub label: &'static str,
+    pub command: &'static str,
+    pub how: How,
+}
+
+/// A page that shows commands' output and offers actions: nothing on it is the window's own.
+#[derive(Clone, Copy, Debug)]
+pub struct View {
+    /// Its name on the command line of the application (`torq-settings data`).
+    pub id: &'static str,
+    pub name: &'static str,
+    pub icon: &'static str,
+    /// A title, and the command whose output is that section.
+    pub sections: &'static [(&'static str, &'static str)],
+    pub actions: &'static [Action],
+}
+
+const fn run(label: &'static str, command: &'static str) -> Action {
+    Action { label, command, how: How::Run }
+}
+const fn op(label: &'static str, command: &'static str) -> Action {
+    Action { label, command, how: How::FillOp }
+}
+const fn cf(label: &'static str, command: &'static str) -> Action {
+    Action { label, command, how: How::FillCf }
+}
+
+/// What the agent may do without asking, and every button on the Proposals page besides each proposal's own.
+pub const AGENT: &[Action] = &[op("Trust the agent for a while…", "request system agent trust "), run("End that trust now", "request system agent trust revoke")];
+
+pub static VIEWS: &[View] = &[
+    View {
+        id: "software",
+        name: "Software",
+        icon: "software-update-available-symbolic",
+        sections: &[("What this machine runs", "show version")],
+        actions: &[
+            run("Load the newest TorqOS into the draft", "request system update"),
+            run("Load everything newer, nixpkgs too", "request system update all"),
+            op("Load an earlier configuration's software…", "request system software rollback "),
+            op("Search the software you can install…", "show packages "),
+            cf("Add a package for everyone…", "set environment systemPackages "),
+            cf("Add a package for one person…", "set users users "),
+            cf("Remove a package…", "delete environment systemPackages "),
+        ],
+    },
+    View {
+        id: "services",
+        name: "Services",
+        icon: "network-server-symbolic",
+        sections: &[("Turned on by the configuration", "show services"), ("The network", "show interfaces")],
+        actions: &[cf("Turn a service on or change it…", "set services "), cf("Turn a service off…", "delete services ")],
+    },
+    View {
+        id: "data",
+        name: "Data",
+        icon: "drive-harddisk-system-symbolic",
+        sections: &[("Snapshots, each from before a change", "show system snapshots"), ("Backups", "show system backups"), ("Disks", "show system storage")],
+        actions: &[
+            run("Take a snapshot now", "request system snapshot take"),
+            op("Put a path back from a snapshot…", "request system snapshot restore "),
+            op("Delete a snapshot…", "request system snapshot delete "),
+            cf("Declare a backup…", "set services restic backups "),
+            op("Give a backup its key…", "request system backup key "),
+            op("Put a path back from a backup…", "request system restore "),
+        ],
+    },
+    View {
+        id: "machine",
+        name: "This Machine",
+        icon: "computer-symbolic",
+        sections: &[("How long it has run", "show system uptime"), ("People", "show users"), ("Its configuration's remote", "show system remote"), ("Nix files of the configuration", "file list")],
+        actions: &[
+            run("Change your password", "request system password"),
+            op("Change someone's password…", "request system password "),
+            run("Return the machine to its history", "request system repair"),
+            run("Load what waits on the remote into the draft", "request system pull"),
+            run("Show this machine's key for the remote", "request system remote key"),
+            run("Clear the remote's alarm", "request system remote clear"),
+            run("Say no more of a ledger disagreement", "request system ledger acknowledge"),
+            run("Cancel the commit scheduled", "clear system commit"),
+        ],
+    },
+];
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+    use crate::grammar::{read_line, walk};
+    use crate::session::words;
+
+    fn whole(mode: Mode, c: &str) {
+        read_line(mode, &words(c).unwrap()).unwrap_or_else(|e| panic!("`{c}` is not a command of torqcli: {e:#}"));
+    }
+
+    /// Every action the window offers is a torqcli command (ADR-045 2): the grammar's own reading of it.
+    #[test]
+    fn everything_the_pages_offer_is_a_command() {
+        let check = |a: &Action| match a.how {
+            How::Run => whole(Mode::Operational, a.command),
+            How::FillOp => assert!(walk(Mode::Operational, &words(a.command).unwrap()).is_ok(), "`{}`", a.command),
+            How::FillCf => assert!(walk(Mode::Configuration, &words(a.command).unwrap()).is_ok(), "`{}`", a.command),
+        };
+        for v in VIEWS {
+            for (_, c) in v.sections {
+                whole(Mode::Operational, c);
+            }
+            v.actions.iter().for_each(check);
+        }
+        AGENT.iter().for_each(check);
+        for c in ["show system alarms", "show system ledger", "show system proposals", "show system commit", "help nginx"] {
+            whole(Mode::Operational, c);
+        }
+        for c in ["show", "show | compare", "commit check", "commit comment \"x\" confirmed 5", "commit at 12:00", "rollback 0", "rollback 3", "set a b", "delete a b"] {
+            whole(Mode::Configuration, c);
+        }
+        whole(Mode::Operational, "request system revert 5");
+        whole(Mode::Operational, "request system apply 5");
+        whole(Mode::Configuration, CONFIRM_LINE);
+    }
+
+    /// What asks a person goes to a terminal; what only reads, or only changes the draft, stays in the window.
+    #[test]
+    fn what_goes_to_a_terminal() {
+        let t = |m, c| needs_terminal(m, c);
+        for c in ["commit", "commit comment \"x\"", "commit confirmed 5", "commit at 12:00", "file edit a.nix", "load merge terminal", "top commit"] {
+            assert!(t(Mode::Configuration, c), "{c}");
+        }
+        for c in ["request system revert 5", "request system apply 5", "request system password", "request system repair", "request system snapshot take", "clear system commit"] {
+            assert!(t(Mode::Operational, c), "{c}");
+        }
+        for c in ["commit check", "set a b", "delete a b", "rollback 1", "show | compare", "run show version"] {
+            assert!(!t(Mode::Configuration, c), "{c}");
+        }
+        assert!(t(Mode::Configuration, "run request system repair"), "from configuration mode too");
+        for c in ["show system alarms", "request system update", "request system pull", "show packages firefox"] {
+            assert!(!t(Mode::Operational, c), "{c}");
+        }
+    }
+
+    #[test]
+    fn a_line_is_quoted_where_it_must_be() {
+        assert_eq!(line(&["set", "a", "b c"]), "set a \"b c\"");
+    }
+
+    #[test]
+    fn the_terminal_runs_the_draft_from_configuration_mode() {
+        assert_eq!(terminal_script(Mode::Configuration, "commit"), ("configure; commit".to_string(), true));
+        assert_eq!(terminal_script(Mode::Operational, "request system repair"), ("request system repair".to_string(), false));
+    }
+}
+
+/// One of a worker's sessions.
+fn of<'b, 's>(made: &'b mut [(At, Result<crate::session::Session<'s>, String>)], at: At) -> Option<&'b mut Result<crate::session::Session<'s>, String>> {
+    made.iter_mut().find(|(a, _)| *a == at).map(|(_, s)| s)
+}
+
+/// A proposal waiting for a person.
+#[derive(Debug, Clone)]
+pub struct Proposal {
+    pub seq: u64,
+    pub reason: String,
+    pub by: String,
+    pub tainted: bool,
+}
+
+/// The proposals waiting: `show system proposals`' rows.
+pub fn proposals() -> Result<Vec<Proposal>> {
+    let entries = crate::read_ledger(&cli())?;
+    Ok(history::waiting_proposals(&entries)
+        .into_iter()
+        .map(|e| Proposal { seq: e.seq, reason: history::one_line(&e.reason, 300), by: history::one_line(&e.actor, 40), tainted: e.tainted })
+        .collect())
+}
+
+/// `show system commit`'s configurations: each number (for `rollback <n>`) and its line.
+pub fn configurations(shown: &str) -> Vec<(u32, String)> {
+    shown
+        .lines()
+        .filter_map(|l| {
+            let (n, rest) = l.trim().split_once(char::is_whitespace)?;
+            Some((n.parse().ok()?, rest.trim().to_string()))
+        })
+        .collect()
+}
+
+/// COSMIC's own dialog for restarting: it asks first, and counts down.
+pub fn ask_restart() {
+    spawn("cosmic-osd", &["restart"]);
+}
+
+/// COSMIC's own dialog for logging out: it asks first, and counts down.
+pub fn ask_log_out() {
+    spawn("cosmic-osd", &["log-out"]);
+}
+
+/// TorqOS Settings, at a page (`VIEWS`' ids, or overview, configuration, changes, history, proposals, commands).
+pub fn open_settings(page: &str) {
+    spawn("torq-settings", &[page]);
+}
+
+fn spawn(program: &str, args: &[&str]) {
+    let _ = std::process::Command::new(program).args(args).spawn();
+}
+
+#[cfg(test)]
+#[test]
+fn the_configurations_shown_with_their_numbers() {
+    let shown = "Rollback  Change  When  By  What\n0         #16     then  me  One\n1         #14     then  me  Two\n";
+    assert_eq!(configurations(shown), vec![(0, "#16     then  me  One".to_string()), (1, "#14     then  me  Two".to_string())]);
+}

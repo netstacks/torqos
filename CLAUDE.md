@@ -67,6 +67,7 @@ tests/                 NixOS VM tests
 release/               allowed_signers: the keys a machine trusts a release from
 .github/workflows/     test (pull requests, by hand, each release), weekly nixpkgs bump, release on a v* tag
 branding/              the TorqOS logo, icons, terminal logos and palette (modules/branding.nix)
+settings/              Rust crate: torq-settings (TorqOS Settings, ADR-045 2) and torq-applet (the panel, ADR-049), on torqcli's library
 docs/                  design docs and decision log
 ```
 

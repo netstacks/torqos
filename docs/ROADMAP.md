@@ -221,13 +221,14 @@ Before M4: it serves CLI and desktop installs alike. The owner's laptop (HARDWAR
 Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, and only COSMIC
 (ADR-045). Needs `torq-wire` (ADR-044) first.
 
-- [ ] **`torqos-desktop`**: COSMIC and cosmic-greeter through NixOS's modules, its portal, Flatpak on;
+- [x] **`torqos-desktop`** (2026-11-09, COSMIC 1.11 from nixos-unstable, ADR-045 amended; `tests/desktop.nix`): COSMIC and cosmic-greeter through NixOS's modules, its portal, Flatpak on;
       `modules/desktop.nix` rewritten as its module set (niri, tuigreet, Quickshell, foot, fuzzel go).
       Loaded with `load override` on an image machine, or adopted at setup (M3). A VM test that it
       boots to a COSMIC session; smoothness judged on real hardware (.37).
-- [ ] **TorqOS Settings** (`settings/`, libcosmic; ADR-045 2): the tree, the candidate, commit,
+- [x] **TorqOS Settings** (2026-11-09; torqcli's own sessions, ADR-045 amended; every action checked against the grammar): the tree, the candidate, commit,
       history, rollback, pending proposals, alarms, backups — a client of the broker's socket only,
       its words the broker's. A VM test that each action it offers is the torqcli request it names.
+- [x] **TorqOS in COSMIC's panel** (2026-11-09, ADR-049): `torq-applet`, what a switch needs, notifications, the menu refreshed.
 - [ ] **COSMIC Settings wrapped** (ADR-045 3): the pages that change what the tree owns (time zone,
       host name, users, …) hand the change to TorqOS Settings as a proposal; a patch in the overlay.
 - [ ] **The person's COSMIC settings** (ADR-045 4): tree defaults, drift in `show | compare`,

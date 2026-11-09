@@ -1,6 +1,6 @@
 # TorqOS Settings (ADR-045 2), built as COSMIC's own applications are (libcosmicAppHook), from the nixpkgs
 # the desktop's COSMIC comes from (flake.nix, `nixpkgs-cosmic`).
-{ lib, rustPlatform, libcosmicAppHook, pkg-config, makeDesktopItem, copyDesktopItems }:
+{ lib, rustPlatform, libcosmicAppHook, pkg-config, makeDesktopItem, copyDesktopItems, cosmic-panel }:
 
 rustPlatform.buildRustPackage {
   pname = "torq-settings";
@@ -17,12 +17,24 @@ rustPlatform.buildRustPackage {
   # libcosmic and its own git dependencies, each at the revision Cargo.lock names, vendored as nixpkgs does
   # COSMIC's own applications (two git sources give crates of one name and version, which cargoLock refuses).
   # Changing Cargo.lock changes this hash: build once, and take the one Nix reports.
-  cargoHash = "sha256-a5Ucu/F79Xs2z2SICu4wTA8NMLFwcBx+HwhBVBmVi70=";
+  cargoHash = "sha256-lPihLAR3p5IvwWjMCaxdJ6IRAh5c54Vfn1cNSlAXdgE=";
 
   nativeBuildInputs = [ pkg-config libcosmicAppHook copyDesktopItems ];
 
   # Its own code has no tests; torqcli's library, whose words it shows, is tested in torqcli's package.
   doCheck = false;
+
+  # TorqOS in COSMIC's panel by default (ADR-049 2). The panel reads its whole default configuration or none,
+  # so all of it, COSMIC's own at this version, with our applet first among the status ones. A default: a
+  # person's own panel settings come before it. The build stops if COSMIC's list no longer reads as expected.
+  postInstall = ''
+    mkdir -p $out/share
+    cp -r --no-preserve=mode ${cosmic-panel.src}/data/default_schema $out/share/cosmic
+    wings=$out/share/cosmic/com.system76.CosmicPanel.Panel/v1/plugins_wings
+    grep -q '"com.system76.CosmicAppletInputSources"' $wings
+    sed -i 's/"com.system76.CosmicAppletInputSources"/"org.torqos.Applet", &/' $wings
+    grep -q org.torqos.Applet $wings
+  '';
 
   desktopItems = [
     # TorqOS in COSMIC's panel (ADR-049): an applet, not an application of the menu.

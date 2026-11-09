@@ -5020,6 +5020,7 @@ dependencies = [
  "anyhow",
  "libcosmic",
  "torq",
+ "zbus",
 ]
 
 [[package]]

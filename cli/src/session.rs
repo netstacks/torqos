@@ -29,6 +29,11 @@ pub trait Machine {
     /// Propose `diff` against `base` and apply it (with `confirm` minutes: commit confirmed). The
     /// broker's tier must be `tier`. Returns the applied ledger entry's number.
     fn commit(&self, diff: &str, base: &str, tier: &str, reason: &str, confirm: Option<u32>) -> Result<u64>;
+    /// What the running system needs before it is all in use (ADR-049), as a sentence; None: nothing, or not
+    /// a machine that can say.
+    fn needs(&self) -> Option<String> {
+        None
+    }
     /// A commit confirmed waiting, if there is one.
     fn pending_confirm(&self) -> Result<Option<Waiting>>;
     /// Keep the waiting commit confirmed.
@@ -517,6 +522,15 @@ impl<'a> Session<'a> {
         self.write_shared(|_, _| Ok(())).map(drop)
     }
 
+    /// Read the shared candidate again at the next command, as it is on disk now: for a session that lives
+    /// beside others changing it (TorqOS Settings), unless this one holds it alone.
+    pub fn reread(&mut self) {
+        if self.exclusive.is_none() {
+            self.candidate = None;
+            self.print = None;
+        }
+    }
+
     /// Run one command line; returns what to print.
     pub fn exec(&mut self, line: &str) -> Result<String> {
         self.exec_words(&words(line)?)
@@ -578,6 +592,16 @@ impl<'a> Session<'a> {
     /// output path). Data — a configuration, a comparison, a table — is not a sentence.
     fn said(&self, text: &str) -> String {
         format!("{}\n", self.ui().line("", text))
+    }
+
+    /// What the running system needs now (ADR-049), after a change; `waiting`: that change still waits for
+    /// its confirmation, and a restart before it undoes it.
+    fn needs_note(&self, waiting: bool) -> String {
+        match self.machine.needs() {
+            Some(l) if waiting && l.starts_with("Restart") => self.said(&format!("{l} Confirm this change first: a restart undoes a change not yet confirmed.")),
+            Some(l) => self.said(&l),
+            None => String::new(),
+        }
     }
 
     /// A sentence marked `! ` (paint.rs shows it as a warning).
@@ -1721,7 +1745,7 @@ impl<'a> Session<'a> {
                 bail!("change #{} is waiting for {} to confirm it; it rolls back at {} unless they do", w.seq, w.by.as_deref().unwrap_or("?"), w.deadline);
             }
             let n = self.machine.confirm()?;
-            return Ok(self.said(&format!("commit complete: change #{} confirmed (#{n})", w.seq)));
+            return Ok(self.said(&format!("commit complete: change #{} confirmed (#{n})", w.seq)) + &self.needs_note(false));
         }
         if let Some(w) = waiting {
             bail!(
@@ -1840,7 +1864,7 @@ impl<'a> Session<'a> {
                 self.said("commit complete")
             ),
             None => self.said(&format!("commit complete (change #{seq})")),
-        } + &kept)
+        } + &kept + &self.needs_note(confirm.is_some()))
     }
 
     /// The candidate discarded once it is committed (or proposed) — unless another session changed or

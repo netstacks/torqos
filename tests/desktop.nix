@@ -58,6 +58,11 @@ pkgs.testers.runNixOSTest {
         # And TorqOS in the panel (ADR-049): an applet COSMIC offers in its panel settings.
         machine.succeed("grep -qx X-CosmicApplet=true /run/current-system/sw/share/applications/org.torqos.Applet.desktop")
         machine.succeed("test -x /run/current-system/sw/bin/torq-applet")
+        # In the panel by default, running there: a new machine has it without anyone adding it.
+        machine.wait_until_succeeds("pgrep -u alice -fx torq-applet", timeout=60)
+
+    with subtest("COSMIC's own first-run wizard is not offered: TorqOS has its setup"):
+        machine.fail("test -e /run/current-system/sw/bin/cosmic-initial-setup")
 
     with subtest("Flathub is the person's, not the system's"):
         machine.wait_until_succeeds("su - alice -c 'flatpak remotes --user' | grep -q flathub", timeout=60)

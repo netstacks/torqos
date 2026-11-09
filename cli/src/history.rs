@@ -279,6 +279,8 @@ pub struct Row {
     pub seq: u64,
     /// Who made it: the person who approved it, else who asked; empty for the user's own.
     pub who: String,
+    /// It changed the machine and can be undone (`request system revert`).
+    pub undoable: bool,
     /// Made by a session that read untrusted content.
     pub tainted: bool,
     /// What happened, in words.
@@ -310,7 +312,7 @@ pub fn rows(entries: &[Entry], limit: usize, clock: &Clock) -> Vec<Row> {
                 (None, "user" | "") => String::new(),
                 (None, a) => format!("asked by {}", one_line(a, 16)),
             };
-            Row { day, time, symbol, seq: e.seq, who, tainted: e.tainted, text: one_line(&text, usize::MAX) }
+            Row { day, time, symbol, seq: e.seq, who, undoable: e.kind == "applied", tainted: e.tainted, text: one_line(&text, usize::MAX) }
         })
         .collect()
 }

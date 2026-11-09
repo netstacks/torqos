@@ -1592,6 +1592,7 @@ more client. COSMIC has a polkit agent in its shell (`cosmic-osd`) and goes thro
     (it installs setuid pkexec with polkit always): declared for 26.05 only, as what it does, `false`
     refused.
   - When the release's nixpkgs carries a COSMIC as new as unstable's, the second input may go again.
+- **Amended (2026-11-09, the owner: "the app needs 1:1 for the CLI, within reason"): TorqOS Settings runs torqcli's own sessions.** Most of torqcli's work is in torqcli, not the broker (the tree, the candidate, compare), so a window that only spoke to the socket would have to write it again. `cli/` is a library as well as a program; `torq::app::Console` holds real `Session`s on worker threads, with the person's saved candidate, so the window, the terminal's shell and `torqcli --candidate -c` edit one draft (a change by one is seen by the next command of the others; a write over another's is refused, as between two shells). Every button is a command line; `everything_the_pages_offer_is_a_command` reads each through the grammar. The Commands page is the grammar's own (`?` and Tab, as choices), so what torqcli gains the window has. What asks a person (y/N, a password, their editor: `app::needs_terminal`) goes to COSMIC's terminal, on `torqcli --candidate -c` where it concerns the draft; a password is never typed in a window TorqOS draws. Confirming a commit uses a private candidate, always: `commit` of an empty one is what confirms, and a draft must not be swept in with it. Point 5's polkit dialog, point 3's patch of COSMIC Settings and point 4's "save my desktop" remain to build.
 
 ## ADR-046 — Real hardware: firmware on metal, Wi-Fi in the base, a reference laptop
 
@@ -1834,7 +1835,7 @@ prebuilds it), so on real hardware it may fetch build tools from the network.
 
 ## ADR-049 — TorqOS in COSMIC: what a switch needs, and the panel that says so
 
-**Status:** accepted, 2026-11-09 (the owner: "fully integrate TorqOS into the COSMIC desktop … make the panel
+**Status:** accepted and built, 2026-11-09 (the owner: "fully integrate TorqOS into the COSMIC desktop … make the panel
 reflect it in a nice elegant way … and the TorqOS app have all the detailed information"). Builds on ADR-045.
 **Context:** A commit switches the running system the NixOS way: changed services restart at once; an app's new
 version waits until it is opened again, and COSMIC's launcher does not see a new menu entry until it restarts;
@@ -1884,6 +1885,7 @@ A server's person reads torqcli's output; a desktop's person looks at the screen
   sharing the page words), the panel default in the desktop module, notifications, the menu refresh. VM tests:
   each case of 1 detected (a kernel change, a COSMIC change, a package change, a pending confirmation); the
   applet in the panel after login.
+- **As built (2026-11-09):** the badge is drawn from the mark in the panel's own text colour (a symbolic icon has one colour, and the badge is the news). The menu is refreshed by a file come and gone in `~/.local/share/applications`, which COSMIC's app library watches recursively; the system's own folder is replaced whole by a switch, so a watch on it sees nothing. The panel reads its default configuration whole or not at all (no `entries`: its compiled-in default, written to the person's config), so the package ships COSMIC's own `data/default_schema` from the pinned `cosmic-panel`, with the applet inserted, and its build stops if that list no longer reads as expected. The system a session started on is kept per login (`XDG_SESSION_ID`): the runtime directory outlives a logout while an SSH session is open. COSMIC's first-run wizard is left out: TorqOS has its own setup, and the wizard sets what the configuration owns.
 - **Not:** restarting or logging out on the person's behalf; a second status daemon (the applet asks the broker
   as torqcli does); the applet as a way to change the system (it confirms, opens TorqOS Settings, or asks the
   session to log out or restart).

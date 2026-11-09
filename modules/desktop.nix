@@ -56,6 +56,10 @@ in
     # Bluetooth, power profiles, geoclue and the keyring.
     services.desktopManager.cosmic.enable = true;
     services.displayManager.cosmic-greeter.enable = true;
+    # TorqOS has its own first-boot setup, and the configuration owns what COSMIC's wizard would set (the
+    # time zone, accounts): not a second one that writes around it.
+    environment.cosmic.excludePackages = [ pkgs.cosmic-initial-setup ];
+    services.desktopManager.cosmic.showExcludedPkgsWarning = false;
 
     # A desktop's network: NetworkManager, for COSMIC's network applet and settings page, with iwd as its
     # Wi-Fi backend (ADR-046 2): one Wi-Fi stack, so networks joined at setup with iwctl stay joined. The
