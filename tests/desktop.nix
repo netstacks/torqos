@@ -10,11 +10,15 @@ let
 in
 pkgs.testers.runNixOSTest {
   name = "torq-desktop";
+  # The desktop sets nixpkgs.overlays (COSMIC from its own nixpkgs), so the nodes build their own package set.
+  node.pkgsReadOnly = false;
 
   nodes.machine = { lib, ... }: {
     imports = [ self.nixosModules.default ];
     torq.user = "alice";
     torq.desktop.enable = true;
+    # As every TorqOS machine has it (lib.mkSystem); the desktop reads it to take COSMIC from its own nixpkgs.
+    nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
     # NixOS's test instrumentation gives root an empty password; TorqOS asserts root has none.
     users.users.root.hashedPasswordFile = lib.mkForce null;
     # COSMIC's session and its applications: NixOS's own COSMIC test gives it 4 GB.
@@ -37,8 +41,9 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the owner logs in to COSMIC"):
         machine.send_chars("torq-desktop\n", delay=0.2)
-        machine.wait_until_succeeds("pgrep -u alice -x cosmic-comp", timeout=120)
-        machine.wait_until_succeeds("pgrep -u alice -x cosmic-panel", timeout=120)
+        # COSMIC's programs run wrapped: their names are the wrapper's, their command lines their own.
+        machine.wait_until_succeeds("pgrep -u alice -fx cosmic-comp", timeout=120)
+        machine.wait_until_succeeds("pgrep -u alice -fx cosmic-panel", timeout=120)
         machine.sleep(10)
         machine.screenshot("session")
 

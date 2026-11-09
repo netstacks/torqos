@@ -3,6 +3,9 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # COSMIC alone, newer than the release's (ADR-045, amended): the desktop's packages, its NixOS modules
+    # and Mesa come from here; the rest of the system from `nixpkgs`.
+    nixpkgs-cosmic.url = "github:NixOS/nixpkgs/nixos-unstable";
     # TODO(M4): lanzaboote for owner-key Secure Boot + measured boot.
     # lanzaboote = {
     #   url = "github:nix-community/lanzaboote";
@@ -10,7 +13,7 @@
     # };
   };
 
-  outputs = { self, nixpkgs, ... }:
+  outputs = { self, nixpkgs, nixpkgs-cosmic, ... }:
     let
       lib = nixpkgs.lib;
       linuxSystems = [ "x86_64-linux" "aarch64-linux" ];
@@ -56,7 +59,19 @@
 
       # ── The distribution, as one NixOS module ────────────────────────────────
       nixosModules.default = { pkgs, lib, ... }: {
-        imports = [ ./modules ];
+        imports = [
+          ./modules
+          # COSMIC's NixOS modules from the nixpkgs its packages come from (ADR-045, amended): a newer
+          # COSMIC names packages and settings the release's modules do not know. Each does nothing
+          # unless the desktop is on.
+          "${nixpkgs-cosmic}/nixos/modules/services/desktop-managers/cosmic.nix"
+          "${nixpkgs-cosmic}/nixos/modules/services/display-managers/cosmic-greeter.nix"
+        ];
+        disabledModules = [
+          "services/desktop-managers/cosmic.nix"
+          "services/display-managers/cosmic-greeter.nix"
+        ];
+        torq.desktop.cosmicNixpkgs = nixpkgs-cosmic;
         torq.broker.package =
           lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         torq.cli.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq;
