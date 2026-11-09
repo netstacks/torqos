@@ -200,6 +200,11 @@ pub fn later_conflicts(entries: &[Entry], applied: u64) -> Vec<u64> {
         .collect()
 }
 
+/// Whether a commit confirmed that was not confirmed took change `seq` back.
+fn rolled_back(entries: &[Entry], seq: u64) -> bool {
+    entries.iter().any(|e| e.kind == "rolled_back" && e.data["applied"].as_u64() == Some(seq))
+}
+
 /// The proposals not yet applied or failed: waiting for a person (the agent's among them).
 pub fn waiting_proposals(entries: &[Entry]) -> Vec<&Entry> {
     entries
@@ -231,6 +236,7 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         }
         "interrupted" => ("⚠", format!("Interrupted: {}", reason_of(entries, e.data["target"].as_u64()).unwrap_or("a change"))),
         "init" => ("·", "TorqOS set up".to_string()),
+        "rolled_back" => ("↶", clean(&e.reason)),
         "repaired" if e.data["restored"] == false => ("✗", "Tried to return the machine to its history".to_string()),
         "repaired" => ("✓", "Returned the machine to its history".to_string()),
         "break_glass" => ("⚠", format!("Root shell opened: {}", clean(&e.reason))),
@@ -249,7 +255,8 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         "password" => ("✓", clean(&e.reason)),
         "password_failed" => ("✗", clean(&e.reason)),
         "proposal" => ("·", format!("Proposed, not applied: {}", e.reason)),
-        other => ("·", other.to_string()),
+        other if e.reason.is_empty() => ("·", other.to_string()),
+        _ => ("·", clean(&e.reason)),
     }
 }
 
@@ -312,7 +319,7 @@ pub fn rows(entries: &[Entry], limit: usize, clock: &Clock) -> Vec<Row> {
                 (None, "user" | "") => String::new(),
                 (None, a) => format!("asked by {}", one_line(a, 16)),
             };
-            Row { day, time, symbol, seq: e.seq, who, undoable: e.kind == "applied", tainted: e.tainted, text: one_line(&text, usize::MAX) }
+            Row { day, time, symbol, seq: e.seq, who, undoable: e.kind == "applied" && undone_by(entries, e.seq).is_none() && !rolled_back(entries, e.seq), tainted: e.tainted, text: one_line(&text, usize::MAX) }
         })
         .collect()
 }
@@ -496,4 +503,24 @@ mod tests {
         assert!(out.contains("#11  asked by agent  Interrupted: Install y") && !out.contains("Proposed, not applied"), "{out}");
     }
 
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+
+    #[test]
+    fn a_change_taken_back_is_said_and_offers_no_undo() {
+        let e = parse(concat!(
+            r#"{"seq":1,"ts":"2026-10-30T12:00:00Z","kind":"applied","actor":"user","tier":"system","reason":"One","data":{}}"#, "\n",
+            r#"{"seq":2,"ts":"2026-10-30T12:01:00Z","kind":"rolled_back","actor":"broker","tier":"system","reason":"Change #1 rolled back: not confirmed","data":{"applied":1}}"#, "\n",
+            r#"{"seq":3,"ts":"2026-10-30T12:02:00Z","kind":"applied","actor":"user","tier":"system","reason":"Two","data":{}}"#, "\n",
+            r#"{"seq":4,"ts":"2026-10-30T12:03:00Z","kind":"backup_key","actor":"user","tier":"system","reason":"Key given","data":{}}"#,
+        )).unwrap();
+        let r = rows(&e, 10, &Clock { now: 0, offset: 0 });
+        assert!(!r[0].undoable, "rolled back already");
+        assert_eq!((r[1].symbol, r[1].text.as_str()), ("↶", "Change #1 rolled back: not confirmed"));
+        assert!(r[2].undoable);
+        assert_eq!(r[3].text, "Key given", "what it says, not its kind");
+    }
 }
