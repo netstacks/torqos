@@ -1676,3 +1676,75 @@ it lacks is a way to take *someone else's* repository, which is untrusted, where
 - **Not:** a recipe store, accounts or ratings; a recipe that installs without the person seeing what it
   does; recipes that carry secrets (the fence refuses them in any repository); a graphical installer (the
   desktop's installs use the same console UI; one installer to keep correct).
+
+## ADR-048 — The installer: erase, alongside, free space or a partition; no network from stick to login
+
+**Status:** accepted, 2026-11-09 (the owner: "dual boot or multi boot or a wipe, just like any other installer";
+"install work without any networking"; our own console UI on proven tools rather than a ported installer).
+Amends ADR-031 ("whole disks only") and builds on ADR-047's console UI. The first real install it serves:
+TorqOS alongside Pop!_OS on the owner's Zenbook (ADR-046).
+**Context:** No installer does this for NixOS from a console. Calamares (graphical, Qt) is the one mature
+installer with erase / alongside / replace / manual, and NixOS has extensions for it, but it needs a graphical
+live ISO (ours is ~1.9 GiB of GitHub's 2 GiB a file), cannot run on a server's console or a serial line,
+installs with `nixos-install` instead of the tested image, and is reported unreliable on NixOS. The Rust
+console installers for NixOS (nixos-wizard, others) partition whole disks only. What every installer
+underneath uses is available to us: systemd-repart (already TorqOS's), the file systems' own resize tools,
+systemd-boot. Two facts of TorqOS's own: the image is written byte for byte, so every install has the same
+file-system UUIDs (harmless across machines, dangerous beside another system on one disk: btrfs
+mistakes devices with the same UUID); and first-boot setup's build is untested offline (`tests/image.nix`
+prebuilds it), so on real hardware it may fetch build tools from the network.
+- **Decision:**
+  1. **Four ways to install, chosen in the console UI:**
+     - **Erase the disk** — as today (ADR-031): the image, byte for byte, read back.
+     - **Install alongside** — shrink one existing partition and install into the space it frees.
+     - **Use free space** — install into unpartitioned space already on a disk.
+     - **Replace a partition** — erase one chosen partition (and only it) and install there.
+     A manual mode (any layout, by hand) is later; until then, one made by hand beforehand is "free space".
+  2. **The image's parts, not only the whole.** The build makes, beside the whole disk, its parts: the
+     boot files, the record's file system and the root's (btrfs), each with its SHA-256. For every mode
+     but erase the installer has systemd-repart **add** three partitions into the free space — a boot
+     partition of TorqOS's own (XBOOTLDR, 1 GiB, vfat: the kernels and initrds), the record (1 GiB, ext4,
+     TorqOS's type) and the root (the rest; at least 20 GiB) — copying the parts into them
+     (`CopyBlocks=`), and then reads them back. repart never moves, shrinks or deletes a partition it did
+     not make; that is why it is the tool. Then each new file system gets **new UUIDs** (`btrfstune -m`,
+     `tune2fs -U`, a new vfat serial), in erase mode too, and the hardware file names file systems by
+     UUID, never by label (another system may have an `ESP` or `nixos`). The root grows into its
+     partition at first boot as now.
+  3. **Shrinking**, before repart, of one partition at the end that frees space: **NTFS** (`ntfsresize`;
+     refused while Windows is hibernated or "fast startup" left it dirty, or BitLocker is on — the UI says
+     how to turn each off in Windows), **ext4** (`e2fsck -f`, then `resize2fs`, unmounted), **btrfs**
+     (`btrfs filesystem resize`), then the partition's end in the table. Each tool's own dry run first
+     (`ntfsresize --no-action`, the minimum `resize2fs -P` reports) with room to spare on top; the file
+     system is checked again after. **Refused, with the reason:** LUKS, LVM, RAID, unknown file systems,
+     a partition anything is mounted from. Encrypted Pop!_OS (LUKS + LVM) and the like: shrink it from
+     that system first, then use free space. Before any shrink: a warning to back up, and on a laptop
+     mains power or the battery above half (a power cut mid-resize loses the partition).
+  4. **Booting beside others.** systemd-boot goes onto the disk's **existing EFI system partition**
+     (`bootctl install`, mounted at `/efi`); TorqOS's kernels go on its own boot partition
+     (`boot.loader.systemd-boot.xbootldrMountPoint = "/boot"`), so a small ESP (Windows makes 100 MiB)
+     is enough. systemd-boot lists Windows (`EFI/Microsoft`) and other systemd-boot systems (Pop!_OS's
+     entries) by itself; for other loaders the installer finds on the ESP (`EFI/<distribution>/
+     {shimx64,grubx64}.efi`) it writes an entry each (`loader/entries/torq-other-<name>.conf`). TorqOS's
+     `loader.conf` shows the menu (5 s), TorqOS first; the UEFI boot order puts systemd-boot first and
+     keeps every other entry. Erase mode keeps its own ESP as now.
+  5. **No network from the stick to the first login.** The installer has none (ADR-031). First-boot setup
+     builds change #1 from the disk alone: the image carries **the build closure of a first
+     configuration** — the inputs of every derivation that setup's answers can change (the host name, the
+     user, the hardware file with firmware and iwd on or off, the hardware profiles of ADR-046), computed
+     at build time from sample answers and checked in CI. A VM test without a network runs setup and
+     **really builds** change #1, nothing prebuilt. If a machine's answers need what is not carried, setup
+     says what and offers Wi-Fi (ADR-046) before the build, never a silent fetch.
+  6. **Safety as now, for every mode:** nothing is written before the summary is confirmed, typing the
+     disk's or partition's name; what will happen to each existing partition said in words ("shrunk to
+     380 GiB", "untouched", "erased"); refused while the battery is low; on a failure after writing began,
+     what was added is removed and what was shrunk is said, never left silently half done.
+- **Tests:** VM tests with a disk that already holds other systems — an ESP with Windows' boot manager as
+  a file and a GRUB, an NTFS partition (`mkntfs`), an ext4 one with files, free space: for each mode, the
+  bytes of every partition not chosen are unchanged (hashed before and after), a shrunk file system checks
+  clean with its files intact, TorqOS boots and its menu lists the others. Refusals (LUKS, LVM, dirty NTFS,
+  too little space) each a test. The offline build (5) its own test.
+- **The unmerged `m4-plan` branch** (2026-11-07, ADR-050–052 there, never accepted) is not taken: it planned
+  niri, Windows erased and no hardware profiles, which ADR-045–048 decide otherwise. Its laptop checklist
+  and the Zenbook's known issues are kept, in HARDWARE.md.
+- **Not:** a graphical installer; resizing encrypted, LVM or RAID volumes; moving a partition's start;
+  BIOS (non-UEFI) machines; installing over another TorqOS beside it (one per disk, for now).

@@ -189,14 +189,18 @@ the sysadmin's audit trail; a laptop's is what makes the agent's access safe.
 - [x] Ledger hardening carried over: N3 (a torn append), M3 (password change in one transaction),
       the `Ledger-Entry` trailer cross-check.
 
-### M3.5 — The install: one console UI, real hardware, recipes (ADR-046, ADR-047)
+### M3.5 — The install: one console UI, real hardware, recipes (ADR-046, ADR-047, ADR-048)
 Before M4: it serves CLI and desktop installs alike. The owner's laptop (HARDWARE.md) is the target.
 
 - [ ] **Real hardware** (ADR-046): the installer's hardware file turns on redistributable firmware and,
       where it finds a wireless interface, iwd; hardware profiles chosen by DMI (`hardware/`), the
       Zenbook S 16 first, split base / desktop. A VM test of the file written for a fake DMI and Wi-Fi.
-- [ ] **No network needed before Wi-Fi**: measure what first-boot setup's build fetches; if anything,
-      Wi-Fi first or the build offline.
+- [ ] **No network from stick to login** (ADR-048 5): the image carries a first configuration's build
+      closure; a VM test without a network really builds change #1.
+- [ ] **The installer's ways** (ADR-048 1–4, 6): the image's parts beside the whole; erase, alongside
+      (NTFS, ext4, btrfs shrunk), free space, a partition; new UUIDs every install, file systems by UUID;
+      systemd-boot on the existing ESP with TorqOS's own XBOOTLDR, other systems in the menu. VM tests
+      on a disk holding other systems, each refusal a test.
 - [ ] **The console UI** (ADR-047 1): `ratatui` over `crossterm` in torqcli, 80×25 and serial; the
       installer's disk steps, setup's network (Ethernet, or Wi-Fi through iwd), identity, SSH and
       starting point, a summary, the build's progress. The line-at-a-time setup kept as the fallback.
@@ -205,7 +209,7 @@ Before M4: it serves CLI and desktop installs alike. The owner's laptop (HARDWAR
       a recipe at a URL, my own repository); `request system recipe <url>`, `… recipe update`,
       `torq recipe publish`, `torq recipe list`; what is never taken refused (SSH keys, remote, users,
       caches' keys …). VM tests for each refusal, a recipe reverting itself, an update shown not applied.
-- [ ] **TorqOS installed on the laptop itself**, CLI only first; then TorqOS Desktop from setup.
+- [ ] **TorqOS installed on the laptop itself**, alongside Pop!_OS, CLI only first; then TorqOS Desktop from setup.
 
 ### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038, ADR-045)
 Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, and only COSMIC

@@ -28,6 +28,41 @@ The desktop's target machine for now, the owner's: a target to make work, not re
 | Known good | Pop!_OS 24.04, kernel 7.2.15 (2026-11-08); nothing out of tree |
 
 Which of it the base carries and which the desktop: ADR-046 3. The profile is `hardware/asus-zenbook-s16-um5606wa.nix` (M3.5).
+TorqOS's first install on it goes alongside Pop!_OS (ADR-048), on its one NVMe disk.
+
+### Known for this model (community reports, not yet seen on this unit)
+
+- **Wi-Fi after suspend** (`mt7925e` not back after s2idle): fixed in 6.14; Bluetooth after resume
+  reported failing on some 6.14 systems — check it.
+- **Speakers** thin before 6.13 (the CS35L56 tuning); if still thin, a PipeWire upmix to 4.0 is the
+  reported work-around.
+- **Display freezes from panel self-refresh**: `amdgpu.dcdebugmask=0x600` is the reported fix — only if
+  seen, as a kernel parameter in the profile, with `commit confirmed`.
+
+Sources: the Arch wiki's "ASUS Zenbook UM5606"; `github.com/BNieuwenhuizen/zenbook-s16`.
+
+### What must work (checked on the machine, dated; a failure becomes a KNOWN-GAPS line)
+
+| Function | How to check | Status |
+|---|---|---|
+| Boots TorqOS beside Pop!_OS, both in the menu | the installer, then the menu | — |
+| GPU accelerated (amdgpu, radeonsi, RADV) | `dmesg \| grep amdgpu`, `vulkaninfo --summary` | — |
+| The panel at its native mode, 120 Hz; scale | COSMIC's display settings | — |
+| Brightness keys (OLED) | `/sys/class/backlight`, the keys | — |
+| No freezes from panel self-refresh | a day of use | — |
+| Touchscreen, pen, touchpad gestures | `libinput debug-events`, the session | — |
+| Keyboard, Fn keys, keyboard light | the keys; `/sys/class/leds` | — |
+| Speakers full range, microphones, headphone jack | `speaker-test -c 2`, `arecord` | — |
+| Webcam | `v4l2-ctl --list-devices` | — |
+| Wi-Fi from setup on, no cable; after suspend | setup joins; suspend, resume, `ping` | — |
+| Bluetooth, and after suspend | `bluetoothctl` | — |
+| Suspend (s2idle), the lid, drain per hour | close the lid 10 min | — |
+| Battery, charge limit | `upower -d`, `charge_control_end_threshold` | — |
+| Power profiles | `powerprofilesctl` | — |
+| USB-C charging, a dock, an external screen, HDMI | plug in | — |
+| Temperatures and fan | `sensors` | — |
+| NPU seen | `/dev/accel/accel0` | — |
+| A system change rolls back on this hardware | `commit confirmed`, let it expire | — |
 
 Firmware and Secure Boot hardware guidance were dropped with the laptop goals (ADR-019); the earlier
 list is in git history.
