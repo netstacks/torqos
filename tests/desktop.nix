@@ -55,6 +55,9 @@ pkgs.testers.runNixOSTest {
     with subtest("TorqOS Settings is in the menu"):
         machine.succeed("test -e /run/current-system/sw/share/applications/org.torqos.Settings.desktop")
         machine.succeed("test -x /run/current-system/sw/bin/torq-settings")
+        # And TorqOS in the panel (ADR-049): an applet COSMIC offers in its panel settings.
+        machine.succeed("grep -qx X-CosmicApplet=true /run/current-system/sw/share/applications/org.torqos.Applet.desktop")
+        machine.succeed("test -x /run/current-system/sw/bin/torq-applet")
 
     with subtest("Flathub is the person's, not the system's"):
         machine.wait_until_succeeds("su - alice -c 'flatpak remotes --user' | grep -q flathub", timeout=60)

@@ -398,7 +398,7 @@ impl Machine for Real<'_> {
 
     fn proposals(&self, fit: Option<usize>) -> Result<String> {
         let entries = crate::read_ledger(self.cli)?;
-        let waiting = waiting_proposals(&entries);
+        let waiting = history::waiting_proposals(&entries);
         if waiting.is_empty() {
             return Ok("No proposals are waiting.\n".into());
         }
@@ -422,7 +422,7 @@ impl Machine for Real<'_> {
 
     fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
         let entries = crate::read_ledger(self.cli)?;
-        if !waiting_proposals(&entries).iter().any(|e| e.seq == seq) {
+        if !history::waiting_proposals(&entries).iter().any(|e| e.seq == seq) {
             bail!("#{seq} is not a proposal waiting to be applied (show system proposals lists them)");
         }
         let log = run::start_log()?;
@@ -993,13 +993,6 @@ fn writes_never_go_through_a_link() {
 
 /// The proposals no one has applied (or tried to): what `show system proposals` lists and
 /// `request system apply` takes.
-fn waiting_proposals(entries: &[history::Entry]) -> Vec<&history::Entry> {
-    entries
-        .iter()
-        .filter(|e| e.kind == "proposal")
-        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed") && e.data["proposal"].as_u64() == Some(p.seq)))
-        .collect()
-}
 /// `propose`'s arguments. Every value given as `--name=value`: a reason or comment that starts with
 /// `-` (any change of an existing value does: "-   host-name two; …") must not read as an option.
 fn propose_args(diff: &str, base: &str, reason: &str) -> Vec<String> {

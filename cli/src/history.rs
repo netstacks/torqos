@@ -200,6 +200,15 @@ pub fn later_conflicts(entries: &[Entry], applied: u64) -> Vec<u64> {
         .collect()
 }
 
+/// The proposals not yet applied or failed: waiting for a person (the agent's among them).
+pub fn waiting_proposals(entries: &[Entry]) -> Vec<&Entry> {
+    entries
+        .iter()
+        .filter(|e| e.kind == "proposal")
+        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed") && e.data["proposal"].as_u64() == Some(p.seq)))
+        .collect()
+}
+
 /// The latest change that took effect (applied, undone, repaired), in the log's words.
 pub fn last_change(entries: &[Entry]) -> Option<String> {
     let e = entries.iter().rev().find(|e| matches!(e.kind.as_str(), "applied" | "reverted" | "repaired"))?;

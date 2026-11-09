@@ -16,4 +16,13 @@ torq = { path = "../cli" }
 git = "https://github.com/pop-os/libcosmic"
 rev = "430f3d48a97d8779f9c1985473912e594ccca1ae"
 default-features = false
-features = ["winit", "tokio", "dbus-config", "multi-window"]
+features = ["winit", "tokio", "dbus-config", "multi-window", "applet"]
+
+# The window, and TorqOS in COSMIC's panel (ADR-049).
+[[bin]]
+name = "torq-settings"
+path = "src/main.rs"
+
+[[bin]]
+name = "torq-applet"
+path = "src/applet.rs"
