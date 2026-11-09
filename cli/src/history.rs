@@ -257,53 +257,83 @@ pub fn asked_by<'a>(entries: &'a [Entry], e: &'a Entry) -> &'a str {
     pointed.and_then(|s| entries.iter().find(|x| x.seq == s)).map_or(e.actor.as_str(), |x| x.actor.as_str())
 }
 
-/// The last `limit` changes, oldest first, grouped by day in local time (docs/CLI-DESIGN.md).
-/// A proposal that was applied (or failed) is folded into its result. Who made a change is shown
-/// whenever it was not the user — the agent, say — and a change from a session that read
-/// untrusted content is marked: the log is where a person audits the machine.
-pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock) -> String {
+/// One line of the history, as `show system ledger` prints it and TorqOS Settings shows it (ADR-045 2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    /// Its day, in local time: "Today", "Yesterday", or the date.
+    pub day: String,
+    /// Its time, local, `HH:MM`.
+    pub time: String,
+    /// ✓ done, ✗ failed or refused, ⚠ look at it, ↶ undone, ↺ restored, · anything else.
+    pub symbol: &'static str,
+    /// Its change number (`request system revert #85`).
+    pub seq: u64,
+    /// Who made it: the person who approved it, else who asked; empty for the user's own.
+    pub who: String,
+    /// Made by a session that read untrusted content.
+    pub tainted: bool,
+    /// What happened, in words.
+    pub text: String,
+}
+
+/// The last `limit` changes, oldest first, in local time. A proposal that was applied (or failed) is
+/// folded into its result. Who made a change is said whenever it was not the user — the agent, say — and
+/// a change from a session that read untrusted content is marked: the log is where a person audits the
+/// machine.
+pub fn rows(entries: &[Entry], limit: usize, clock: &Clock) -> Vec<Row> {
     let shown: Vec<&Entry> = entries.iter().filter(|e| !(e.kind == "proposal" && settled(entries, e.seq))).collect();
     let today = (clock.now + clock.offset).div_euclid(86_400);
-    use crate::ui::{Col, Table};
-    // One line per entry, cut to the window if need be: what an entry says cannot look like another
-    // entry. Who made it in its own column, never cut.
-    let mut t = Table::new(&[Col::Left(""), Col::Left(""), Col::Right(""), Col::Left(""), Col::Text("")]).indent(4).lines(1);
-    let mut day = None;
-    for e in &shown[shown.len().saturating_sub(limit)..] {
-        let local = parse_ts(&e.ts).map(|t| t + clock.offset);
-        let this_day = local.map(|t| t.div_euclid(86_400));
-        if this_day != day {
-            day = this_day;
-            let label = match this_day {
+    shown[shown.len().saturating_sub(limit)..]
+        .iter()
+        .map(|e| {
+            let local = parse_ts(&e.ts).map(|t| t + clock.offset);
+            let day = match local.map(|t| t.div_euclid(86_400)) {
                 Some(d) if d == today => "Today".to_string(),
                 Some(d) if d == today - 1 => "Yesterday".to_string(),
                 Some(d) => crate::pkg::ymd((d * 86_400) as u64),
                 None => "Unknown date".to_string(),
             };
-            t.line(format!("  {}", ui.bold(&label)));
+            let time = local.map(|t| format!("{:02}:{:02}", t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60)).unwrap_or_else(|| "--:--".into());
+            let (symbol, text) = describe(entries, e);
+            // Who made it: the person who approved it, else who asked (an agent, the broker on its own).
+            let who = match (&e.approved_by, asked_by(entries, e)) {
+                (Some(p), _) => one_line(p, 16),
+                (None, "user" | "") => String::new(),
+                (None, a) => format!("asked by {}", one_line(a, 16)),
+            };
+            Row { day, time, symbol, seq: e.seq, who, tainted: e.tainted, text: one_line(&text, usize::MAX) }
+        })
+        .collect()
+}
+
+/// `rows`, as the terminal shows them: grouped by day (docs/CLI-DESIGN.md), one line each.
+pub fn render(entries: &[Entry], limit: usize, ui: &crate::ui::Ui, clock: &Clock) -> String {
+    use crate::ui::{Col, Table};
+    // One line per entry, cut to the window if need be: what an entry says cannot look like another
+    // entry. Who made it in its own column, never cut.
+    let mut t = Table::new(&[Col::Left(""), Col::Left(""), Col::Right(""), Col::Left(""), Col::Text("")]).indent(4).lines(1);
+    let rows = rows(entries, limit, clock);
+    let mut day = None;
+    for r in &rows {
+        if day != Some(&r.day) {
+            day = Some(&r.day);
+            t.line(format!("  {}", ui.bold(&r.day)));
         }
-        let time = local.map(|t| format!("{:02}:{:02}", t.rem_euclid(86_400) / 3600, t.rem_euclid(3600) / 60)).unwrap_or_else(|| "--:--".into());
-        let (symbol, text) = describe(entries, e);
-        // Who made it: the person who approved it, else who asked (an agent, the broker on its own).
-        let mut who = match (&e.approved_by, asked_by(entries, e)) {
-            (Some(p), _) => one_line(p, 16),
-            (None, "user" | "") => String::new(),
-            (None, a) => format!("asked by {}", one_line(a, 16)),
-        };
-        if e.tainted {
+        let mut who = r.who.clone();
+        if r.tainted {
             who.push_str(" ⚠ tainted");
         }
-        let symbol = match symbol {
-            "✓" => ui.green(symbol),
-            "✗" => ui.red(symbol),
-            "⚠" => ui.yellow(symbol),
+        let symbol = match r.symbol {
+            "✓" => ui.green(r.symbol),
+            "✗" => ui.red(r.symbol),
+            "⚠" => ui.yellow(r.symbol),
             s => s.to_string(),
         };
         // Its change number, as everywhere (`request system revert #85`).
-        t.row(vec![time, symbol, format!("#{}", e.seq), who.trim_start().to_string(), one_line(&text, usize::MAX)]);
+        t.row(vec![r.time.clone(), symbol, format!("#{}", r.seq), who.trim_start().to_string(), r.text.clone()]);
     }
     let mut out = t.render(ui);
-    if shown.is_empty() {
+    if rows.is_empty() {
         out.push_str("  Nothing has changed yet.\n");
     } else {
         out.push_str(&format!("\n{}\n", ui.dim(&ui.line("  ", "To undo one change: request system revert <change> (its number, like #85)."))));

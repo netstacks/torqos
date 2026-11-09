@@ -99,20 +99,9 @@ impl Real<'_> {
     }
 
 
-    /// The broker's status as `show system alarms` reports it — without colour (the shell cleans its
-    /// output, which would show colour codes as text), naming the shell's own commands.
+    /// The broker's status as `show system alarms` reports it (`crate::status_report`).
     fn status_report(&self, fit: Option<usize>) -> Result<(serde_json::Value, crate::status::Report)> {
-        let log = run::start_log()?;
-        let v = match run::broker_status(broker(self.cli, &["status"])?, &log)? {
-            Ok(v) => v,
-            Err(why) => bail!("couldn't check this machine: {why}"),
-        };
-        let last = crate::read_ledger(self.cli).ok().and_then(|l| history::last_change(&l));
-        let ui = crate::ui::Ui::plain_at(fit);
-        let mut report = crate::status::render(&v, last.as_deref(), &self.cli.repo.display().to_string(), &ui);
-        let sshd = std::fs::read_to_string("/etc/ssh/sshd_config").ok();
-        report.text.push_str(&crate::status::notes(sshd.as_deref(), &ui));
-        Ok((v, report))
+        crate::status_report(self.cli, fit)
     }
 }
 
