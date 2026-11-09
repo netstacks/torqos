@@ -16,4 +16,4 @@ torq = { path = "../cli" }
 git = "https://github.com/pop-os/libcosmic"
 rev = "430f3d48a97d8779f9c1985473912e594ccca1ae"
 default-features = false
-features = ["winit", "tokio", "dbus-config", "wayland"]
+features = ["winit", "tokio", "dbus-config", "multi-window"]

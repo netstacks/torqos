@@ -79,6 +79,12 @@ impl cosmic::Application for Settings {
         Some(&self.nav)
     }
 
+    /// A page chosen in the navigation: libcosmic leaves switching to it to the application.
+    fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Message>> {
+        self.nav.activate(id);
+        Task::none()
+    }
+
     fn header_end(&self) -> Vec<Element<'_, Message>> {
         vec![widget::button::icon(icon::from_name("view-refresh-symbolic")).tooltip("Ask the broker again").on_press(Message::Refresh).into()]
     }
