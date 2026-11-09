@@ -166,6 +166,10 @@ pub fn run() -> Result<()> {
         bail!("this machine is already set up (its history: {LEDGER})");
     }
     let repo = Path::new(REPO);
+    // The network first (ADR-048, amended): what follows offers what needs it only when it is there.
+    println!("\n{}\n", welcome());
+    let online = crate::network::step(&welcome)?;
+    let mut first = true;
     loop {
         // Anything a setup cut short left: gone, to start clean. That includes Nix's caches of the
         // broker's build (HOME=/root): Nix writes them without waiting for the disk, so a power cut
@@ -173,16 +177,24 @@ pub fn run() -> Result<()> {
         // build would fail on them. Before change #1 nothing else on the image uses them.
         let _ = std::fs::remove_dir_all(repo);
         let _ = std::fs::remove_dir_all(BUILD_CACHE);
-        println!("\n{}\n", welcome());
+        if !std::mem::take(&mut first) {
+            println!("\n{}\n", welcome());
+        }
         const HOW: &str = "How should this machine start?\n  1  as a new machine\n  2  from a repository: become the machine it holds";
-        println!("{HOW}");
+        if online {
+            println!("\n{HOW}");
+        } else {
+            println!("\nOffline, so a new machine: starting from your own repository needs the network (connect one and restart setup).");
+        }
         // Shown again with the question, if the console is taken over (`asked`).
         let heading = || format!("{}\n\n{HOW}", welcome());
-        let adopting = until(|| line_under(&heading, "Start", "1"), |c| match c {
-            "1" => Ok(false),
-            "2" => Ok(true),
-            _ => bail!("1 or 2"),
-        })?;
+        // Starting from a repository needs the network; offline, a new machine is the one way.
+        let adopting = online
+            && until(|| line_under(&heading, "Start", "1"), |c| match c {
+                "1" => Ok(false),
+                "2" => Ok(true),
+                _ => bail!("1 or 2"),
+            })?;
         let (user, done, what) = if adopting {
             match adopt_questions()? {
                 None => continue,
@@ -203,9 +215,20 @@ pub fn run() -> Result<()> {
         };
         match done {
             Ok(()) => {
+                let sbin = "/run/current-system/sw/bin";
+                // Real hardware restarts into the installed system (ADR-048, amended): the image's boot had no
+                // firmware, so drivers that wanted it (graphics, Wi-Fi) gave up, and only a new boot loads
+                // them. A virtual machine has nothing of the kind and goes on as it is.
+                let metal = std::process::Command::new(format!("{sbin}/systemd-detect-virt")).arg("--quiet").status().is_ok_and(|s| !s.success());
+                if metal {
+                    println!("\n{what}. Restarting into it; then log in as {user}.\n");
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let _ = std::process::Command::new(format!("{sbin}/systemctl")).arg("reboot").status();
+                    return Ok(());
+                }
                 println!("\n{what}. Log in as {user}.\n");
                 // The console's login prompt, now that there is someone to log in.
-                let _ = std::process::Command::new("/run/current-system/sw/bin/systemctl").args(["start", "--no-block", "getty@tty1.service"]).status();
+                let _ = std::process::Command::new(format!("{sbin}/systemctl")).args(["start", "--no-block", "getty@tty1.service"]).status();
                 return Ok(());
             }
             Err(e) => {
