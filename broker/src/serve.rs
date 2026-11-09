@@ -156,11 +156,10 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     if !config::running_as_root() {
         return Err(refuse(false, REFUSED)(anyhow::anyhow!("serve runs as root, from torq-broker.socket")));
     }
-    let uid = rustix::net::sockopt::socket_peercred(std::io::stdin())
+    let peer = rustix::net::sockopt::socket_peercred(std::io::stdin())
         .context("this is not a connection to the broker's socket (no SO_PEERCRED)")
-        .map_err(refuse(false, REFUSED))?
-        .uid
-        .as_raw();
+        .map_err(refuse(false, REFUSED))?;
+    let (uid, pid) = (peer.uid.as_raw(), rustix::process::Pid::as_raw(Some(peer.pid)));
     // A caller that sends nothing, or stops reading, holds nothing for long (the audit of ADR-040,
     // its 3 and 4): the request must come within the time, and a reply no one reads is dropped —
     // the broker's own output is still read, so a change never waits on its caller.
@@ -215,6 +214,14 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     match socket::gate(&who, if confirmed { "apply-confirmed" } else { name }, change.as_ref(), user.as_deref()) {
         Gate::Open => {}
         Gate::Refused(why) => return Err(refused(anyhow::anyhow!(why))),
+        Gate::Password if socket::on_the_desktop(&read(&format!("/proc/{pid}/cgroup")).unwrap_or_default(), |id| read(&format!("/run/systemd/sessions/{id}")).ok(), read(&format!("/run/systemd/users/{uid}")).ok().as_deref()) => {
+            // From the desktop, COSMIC's own dialog and nothing else (ADR-045 5): a password sent here could
+            // have been typed into any window, and one a lookalike took cannot be replayed.
+            if req.password.is_some() {
+                return Err(refused(anyhow::anyhow!("from the desktop a system change is approved in its dialog, not by a password in the request")));
+            }
+            approve_in_dialog(pid, uid, &approval_text(name, &settings.state_dir, seq)).map_err(&refused)?;
+        }
         Gate::Password => match req.password.as_deref() {
             None => return Err(Refusal { json, code: socket::NEED_PASSWORD, why: format!("this needs {}'s password", who.name) }),
             Some(p) => {
@@ -229,6 +236,53 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     }
     drop(req);
     Ok(run(reply, &who, &args))
+}
+
+/// How long a person has to answer the dialog.
+const DIALOG_SECONDS: u64 = 120;
+
+/// What the dialog says is being approved: the broker's own words, the change's reason cleaned.
+fn approval_text(cmd: &str, state_dir: &Path, seq: Option<u64>) -> String {
+    let reason = seq.and_then(|s| Ledger::open(state_dir.join("ledger.jsonl")).get(s).ok()).map(|e| e.body.reason);
+    let what = match (cmd, reason) {
+        ("apply" | "schedule", Some(r)) => format!("Apply this change to the system: {r}"),
+        ("revert", Some(r)) => format!("Undo this change to the system: {r}"),
+        (other, _) => format!("Approve `{other}` on this machine"),
+    };
+    crate::printable(&what).chars().take(240).collect()
+}
+
+/// Ask polkit, and through it COSMIC's agent, for the caller's approval: its own process, named so that a
+/// pid used again is not taken for it. Nothing here sees the password.
+fn approve_in_dialog(pid: i32, uid: u32, text: &str) -> Result<()> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).context("the caller has gone")?;
+    let started = socket::start_time(&stat).context("reading when the caller started")?;
+    let mut child = Command::new("/run/current-system/sw/bin/pkcheck")
+        .args(["--action-id", socket::APPROVE_ACTION, "--allow-user-interaction", "--process", &format!("{pid},{started},{uid}"), "--detail", "polkit.message", text])
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("asking for approval (is this TorqOS Desktop?)")?;
+    let deadline = Instant::now() + Duration::from_secs(DIALOG_SECONDS);
+    let status = loop {
+        if let Some(s) = child.try_wait().context("waiting for the approval")? {
+            break s;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("not approved: the dialog was not answered in time");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(2) => bail!("not approved: the dialog was dismissed"),
+        Some(1) => bail!("not approved"),
+        _ => bail!("not approved: polkit could not ask (is an agent running in this session?)"),
+    }
 }
 
 /// The turn to check `uid`'s password: an exclusive lock on its file in faillock's directory

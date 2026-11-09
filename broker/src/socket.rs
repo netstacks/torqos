@@ -243,6 +243,42 @@ pub fn password_ok(name: &str, password: &str) -> bool {
         && t.items().user().is_ok_and(|u| u.as_deref() == Some(OsStr::new(name)))
 }
 
+/// The polkit action a desktop's approval of a system change is (modules/desktop.nix; `auth_self`: the
+/// caller's own password, asked by COSMIC's agent, every time).
+pub const APPROVE_ACTION: &str = "org.torqos.approve";
+
+/// A value of a logind record (`KEY=value` lines).
+fn record<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+}
+
+fn graphical(session: &str) -> bool {
+    matches!(record(session, "TYPE"), Some("wayland" | "x11"))
+}
+
+/// Whether a process belongs to a person's graphical session (ADR-045 5): in the session itself, or among
+/// the applications of a user manager whose person has one logged in. Anything else (a text console, SSH, a
+/// system service) is as it was: its own record says so. `cgroup` is /proc/<pid>/cgroup, `session` reads
+/// logind's record of a session, and `user` is logind's record of the caller's account.
+pub fn on_the_desktop(cgroup: &str, session: impl Fn(&str) -> Option<String>, user: Option<&str>) -> bool {
+    let Some(path) = cgroup.lines().find_map(|l| l.strip_prefix("0::")) else { return false };
+    for part in path.split('/') {
+        if let Some(id) = part.strip_prefix("session-").and_then(|s| s.strip_suffix(".scope")) {
+            return session(id).is_some_and(|s| graphical(&s));
+        }
+        if part.starts_with("user@") && part.ends_with(".service") {
+            return user.and_then(|u| record(u, "SESSIONS")).is_some_and(|ids| ids.split_whitespace().any(|id| session(id).is_some_and(|s| graphical(&s))));
+        }
+    }
+    false
+}
+
+/// When a process started, from its /proc/<pid>/stat: with its pid and uid, what polkit names it by, so
+/// that a pid used again is not taken for it. (After the name, which may hold anything: the last `)`.)
+pub fn start_time(stat: &str) -> Option<u64> {
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +356,38 @@ mod tests {
         assert_eq!(gate(&who(1000), "password", None, Some("sam")), Gate::Password);
     }
 
+
+    #[test]
+    fn who_is_on_the_desktop() {
+        let session = |id: &str| match id {
+            "7" => Some("TYPE=wayland\nCLASS=user\n".to_string()),
+            "4" => Some("TYPE=unspecified\nCLASS=manager\n".to_string()),
+            "9" => Some("TYPE=tty\nREMOTE=1\n".to_string()),
+            _ => None,
+        };
+        let cg = |p: &str| format!("0::{p}\n");
+        let logged_in = "NAME=viper\nSESSIONS=7 4\n";
+        // In the graphical session, and among its applications.
+        assert!(on_the_desktop(&cg("/user.slice/user-1000.slice/session-7.scope"), session, Some(logged_in)));
+        assert!(on_the_desktop(&cg("/user.slice/user-1000.slice/user@1000.service/app.slice/app-cosmic.scope"), session, Some(logged_in)));
+        // SSH and the text console stay as they were, even with a desktop logged in beside them.
+        assert!(!on_the_desktop(&cg("/user.slice/user-1000.slice/session-9.scope"), session, Some(logged_in)));
+        // A user manager with no desktop logged in: a server's.
+        assert!(!on_the_desktop(&cg("/user.slice/user-1000.slice/user@1000.service/app.slice/x.service"), session, Some("NAME=viper\nSESSIONS=9 4\n")));
+        assert!(!on_the_desktop(&cg("/user.slice/user-1000.slice/user@1000.service/app.slice/x.service"), session, None));
+        // A system service; a session no record names; nothing to read.
+        assert!(!on_the_desktop(&cg("/system.slice/backdoor.service"), session, Some(logged_in)));
+        assert!(!on_the_desktop(&cg("/user.slice/user-1000.slice/session-77.scope"), session, Some(logged_in)));
+        assert!(!on_the_desktop("", session, Some(logged_in)));
+    }
+
+    #[test]
+    fn a_process_is_named_by_when_it_started() {
+        let rest: Vec<String> = (3..=30).map(|n| n.to_string()).collect();
+        // A name with spaces and a `)` in it does not move the fields.
+        assert_eq!(start_time(&format!("42 (ev)il na me) {}", rest.join(" "))), Some(22));
+        assert_eq!(start_time("nonsense"), None);
+    }
     #[test]
     fn the_agent_proposes_and_nothing_more() {
         let a = who(990);

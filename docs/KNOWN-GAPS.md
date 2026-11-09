@@ -837,3 +837,9 @@ Its §5 lists claims without a test.
    - **Setup's own path is not what the test runs:** the test loads the registration as setup does
      (`register_carried`) and builds as the broker would; tests/image.nix's setup still switches to a
      prebuilt specialisation.
+
+6zs. **Approval on the desktop is the dialog, not a trusted path (ADR-045 5, 2026-11-09).** A password sent to the
+   broker from the desktop is refused, so one a lookalike window took cannot be replayed there. It can still be used
+   from a text console, or by `ssh localhost` where SSH accepts passwords: a program of the person's that has their
+   password can reach a session the broker treats as a terminal. And a lookalike of the dialog is still possible: no
+   dialog is a trusted path. The dialog's text is the broker's, cleaned; the agent never gets here (it is not a person).

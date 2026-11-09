@@ -1,8 +1,8 @@
 //! `torq-applet`: TorqOS in COSMIC's panel (ADR-049). The machine's state at a glance and the one action
 //! that settles it: a commit waiting for confirmation, a restart or log-out a switch needs, an alarm,
 //! proposals waiting, an uncommitted draft. TorqOS Settings holds the detail; this only points there. It
-//! changes nothing itself: it confirms through torqcli in a terminal (a password, when one is asked, is
-//! typed there), and asks COSMIC's own dialogs to log out or restart.
+//! changes nothing itself: it confirms through torqcli, approved in COSMIC's own dialog, and asks
+//! COSMIC's own dialogs to log out or restart.
 
 // No unsafe code and no dead code, ever: `forbid` cannot be undone by any `#[allow]` below it,
 // so the compiler is the guard (docs/DECISIONS.md ADR-020).
@@ -150,7 +150,7 @@ impl Applet {
         if let Some(c) = &g.confirm {
             return State::Confirm(c);
         }
-        if g.needs != Needs::Nothing {
+        if matches!(g.needs, Needs::LogOut(_) | Needs::Restart(_)) {
             return State::Needs(&g.needs);
         }
         if let Some(a) = &g.alarm {
@@ -331,7 +331,7 @@ impl cosmic::Application for Applet {
             Message::Confirm => {
                 let restart = matches!(&self.glance, Some(Ok(g)) if matches!(g.needs, Needs::Restart(_)));
                 return cosmic::task::future(async move {
-                    let confirmed = off(|| app::in_terminal(app::CONFIRM, false)).await.and_then(|r| r).unwrap_or(false);
+                    let confirmed = blocking(app::confirm).await.is_ok();
                     if restart && confirmed {
                         app::ask_restart();
                     }

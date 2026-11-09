@@ -28,6 +28,7 @@ rustPlatform.buildRustPackage {
   # so all of it, COSMIC's own at this version, with our applet first among the status ones. A default: a
   # person's own panel settings come before it. The build stops if COSMIC's list no longer reads as expected.
   postInstall = ''
+    install -Dm644 ${./org.torqos.policy} $out/share/polkit-1/actions/org.torqos.policy
     mkdir -p $out/share
     cp -r --no-preserve=mode ${cosmic-panel.src}/data/default_schema $out/share/cosmic
     wings=$out/share/cosmic/com.system76.CosmicPanel.Panel/v1/plugins_wings

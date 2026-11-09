@@ -44,25 +44,34 @@ pub fn history(limit: usize) -> Result<Vec<history::Row>> {
     Ok(history::rows(&entries, limit, &history::Clock::system()))
 }
 
-/// What the running system needs before it is all in use (ADR-049): a switch changes files at once, but a
-/// kernel, its boot image, modules, firmware or graphics driver only at the next boot, and COSMIC's session
-/// only at the next login.
+/// What the running system needs before it is all in use (ADR-049). A restart is almost never one of them: the
+/// machine goes on working on the kernel it started with, and a boot image is only read at boot.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Needs {
     Nothing,
+    /// In use at the next start, with nothing to do until then: said, never asked for.
+    NextStart(Vec<&'static str>),
     /// What would be taken into use by logging out and in again.
     LogOut(Vec<&'static str>),
-    /// What would be taken into use by a restart.
+    /// What cannot be in use without a restart.
     Restart(Vec<&'static str>),
 }
 
 impl Needs {
-    /// The sentence torqcli, the applet and TorqOS Settings all say; None when nothing is needed.
+    /// The sentence torqcli, the applet and TorqOS Settings all say when something is asked of the person.
     pub fn line(&self) -> Option<String> {
         match self {
-            Needs::Nothing => None,
+            Needs::Nothing | Needs::NextStart(_) => None,
             Needs::LogOut(what) => Some(format!("Log out and back in to use the new {}.", and(what))),
             Needs::Restart(what) => Some(format!("Restart to use the new {}.", and(what))),
+        }
+    }
+
+    /// What is ready for the next start: nothing to do about it.
+    pub fn note(&self) -> Option<String> {
+        match self {
+            Needs::NextStart(what) => Some(format!("A new {} is installed, for the next time this machine starts. There is no need to restart for it.", and(what))),
+            _ => None,
         }
     }
 }
@@ -79,26 +88,29 @@ fn and(what: &[&str]) -> String {
 /// desktop session, `session` (the system the session started on, as the applet recorded it).
 pub fn needs(booted: &std::path::Path, current: &std::path::Path, session: Option<&std::path::Path>) -> Needs {
     let link = |sys: &std::path::Path, what: &str| std::fs::read_link(sys.join(what)).ok();
-    let mut restart = vec![];
-    for (what, name) in [("kernel", "kernel"), ("initrd", "boot image"), ("kernel-modules", "kernel modules"), ("firmware", "firmware")] {
-        if link(booted, what) != link(current, what) {
-            restart.push(name);
-        }
-    }
-    if driver(booted) != driver(current) {
-        restart.push("graphics driver");
-    }
     // The desktop turned on while the machine runs without it: its login screen starts at the next boot.
     if desktop(current).is_some() && desktop(booted).is_none() {
-        restart.push("desktop");
+        return Needs::Restart(vec!["desktop"]);
     }
-    if !restart.is_empty() {
-        return Needs::Restart(restart);
+    if let Some(s) = session {
+        let mut what = vec![];
+        if desktop(s) != desktop(current) {
+            what.push("COSMIC");
+        }
+        if driver(s) != driver(current) {
+            what.push("graphics driver");
+        }
+        if !what.is_empty() {
+            return Needs::LogOut(what);
+        }
     }
-    match session {
-        Some(s) if desktop(s) != desktop(current) => Needs::LogOut(vec!["COSMIC"]),
-        _ => Needs::Nothing,
+    // Only a new kernel waits for a start. A boot image, the firmware and the modules of a new one are not
+    // news: the first is read only at boot, NixOS keeps the running kernel's modules, and firmware is read
+    // when a driver loads.
+    if link(booted, "kernel") != link(current, "kernel") {
+        return Needs::NextStart(vec!["Linux kernel"]);
     }
+    Needs::Nothing
 }
 
 /// The graphics driver a system links at /run/opengl-driver: its tmpfiles line's target.
@@ -108,9 +120,9 @@ fn driver(sys: &std::path::Path) -> Option<String> {
     line.split_whitespace().last().filter(|t| t.starts_with("/nix/store/")).map(String::from)
 }
 
-/// COSMIC's session in a system: the compositor and the session, by their store paths; None without a desktop.
+/// What only a new login takes up: COSMIC's compositor and its session, by their store paths; None without a desktop.
 fn desktop(sys: &std::path::Path) -> Option<Vec<std::path::PathBuf>> {
-    ["cosmic-comp", "cosmic-session", "cosmic-panel"]
+    ["cosmic-comp", "cosmic-session"]
         .iter()
         .map(|b| std::fs::canonicalize(sys.join("sw/bin").join(b)).ok())
         .collect()
@@ -133,7 +145,7 @@ mod needs_tests {
         std::fs::create_dir_all(s.join("etc/tmpfiles.d")).unwrap();
         std::fs::write(s.join("etc/tmpfiles.d/graphics-driver.conf"), format!("'L+' '/run/opengl-driver' '-' '-' '-' '-' /nix/store/{drv}-graphics-drivers\n'r' '/run/opengl-driver-32' '-' '-' '-' '-' \n")).unwrap();
         if let Some(v) = cosmic {
-            for b in ["cosmic-comp", "cosmic-session", "cosmic-panel"] {
+            for b in ["cosmic-comp", "cosmic-session"] {
                 let target = root.join(format!("{v}-{b}"));
                 std::fs::write(&target, "").unwrap();
                 symlink(&target, s.join("sw/bin").join(b)).unwrap();
@@ -148,19 +160,28 @@ mod needs_tests {
         let r = d.path();
         let old = system(r, "old", "a", "m1", Some("c1"));
         assert_eq!(needs(&old, &old, Some(&old)), Needs::Nothing);
+        // What the laptop did: only the boot image differs (a host name, zram). Nothing is asked for.
+        let image = system(r, "image", "a", "m1", Some("c1"));
+        std::fs::remove_file(image.join("initrd")).unwrap();
+        symlink("/nix/store/other-initrd", image.join("initrd")).unwrap();
+        assert_eq!(needs(&old, &image, Some(&old)), Needs::Nothing, "a boot image is only read at boot");
         // A new COSMIC: the next login; with no session to compare, nothing a person can do here.
         let cosmic = system(r, "cosmic", "a", "m1", Some("c2"));
         assert_eq!(needs(&old, &cosmic, Some(&old)), Needs::LogOut(vec!["COSMIC"]));
         assert_eq!(needs(&old, &cosmic, None), Needs::Nothing);
         assert_eq!(needs(&old, &cosmic, Some(&cosmic)), Needs::Nothing, "a session started on it already uses it");
-        // A new kernel and driver: the next boot, whatever the session.
-        let kernel = system(r, "kernel", "b", "m2", Some("c2"));
-        assert_eq!(needs(&old, &kernel, Some(&old)), Needs::Restart(vec!["kernel", "boot image", "kernel modules", "firmware", "graphics driver"]));
-        // The desktop turned on, from a machine booted without it.
+        // A new graphics driver: the compositor has the old one loaded until the next login.
+        let driver = system(r, "driver", "a", "m2", Some("c1"));
+        assert_eq!(needs(&old, &driver, Some(&old)), Needs::LogOut(vec!["graphics driver"]));
+        // A new kernel: for the next start, and nothing is asked. Never a restart.
+        let kernel = system(r, "kernel", "b", "m1", Some("c1"));
+        assert_eq!(needs(&old, &kernel, Some(&old)), Needs::NextStart(vec!["Linux kernel"]));
+        assert_eq!(Needs::NextStart(vec!["Linux kernel"]).line(), None, "said, not asked for");
+        assert!(Needs::NextStart(vec!["Linux kernel"]).note().unwrap().contains("no need to restart"));
+        // The one case: the desktop turned on, from a machine booted without it.
         let console = system(r, "console", "a", "m1", None);
         assert_eq!(needs(&console, &old, None), Needs::Restart(vec!["desktop"]));
-        assert_eq!(Needs::Restart(vec!["kernel", "graphics driver"]).line().unwrap(), "Restart to use the new kernel and graphics driver.");
-        assert_eq!(Needs::LogOut(vec!["COSMIC"]).line().unwrap(), "Log out and back in to use the new COSMIC.");
+        assert_eq!(Needs::LogOut(vec!["COSMIC", "graphics driver"]).line().unwrap(), "Log out and back in to use the new COSMIC and graphics driver.");
     }
 }
 
@@ -227,8 +248,7 @@ pub fn glance(session: Option<&std::path::Path>, draft: bool) -> Result<Glance> 
     })
 }
 
-/// What confirms a commit confirmed waiting: torqcli's `-c` script.
-pub const CONFIRM: &str = "configure; commit";
+
 
 // ── What a session started on ────────────────────────────────────────────────────────────────────
 
@@ -290,9 +310,12 @@ pub struct Typed {
     pub edit: Vec<String>,
 }
 
+/// Where a command's questions go, each with the way back for its answer.
+type Asks = std::sync::mpsc::Sender<(String, std::sync::mpsc::Sender<bool>)>;
+
 enum Job {
-    Run(At, String, std::sync::mpsc::Sender<Result<String, String>>),
-    Typed(String, std::sync::mpsc::Sender<Typed>),
+    Run(At, String, std::sync::mpsc::Sender<Result<String, String>>, Option<Asks>),
+    Typed(String, std::sync::mpsc::Sender<Typed>, Option<Asks>),
     Choices(At, String, std::sync::mpsc::Sender<Vec<Choice>>),
     Uncommitted(std::sync::mpsc::Sender<bool>),
 }
@@ -341,18 +364,33 @@ impl Console {
     /// Run a line, its output cleaned as the terminal's is.
     pub fn run(&self, at: At, line: &str) -> Result<String, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.queue(at).send(Job::Run(at, line.to_string(), tx)).map_err(|_| GONE.to_string())?;
+        self.queue(at).send(Job::Run(at, line.to_string(), tx, None)).map_err(|_| GONE.to_string())?;
         rx.recv().unwrap_or_else(|_| Err(GONE.to_string()))
     }
 
-    /// A line typed on the Commands page.
-    pub fn typed(&self, line: &str) -> Typed {
+    /// Run a line that may ask a person something: `ask` answers each question.
+    pub fn act(&self, at: At, line: &str, ask: impl Fn(String) -> bool + Send) -> Result<String, String> {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (asks, questions) = std::sync::mpsc::channel();
+        self.queue(at).send(Job::Run(at, line.to_string(), tx, Some(asks))).map_err(|_| GONE.to_string())?;
+        std::thread::scope(|scope| {
+            scope.spawn(move || answering(questions, ask));
+            rx.recv().unwrap_or_else(|_| Err(GONE.to_string()))
+        })
+    }
+
+    /// A line typed on the Command Line: `ask` answers what it asks.
+    pub fn typed(&self, line: &str, ask: impl Fn(String) -> bool + Send) -> Typed {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (asks, questions) = std::sync::mpsc::channel();
         let gone = || Typed { output: Err(GONE.to_string()), configuration: false, edit: vec![] };
-        if self.edits.send(Job::Typed(line.to_string(), tx)).is_err() {
+        if self.edits.send(Job::Typed(line.to_string(), tx, Some(asks))).is_err() {
             return gone();
         }
-        rx.recv().unwrap_or_else(|_| gone())
+        std::thread::scope(|scope| {
+            scope.spawn(move || answering(questions, ask));
+            rx.recv().unwrap_or_else(|_| gone())
+        })
     }
 
     /// What may come next after `before` (the line up to the cursor): `?` and Tab's answer.
@@ -384,24 +422,31 @@ fn cleaned(out: String) -> String {
 /// A worker: its sessions, and the jobs for them, in order.
 fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
     let cli = cli();
-    let real = crate::shell::Real::new(&cli);
-    let session = |at: At| -> Result<crate::session::Session<'_>> {
-        use anyhow::Context as _;
-        let schema = crate::tree::Schema::parse(&std::fs::read_to_string(crate::shell::SCHEMA).with_context(|| format!("reading {} (is this TorqOS?)", crate::shell::SCHEMA))?)?;
-        let tree = crate::nixos::Tree::parse(&std::fs::read_to_string(crate::shell::NIXOS_SCHEMA).with_context(|| format!("reading {}", crate::shell::NIXOS_SCHEMA))?)?;
-        let who = crate::me()?;
-        let saved = crate::candidate::Candidate::default_path()?;
-        let mut s = crate::session::Session::new(schema, tree, crate::candidate::Repo::new(&cli.repo), Some(saved), &real, &who);
-        s.cache = crate::evalcache::Cache::personal();
-        if at == At::Draft {
-            s.exec("configure")?;
-        }
-        Ok(s)
-    };
+    // What a command asks a person goes to whoever gave this job its `Asks`; with none, there is nobody to ask.
+    let asks: std::rc::Rc<std::cell::RefCell<Option<Asks>>> = Default::default();
+    let asking = asks.clone();
+    let real = crate::shell::Real::asking(
+        &cli,
+        Box::new(move |question| {
+            use crate::session::Answer;
+            let Some(tx) = asking.borrow().clone() else { return Answer::NobodyToAsk };
+            let (back, answer) = std::sync::mpsc::channel();
+            if tx.send((cleaned(question.to_string()), back)).is_err() {
+                return Answer::NobodyToAsk;
+            }
+            match answer.recv() {
+                Ok(true) => Answer::Yes,
+                Ok(false) => Answer::No,
+                Err(_) => Answer::NobodyToAsk,
+            }
+        }),
+    );
+    let session = |at: At| open_session(&cli, &real, Some(crate::candidate::Candidate::default_path()?), at);
     let mut made: Vec<(At, Result<crate::session::Session<'_>, String>)> = sessions.iter().map(|&at| (at, session(at).map_err(|e| said(&e)))).collect();
     for job in jobs {
         match job {
-            Job::Run(at, line, reply) => {
+            Job::Run(at, line, reply, question) => {
+                *asks.borrow_mut() = question;
                 let r = match of(&mut made, at) {
                     Some(Ok(s)) => {
                         s.reread();
@@ -410,13 +455,18 @@ fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
                     Some(Err(e)) => Err(e.clone()),
                     None => Err(GONE.to_string()),
                 };
+                *asks.borrow_mut() = None;
                 let _ = reply.send(r);
             }
-            Job::Typed(line, reply) => {
+            Job::Typed(line, reply, question) => {
+                *asks.borrow_mut() = question;
                 let t = match of(&mut made, At::Typed) {
                     Some(Ok(s)) => {
                         s.reread();
-                        let output = s.exec(&line).map(cleaned).map_err(|e| said(&e));
+                        let output = match refused_here(s.mode, &line) {
+                            Some(why) => Err(why.to_string()),
+                            None => s.exec(&line).map(cleaned).map_err(|e| said(&e)),
+                        };
                         // `exit` at the top of operational mode: the window stays, and so does the session.
                         s.done = false;
                         Typed { output, configuration: s.mode == Mode::Configuration, edit: s.edit_path().to_vec() }
@@ -424,6 +474,7 @@ fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
                     Some(Err(e)) => Typed { output: Err(e.clone()), configuration: false, edit: vec![] },
                     None => Typed { output: Err(GONE.to_string()), configuration: false, edit: vec![] },
                 };
+                *asks.borrow_mut() = None;
                 let _ = reply.send(t);
             }
             Job::Choices(at, before, reply) => {
@@ -471,26 +522,22 @@ fn choices_of(s: &mut crate::session::Session<'_>, before: &str) -> Vec<Choice> 
     crate::complete::choices_at(&crate::complete::Know { schema: &s.schema, tree: &s.tree }, &at, &words, &partial)
 }
 
-/// Whether a line must go to a terminal: it asks a person something (y/N), or their password, or opens
-/// their editor. A password is never typed in a window TorqOS draws (ADR-045 5); everything else runs here.
+/// Whether a line must go to a terminal: it has a person type a new secret, or opens their editor. A yes or no
+/// is asked in the window, and an approval in COSMIC's own dialog (ADR-045 5), never a password in a window
+/// TorqOS draws.
 pub fn needs_terminal(mode: Mode, line: &str) -> bool {
-    fn asks(op: &crate::syntax::Op) -> bool {
+    fn types(op: &crate::syntax::Op) -> bool {
         use crate::syntax::{FileAction, LoadFrom, Op, Request};
         match op {
-            Op::Commit(o) => !o.check,
-            Op::ClearCommit => true,
-            Op::Request(Request::Update { .. } | Request::Pull | Request::SoftwareRollback { .. }) => false,
-            Op::Request(_) => true,
+            Op::Request(Request::Password { .. } | Request::BackupKey { .. }) => true,
             Op::File { action: FileAction::Edit, .. } => true,
             Op::Load { from: LoadFrom::Terminal, .. } => true,
-            // Everything, or everything below a place: it asks first.
-            Op::Delete { words } => words.is_empty(),
-            Op::Run(op) => asks(op),
-            Op::Top { then: Some(op) } => asks(op),
+            Op::Run(op) => types(op),
+            Op::Top { then: Some(op) } => types(op),
             _ => false,
         }
     }
-    crate::session::words(line).ok().and_then(|w| crate::grammar::read_line(mode, &w).ok()).is_some_and(|l| asks(&l.op))
+    crate::session::words(line).ok().and_then(|w| crate::grammar::read_line(mode, &w).ok()).is_some_and(|l| types(&l.op))
 }
 
 /// What the window will not do, and why: a line that would hold the shared draft for this window alone,
@@ -682,21 +729,20 @@ mod page_tests {
         whole(Mode::Configuration, "commit");
     }
 
-    /// What asks a person goes to a terminal; what only reads, or only changes the draft, stays in the window.
+    /// Only what has a person type a secret, or edit a file, goes to a terminal.
     #[test]
     fn what_goes_to_a_terminal() {
         let t = |m, c| needs_terminal(m, c);
-        for c in ["commit", "commit comment \"x\"", "commit confirmed 5", "commit at 12:00", "file edit a.nix", "load merge terminal", "top commit", "delete", "top delete"] {
+        for c in ["file edit a.nix", "load merge terminal", "run request system password", "top load set terminal"] {
             assert!(t(Mode::Configuration, c), "{c}");
         }
-        for c in ["request system revert 5", "request system apply 5", "request system password", "request system repair", "request system snapshot take", "clear system commit"] {
+        for c in ["request system password", "request system password sam", "request system backup key b"] {
             assert!(t(Mode::Operational, c), "{c}");
         }
-        for c in ["commit check", "set a b", "delete a b", "rollback 1", "show | compare", "run show version"] {
-            assert!(!t(Mode::Configuration, c), "{c}");
+        for c in ["commit", "commit comment \"x\"", "commit confirmed 5", "commit at 12:00", "commit check", "set a b", "delete", "top delete", "rollback 1", "show | compare", "run request system repair"] {
+            assert!(!t(Mode::Configuration, c), "{c}: asked in the window, approved in the dialog");
         }
-        assert!(t(Mode::Configuration, "run request system repair"), "from configuration mode too");
-        for c in ["show system alarms", "request system update", "request system pull", "show packages firefox"] {
+        for c in ["request system revert 5", "request system apply 5", "request system repair", "request system snapshot take", "clear system commit", "show system alarms", "request system update"] {
             assert!(!t(Mode::Operational, c), "{c}");
         }
     }
@@ -841,5 +887,35 @@ mod tree_tests {
         assert_eq!(rollback_of(shown, 16), Some(0));
         assert_eq!(rollback_of(shown, 14), Some(1));
         assert_eq!(rollback_of(shown, 1), None, "not #1 of #14 or #16");
+    }
+}
+
+/// A session of torqcli's on this machine: `saved`, the candidate it works on (None: its own).
+fn open_session<'a>(cli: &Cli, machine: &'a dyn crate::session::Machine, saved: Option<PathBuf>, at: At) -> Result<crate::session::Session<'a>> {
+    use anyhow::Context as _;
+    let schema = crate::tree::Schema::parse(&std::fs::read_to_string(crate::shell::SCHEMA).with_context(|| format!("reading {} (is this TorqOS?)", crate::shell::SCHEMA))?)?;
+    let tree = crate::nixos::Tree::parse(&std::fs::read_to_string(crate::shell::NIXOS_SCHEMA).with_context(|| format!("reading {}", crate::shell::NIXOS_SCHEMA))?)?;
+    let who = crate::me()?;
+    let mut s = crate::session::Session::new(schema, tree, crate::candidate::Repo::new(&cli.repo), saved, machine, &who);
+    s.cache = crate::evalcache::Cache::personal();
+    if at == At::Draft {
+        s.exec("configure")?;
+    }
+    Ok(s)
+}
+
+/// Keep a commit confirmed waiting: `commit` of an empty candidate, a private one, always, so that the
+/// person's draft is never swept in with it.
+pub fn confirm() -> Result<String> {
+    let cli = cli();
+    let real = crate::shell::Real::new(&cli);
+    let mut s = open_session(&cli, &real, None, At::Draft)?;
+    Ok(cleaned(s.exec("commit")?))
+}
+
+/// A job's questions, each answered in turn, until the job has no more.
+fn answering(questions: std::sync::mpsc::Receiver<(String, std::sync::mpsc::Sender<bool>)>, ask: impl Fn(String) -> bool) {
+    for (question, back) in questions {
+        let _ = back.send(ask(question));
     }
 }

@@ -1,13 +1,16 @@
 //! The window: each page torqcli's output, laid out as COSMIC lays out settings, and each button a torqcli
-//! command, run by torqcli's own session (`torq::app::Console`). What asks a person (a commit, an undo, a
-//! password) goes to a terminal: a password is never typed in a window TorqOS draws (ADR-045 5).
+//! command, run by torqcli's own session (`torq::app::Console`). A yes or no is asked here, an approval in
+//! COSMIC's own dialog (ADR-045 5): a password is never typed in a window TorqOS draws.
 
 use cosmic::app::context_drawer;
 use cosmic::iced::{Alignment, Length, Padding};
 use cosmic::prelude::*;
 use cosmic::widget::segmented_button::{Entity, SingleSelectModel};
 use cosmic::widget::{self, icon, nav_bar, settings};
+use cosmic::iced::futures::channel::mpsc::Sender;
+use cosmic::iced::futures::SinkExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use torq::app::{self, Action, At, Choice, Console, Glance, How, Machine, Mode, Needs, Proposal, Typed, View, VIEWS};
 use torq::history::Row;
 
@@ -139,6 +142,36 @@ pub struct Settings {
     log: Vec<(String, String)>,
     /// Ask to restart once the terminal has confirmed the change (`Confirm, then restart`).
     restart_after: bool,
+    /// What a running command is asking.
+    question: Option<(String, Reply)>,
+}
+
+/// The way back to a command waiting for a person's yes or no.
+#[derive(Clone)]
+pub struct Reply(Arc<Mutex<Option<std::sync::mpsc::Sender<bool>>>>);
+
+impl std::fmt::Debug for Reply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Reply")
+    }
+}
+
+impl Reply {
+    fn send(&self, yes: bool) {
+        if let Some(back) = self.0.lock().ok().and_then(|mut b| b.take()) {
+            let _ = back.send(yes);
+        }
+    }
+}
+
+/// Puts a command's question on the window and waits for the answer; on a thread that may wait.
+fn asker(ui: Sender<Message>) -> impl Fn(String) -> bool + Send {
+    move |question| {
+        let mut ui = ui.clone();
+        let (back, answer) = std::sync::mpsc::channel();
+        let sent = cosmic::iced::futures::executor::block_on(ui.send(Message::Asked(question, Reply(Arc::new(Mutex::new(Some(back)))))));
+        sent.is_ok() && answer.recv().unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +186,10 @@ pub enum Message {
     Act(At, String),
     Did(String, Result<String, String>),
     Closed(String, Result<bool, String>),
+    /// A command asks a person: its question, and the way back for the answer.
+    Asked(String, Reply),
+    Answer(bool),
+    ConfirmDone(Result<String, String>),
     Confirm,
     Restart,
     LogOut,
@@ -292,6 +329,7 @@ impl cosmic::Application for Settings {
             asked: 0,
             log: vec![],
             restart_after: false,
+            question: None,
         };
         let title = match app.core.main_window_id() {
             Some(id) => app.set_window_title("TorqOS Settings".into(), id),
@@ -317,6 +355,21 @@ impl cosmic::Application for Settings {
 
     fn header_end(&self) -> Vec<Element<'_, Message>> {
         vec![widget::button::icon(icon::from_name("view-refresh-symbolic")).tooltip("Ask the broker again").on_press(Message::Refresh).into()]
+    }
+
+    /// What a running command asks a person (commit's review, an undo, a delete): the yes or no a terminal
+    /// would ask. An approval the system needs comes after it, in COSMIC's own dialog.
+    fn dialog(&self) -> Option<Element<'_, Message>> {
+        let (question, _) = self.question.as_ref()?;
+        let body = widget::container(widget::scrollable(widget::text::monotext(question.trim_end().to_string()).width(Length::Fill))).max_height(360.0);
+        Some(
+            widget::dialog()
+                .title("Go ahead?")
+                .control(body)
+                .primary_action(widget::button::suggested("Yes").on_press(Message::Answer(true)))
+                .secondary_action(widget::button::standard("No").on_press(Message::Answer(false)))
+                .into(),
+        )
     }
 
     /// The side panel: one setting, what it is, and the control for it.
@@ -377,10 +430,29 @@ impl cosmic::Application for Settings {
                 }
                 return self.load();
             }
-            // A private candidate, always: `commit` of an empty one is what confirms, and the draft is not part of it.
             Message::Confirm => {
                 self.restart_after = matches!(&self.glance, Loaded::Got(g) if matches!(g.needs, Needs::Restart(_)));
-                return self.terminal(app::CONFIRM.to_string(), false, "commit".to_string());
+                self.busy = Some("confirming".into());
+                self.note = None;
+                return cosmic::task::future(async { Message::ConfirmDone(blocking(app::confirm).await) });
+            }
+            Message::ConfirmDone(r) => {
+                self.busy = None;
+                let restart = std::mem::take(&mut self.restart_after);
+                if restart && r.is_ok() {
+                    app::ask_restart();
+                }
+                self.note = Some(match r {
+                    Ok(out) => (out.trim().to_string(), false),
+                    Err(e) => (e, true),
+                });
+                return self.load();
+            }
+            Message::Asked(question, reply) => self.question = Some((question, reply)),
+            Message::Answer(yes) => {
+                if let Some((_, reply)) = self.question.take() {
+                    reply.send(yes);
+                }
             }
             Message::Restart => app::ask_restart(),
             Message::LogOut => app::ask_log_out(),
@@ -416,7 +488,7 @@ impl cosmic::Application for Settings {
                     (false, false) => "",
                 };
                 return cosmic::task::future(async move {
-                    let t = off(move || console.typed(step)).await;
+                    let t = off(move || console.typed(step, |_| false)).await;
                     Message::Filled(command, t.unwrap_or_else(|e| Typed { output: Err(e), configuration: false, edit: vec![] }))
                 });
             }
@@ -586,11 +658,13 @@ impl cosmic::Application for Settings {
                 }
                 self.busy = Some(line.clone());
                 let console = self.console.clone();
-                return cosmic::task::future(async move {
+                return Task::stream(cosmic::iced::stream::channel(4, async move |mut out: Sender<Message>| {
+                    let ask = asker(out.clone());
                     let shown = line.clone();
-                    let t = off(move || console.typed(&line)).await;
-                    Message::Typed(shown, t.unwrap_or_else(|e| Typed { output: Err(e), configuration: false, edit: vec![] }))
-                });
+                    let t = off(move || console.typed(&line, ask)).await;
+                    let _ = out.send(Message::Typed(shown, t.unwrap_or_else(|e| Typed { output: Err(e), configuration: false, edit: vec![] }))).await;
+                }))
+                .map(cosmic::Action::App);
             }
             Message::Typed(line, t) => {
                 self.busy = None;
@@ -791,11 +865,13 @@ impl Settings {
         self.busy = Some(line.clone());
         self.note = None;
         let console = self.console.clone();
-        cosmic::task::future(async move {
+        Task::stream(cosmic::iced::stream::channel(4, async move |mut out: Sender<Message>| {
+            let ask = asker(out.clone());
             let c = line.clone();
-            let got = off(move || console.run(at, &c)).await.and_then(|r| r);
-            Message::Did(line, got)
-        })
+            let got = off(move || console.act(at, &c, ask)).await.and_then(|r| r);
+            let _ = out.send(Message::Did(line, got)).await;
+        }))
+        .map(cosmic::Action::App)
     }
 
     fn terminal(&mut self, script: String, draft: bool, what: String) -> Task<cosmic::Action<Message>> {
@@ -1061,6 +1137,9 @@ impl Settings {
             page = page.push(waiting_on);
         }
 
+        if let Some(n) = g.needs.note() {
+            page = page.push(widget::text::body(n));
+        }
         // `show system alarms`, line by line, as it prints them.
         let mut alarms = settings::section().title("Status");
         match &self.machine {
@@ -1144,7 +1223,7 @@ impl Settings {
                 .push(widget::button::destructive("Discard my changes").on_press(Message::Act(At::Draft, "rollback 0".into())))
                 .spacing(spacing.space_xs),
         );
-        page.push(widget::text::caption("Commit opens a terminal, where anything it needs from you is asked.")).into()
+        page.push(widget::text::caption("Commit shows you the change, then asks for your approval in COSMIC's own password dialog.")).into()
     }
 
     fn earlier_tab(&self) -> Element<'_, Message> {

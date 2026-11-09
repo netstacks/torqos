@@ -23,9 +23,21 @@ pkgs.testers.runNixOSTest {
     users.users.root.hashedPasswordFile = lib.mkForce null;
     # COSMIC's session and its applications: NixOS's own COSMIC test gives it 4 GB.
     virtualisation.memorySize = 4096;
+    # What a change does here does not matter: this proves who may approve it, and how.
+    torq.broker.rebuildCommand = "true";
+    environment.etc."torq-test/desktop.nix".text = "{ nightLight = false; }\n";
+    environment.etc."torq-test/system.diff".text = ''
+      --- a/desktop.nix
+      +++ b/desktop.nix
+      @@ -1 +1 @@
+      -{ nightLight = false; }
+      +{ nightLight = true; }
+    '';
+    environment.systemPackages = [ pkgs.pam ];
   };
 
   testScript = ''
+    import json, shlex
     machine.wait_for_unit("multi-user.target")
     # The owner's password, set as setup sets it, then the accounts written from it.
     machine.succeed("install -d -m 700 /var/lib/torq/secrets/passwords"
@@ -66,6 +78,55 @@ pkgs.testers.runNixOSTest {
 
     with subtest("memory run short ends a program, it does not freeze the desktop"):
         machine.succeed("swapon --show=NAME --noheadings | grep -q zram")
+
+    with subtest("a system change from the desktop is approved in COSMIC's dialog, and only there"):
+        repo = "/var/lib/torq/config"
+        machine.succeed(f"mkdir -p {repo} && cp /etc/torq-test/desktop.nix {repo}/ && touch {repo}/flake.nix")
+        machine.succeed("torq-broker init")
+        sock = "${pkgs.socat}/bin/socat -t 150 - UNIX-CONNECT:/run/torq/broker.sock"
+        def on_the_desktop(request):
+            # A program of alice's desktop session, as an application is: in her user manager.
+            line = json.dumps(request)
+            shell = f"printf '%s\\n' {shlex.quote(line)} | {sock}"
+            return f"systemd-run --user --machine=alice@ --pipe --wait --quiet /bin/sh -c {shlex.quote(shell)}"
+        def frames(raw):
+            code, out = None, ""
+            for l in raw.splitlines():
+                f = json.loads(l)
+                out += f.get("out", "")
+                if "exit" in f:
+                    code = f["exit"]
+            return code, json.loads(out) if out.strip() else None
+        head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+        diff = machine.succeed("cat /etc/torq-test/system.diff")
+        code, p = frames(machine.succeed(on_the_desktop({"args": ["--json", "propose", f"--base={head}", "--reason=night light"], "diff": diff})))
+        assert code == 0, (code, p)
+        seq = str(p["seq"])
+
+        # A password sent straight to the broker, right or not, is refused from here.
+        code, v = frames(machine.succeed(on_the_desktop({"args": ["--json", "apply", seq], "password": "torq-desktop"})))
+        assert code == 1 and "dialog" in v["error"], (code, v)
+        machine.fail(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = true'")
+
+        # A wrong password in the dialog counts toward the same lockout as one at a terminal.
+        ask = on_the_desktop({"args": ["--json", "apply", seq]})
+        machine.succeed(f"(setsid {ask} > /tmp/refused.out 2>&1 < /dev/null &)")
+        machine.wait_until_succeeds("pgrep -x pkcheck", timeout=30)
+        machine.sleep(8)
+        machine.screenshot("approval")
+        machine.send_chars("wrong-password\n", delay=0.1)
+        machine.wait_until_succeeds("faillock --dir /run/torq/faillock --user alice | grep -q ' V$\\| V '", timeout=30)
+        machine.fail(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = true'")
+        machine.succeed("pkill -x pkcheck || true")
+        machine.sleep(3)
+
+        # The right one, in the dialog: the change is made.
+        machine.succeed(f"(setsid {ask} > /tmp/approved.out 2>&1 < /dev/null &)")
+        machine.wait_until_succeeds("pgrep -x pkcheck", timeout=30)
+        machine.sleep(8)
+        machine.send_chars("torq-desktop\n", delay=0.1)
+        machine.wait_until_succeeds("grep -q '\"exit\":0' /tmp/approved.out", timeout=60)
+        machine.succeed(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = true'")
 
     with subtest("Flathub is the person's, not the system's"):
         machine.wait_until_succeeds("su - alice -c 'flatpak remotes --user' | grep -q flathub", timeout=60)

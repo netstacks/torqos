@@ -1558,6 +1558,7 @@ more client. COSMIC has a polkit agent in its shell (`cosmic-osd`) and goes thro
      session's requests then refuse a password in the request outright, so a password phished by a lookalike
      window cannot be replayed over the socket (the trusted-path problem is not solved by any dialog;
      SECURITY-MODEL says so); and polkit's PAM service set to count as `torq-approve` does.
+     **Built 2026-11-09, both questions settled by the owner:** a caller on the desktop (in a graphical session, or among its user manager's applications, by logind's records and the process's cgroup: `socket::on_the_desktop`) is approved through `pkcheck` and COSMIC's agent, and a password sent in its request is refused; a text console, SSH and system services are as before. `polkit-1` uses `torq-approve`'s PAM stack, so wrong passwords in the dialog count toward the same lockout. A yes or no a command asks is answered in TorqOS Settings, in the window; only typing a new secret or opening an editor still takes a terminal (`app::needs_terminal`). `tests/desktop.nix` drives the real dialog.
   6. **The agent's view of the desktop goes through COSMIC's portal** (`xdg-desktop-portal-cosmic`:
      ScreenCast, Screenshot, RemoteDesktop where it is complete), granted by the person per session in the
      portal's own dialog and ledgered as a grant like session trust (ADR-042 7). Not the compositor's
@@ -1847,7 +1848,7 @@ COSMIC (1.11 needed a restart), and a restart before confirming silently undid a
 A server's person reads torqcli's output; a desktop's person looks at the screen.
 - **Decision:**
   1. **What a switch needs, worked out, never guessed.** From the systems themselves, unprivileged:
-     - **restart** — the running system's kernel, initrd, kernel modules or firmware differ from the booted
+     - **restart** (as first written; see "As built": only the desktop turned on) — the running system's kernel, initrd, kernel modules or firmware differ from the booted
        system's (`/run/current-system` against `/run/booted-system`), or the graphics driver does
        (`/run/opengl-driver`, ADR-045 amended), or the desktop was turned on while the machine runs without it;
      - **log out** — COSMIC's compositor, session or panel differs from what the person's session started with (the applet
@@ -1885,6 +1886,7 @@ A server's person reads torqcli's output; a desktop's person looks at the screen
   sharing the page words), the panel default in the desktop module, notifications, the menu refresh. VM tests:
   each case of 1 detected (a kernel change, a COSMIC change, a package change, a pending confirmation); the
   applet in the panel after login.
+- **Amended (2026-11-09, the owner: "I dont think we should be requiring a reboot of a system without a true very pure need"): a restart is only asked for when nothing else can do.** The first version asked for one whenever the kernel, boot image, modules, firmware or driver differed from boot, and on the laptop every commit that changed the initrd (a host name) said so. Now: a new boot image, firmware or modules are not news; a new kernel is a sentence for the next start, not a badge or a request; COSMIC's compositor or session, or the graphics driver, asks for a log-out; only the desktop turned on from a machine booted without it asks for a restart. Nothing logs a person out unasked: a new login closes every open application, as a restart would.
 - **As built (2026-11-09):** the badge is drawn from the mark in the panel's own text colour (a symbolic icon has one colour, and the badge is the news). The menu is refreshed by a file come and gone in `~/.local/share/applications`, which COSMIC's app library watches recursively; the system's own folder is replaced whole by a switch, so a watch on it sees nothing. The panel reads its default configuration whole or not at all (no `entries`: its compiled-in default, written to the person's config), so the package ships COSMIC's own `data/default_schema` from the pinned `cosmic-panel`, with the applet inserted, and its build stops if that list no longer reads as expected. The system a session started on is kept per login (`XDG_SESSION_ID`): the runtime directory outlives a logout while an SSH session is open. COSMIC's first-run wizard is left out: TorqOS has its own setup, and the wizard sets what the configuration owns.
 - **Not:** restarting or logging out on the person's behalf; a second status daemon (the applet asks the broker
   as torqcli does); the applet as a way to change the system (it confirms, opens TorqOS Settings, or asks the

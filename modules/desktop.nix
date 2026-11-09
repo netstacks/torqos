@@ -59,6 +59,9 @@ in
     # TorqOS has its own first-boot setup, and the configuration owns what COSMIC's wizard would set (the
     # time zone, accounts): not a second one that writes around it.
     environment.cosmic.excludePackages = [ pkgs.cosmic-initial-setup ];
+    # A wrong password in COSMIC's dialog counts toward the same lockout as one at a terminal (ADR-045 5): no
+    # more guesses for changing where they are made.
+    security.pam.services.polkit-1.text = config.security.pam.services.torq-approve.text;
     services.desktopManager.cosmic.showExcludedPkgsWarning = false;
 
     # A desktop's network: NetworkManager, for COSMIC's network applet and settings page, with iwd as its

@@ -20,6 +20,8 @@ pub(crate) struct Real<'a> {
     cli: &'a Cli,
     /// `| display detail`: steps and Nix's and the broker's output shown as they come (no spinner).
     detail: std::cell::Cell<bool>,
+    /// Who answers what a command asks a person: in TorqOS Settings, its dialog (None: the terminal).
+    asker: Option<Box<dyn Fn(&str) -> crate::session::Answer + 'a>>,
 }
 
 impl Real<'_> {
@@ -118,14 +120,20 @@ fn done(o: run::Outcome, what: &str) -> Result<serde_json::Value> {
 impl<'a> Real<'a> {
     /// The machine, as TorqOS Settings' sessions use it too (app.rs).
     pub(crate) fn new(cli: &'a Cli) -> Self {
-        Real { cli, detail: std::cell::Cell::new(false) }
+        Real { cli, detail: std::cell::Cell::new(false), asker: None }
+    }
+
+    /// The machine, its questions answered by `asker`.
+    pub(crate) fn asking(cli: &'a Cli, asker: Box<dyn Fn(&str) -> crate::session::Answer + 'a>) -> Self {
+        Real { cli, detail: std::cell::Cell::new(false), asker: Some(asker) }
     }
 }
 
 impl Machine for Real<'_> {
     fn needs(&self) -> Option<String> {
         let session = crate::app::session_recorded();
-        crate::app::needs(std::path::Path::new("/run/booted-system"), std::path::Path::new("/run/current-system"), session.as_deref()).line()
+        let needs = crate::app::needs(std::path::Path::new("/run/booted-system"), std::path::Path::new("/run/current-system"), session.as_deref());
+        needs.line().or_else(|| needs.note())
     }
 
     fn evaluate(&self, base: &str, files: &[(String, Option<String>)]) -> Result<Evaluated> {
@@ -910,6 +918,9 @@ impl Machine for Real<'_> {
         fs::read_to_string("/etc/os-release").ok().and_then(|t| crate::release::os_release_version(&t))
     }
     fn ask(&self, question: &str) -> crate::session::Answer {
+        if let Some(asker) = &self.asker {
+            return asker(question);
+        }
         ask_person(question)
     }
     fn read_terminal(&self, max: usize) -> Result<String> {
@@ -1403,7 +1414,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
     check_repo(&cli)?;
     let schema = Schema::parse(&fs::read_to_string(SCHEMA).with_context(|| format!("reading {SCHEMA} (is this TorqOS?)"))?)?;
     let tree = crate::nixos::Tree::parse(&fs::read_to_string(NIXOS_SCHEMA).with_context(|| format!("reading {NIXOS_SCHEMA} (is this TorqOS, from S1 on?)"))?)?;
-    let machine = Real { cli: &cli, detail: std::cell::Cell::new(false) };
+    let machine = Real { cli: &cli, detail: std::cell::Cell::new(false), asker: None };
     let who = me()?;
     // Only the interactive shell keeps a candidate between runs; a script's is its own.
     let saved = if matches!(run, Invocation::Interactive | Invocation::Draft(_)) { Some(Candidate::default_path()?) } else { None };
@@ -1462,7 +1473,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
         Invocation::Interactive => {
             let history_cli = Cli { repo: cli.repo.clone(), broker: cli.broker.clone() };
             let history = crate::complete::Later::new(move || {
-                let real = Real { cli: &history_cli, detail: std::cell::Cell::new(false) };
+                let real = Real { cli: &history_cli, detail: std::cell::Cell::new(false), asker: None };
                 real.configurations(&Repo::new(&history_cli.repo), 30).map(|h| crate::session::configuration_lines(&h)).unwrap_or_default()
             });
             interactive(&mut s, history)
