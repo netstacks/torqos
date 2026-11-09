@@ -19,6 +19,7 @@ use torq_broker::config::{self, Settings};
 use torq_broker::ledger::Ledger;
 use torq_broker::policy::Tier;
 use torq_broker::socket::{self, Caller, Change, Frame, Gate, Request};
+use torq_wire::socket::{REFUSED, USAGE};
 
 /// How many frames may wait for the caller. Past that, lines are left out — counted, and said —
 /// rather than the broker's output ever waiting on the caller (the reviews of ADR-040).
@@ -153,11 +154,11 @@ struct Refusal {
 fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     let refuse = |json: bool, code: i32| move |e: anyhow::Error| Refusal { json, code, why: format!("{e:#}") };
     if !config::running_as_root() {
-        return Err(refuse(false, 1)(anyhow::anyhow!("serve runs as root, from torq-broker.socket")));
+        return Err(refuse(false, REFUSED)(anyhow::anyhow!("serve runs as root, from torq-broker.socket")));
     }
     let uid = rustix::net::sockopt::socket_peercred(std::io::stdin())
         .context("this is not a connection to the broker's socket (no SO_PEERCRED)")
-        .map_err(refuse(false, 1))?
+        .map_err(refuse(false, REFUSED))?
         .uid
         .as_raw();
     // A caller that sends nothing, or stops reading, holds nothing for long (the audit of ADR-040,
@@ -167,10 +168,10 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     rustix::net::sockopt::set_socket_timeout(std::io::stdin(), rustix::net::sockopt::Timeout::Recv, limit)
         .and_then(|()| rustix::net::sockopt::set_socket_timeout(std::io::stdout(), rustix::net::sockopt::Timeout::Send, limit))
         .context("setting the connection's time limits")
-        .map_err(refuse(false, 1))?;
-    let req = read_request().map_err(refuse(false, 2))?;
+        .map_err(refuse(false, REFUSED))?;
+    let req = read_request().map_err(refuse(false, USAGE))?;
     let json = req.args.iter().any(|a| a == "--json");
-    let refused = refuse(json, 1);
+    let refused = refuse(json, REFUSED);
     if uid == 0 {
         return Err(refused(anyhow::anyhow!("root runs torq-broker itself, not through the socket")));
     }
@@ -193,7 +194,7 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     // The arguments as the broker will read them: what they name, for the gate.
     let m = crate::command_line()
         .try_get_matches_from(std::iter::once("torq-broker".to_string()).chain(args.iter().cloned()))
-        .map_err(|e| Refusal { json, code: 2, why: e.render().to_string().trim().to_string() })?;
+        .map_err(|e| Refusal { json, code: USAGE, why: e.render().to_string().trim().to_string() })?;
     let (name, sub) = m.subcommand().ok_or_else(|| refused(anyhow::anyhow!("no command")))?;
     if name != cmd {
         return Err(refused(anyhow::anyhow!("the command is {name}, not {cmd}")));
@@ -343,7 +344,7 @@ fn run(reply: &Reply, who: &Caller, args: &[String]) -> i32 {
     let out = forward(child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>), Frame::Out, true);
     let err = forward(child.stderr.take().map(|e| Box::new(e) as Box<dyn Read + Send>), Frame::Err, false);
     let code = match child.wait() {
-        Ok(s) => s.code().unwrap_or(1),
+        Ok(s) => s.code().unwrap_or(REFUSED),
         Err(_) => 1,
     };
     // Its output, to its end — unless something it started still holds the pipes open: then a

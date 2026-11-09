@@ -85,6 +85,7 @@ machine stays thin. `nix develop` for a shell, or `nix develop --command …` fo
 nix develop --command bash -c 'cd broker && cargo test'   # incl. ledger tamper detection
 nix develop --command bash -c 'cd cli    && cargo test'   # the grammar, candidate, tree
 nix develop --command bash -c 'cd agent  && cargo test'   # doctor mode, against a scripted model
+nix develop --command bash -c 'cd wire   && cargo test'   # torq-wire: the socket's bytes (ledger fixtures: the broker's)
 
 # Nix — x86_64 only: aarch64 is neither built nor tested during development (ADR-030, amended)
 nix flake check                                   # eval + tree checks + VM tests

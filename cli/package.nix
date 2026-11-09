@@ -16,7 +16,12 @@ rustPlatform.buildRustPackage {
   # One place: Cargo.toml (scripts/bump-version sets it).
   version = (lib.importTOML ./Cargo.toml).package.version;
   # This crate and torq-wire (ADR-044), nothing else of the repository: a change elsewhere rebuilds nothing.
-  src = lib.fileset.toSource { root = ../.; fileset = lib.fileset.unions [ ./. ../wire ]; };
+  src = lib.fileset.toSource {
+    root = ../.;
+    # Not a build left in the working tree (a `path:` source, in development, copies it).
+    fileset = lib.fileset.difference (lib.fileset.unions [ ./. ../wire ])
+      (lib.fileset.unions [ (lib.fileset.maybeMissing ./target) (lib.fileset.maybeMissing ../wire/target) ]);
+  };
   cargoRoot = "cli";
   buildAndTestSubdir = "cli";
   cargoLock.lockFile = ./Cargo.lock;

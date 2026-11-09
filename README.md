@@ -283,6 +283,7 @@ nix build .#iso                                  # the ISO installer
 nix build .#checks.x86_64-linux.trust-loop       # one VM test
 nix develop -c sh -c 'cd cli && cargo test'      # torqcli's unit tests
 nix develop -c sh -c 'cd broker && cargo test'   # the broker's unit tests
+nix develop -c sh -c 'cd wire && cargo test'     # torq-wire, the words the three share
 ```
 
 | Check | What it proves |

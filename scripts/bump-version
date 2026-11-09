@@ -121,7 +121,7 @@ if [ $bad -ne 0 ]; then
   [ "$old" = "$new" ] || [ -z "$release" ] || git checkout -q -- "${cargo_files[@]}"
   exit 1
 fi
-[ "$old" = "$new" ] || echo "TorqOS is $new (was $old): cli and broker, their Cargo.toml and Cargo.lock, and their packages."
+[ "$old" = "$new" ] || echo "TorqOS is $new (was $old): cli, broker, agent and wire, their Cargo.toml and Cargo.lock, and their packages."
 
 bumped=
 if [ -n "$commit" ] && [ "$old" != "$new" ]; then

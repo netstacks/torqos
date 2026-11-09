@@ -115,6 +115,7 @@ cd ~/torq
 nix develop --command bash -c 'cd broker && cargo test'   # the broker's unit tests
 nix develop --command bash -c 'cd cli    && cargo test'   # torqcli's
 nix develop --command bash -c 'cd agent  && cargo test'   # the agent's doctor mode (a scripted model)
+nix develop --command bash -c 'cd wire   && cargo test'   # torq-wire, the words the three share (ADR-044)
 nix flake check                                           # evaluation, tree checks, VM tests
 nix build .#checks.x86_64-linux.trust-loop                # one VM test
 nix build .#checks.x86_64-linux.image                     # the image test: boot, setup, update

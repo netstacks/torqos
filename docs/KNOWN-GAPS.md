@@ -727,7 +727,11 @@ Its §5 lists claims without a test.
    fixtures first so the ledger's bytes are proven unchanged; not in 0.3.0 (it changes all three Nix
    packages' sources and touches `lib.rs` while the release's branches do).
    **Steps 0 and 1 done (2026-11-09):** the fixtures, and the socket's types and exit codes in `torq-wire`, shared
-   by the broker and torqcli. Open: the kinds, tiers and actors (step 2) and the newtypes (step 3).
+   by the broker and torqcli. Open: the kinds, tiers and actors (step 2) and the newtypes (step 3). Before step 2,
+   the fixtures need lines no `cargo test` writes (review, 2026-11-09): `adopted`, `data_restored`,
+   `disagreement_acknowledged`, `remote_cleared`, `backup_key_failed`, and an entry with `data.via` and
+   `data.caller` as every entry since ADR-040 has; else a misspelt `Kind` for one of them round-trips as
+   `Unknown` and no test sees it.
 
 6zr. **Python out of a new machine (ADR-032/033, amended 2026-11-07, `work/w6`).** The root is grown by
    systemd-repart in the initrd, not growpart; the SSH greeting runs fastfetch's program without its
