@@ -76,6 +76,13 @@ pkgs.testers.runNixOSTest {
     with subtest("COSMIC's own first-run wizard is not offered: TorqOS has its setup"):
         machine.fail("test -e /run/current-system/sw/bin/cosmic-initial-setup")
 
+    with subtest("COSMIC starts its panel again by itself, with the applet in it: what a switch relies on"):
+        panel = machine.succeed("pgrep -u alice -fx cosmic-panel").strip()
+        machine.succeed("pkill -u alice -fx cosmic-panel")
+        machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-panel | grep -vx {panel}", timeout=60)
+        machine.wait_until_succeeds("pgrep -u alice -fx torq-applet", timeout=60)
+        machine.succeed("pgrep -u alice -fx cosmic-comp")
+
     with subtest("memory run short ends a program, it does not freeze the desktop"):
         machine.succeed("swapon --show=NAME --noheadings | grep -q zram")
 

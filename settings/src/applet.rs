@@ -40,6 +40,8 @@ struct Applet {
     session: Option<PathBuf>,
     /// The running system when last looked at: a change is a switch.
     running: Option<PathBuf>,
+    /// The system a switch has just left: once it has settled, what it changed is started again.
+    switched_from: Option<PathBuf>,
     /// What was last notified, so each state is said once.
     told: Option<String>,
     /// The confirmation already warned of as about to expire.
@@ -295,9 +297,15 @@ impl cosmic::Application for Applet {
             Message::Looked => {
                 let now = running();
                 if now != self.running {
+                    // The first system left, if a switch follows a switch: what is running came from it.
+                    self.switched_from = self.switched_from.take().or_else(|| self.running.clone());
                     self.running = now;
                     refresh_menu();
                     return self.update(Message::Ask);
+                }
+                // Settled: the panel and the rest, where they changed, without a new login. Open windows stay.
+                if let (Some(old), Some(new)) = (self.switched_from.take(), now) {
+                    app::restart_parts(&app::stale_parts(&old, &new));
                 }
             }
             Message::Tick => {

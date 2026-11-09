@@ -919,3 +919,92 @@ fn answering(questions: std::sync::mpsc::Receiver<(String, std::sync::mpsc::Send
         let _ = back.send(ask(question));
     }
 }
+
+// ── What a switch can bring in without a new login ───────────────────────────────────────────────
+
+/// The parts of COSMIC its session starts again by itself, new from the system's path, each with the programs
+/// whose change means it is out of date. Not the compositor or the session: those are the login. Not the
+/// greeter, which holds the lock screen. The panel is last: this applet lives in it.
+const LIVE_PARTS: &[(&str, &[&str])] = &[
+    ("cosmic-settings-daemon", &["cosmic-settings-daemon"]),
+    ("cosmic-notifications", &["cosmic-notifications"]),
+    ("cosmic-app-library", &["cosmic-app-library"]),
+    ("cosmic-launcher", &["cosmic-launcher", "pop-launcher"]),
+    ("cosmic-workspaces", &["cosmic-workspaces"]),
+    ("cosmic-osd", &["cosmic-osd"]),
+    ("cosmic-osk", &["cosmic-osk"]),
+    ("cosmic-bg", &["cosmic-bg"]),
+    ("cosmic-idle", &["cosmic-idle"]),
+    ("cosmic-files-applet", &["cosmic-files-applet"]),
+    ("cosmic-panel", &["cosmic-panel", "cosmic-panel-button", "cosmic-applet-audio", "torq-applet"]),
+];
+
+/// The live parts of the desktop `new` has other programs for than `old`.
+pub fn stale_parts(old: &std::path::Path, new: &std::path::Path) -> Vec<&'static str> {
+    let of = |sys: &std::path::Path, b: &str| std::fs::canonicalize(sys.join("sw/bin").join(b)).ok();
+    LIVE_PARTS.iter().filter(|(_, programs)| programs.iter().any(|b| of(old, b) != of(new, b))).map(|(part, _)| *part).collect()
+}
+
+/// End each of these programs of this person's, by its exact command line: COSMIC's session starts it again.
+pub fn restart_parts(parts: &[&str]) {
+    let me = rustix::process::geteuid().as_raw();
+    let Ok(procs) = std::fs::read_dir("/proc") else { return };
+    let running: Vec<(i32, String)> = procs
+        .flatten()
+        .filter_map(|e| {
+            use std::os::unix::fs::MetadataExt as _;
+            let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+            (e.metadata().ok()?.uid() == me).then_some(())?;
+            let cmdline = std::fs::read(e.path().join("cmdline")).ok()?;
+            // One word, as the session started it.
+            let word = cmdline.strip_suffix(&[0])?;
+            (!word.contains(&0)).then(|| Some((pid, String::from_utf8_lossy(word).into_owned())))?
+        })
+        .collect();
+    for part in parts {
+        for (pid, _) in running.iter().filter(|(_, c)| c == part) {
+            if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_parts {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn system(root: &std::path::Path, name: &str, programs: &[(&str, &str)]) -> PathBuf {
+        let s = root.join(name);
+        std::fs::create_dir_all(s.join("sw/bin")).unwrap();
+        for (b, version) in programs {
+            let target = root.join(format!("{version}-{b}"));
+            std::fs::write(&target, "").unwrap();
+            symlink(&target, s.join("sw/bin").join(b)).unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn only_what_changed_is_started_again_the_panel_last() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        let old = system(r, "old", &[("cosmic-panel", "1"), ("cosmic-bg", "1"), ("torq-applet", "1"), ("cosmic-comp", "1")]);
+        assert!(stale_parts(&old, &old).is_empty());
+        let applet = system(r, "applet", &[("cosmic-panel", "1"), ("cosmic-bg", "1"), ("torq-applet", "2"), ("cosmic-comp", "1")]);
+        assert_eq!(stale_parts(&old, &applet), vec!["cosmic-panel"], "the applet lives in the panel");
+        let both = system(r, "both", &[("cosmic-panel", "2"), ("cosmic-bg", "2"), ("torq-applet", "1"), ("cosmic-comp", "1")]);
+        assert_eq!(stale_parts(&old, &both), vec!["cosmic-bg", "cosmic-panel"], "the panel last: it holds this applet");
+        let comp = system(r, "comp", &[("cosmic-panel", "1"), ("cosmic-bg", "1"), ("torq-applet", "1"), ("cosmic-comp", "2")]);
+        assert!(stale_parts(&old, &comp).is_empty(), "the compositor is the login: never ended here");
+    }
+
+    #[test]
+    fn the_login_is_never_among_them() {
+        for (part, _) in LIVE_PARTS {
+            assert!(!matches!(*part, "cosmic-comp" | "cosmic-session" | "cosmic-greeter"), "{part}");
+        }
+        assert_eq!(LIVE_PARTS.last().unwrap().0, "cosmic-panel");
+    }
+}
