@@ -265,7 +265,7 @@ impl cosmic::Application for Applet {
     }
 
     fn init(core: cosmic::Core, _flags: ()) -> (Self, Task<cosmic::Action<Message>>) {
-        let mut app = Applet { core, console: Some(Console::start()), session: app::session_system(), running: running(), now: app::now(), ..Default::default() };
+        let mut app = Applet { core, console: Some(Console::watcher()), session: app::session_system(), running: running(), now: app::now(), ..Default::default() };
         let ask = app.update(Message::Ask);
         (app, ask)
     }
@@ -312,21 +312,29 @@ impl cosmic::Application for Applet {
             }
             Message::Answer(g) => {
                 let first = self.glance.is_none();
+                let failed = g.is_err();
                 self.glance = Some(g);
                 self.now = app::now();
-                let tell = self.tell();
-                let key = tell.as_ref().map(|(s, b, _)| format!("{s}{b}"));
-                // Each state said once, when it starts: not the one the session opened on.
-                if key != self.told {
-                    if let (Some((summary, body, page)), false) = (tell, first) {
-                        notify(summary, body, page);
+                // A failed ask says nothing of the state: what was said stands, and is not said again.
+                if !failed {
+                    let tell = self.tell();
+                    let key = tell.as_ref().map(|(s, b, _)| format!("{s}{b}"));
+                    // Each state said once, when it starts: not the one the session opened on.
+                    if key != self.told {
+                        if let (Some((summary, body, page)), false) = (tell, first) {
+                            notify(summary, body, page);
+                        }
+                        self.told = key;
                     }
-                    self.told = key;
                 }
             }
             Message::Confirm => {
-                return cosmic::task::future(async {
-                    let _ = off(|| app::in_terminal(app::CONFIRM, false)).await;
+                let restart = matches!(&self.glance, Some(Ok(g)) if matches!(g.needs, Needs::Restart(_)));
+                return cosmic::task::future(async move {
+                    let confirmed = off(|| app::in_terminal(app::CONFIRM, false)).await.and_then(|r| r).unwrap_or(false);
+                    if restart && confirmed {
+                        app::ask_restart();
+                    }
                     Message::Closed
                 });
             }
@@ -395,5 +403,5 @@ async fn off<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Resul
 
 /// `off`, for a call of the library's: its error as torqcli would say it.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
-    off(move || f().map_err(|e| format!("{e:#}"))).await.and_then(|r| r)
+    off(move || f().map_err(|e| app::said(&e))).await.and_then(|r| r)
 }

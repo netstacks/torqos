@@ -37,14 +37,17 @@ jobs:
         run: |
           release=$(jq -r .nodes.nixpkgs.original.ref flake.lock)
           old=$(jq -r .nodes.nixpkgs.locked.rev flake.lock)
+          cosmic_old=$(jq -r '.nodes."nixpkgs-cosmic".locked.rev' flake.lock)
           nix flake update nixpkgs
           scripts/bump-cosmic
           new=$(jq -r .nodes.nixpkgs.locked.rev flake.lock)
-          printf "old=%s\nnew=%s\nrelease=%s\n" "$old" "$new" "$release" >> "$GITHUB_OUTPUT"
+          cosmic_new=$(jq -r '.nodes."nixpkgs-cosmic".locked.rev' flake.lock)
+          moved=false; { [ "$old" != "$new" ] || [ "$cosmic_old" != "$cosmic_new" ]; } && moved=true
+          printf "old=%s\nnew=%s\nrelease=%s\nmoved=%s\n" "$old" "$new" "$release" "$moved" >> "$GITHUB_OUTPUT"
           if [ "$old" = "$new" ]; then echo "nixpkgs is at the newest $release commit already ($new)."; fi
 
       - name: The bump, on its branch
-        if: steps.update.outputs.old != steps.update.outputs.new
+        if: steps.update.outputs.moved == 'true'
         env:
           OLD: ${{ steps.update.outputs.old }}
           NEW: ${{ steps.update.outputs.new }}
@@ -62,7 +65,7 @@ jobs:
           git push -q --force origin "HEAD:refs/heads/$BRANCH"
 
       - name: Its pull request
-        if: steps.update.outputs.old != steps.update.outputs.new
+        if: steps.update.outputs.moved == 'true'
         env:
           OLD: ${{ steps.update.outputs.old }}
           NEW: ${{ steps.update.outputs.new }}

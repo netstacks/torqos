@@ -101,7 +101,7 @@ impl Real<'_> {
 
     /// The broker's status as `show system alarms` reports it (`crate::status_report`).
     fn status_report(&self, fit: Option<usize>) -> Result<(serde_json::Value, crate::status::Report)> {
-        crate::status_report(self.cli, fit)
+        crate::status_report(self.cli, fit, run::start_log()?)
     }
 }
 

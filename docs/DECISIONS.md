@@ -1850,7 +1850,7 @@ A server's person reads torqcli's output; a desktop's person looks at the screen
      - **restart** — the running system's kernel, initrd, kernel modules or firmware differ from the booted
        system's (`/run/current-system` against `/run/booted-system`), or the graphics driver does
        (`/run/opengl-driver`, ADR-045 amended), or the desktop was turned on while the machine runs without it;
-     - **log out** — COSMIC's session or greeter differs from what the person's session started with (the applet
+     - **log out** — COSMIC's compositor, session or panel differs from what the person's session started with (the applet
        records the system it started on, since it starts with the session);
      - **nothing** — services restart themselves; apps take the new version when opened next.
      One function in torqcli's library (`torq::app`), so torqcli's commit output, the applet and TorqOS Settings

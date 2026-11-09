@@ -11,11 +11,17 @@ fn cli() -> Cli {
     Cli { repo: PathBuf::from(REPO), broker: BROKER.into() }
 }
 
+/// TorqOS's version as the machine runs it now: a panel started before an update is told the new one.
+fn version() -> String {
+    let release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    release.lines().find_map(|l| l.strip_prefix("VERSION_ID=")).map(|v| v.trim_matches('"').to_string()).filter(|v| !v.is_empty()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
 /// The machine at a glance: `show system alarms`.
 #[derive(Debug, Clone)]
 pub struct Machine {
-    /// TorqOS's version (this program's: the system's own torqcli).
-    pub version: &'static str,
+    /// TorqOS's version.
+    pub version: String,
     /// Nothing is wrong: the machine is as its history says.
     pub well: bool,
     /// What `show system alarms` prints, each line a sentence.
@@ -23,8 +29,13 @@ pub struct Machine {
 }
 
 pub fn machine() -> Result<Machine> {
-    let (_, report) = crate::status_report(&cli(), None)?;
-    Ok(Machine { version: env!("CARGO_PKG_VERSION"), well: matches!(report.fix, status::Fix::Nothing) && report.exit == 0, alarms: report.text })
+    let (_, report) = crate::status_report(&cli(), None, crate::run::watch_log()?)?;
+    Ok(Machine { version: version(), well: matches!(report.fix, status::Fix::Nothing) && report.exit == 0, alarms: report.text })
+}
+
+/// An error as the window shows it: cleaned, as the terminal cleans what it prints.
+pub fn said(e: &anyhow::Error) -> String {
+    history::clean(&format!("{e:#}"))
 }
 
 /// The last `limit` changes, oldest first: `show system ledger`'s lines.
@@ -90,12 +101,11 @@ pub fn needs(booted: &std::path::Path, current: &std::path::Path, session: Optio
     }
 }
 
-/// The graphics driver a system's activation links at /run/opengl-driver.
+/// The graphics driver a system links at /run/opengl-driver: its tmpfiles line's target.
 fn driver(sys: &std::path::Path) -> Option<String> {
-    let script = std::fs::read_to_string(sys.join("activate")).ok()?;
-    let at = script.find("-graphics-drivers")?;
-    let start = script[..at].rfind("/nix/store/")?;
-    Some(script[start..at].to_string())
+    let lines = std::fs::read_to_string(sys.join("etc/tmpfiles.d/graphics-driver.conf")).ok()?;
+    let line = lines.lines().find(|l| l.contains("'/run/opengl-driver'"))?;
+    line.split_whitespace().last().filter(|t| t.starts_with("/nix/store/")).map(String::from)
 }
 
 /// COSMIC's session in a system: the compositor and the session, by their store paths; None without a desktop.
@@ -119,7 +129,9 @@ mod needs_tests {
         for what in ["kernel", "initrd", "kernel-modules", "firmware"] {
             symlink(format!("/nix/store/{boot}-{what}"), s.join(what)).unwrap();
         }
-        std::fs::write(s.join("activate"), format!("ln -sfn /nix/store/{drv}-graphics-drivers /run/opengl-driver\n")).unwrap();
+        // As NixOS writes it.
+        std::fs::create_dir_all(s.join("etc/tmpfiles.d")).unwrap();
+        std::fs::write(s.join("etc/tmpfiles.d/graphics-driver.conf"), format!("'L+' '/run/opengl-driver' '-' '-' '-' '-' /nix/store/{drv}-graphics-drivers\n'r' '/run/opengl-driver-32' '-' '-' '-' '-' \n")).unwrap();
         if let Some(v) = cosmic {
             for b in ["cosmic-comp", "cosmic-session", "cosmic-panel"] {
                 let target = root.join(format!("{v}-{b}"));
@@ -155,7 +167,7 @@ mod needs_tests {
 /// The machine at a glance, for COSMIC's panel (ADR-049): each part the command line's own.
 #[derive(Debug, Clone)]
 pub struct Glance {
-    pub version: &'static str,
+    pub version: String,
     /// Nothing is wrong: the machine is as its history says.
     pub well: bool,
     /// The first thing `show system alarms` says is wrong, when something is.
@@ -191,7 +203,7 @@ pub fn now() -> i64 {
 /// `draft`: `Console::uncommitted`, as the caller asked it.
 pub fn glance(session: Option<&std::path::Path>, draft: bool) -> Result<Glance> {
     let cli = cli();
-    let (v, report) = crate::status_report(&cli, None)?;
+    let (v, report) = crate::status_report(&cli, None, crate::run::watch_log()?)?;
     let well = matches!(report.fix, status::Fix::Nothing) && report.exit == 0;
     let alarm = if well { None } else { report.text.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from) };
     let p = &v["pending_confirm"];
@@ -204,7 +216,7 @@ pub fn glance(session: Option<&std::path::Path>, draft: bool) -> Result<Glance> 
     let w = history::waiting_proposals(&entries);
     let needs = needs(std::path::Path::new("/run/booted-system"), std::path::Path::new("/run/current-system"), session);
     Ok(Glance {
-        version: env!("CARGO_PKG_VERSION"),
+        version: version(),
         well,
         alarm,
         confirm,
@@ -217,8 +229,6 @@ pub fn glance(session: Option<&std::path::Path>, draft: bool) -> Result<Glance> 
 
 /// What confirms a commit confirmed waiting: torqcli's `-c` script.
 pub const CONFIRM: &str = "configure; commit";
-/// That confirmation, as configuration mode reads it.
-pub const CONFIRM_LINE: &str = "commit";
 
 // ── What a session started on ────────────────────────────────────────────────────────────────────
 
@@ -268,6 +278,8 @@ pub enum At {
     Draft,
     /// The Commands page's: whichever mode the person has gone to.
     Typed,
+    /// What only asks whether the draft has changes: never held up by a `commit check`.
+    Watch,
 }
 
 /// What a typed line did: its output or why not, and where the session is now.
@@ -291,6 +303,7 @@ enum Job {
 pub struct Console {
     reads: std::sync::mpsc::Sender<Job>,
     edits: std::sync::mpsc::Sender<Job>,
+    watch: std::sync::mpsc::Sender<Job>,
 }
 
 impl Default for Console {
@@ -306,11 +319,23 @@ impl Console {
             std::thread::spawn(move || serve(sessions, rx));
             tx
         };
-        Console { reads: spawn(&[At::Read]), edits: spawn(&[At::Draft, At::Typed]) }
+        Console { reads: spawn(&[At::Read]), edits: spawn(&[At::Draft, At::Typed]), watch: spawn(&[At::Watch]) }
+    }
+
+    /// Only what the panel needs: whether the draft has changes.
+    pub fn watcher() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || serve(&[At::Watch], rx));
+        let none = || std::sync::mpsc::channel().0;
+        Console { reads: none(), edits: none(), watch: tx }
     }
 
     fn queue(&self, at: At) -> &std::sync::mpsc::Sender<Job> {
-        if at == At::Read { &self.reads } else { &self.edits }
+        match at {
+            At::Read => &self.reads,
+            At::Draft | At::Typed => &self.edits,
+            At::Watch => &self.watch,
+        }
     }
 
     /// Run a line, its output cleaned as the terminal's is.
@@ -342,7 +367,7 @@ impl Console {
     /// Whether the person's draft differs from the configuration in effect.
     pub fn uncommitted(&self) -> bool {
         let (tx, rx) = std::sync::mpsc::channel();
-        if self.edits.send(Job::Uncommitted(tx)).is_err() {
+        if self.watch.send(Job::Uncommitted(tx)).is_err() {
             return false;
         }
         rx.recv().unwrap_or(false)
@@ -373,14 +398,14 @@ fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
         }
         Ok(s)
     };
-    let mut made: Vec<(At, Result<crate::session::Session<'_>, String>)> = sessions.iter().map(|&at| (at, session(at).map_err(|e| format!("{e:#}")))).collect();
+    let mut made: Vec<(At, Result<crate::session::Session<'_>, String>)> = sessions.iter().map(|&at| (at, session(at).map_err(|e| said(&e)))).collect();
     for job in jobs {
         match job {
             Job::Run(at, line, reply) => {
                 let r = match of(&mut made, at) {
                     Some(Ok(s)) => {
                         s.reread();
-                        s.exec(&line).map(cleaned).map_err(|e| format!("{e:#}"))
+                        s.exec(&line).map(cleaned).map_err(|e| said(&e))
                     }
                     Some(Err(e)) => Err(e.clone()),
                     None => Err(GONE.to_string()),
@@ -391,7 +416,7 @@ fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
                 let t = match of(&mut made, At::Typed) {
                     Some(Ok(s)) => {
                         s.reread();
-                        let output = s.exec(&line).map(cleaned).map_err(|e| format!("{e:#}"));
+                        let output = s.exec(&line).map(cleaned).map_err(|e| said(&e));
                         // `exit` at the top of operational mode: the window stays, and so does the session.
                         s.done = false;
                         Typed { output, configuration: s.mode == Mode::Configuration, edit: s.edit_path().to_vec() }
@@ -412,7 +437,7 @@ fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
                 let _ = reply.send(c);
             }
             Job::Uncommitted(reply) => {
-                let u = match of(&mut made, At::Draft) {
+                let u = match of(&mut made, At::Watch) {
                     Some(Ok(s)) => {
                         s.reread();
                         s.uncommitted().unwrap_or(false)
@@ -458,6 +483,8 @@ pub fn needs_terminal(mode: Mode, line: &str) -> bool {
             Op::Request(_) => true,
             Op::File { action: FileAction::Edit, .. } => true,
             Op::Load { from: LoadFrom::Terminal, .. } => true,
+            // Everything, or everything below a place: it asks first.
+            Op::Delete { words } => words.is_empty(),
             Op::Run(op) => asks(op),
             Op::Top { then: Some(op) } => asks(op),
             _ => false,
@@ -466,23 +493,55 @@ pub fn needs_terminal(mode: Mode, line: &str) -> bool {
     crate::session::words(line).ok().and_then(|w| crate::grammar::read_line(mode, &w).ok()).is_some_and(|l| asks(&l.op))
 }
 
-/// Run `script` (torqcli's `-c`) in COSMIC's terminal and wait until it is closed: `draft`, on the person's
-/// saved candidate. It stays open at the end, for what happened to be read.
-pub fn in_terminal(script: &str, draft: bool) -> Result<(), String> {
-    let run = if draft { "torqcli --candidate -c \"$1\"" } else { "torqcli -c \"$1\"" };
-    let shell = format!("{run}; echo; read -r -p 'Press Enter to close. ' _");
-    std::process::Command::new("cosmic-term")
-        .args(["-e", "sh", "-c", &shell, "sh", script])
-        .status()
-        .map_err(|e| format!("opening COSMIC's terminal: {e}"))
-        .map(drop)
+/// What the window will not do, and why: a line that would hold the shared draft for this window alone,
+/// and shut out its own pages and the terminal a commit goes to.
+pub fn refused_here(mode: Mode, line: &str) -> Option<&'static str> {
+    let op = crate::session::words(line).ok().and_then(|w| crate::grammar::read_line(mode, &w).ok())?.op;
+    matches!(op, crate::syntax::Op::Configure { exclusive: true }).then_some("configure exclusive holds the draft for one session: use it in a terminal, where it is yours alone")
 }
 
-/// The line `in_terminal` runs for a line of the given mode (the draft's, from configuration mode).
-pub fn terminal_script(mode: Mode, line: &str) -> (String, bool) {
+/// Whether a line only loads something into the draft, however long that takes: it runs with the draft's
+/// session, from configuration mode (there an update only loads), so that what the pages read is not held up.
+pub fn loads_draft(line: &str) -> bool {
+    use crate::syntax::{Op, Request};
+    crate::session::words(line).ok().and_then(|w| crate::grammar::read_line(Mode::Operational, &w).ok()).is_some_and(|l| matches!(l.op, Op::Request(Request::Update { .. } | Request::Pull | Request::SoftwareRollback { .. })))
+}
+
+/// Run `script` (torqcli's `-c`) in COSMIC's terminal, and wait until it is closed: `draft`, on the person's
+/// saved candidate. It stays open at the end, for what happened to be read. Whether the script succeeded.
+pub fn in_terminal(script: &str, draft: bool) -> Result<bool, String> {
+    let run = if draft { "torqcli --candidate -c \"$1\"" } else { "torqcli -c \"$1\"" };
+    let shell = format!("{run}; echo $? > \"$2\"; echo; read -r -p 'Press Enter to close. ' _");
+    let dir = tempfile::tempdir().map_err(|e| format!("making a private folder: {e}"))?;
+    let status = dir.path().join("status");
+    std::process::Command::new("cosmic-term")
+        // Not a daemon: it would return at once, with the commit still asking.
+        .args(["--no-daemon", "-e", "sh", "-c", &shell, "sh", script])
+        .arg(&status)
+        .status()
+        .map_err(|e| format!("opening COSMIC's terminal: {e}"))?;
+    Ok(std::fs::read_to_string(&status).is_ok_and(|s| s.trim() == "0"))
+}
+
+/// A line as `-c` reads it, each word quoted: a `;` inside a typed word must not split the script.
+fn requoted(line: &str) -> String {
+    match crate::session::words(line) {
+        Ok(w) => w.iter().map(|x| if x == "|" { x.clone() } else { crate::syntax::quote(x) }).collect::<Vec<_>>().join(" "),
+        Err(_) => line.to_string(),
+    }
+}
+
+/// The script `in_terminal` runs for a line of the given mode: in configuration mode the draft's, at the
+/// place (`edit`) the line was typed at, whose meaning depends on it.
+pub fn terminal_script(mode: Mode, edit: &[String], line: &str) -> (String, bool) {
+    let line = requoted(line);
     match mode {
-        Mode::Configuration => (format!("configure; {line}"), true),
-        Mode::Operational => (line.to_string(), false),
+        Mode::Configuration if edit.is_empty() => (format!("configure; {line}"), true),
+        Mode::Configuration => {
+            let place: Vec<&str> = std::iter::once("edit").chain(edit.iter().map(String::as_str)).collect();
+            (format!("configure; {}; {line}", self::line(&place)), true)
+        }
+        Mode::Operational => (line, false),
     }
 }
 
@@ -620,14 +679,14 @@ mod page_tests {
         }
         whole(Mode::Operational, "request system revert 5");
         whole(Mode::Operational, "request system apply 5");
-        whole(Mode::Configuration, CONFIRM_LINE);
+        whole(Mode::Configuration, "commit");
     }
 
     /// What asks a person goes to a terminal; what only reads, or only changes the draft, stays in the window.
     #[test]
     fn what_goes_to_a_terminal() {
         let t = |m, c| needs_terminal(m, c);
-        for c in ["commit", "commit comment \"x\"", "commit confirmed 5", "commit at 12:00", "file edit a.nix", "load merge terminal", "top commit"] {
+        for c in ["commit", "commit comment \"x\"", "commit confirmed 5", "commit at 12:00", "file edit a.nix", "load merge terminal", "top commit", "delete", "top delete"] {
             assert!(t(Mode::Configuration, c), "{c}");
         }
         for c in ["request system revert 5", "request system apply 5", "request system password", "request system repair", "request system snapshot take", "clear system commit"] {
@@ -649,8 +708,12 @@ mod page_tests {
 
     #[test]
     fn the_terminal_runs_the_draft_from_configuration_mode() {
-        assert_eq!(terminal_script(Mode::Configuration, "commit"), ("configure; commit".to_string(), true));
-        assert_eq!(terminal_script(Mode::Operational, "request system repair"), ("request system repair".to_string(), false));
+        assert_eq!(terminal_script(Mode::Configuration, &[], "commit"), ("configure; commit".to_string(), true));
+        // A bare `delete` at a place deletes that place: never everything.
+        assert_eq!(terminal_script(Mode::Configuration, &["services".into(), "openssh".into()], "delete"), ("configure; edit services openssh; delete".to_string(), true));
+        // A `;` in a word stays in the word.
+        assert_eq!(terminal_script(Mode::Configuration, &[], "commit comment \"a;b\""), ("configure; commit comment \"a;b\"".to_string(), true));
+        assert_eq!(terminal_script(Mode::Operational, &[], "request system repair"), ("request system repair".to_string(), false));
     }
 }
 
@@ -712,4 +775,13 @@ fn spawn(program: &str, args: &[&str]) {
 fn the_configurations_shown_with_their_numbers() {
     let shown = "Rollback  Change  When  By  What\n0         #16     then  me  One\n1         #14     then  me  Two\n";
     assert_eq!(configurations(shown), vec![(0, "#16     then  me  One".to_string()), (1, "#14     then  me  Two".to_string())]);
+}
+
+#[cfg(test)]
+#[test]
+fn the_window_keeps_what_would_lock_it_out() {
+    assert!(refused_here(Mode::Operational, "configure exclusive").is_some());
+    assert!(refused_here(Mode::Operational, "configure").is_none());
+    assert!(loads_draft("request system update") && loads_draft("request system pull"));
+    assert!(!loads_draft("show version") && !loads_draft("request system repair"));
 }

@@ -1,5 +1,5 @@
-//! TorqOS Settings (ADR-045 2): torqcli in a COSMIC window. A client of the broker's socket and nothing
-//! more: the person's own account, no privilege, and torqcli's own sessions (`torq::app::Console`), so the
+//! TorqOS Settings (ADR-045 2): torqcli in a COSMIC window. No privilege and no way of its own to change the
+//! system: the person's own account, and torqcli's own sessions (`torq::app::Console`), so the
 //! window does what the command line does and says it in the same words. Every action it offers is a
 //! torqcli command the person could type, and it shows which.
 

@@ -60,7 +60,7 @@ rustPlatform.buildRustPackage {
   ];
 
   meta = {
-    description = "TorqOS Settings: torqcli in a COSMIC window, a client of the broker's socket";
+    description = "TorqOS Settings: torqcli in a COSMIC window, and TorqOS in its panel";
     mainProgram = "torq-settings";
     license = lib.licenses.asl20;
     platforms = lib.platforms.linux;

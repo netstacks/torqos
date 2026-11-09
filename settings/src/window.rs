@@ -96,6 +96,8 @@ pub struct Settings {
     offers: Vec<Choice>,
     asked: u64,
     log: Vec<(String, String)>,
+    /// Ask to restart once the terminal has confirmed the change (`Confirm, then restart`).
+    restart_after: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -109,17 +111,17 @@ pub enum Message {
     /// Do this command, here or in a terminal.
     Act(At, String),
     Did(String, Result<String, String>),
-    Closed(String, Result<(), String>),
+    Closed(String, Result<bool, String>),
     Confirm,
     Restart,
     LogOut,
     Go(Page2),
     Fill(How, String),
-    Filled(How, String),
+    Filled(How, String, Typed),
     // Configuration:
     To(Vec<String>),
-    Pick(String),
-    Picked(String, Vec<Choice>),
+    Pick(Vec<String>, String),
+    Picked(Vec<String>, String, Vec<Choice>),
     Options(Vec<String>, Vec<Choice>),
     Filter(String),
     Entry(String),
@@ -206,6 +208,7 @@ impl cosmic::Application for Settings {
             offers: vec![],
             asked: 0,
             log: vec![],
+            restart_after: false,
         };
         if app.nav.active_data::<Page>().is_none() {
             let first = app.nav.iter().next();
@@ -244,6 +247,12 @@ impl cosmic::Application for Settings {
             Message::History(r) => self.history = r.into(),
             Message::Proposals(r) => self.proposals = r.into(),
             Message::Output(c, r) => {
+                // Nothing left to commit: what was typed for the last commit must not name the next.
+                if c == "show | compare" && matches!(&r, Ok(t) if t.starts_with("No changes")) {
+                    self.comment.clear();
+                    self.at.clear();
+                    self.confirmed = false;
+                }
                 self.outputs.insert(c, r.into());
             }
             Message::Act(at, line) => return self.act(at, line),
@@ -257,11 +266,22 @@ impl cosmic::Application for Settings {
             }
             Message::Closed(what, r) => {
                 self.busy = None;
-                self.note = r.err().map(|e| (e, true)).or(Some((format!("The terminal for `{what}` has closed."), false)));
+                let restart = std::mem::take(&mut self.restart_after);
+                self.note = Some(match r {
+                    Ok(true) => (format!("Done: {what}"), false),
+                    Ok(false) => (format!("`{what}` did not finish: the terminal said why."), true),
+                    Err(e) => (e, true),
+                });
+                if restart && self.note.as_ref().is_some_and(|(_, failed)| !failed) {
+                    app::ask_restart();
+                }
                 return self.load();
             }
             // A private candidate, always: `commit` of an empty one is what confirms, and the draft is not part of it.
-            Message::Confirm => return self.terminal(app::CONFIRM.to_string(), false, "commit".to_string()),
+            Message::Confirm => {
+                self.restart_after = matches!(&self.glance, Loaded::Got(g) if matches!(g.needs, Needs::Restart(_)));
+                return self.terminal(app::CONFIRM.to_string(), false, "commit".to_string());
+            }
             Message::Restart => app::ask_restart(),
             Message::LogOut => app::ask_log_out(),
             Message::Go(p) => {
@@ -278,16 +298,20 @@ impl cosmic::Application for Settings {
             Message::Fill(how, command) => {
                 // The Commands page's session, in the mode the command is of.
                 let console = self.console.clone();
-                let done = command.clone();
+                let step = match (how == How::FillCf, self.typed_cf) {
+                    (true, false) => "configure",
+                    (true, true) => "top",
+                    (false, true) => "exit configuration-mode",
+                    (false, false) => "",
+                };
                 return cosmic::task::future(async move {
-                    let step = if how == How::FillCf { "configure" } else { "exit configuration-mode" };
-                    off(move || console.typed(step)).await.ok();
-                    Message::Filled(how, done)
+                    let t = off(move || console.typed(step)).await;
+                    Message::Filled(how, command, t.unwrap_or_else(|e| Typed { output: Err(e), configuration: false, edit: vec![] }))
                 });
             }
-            Message::Filled(how, command) => {
-                self.typed_cf = how == How::FillCf;
-                self.edit.clear();
+            Message::Filled(_how, command, t) => {
+                self.typed_cf = t.configuration;
+                self.edit = t.edit;
                 self.line = command;
                 let id = self.nav.iter().find(|&i| self.nav.data::<Page>(i).is_some_and(|p| *p == Page::Commands));
                 if let Some(id) = id {
@@ -302,19 +326,27 @@ impl cosmic::Application for Settings {
                 self.entry.clear();
                 return self.load();
             }
-            Message::Pick(word) => {
+            Message::Pick(path, word) => {
                 // A word that ends the line is a value to set; any other is a place to go down to.
                 let console = self.console.clone();
                 let mut words: Vec<&str> = vec!["set"];
-                words.extend(self.path.iter().map(String::as_str));
+                words.extend(path.iter().map(String::as_str));
                 words.push(&word);
                 let before = format!("{} ", app::line(&words));
                 return cosmic::task::future(async move {
                     let got = off(move || console.choices(At::Draft, &before)).await.unwrap_or_default();
-                    Message::Picked(word, got)
+                    Message::Picked(path, word, got)
                 });
             }
-            Message::Picked(word, next) => {
+            Message::Picked(path, word, next) => {
+                // The person has moved on: this word was for a place they have left.
+                if path != self.path {
+                    return Task::none();
+                }
+                if next.is_empty() {
+                    self.note = Some((format!("Could not read what may follow `{word}`."), true));
+                    return Task::none();
+                }
                 // `<[Enter]>` alone: the line is whole. With other words (`enable`: true, false) there is a choice to show.
                 if next.iter().all(|c| c.word == "<[Enter]>") {
                     let line = self.at_path("set", Some(&word));
@@ -394,7 +426,7 @@ impl cosmic::Application for Settings {
                 let mode = if self.typed_cf { Mode::Configuration } else { Mode::Operational };
                 if app::needs_terminal(mode, &line) {
                     self.line.clear();
-                    let (script, draft) = app::terminal_script(mode, &line);
+                    let (script, draft) = app::terminal_script(mode, &self.edit, &line);
                     return self.terminal(script, draft, line);
                 }
                 self.busy = Some(line.clone());
@@ -504,9 +536,11 @@ impl Settings {
 
     /// Run a command: in this window, or, if it asks a person, in a terminal.
     fn act(&mut self, at: At, line: String) -> Task<cosmic::Action<Message>> {
+        // Slow, and only loads the draft: with the draft's session, so that the pages' reads go on.
+        let (at, line) = if at == At::Read && app::loads_draft(&line) { (At::Draft, format!("run {line}")) } else { (at, line) };
         let mode = if at == At::Read { Mode::Operational } else { Mode::Configuration };
         if app::needs_terminal(mode, &line) {
-            let (script, draft) = app::terminal_script(mode, &line);
+            let (script, draft) = app::terminal_script(mode, &[], &line);
             return self.terminal(script, draft, line);
         }
         self.busy = Some(line.clone());
@@ -687,7 +721,7 @@ impl Settings {
                     icon::from_name("go-next-symbolic").size(16).icon().into(),
                 ])
                 .spacing(spacing.space_s);
-                list = list.add(widget::mouse_area(row).on_press(Message::Pick(c.word.clone())));
+                list = list.add(widget::mouse_area(row).on_press(Message::Pick(self.path.clone(), c.word.clone())));
             }
             page = page.push(list);
             if words.len() > LISTED {
@@ -720,7 +754,7 @@ impl Settings {
                     .push(widget::button::destructive("Discard").on_press(Message::Act(At::Draft, "rollback 0".into())))
                     .spacing(spacing.space_xs),
             );
-            page = page.push(widget::text::caption("Commit opens a terminal: it shows the change, and asks for your password there."));
+            page = page.push(widget::text::caption("Commit opens a terminal, where anything it needs from you is asked."));
         }
 
         let mut earlier = settings::section().title("Earlier configurations");
@@ -956,5 +990,5 @@ async fn off<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Resul
 
 /// `off`, for a call of the library's that can fail: its error as torqcli would say it.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
-    off(move || f().map_err(|e| format!("{e:#}"))).await.and_then(|r| r)
+    off(move || f().map_err(|e| app::said(&e))).await.and_then(|r| r)
 }

@@ -2,7 +2,7 @@
 name = "torq-settings"
 version = "0.3.2"
 edition = "2024"
-description = "TorqOS Settings: torqcli in a COSMIC window, a client of the broker's socket and nothing more (ADR-045 2)"
+description = "TorqOS Settings: torqcli in a COSMIC window, and TorqOS in its panel (ADR-045 2, ADR-049)"
 license = "Apache-2.0"
 publish = false
 

@@ -473,8 +473,7 @@ mod lock_tests {
 /// The broker's status as `show system alarms` reports it — without colour (the shell cleans its output,
 /// which would show colour codes as text), naming the shell's own commands. The shell and TorqOS Settings
 /// (app.rs) both show this.
-fn status_report(cli: &Cli, fit: Option<usize>) -> Result<(serde_json::Value, status::Report)> {
-    let log = run::start_log()?;
+fn status_report(cli: &Cli, fit: Option<usize>, log: PathBuf) -> Result<(serde_json::Value, status::Report)> {
     let v = match run::broker_status(broker(cli, &["status"])?, &log)? {
         Ok(v) => v,
         Err(why) => bail!("couldn't check this machine: {why}"),

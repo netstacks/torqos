@@ -17,29 +17,39 @@ use std::time::{Duration, Instant};
 /// Never a shared directory: without a home there is no log (it would be readable, and replaceable,
 /// by others in /tmp).
 pub fn log_path() -> Result<PathBuf> {
+    log_named("last.log")
+}
+
+fn log_named(name: &str) -> Result<PathBuf> {
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .context("neither XDG_STATE_HOME nor HOME is set, so there is nowhere private to keep the log")?;
-    Ok(state.join("torq/last.log"))
+    Ok(state.join("torq").join(name))
 }
 
 /// Start a fresh log for this command: private to the user (0600), and never written through a
 /// symlink.
 pub fn start_log() -> Result<PathBuf> {
-    open_log(true)
+    open_log("last.log", true)
+}
+
+/// A log of its own for what looks at the machine over and over (the panel, TorqOS Settings' pages), so that
+/// it never empties the one a commit is writing, or a failed command has just pointed a person to.
+pub fn watch_log() -> Result<PathBuf> {
+    open_log("watch.log", true)
 }
 
 /// The log as this command has it so far, added to (made as `start_log` makes it if there is none):
 /// a step after another, whose output belongs with the first's.
 pub fn go_on_log() -> Result<PathBuf> {
-    open_log(false)
+    open_log("last.log", false)
 }
 
-fn open_log(fresh: bool) -> Result<PathBuf> {
+fn open_log(name: &str, fresh: bool) -> Result<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
-    let p = log_path()?;
+    let p = log_named(name)?;
     fs::create_dir_all(p.parent().unwrap()).with_context(|| format!("creating {}", p.display()))?;
     if fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
         fs::remove_file(&p).with_context(|| format!("removing the symlink {}", p.display()))?;

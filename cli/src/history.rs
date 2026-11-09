@@ -217,7 +217,7 @@ pub fn waiting_proposals(entries: &[Entry]) -> Vec<&Entry> {
 /// The latest change that took effect (applied, undone, repaired), in the log's words.
 pub fn last_change(entries: &[Entry]) -> Option<String> {
     let e = entries.iter().rev().find(|e| matches!(e.kind.as_str(), "applied" | "reverted" | "repaired"))?;
-    Some(describe(entries, e).1)
+    Some(one_line(&describe(entries, e).1, 300))
 }
 
 /// One change as a log line: its symbol and what happened, in words.
