@@ -281,7 +281,7 @@ impl cosmic::Application for Settings {
         }
         let mut sys_tabs = SingleSelectModel::default();
         for (i, v) in VIEWS.iter().enumerate() {
-            let item = sys_tabs.insert().text(v.name).data(*v);
+            let item = sys_tabs.insert().text(v.name).data(v);
             if v.id == start || (i == 0 && !VIEWS.iter().any(|v| v.id == start)) {
                 item.activate();
             }
