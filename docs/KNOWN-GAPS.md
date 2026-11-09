@@ -812,3 +812,19 @@ Its §5 lists claims without a test.
      update answered at a terminal.
    - **What the broker streams** during its build is what it sends as frames: if it sends its build
      output only at the end, detail shows it then.
+
+6zu. **A first boot with no network (ADR-048 5, built 2026-11-09, `tests/installer.nix`).** Open:
+   - **x86_64 only.** The first configurations are x86 machines (an AMD and an Intel CPU, their
+     microcode); an arm64 installer carries nothing for its first build, which fetches.
+   - **Evaluating the x86 installer needs an x86 builder:** the carried set is read from the .drv files
+     at build time and imported (`hosts/installer/first-build.nix`). CI and the dev host are x86_64; an
+     arm64 machine evaluating `nixosConfigurations.installer-x86_64-linux` would need a remote builder.
+   - **Covered by its samples, proved on one machine:** what differs between two kinds of machine (AMD
+     with Wi-Fi and SSH by key; Intel with neither) and two machines of each. A machine whose hardware
+     brings what none of them has (an out-of-tree driver, `boot.extraModulePackages`) needs the
+     network at its first build; setup does not yet say so before it starts (ADR-048 5's message).
+     The VM test builds change #1 for a machine none of the samples is (a VM, no firmware): 23
+     derivations, from the disk alone. Real hardware (firmware, iwd) is proved on the Zenbook.
+   - **Setup's own path is not what the test runs:** the test loads the registration as setup does
+     (`register_carried`) and builds as the broker would; tests/image.nix's setup still switches to a
+     prebuilt specialisation.

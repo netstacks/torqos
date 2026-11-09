@@ -195,8 +195,10 @@ Before M4: it serves CLI and desktop installs alike. The owner's laptop (HARDWAR
 - [ ] **Real hardware** (ADR-046): the installer's hardware file turns on redistributable firmware and,
       where it finds a wireless interface, iwd; hardware profiles chosen by DMI (`hardware/`), the
       Zenbook S 16 first, split base / desktop. A VM test of the file written for a fake DMI and Wi-Fi.
-- [ ] **No network from stick to login** (ADR-048 5): the image carries a first configuration's build
-      closure; a VM test without a network really builds change #1.
+- [x] **No network from stick to login** (ADR-048 5; built 2026-11-09, `tests/installer.nix`): the ISO carries
+      what a first boot builds from (`hosts/installer/first-build.nix`: 362 paths, ~64 MiB beyond its store);
+      `torq install` copies what the disk lacks, setup registers it; a VM with no network card builds
+      change #1. x86_64 only (KNOWN-GAPS 6zu).
 - [ ] **The installer's ways** (ADR-048 1–4, 6): the image's parts beside the whole; erase, alongside
       (NTFS, ext4, btrfs shrunk), free space, a partition; new UUIDs every install, file systems by UUID;
       systemd-boot on the existing ESP with TorqOS's own XBOOTLDR, other systems in the menu. VM tests
