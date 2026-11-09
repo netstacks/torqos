@@ -64,6 +64,9 @@ pkgs.testers.runNixOSTest {
     with subtest("COSMIC's own first-run wizard is not offered: TorqOS has its setup"):
         machine.fail("test -e /run/current-system/sw/bin/cosmic-initial-setup")
 
+    with subtest("memory run short ends a program, it does not freeze the desktop"):
+        machine.succeed("swapon --show=NAME --noheadings | grep -q zram")
+
     with subtest("Flathub is the person's, not the system's"):
         machine.wait_until_succeeds("su - alice -c 'flatpak remotes --user' | grep -q flathub", timeout=60)
         machine.fail("flatpak remotes --system | grep -q flathub")

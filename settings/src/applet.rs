@@ -24,7 +24,7 @@ fn main() -> cosmic::iced::Result {
 }
 
 /// How often the broker is asked, when nothing else says to ask sooner.
-const EVERY: Duration = Duration::from_secs(30);
+const EVERY: Duration = Duration::from_secs(60);
 /// How often the running system is looked at: a switch is seen within this, and the broker asked then.
 const SWITCH: Duration = Duration::from_secs(3);
 /// A notification this long before an unconfirmed change rolls back.

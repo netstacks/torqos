@@ -83,6 +83,10 @@ in
       };
     };
 
+    # Memory run short should end the program using it, not freeze the desktop: without swap the kernel
+    # thrashes page cache and systemd-oomd, which reads swap pressure, is degraded. Compressed, in memory.
+    zramSwap.enable = lib.mkDefault true;
+
     hardware.graphics.enable = true;
 
     # What base.nix leaves out of a machine without a screen.
