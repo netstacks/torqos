@@ -226,7 +226,7 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, 
       host name, users, …) hand the change to TorqOS Settings as a proposal; a patch in the overlay.
 - [ ] **The person's COSMIC settings** (ADR-045 4): tree defaults, drift in `show | compare`,
       `request users <name> desktop save`; the tree's COSMIC words generated from cosmic-config's keys.
-- [ ] **Applications by rung** (ADR-037): `users <name> flatpaks` reconciled at switch; the design
+- [ ] **Applications by rung** (ADR-037): `users <name> flatpaks` reconciled at switch (only what it names); the COSMIC Store per user, its installs shown in `show | compare` and kept with `… flatpaks keep` (ADR-037 amended); the design
       for a person's own builds in the tree (`users <name> projects`), user tier; what TorqOS refuses
       (`curl | sh`, self-updaters) said where it can see it.
 - [ ] **Data declared** (ADR-038): `services syncthing` and a sync mount as tree settings; the

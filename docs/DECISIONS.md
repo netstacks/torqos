@@ -890,6 +890,21 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
 - **Consequences:** the desktop configuration turns on `services.flatpak` and the portal for its
   compositor; disk for runtimes; the agent builds Nix packages, not Flatpaks. The repository shows
   every application on the machine, by rung.
+- **Amended (2026-11-09, the owner; ADR-045): the COSMIC Store installs by hand, and the tree keeps
+  what it is asked to.** NixOS's COSMIC module installs COSMIC Store wherever Flatpak is on, so every
+  TorqOS Desktop has it (a CLI machine has neither). On NixOS it is a Flatpak store in practice (its
+  system-package side needs PackageKit, which NixOS has not). "Never `flatpak install` by hand" gives way
+  for it:
+  - **The Store installs freely, per user, without a password**: a person's own Flatpak in their own home
+    is user tier, sandboxed, and touches nothing of the system. System-wide installs from it are refused
+    (the remote set user-only; a system Flatpak is a tree setting, rung 2 as above).
+  - **A switch never removes what the tree did not declare.** The reconciler installs and removes the
+    Flatpaks `users <name> flatpaks` names, and only those (nix-flatpak's `uninstallUnmanaged` off).
+  - **What was installed by hand shows in `show | compare`** ("installed from the Store, not in the
+    tree"), and **keep** (`request users <name> flatpaks keep`, or a button in TorqOS Settings) writes it
+    into `users <name> flatpaks`, user tier, so a machine rebuilt from its repository or a recipe
+    (ADR-047) brings it back. Not kept, it stays the person's state, like a file in their home.
+  - The agent installs nothing through the Store; its applications are rung 1 or 3, as above.
 
 ## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it
 - **Status:** proposed, 2026-11-03; local snapshots accepted and built 2026-11-06 (the owner: btrfs in
