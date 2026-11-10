@@ -127,7 +127,12 @@ pkgs.testers.runNixOSTest {
         # A wrong password in the dialog counts toward the same lockout as one at a terminal.
         ask = on_the_desktop({"args": ["--json", "apply", seq]})
         machine.succeed(f"(setsid {ask} > /tmp/refused.out 2>&1 < /dev/null &)")
-        machine.wait_until_succeeds("pgrep -x pkcheck", timeout=30)
+        try:
+            machine.wait_until_succeeds("pgrep -x pkcheck", timeout=30)
+        except Exception:
+            # Why no dialog was asked for: the broker's own answer (on .52, 2026-11-10, it answered in 3 s).
+            print(machine.execute("cat /tmp/refused.out; pgrep -u alice -fa cosmic-osd")[1])
+            raise
         machine.sleep(8)
         machine.screenshot("approval")
         machine.send_chars("wrong-password\n", delay=0.1)
