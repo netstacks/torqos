@@ -78,7 +78,9 @@ service is on this machine, the model (local, or REMOTE with its endpoint), whet
 configured (only yes or no — never the key), how many turns it remembers with **Forget…**, and buttons
 to its window and to Proposals. Choosing the model is a change to the system like any other: the
 page's buttons put the line in your draft (`set torq agent doctor endpoint …`, `set torq agent doctor
-model …`, `delete torq agent doctor endpoint` for the local model again, `set torq agent people …`), and
+model …`, `delete torq agent doctor endpoint` for the local model again, `set torq agent people …` — which
+adds a person, except the first time: until the list is written its default is you, the owner, and the first
+`set` replaces that, so name yourself too), and
 you commit it from *Your Changes* — recorded, undoable, with your approval. Entering the key itself is
 not on this page yet: it comes with TorqOS's secrets; until then an administrator puts its file in
 place (`torq agent doctor apiKeyFile`).

@@ -836,7 +836,9 @@ pub const AGENT_SETTINGS: &[Action] = &[
     draft("Use the local model again", "delete torq agent doctor endpoint"),
     cf("The local model's file (its URL)…", "set torq agent model url "),
     cf("…and its hash", "set torq agent model hash "),
-    cf("Give someone an agent of their own…", "set torq agent people "),
+    // `set` adds to the list in the configuration; but until the list is written, its default (the owner) is the
+    // module's, and the first `set` replaces it: the label says so.
+    cf("Give someone an agent of their own… (the first time, name yourself too: the list replaces its default)", "set torq agent people "),
 ];
 
 pub static VIEWS: &[View] = &[
