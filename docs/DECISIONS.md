@@ -2049,7 +2049,7 @@ content at the next), and a proposal must be judged on what it does, not on what
   effect.
 
 ## ADR-054 — Touchpad gestures in the compositor, not a gesture daemon
-- **Status:** proposed, 2026-11-10 (the owner: "three finger swipe to see windows and down to see
+- **Status:** accepted and built, 2026-11-10; on the laptop since change #73, the owner: "the touchpad is working great". Asked for (the owner: "three finger swipe to see windows and down to see
   workspace", "four finger pinch to open applications", no three-finger left/right).
 - **Context:** COSMIC's compositor (cosmic-comp 1.11.0) has one touchpad gesture: four fingers left and
   right (up and down on a vertical layout) switch workspaces. Three-finger swipes are its `TODO`, taken and
