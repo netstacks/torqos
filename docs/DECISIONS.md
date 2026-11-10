@@ -2427,8 +2427,8 @@ vouches for, that only proposes, every change ledgered and undone in one command
   second start's `ask` action reaches the open one) takes only a regular file of the person's own, directly
   there, not through a link, at most 64 KiB, once, and bounds it again: the question to 2 000 characters, what
   is attached to 16 000. What is attached is shown above the box, marked untrusted, removable, and sent with the
-  person's next question only — the person asks; it taints that session (the service reports `attached`). Only
-  the launcher asks at once (the person typed and sent the question; nothing attached). The entry points:
+  person's next question only — the person asks; it taints that session (the service reports `attached`). As first
+  built the launcher asked at once; no longer (below): nothing is sent by itself. The entry points:
   1. **The key**: Super+Shift+A runs `/run/current-system/sw/bin/torq-agent-ui` (the owner, 2026-11-10: Super+A
      stays COSMIC's App Library; Super+Shift+A is bound to nothing in cosmic-comp 1.11.0's `data/keybindings.ron`,
      the shortcuts' `defaults`), a default of COSMIC's own *custom* shortcuts
@@ -2438,7 +2438,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
   2. **The launcher**: `torq-agent-launcher` (torqcli's crate; `torq::agent::launcher`), a pop-launcher plugin
      in `/etc/pop-launcher/plugins/torq-agent/plugin.ron` (pop-launcher's system plugin directory; it runs
      `bin.path` as written when absolute): `ask <question>` offers "Ask your agent: …"; choosing it opens the
-     window asking at once. No change to COSMIC.
+     window with the question in its box (as amended below: the person asks). No change to COSMIC.
   3. **TorqOS Settings**: **Ask the agent** beside each alarm (Overview), under a failed command's words (what
      ran and what it said), in a setting's side panel (its place, help and value) and on Your Changes (`show |
      compare`) — `handoff::About`'s question with the thing attached.
@@ -2462,6 +2462,28 @@ vouches for, that only proposes, every change ledgered and undone in one command
   her session starting the window). Mutation-checked: the handoff's owner check and its no-link open, the crash
   filter's uid. Not driven in a VM: the buttons themselves (Decline, each Ask the agent), a crash notification's
   click, the plugin through pop-launcher (KNOWN-GAPS 6zzn).
+  **Fixed from its review (2026-11-10):** a crash counts only if journald's own fields say systemd-coredump logged
+  it — its unit (`systemd-coredump@….service`, from the sender's control group) in `system-systemd\x2dcoredump.slice`,
+  `_UID` the person's (systemd-coredump drops to the crashed process's owner before it logs: `_UID=0` would refuse
+  every real crash), `_TRANSPORT=journal` — since `COREDUMP_UID` and the rest are anyone's to write
+  (`logger --journald`); `coredumpctl info` then reads exactly that entry (`COREDUMP_PID`, `COREDUMP_UID` and
+  `_SYSTEMD_UNIT` together: a pid may be reused); the crash's question is fixed and the program's name only in
+  what is attached; the notification's body is escaped as markup; only its own action (`ask`, compared) asks — no
+  default action, so clicking the notification's body asks nothing; offers are bounded (one program's repeats
+  merged for 10 minutes, at most 3 open and 5 a minute, each expiring after 10 minutes). **Nothing is sent by
+  itself:** `ask_now` is gone — any of the person's programs can write a handoff, so the window only fills its
+  box, the launcher's question too, and the person asks; the question is one line, so the box shows all of it.
+  The handoff file is opened without blocking and its type checked on the descriptor (a FIFO is refused at
+  once). The window starts through `systemd-run --user --collect` (by absolute path, waited for): a unit of its
+  own with the session's environment, not in the crash watcher's or the launcher's control group, and no zombie;
+  the programs the applets and Settings start are waited for on a thread. Decline is offered only on the person's
+  own agent's proposals (`Proposal.yours`: the ledger's `agent_for`), anyone else's being an administrator's, in
+  torqcli. A proposal whose apply failed (it waits again) says "its apply failed once — apply it again, or
+  decline it" on the Proposals page, in the applet and in the window. `torq ask` with no words (the alias
+  `ask` alone) reads one line from standard input, which no shell reads; otherwise the guide says to quote.
+  **In the diff, not said above:** each Decline in the applet and the window runs on a fresh torqcli session
+  (`Console::start()`), its own; the key opens the window with no handoff (nothing to attach); a setting's Ask
+  attaches its help as NixOS wrote it (the option's description), with its place and value. Open: KNOWN-GAPS 6zzn.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

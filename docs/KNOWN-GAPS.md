@@ -1205,3 +1205,15 @@ Its §5 lists claims without a test.
    - **A crash's backtrace can hold anything the program had** (arguments, paths, a line of a file): it is
      attached only after the person's click, shown before it is sent, removable, and tainting; with a remote
      model it then leaves the machine, as anything the person asks does (ADR-051 2).
+   - **Before cosmic-notifications owns its name**, another program of the person's could take
+     `org.freedesktop.Notifications` on their session bus and so receive the crash offers and "click" them:
+     only the person's own programs (the agent has no way to their session bus), and a click only fills the
+     window's box — the person still reads what is attached and asks.
+   - **A plugin of the person's own named `torq-agent`** in `~/.local/share/pop-launcher/plugins` replaces
+     TorqOS's (pop-launcher prefers the person's): the same uid, so nothing it could not do already.
+   - **Decline is offered only on the person's own agent's proposals.** Someone else's change waiting for the
+     person (another person's, a pull) is declined in torqcli (`request system decline <n>`), which asks an
+     administrator's password where the broker says so.
+   - **A crash notification's thread** ends when the notification is clicked, closed or expires (10 minutes,
+     said to the daemon); a daemon that never says so leaves it waiting until its next signal. At most 3 are
+     open at once.

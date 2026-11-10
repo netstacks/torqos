@@ -86,16 +86,20 @@ you commit it from *Your Changes* — recorded, undoable, with your approval. En
 not on this page yet: it comes with TorqOS's secrets; until then an administrator puts its file in
 place (`torq agent doctor apiKeyFile`).
 
-**Decline.** Beside **Review**, wherever a proposal waits for you — TorqOS Settings' Proposals page, the
-agent's applet, its window — **Decline** turns it down: it shows you the proposal and asks first, and a
-declined proposal is never applied (`request system decline <n>` in torqcli does the same).
+**Decline.** Beside **Review**, wherever one of your agent's proposals waits for you — TorqOS Settings'
+Proposals page, the agent's applet, its window — **Decline** turns it down: it shows you the proposal and
+asks first, and a declined proposal is never applied (`request system decline <n>` in torqcli does the same,
+also for other changes waiting for you, which may ask an administrator's password). A proposal whose apply
+failed waits again, marked "its apply failed once — apply it again, or decline it".
 
 ### Ask from anywhere
 
 - **Super+Shift+A** opens the agent's window (Super+A stays COSMIC's App Library; change either in COSMIC
   Settings → Keyboard → Shortcuts).
-- **The launcher** (Super+/): type `ask why is my wifi slow?` and press Enter.
-- **The terminal**: `ask why is my wifi slow?` (the same as `torq ask …`).
+- **The launcher** (Super+/): type `ask why is my wifi slow?` and press Enter: the window opens with the
+  question in its box, and you press Ask.
+- **The terminal**: `ask` on its own, then type the question and press Enter — no quoting needed. With the
+  question on the same line, quote it as you would any text the shell reads: `ask "why is $HOME full?"`.
 - **Ask the agent** beside an alarm, under a command that failed, in a setting's side panel and on your
   uncommitted changes in TorqOS Settings; on an alarm in TorqOS's applet; on a tunnel that will not come up in
   the SSH tunnels applet.
