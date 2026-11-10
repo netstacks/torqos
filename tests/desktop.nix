@@ -137,6 +137,13 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-osd | grep -vx {osd}", timeout=30)
         machine.sleep(3)
 
+        # Meanwhile the applet saved alice's desktop (it saves when the ledger changes, and every 15
+        # minutes): the configuration has moved on from the change's base, by a commit to her own folder.
+        # The regression of ADR-052: it was refused as stale, so no change waiting for a person could land.
+        machine.wait_until_succeeds(f"git -C {repo} cat-file -e HEAD:users/alice/desktop.json", timeout=150)
+        moved = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+        assert moved != head, moved
+
         # The right one, in the dialog: the change is made.
         machine.succeed(f"(setsid {ask} > /tmp/approved.out 2>&1 < /dev/null &)")
         machine.wait_until_succeeds("pgrep -x pkcheck", timeout=30)
@@ -149,6 +156,11 @@ pkgs.testers.runNixOSTest {
             print(machine.execute("cat /tmp/approved.out; journalctl -b --no-pager -u 'torq-broker@*' -u polkit -u 'polkit-agent-helper@*' | tail -40")[1])
             raise
         machine.succeed(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = true'")
+        # Re-checked on the moved configuration, and the history says so; the desktop save kept.
+        applied = [json.loads(l) for l in machine.succeed("torq-broker --json log --brief").splitlines()]
+        applied = [e for e in applied if e["kind"] == "applied" and e["data"].get("proposal") == int(seq)]
+        assert len(applied) == 1 and applied[0]["data"].get("rechecked_on"), applied
+        machine.succeed(f"git -C {repo} cat-file -e HEAD:users/alice/desktop.json")
 
     with subtest("Flathub is the person's, not the system's"):
         machine.wait_until_succeeds("su - alice -c 'flatpak remotes --user' | grep -q flathub", timeout=60)
