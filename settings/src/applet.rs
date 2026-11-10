@@ -27,6 +27,8 @@ fn main() -> cosmic::iced::Result {
 const EVERY: Duration = Duration::from_secs(60);
 /// How often the running system is looked at: a switch is seen within this, and the broker asked then.
 const SWITCH: Duration = Duration::from_secs(3);
+/// How often a person's desktop is saved, when saving is automatic.
+const DESKTOP: Duration = Duration::from_secs(15 * 60);
 /// A notification this long before an unconfirmed change rolls back.
 const WARN_SECONDS: i64 = 120;
 
@@ -45,6 +47,8 @@ struct Applet {
     /// polkit's process when last looked at, and whether it was replaced at that look.
     polkit: Option<i32>,
     polkit_replaced: bool,
+    /// The latest change, when last looked at: another (an undo, a pull) may change the person's desktop.
+    last_change: Option<String>,
     /// What was last notified, so each state is said once.
     told: Option<String>,
     /// The confirmation already warned of as about to expire.
@@ -58,6 +62,7 @@ enum Message {
     Ask,
     Looked,
     Tick,
+    SyncDesktop,
     Answer(Result<Glance, String>),
     Confirm,
     Closed,
@@ -271,9 +276,10 @@ impl cosmic::Application for Applet {
 
     fn init(core: cosmic::Core, _flags: ()) -> (Self, Task<cosmic::Action<Message>>) {
         let mut app = Applet { core, console: Some(Console::watcher()), session: app::session_system(), running: running(), now: app::now(), ..Default::default() };
-        // A rebuilt machine's apps come back at the first login.
+        // A rebuilt machine's apps and desktop come back at the first login.
         std::thread::spawn(|| {
             let _ = app::reconcile_apps();
+            let _ = app::sync_desktop(false);
         });
         let ask = app.update(Message::Ask);
         (app, ask)
@@ -284,7 +290,7 @@ impl cosmic::Application for Applet {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let mut all = vec![cosmic::iced::time::every(EVERY).map(|_| Message::Ask), cosmic::iced::time::every(SWITCH).map(|_| Message::Looked)];
+        let mut all = vec![cosmic::iced::time::every(EVERY).map(|_| Message::Ask), cosmic::iced::time::every(SWITCH).map(|_| Message::Looked), cosmic::iced::time::every(DESKTOP).map(|_| Message::SyncDesktop)];
         // The countdown, only while there is one.
         if matches!(self.state(), State::Confirm(_)) {
             all.push(cosmic::iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
@@ -329,6 +335,11 @@ impl cosmic::Application for Applet {
                     app::restart_parts(&app::stale_parts(&old, &new));
                 }
             }
+            Message::SyncDesktop => {
+                std::thread::spawn(|| {
+                    let _ = app::sync_desktop(false);
+                });
+            }
             Message::Tick => {
                 self.now = app::now();
                 if let State::Confirm(c) = self.state() {
@@ -342,6 +353,15 @@ impl cosmic::Application for Applet {
             Message::Answer(g) => {
                 let first = self.glance.is_none();
                 let failed = g.is_err();
+                // A change since the last look may be to the person's desktop (an undo of one): put it on the desktop.
+                if let Ok(now) = &g {
+                    if self.last_change.is_some() && self.last_change != now.last {
+                        std::thread::spawn(|| {
+                            let _ = app::sync_desktop(false);
+                        });
+                    }
+                    self.last_change = now.last.clone();
+                }
                 self.glance = Some(g);
                 self.now = app::now();
                 // A failed ask says nothing of the state: what was said stands, and is not said again.

@@ -265,6 +265,7 @@ static SHOW_SYSTEM: &[Node] = &[
     fixed("alarms", "Whether this machine is as its history says", In::Op).whole(|r| Ok(Op::ShowAlarms { display: r.display })).pipes(Pipes::Views(DETAIL)),
     fixed("backups", "The backups the configuration declares: whether each has its key, its snapshots, its last run", In::Op).whole(|_| Ok(Op::ShowBackups)).pipes(Pipes::Filters),
     fixed("commit", "The configurations so far, newest first", In::Op).whole(|r| Ok(Op::ShowCommits { display: r.display })).pipes(Pipes::Views(DETAIL)),
+    fixed("desktop", "Your desktop: what of COSMIC's settings is saved in your configuration, and what is not yet", In::Op).whole(|_| Ok(Op::ShowDesktop)).pipes(Pipes::Filters),
     fixed("ledger", "Every change, as the ledger has it (refused and failed ones too)", In::Op).whole(ledger).pipes(Pipes::Filters).then(&[value(Value::Count, "How many entries (20)").whole(ledger).pipes(Pipes::Filters)]),
     fixed("proposals", "Changes proposed and waiting for a person (the agent's): request system apply <n> applies one", In::Op).whole(|_| Ok(Op::ShowProposals)).pipes(Pipes::Filters),
     fixed("remote", "The configuration's remote: where it and its ledger are pushed, and how the last push went", In::Op).whole(|_| Ok(Op::ShowRemote)).pipes(Pipes::Filters),
@@ -278,6 +279,13 @@ static REQUEST_SYSTEM: &[Node] = &[
     fixed("agent", "The agent (torq-agent): what it may do without asking", In::Op).then(&[fixed("trust", "For <minutes> (at most 60), the agent's untainted proposals in your own folder apply without asking — never the system's; ledgered; it asks your password", In::Op).then(&[fixed("revoke", "End your trust in the agent now", In::Op).whole(|_| Ok(Op::Request(Request::TrustRevoke))), value(Value::Minutes, "1 to 60").whole(|r| Ok(Op::Request(Request::Trust { minutes: r.number(Value::Minutes).unwrap_or(0) as u32 })))])]),
     fixed("apply", "Apply a change someone else proposed (the agent's): it shows it and asks first", In::Op).then(&[value(Value::Change, "The proposal's number, from show system proposals").whole(|r| Ok(Op::Request(Request::Apply { proposal: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
     fixed("backup", "A backup the configuration declares (services restic backups)", In::Op).then(&[fixed("key", "Give its key, typed here: kept root's alone, outside the configuration, never in the ledger (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").whole(|r| Ok(Op::Request(Request::BackupKey { name: r.value(Value::Backup).unwrap_or_default().into() })))])]),
+    fixed("desktop", "Your desktop (COSMIC's settings), kept in your own configuration", In::Op).then(&[
+        fixed("save", "Save it now: what you changed goes into your configuration (no password; one change, undoable)", In::Op).whole(|_| Ok(Op::Request(Request::DesktopSave))),
+        fixed("saving", "When it is saved", In::Op).then(&[
+            fixed("automatic", "By itself, as you change it", In::Op).whole(|_| Ok(Op::Request(Request::DesktopSaving { automatic: true }))),
+            fixed("manual", "Only when you ask (request system desktop save)", In::Op).whole(|_| Ok(Op::Request(Request::DesktopSaving { automatic: false }))),
+        ]),
+    ]),
     fixed("ledger", "The ledger", In::Op).then(&[fixed("acknowledge", "You have looked into where it and the repository disagree: say no more of it (ledgered; a new one is said as ever)", In::Op).whole(|_| Ok(Op::Request(Request::LedgerAcknowledge)))]),
     fixed("password", "Change a person's password (yours, or <user>'s)", In::Op).whole(password).then(&[value(Value::User, "Whose (yours, if none)").whole(password)]),
     fixed("pull", "Load the configuration waiting on the remote (its incoming branch) into the candidate: nothing changes until you commit it", In::Op).whole(|_| Ok(Op::Request(Request::Pull))),

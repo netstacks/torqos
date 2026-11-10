@@ -34,6 +34,7 @@ enum Page {
     History,
     Proposals,
     Apps,
+    Desktop,
     System,
     Commands,
 }
@@ -139,6 +140,7 @@ pub struct Settings {
     apps: Loaded<Vec<App>>,
     app_search: String,
     app_results: Option<Loaded<Vec<App>>>,
+    desktop: Option<Loaded<app::DesktopStatus>>,
     /// What is being installed, removed or remembered.
     app_work: Option<String>,
     /// Remembering what is installed: one at a time.
@@ -261,6 +263,11 @@ pub enum Message {
     OpenApp(String),
     AppDone(String, Result<(), String>),
     Synced(Result<bool, String>),
+    DesktopLoaded(Result<app::DesktopStatus, String>),
+    DesktopSave,
+    DesktopSaved(Result<app::Synced, String>),
+    DesktopSaving(app::Saving),
+    DesktopSavingDone(Result<String, String>),
     ToolSearch(String),
     FindTool,
     ToolsFound(Result<String, String>),
@@ -315,6 +322,7 @@ impl cosmic::Application for Settings {
             "proposals" => Page::Proposals,
             "commands" => Page::Commands,
             "apps" => Page::Apps,
+            "desktop" => Page::Desktop,
             "backup" => Page::System,
             s if VIEWS.iter().any(|v| v.id == s) => Page::System,
             _ => Page::Overview,
@@ -324,6 +332,7 @@ impl cosmic::Application for Settings {
             ("Overview", Page::Overview, "emblem-ok-symbolic"),
             ("Configuration", Page::Configuration, "preferences-system-symbolic"),
             ("Apps", Page::Apps, "system-software-install-symbolic"),
+            ("Desktop", Page::Desktop, "preferences-desktop-wallpaper-symbolic"),
             ("History", Page::History, "document-open-recent-symbolic"),
             ("Proposals", Page::Proposals, "mail-message-new-symbolic"),
             ("System", Page::System, "computer-symbolic"),
@@ -391,6 +400,7 @@ impl cosmic::Application for Settings {
             apps: Loaded::Waiting,
             app_search: String::new(),
             app_results: None,
+            desktop: None,
             app_work: None,
             syncing: false,
             tool_search: String::new(),
@@ -902,6 +912,43 @@ impl cosmic::Application for Settings {
                 return self.load();
             }
 
+            Message::DesktopLoaded(r) => self.desktop = Some(r.into()),
+            Message::DesktopSave => {
+                self.busy = Some("Saving your desktop".into());
+                self.note = None;
+                return cosmic::task::future(async { Message::DesktopSaved(blocking(|| app::sync_desktop(true)).await) });
+            }
+            Message::DesktopSaved(r) => {
+                self.busy = None;
+                self.note = Some(match r {
+                    Ok(s) => {
+                        let mut said = match s.saved {
+                            Some(seq) => format!("Saved your desktop (change #{seq})."),
+                            None => "Your desktop was saved already: nothing had changed.".to_string(),
+                        };
+                        if s.applied > 0 {
+                            said.push_str(&format!(" {} settings from your configuration were put on this desktop.", s.applied));
+                        }
+                        (said, false)
+                    }
+                    Err(e) => (e, true),
+                });
+                return self.load();
+            }
+            Message::DesktopSaving(how) => {
+                self.busy = Some("Changing when your desktop is saved".into());
+                self.note = None;
+                return cosmic::task::future(async move { Message::DesktopSavingDone(blocking(move || app::desktop_saving(how)).await) });
+            }
+            Message::DesktopSavingDone(r) => {
+                self.busy = None;
+                self.note = Some(match r {
+                    Ok(s) => (s.trim().to_string(), false),
+                    Err(e) => (e, true),
+                });
+                return self.load();
+            }
+
             Message::Line(s) => {
                 self.line = s;
                 return self.offer();
@@ -958,6 +1005,7 @@ impl cosmic::Application for Settings {
             Page::Overview => self.overview(),
             Page::Configuration => self.configuration(),
             Page::Apps => self.apps_page(),
+            Page::Desktop => self.desktop_page(),
             Page::History => match self.change {
                 Some(seq) => self.change_page(seq),
                 None => self.history(),
@@ -1046,6 +1094,7 @@ impl Settings {
                 Tab::Changes => tasks.push(self.read(At::Draft, COMPARE.into())),
                 Tab::Earlier => tasks.push(self.read(At::Read, COMMITS.into())),
             },
+            Page::Desktop => tasks.push(cosmic::task::future(async { Message::DesktopLoaded(blocking(app::desktop_status).await) })),
             Page::Apps => {
                 tasks.push(cosmic::task::future(async { Message::Apps(blocking(app::installed_apps).await) }));
                 tasks.push(self.read(At::Read, ACTIVE.into()));
@@ -1623,6 +1672,40 @@ impl Settings {
         page = page.push(widget::button::suggested("Review and apply…").on_press(Message::Act(At::Read, format!("request system apply {seq}"))));
         page = page.push(widget::text::heading("What it does"));
         page.push(self.diff(&format!("proposal {seq}"))).into()
+    }
+
+    fn desktop_page(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let mut page = widget::column::with_capacity(4).spacing(spacing.space_m);
+        page = page.push(widget::text::body(
+            "Your desktop's look and feel (theme, panel, dock, wallpaper, shortcuts) kept in your own configuration: a machine rebuilt from it comes back looking the same, and each save is in the history, undoable. It is yours: no password.",
+        ));
+        let s = match &self.desktop {
+            Some(Loaded::Got(s)) => s,
+            Some(Loaded::Failed(why)) => return failed(why),
+            _ => return waiting(),
+        };
+        let automatic = s.saving == app::Saving::Automatic;
+        let toggle = widget::toggler(automatic).on_toggle(|on| Message::DesktopSaving(if on { app::Saving::Automatic } else { app::Saving::Manual }));
+        let state = if s.unsaved.is_empty() {
+            format!("Saved: {} settings, nothing new since", s.saved)
+        } else {
+            format!("Not saved yet: {}", app::desktop_words(&s.unsaved))
+        };
+        let mut save = widget::button::suggested("Save now");
+        if self.busy.is_none() {
+            save = save.on_press(Message::DesktopSave);
+        }
+        page = page.push(
+            settings::section()
+                .title("Saving")
+                .add(settings::item::builder("Save automatically").description("Your changes are saved by themselves, within 15 minutes. Off: only when you press Save now.").control(toggle))
+                .add(settings::item::builder(state).description("request system desktop save").control(save)),
+        );
+        if s.to_apply > 0 {
+            page = page.push(widget::text::caption(format!("{} settings from your configuration are still to be put on this desktop: at your next login, or now with Save now.", s.to_apply)));
+        }
+        page.push(widget::text::caption("Left out, as this machine's rather than yours: which display the panel and dock are on, and when the machine sleeps.")).into()
     }
 
     fn apps_page(&self) -> Element<'_, Message> {

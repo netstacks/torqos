@@ -1747,11 +1747,12 @@ impl Broker {
         if user.is_empty() {
             return Ok(());
         }
-        for (path, file) in self.repo.proposed_files(diff_path, &user, USER_DATA_MAX)? {
+        let most = user.iter().map(|p| policy::user_leaf_max(p.rsplit('/').next().unwrap_or_default())).max().unwrap_or(USER_DATA_MAX);
+        for (path, file) in self.repo.proposed_files(diff_path, &user, most)? {
             let Some(f) = file else { continue };
             let leaf = path.rsplit('/').next().unwrap_or_default();
             let data = f.mode == "100644"
-                && f.size <= USER_DATA_MAX
+                && f.size <= policy::user_leaf_max(leaf)
                 && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| policy::user_leaf_ok(leaf, &v));
             if !data {
                 bail!(
@@ -1760,7 +1761,7 @@ impl Broker {
                         "packages.json" => format!("a JSON list of package names (at most {})", policy::MAX_USER_PACKAGES),
                         _ => "JSON data".to_string(),
                     },
-                    USER_DATA_MAX / 1024
+                    policy::user_leaf_max(leaf) / 1024
                 );
             }
         }

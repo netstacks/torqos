@@ -52,7 +52,8 @@ let
 
   # Same shape and leaves the broker treats as user tier (broker/src/policy.rs, is_user_data).
   isUserName = s: builtins.match "[a-z_][a-z0-9_-]*" s != null;
-  # A leaf is added only together with the typed setting that reads it: packages.json (this module).
+  # A leaf is added only together with the typed setting that reads it: packages.json (this module), flatpaks.json;
+  # desktop.json is read by no module (a person's COSMIC settings, put on the desktop by their own session).
   # One list for the broker and the modules: broker/user-leaves.json
   # (the broker's own test checks its USER_LEAVES against it).
   userLeaves = lib.importJSON ../broker/user-leaves.json;

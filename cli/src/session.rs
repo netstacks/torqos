@@ -672,7 +672,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowRemote => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowRemote | Op::ShowDesktop => {
                 self.show_operational(op)
             }
             Op::ClearCommit => self.clear_commit(),
@@ -1079,6 +1079,7 @@ impl<'a> Session<'a> {
             Op::ShowSnapshots => self.machine.snapshots(),
             Op::ShowBackups => self.machine.backups(),
             Op::ShowRemote => self.machine.remote(),
+            Op::ShowDesktop => Ok(crate::desktop::shown(&crate::desktop::status(&self.repo, &self.me, &crate::desktop::Paths::of_home()?)?)),
             Op::ShowServices => {
                 // What the configuration in effect turns on: NixOS's services (`services <name> enable`,
                 // `virtualisation <name> enable`), and what the old list still turns on.
@@ -1300,6 +1301,24 @@ impl<'a> Session<'a> {
             syntax::Request::Trust { minutes } => self.machine.trust(Some(minutes)),
             syntax::Request::TrustRevoke => self.machine.trust(None),
             syntax::Request::RemoteKey => self.machine.remote_key(),
+            syntax::Request::DesktopSave => {
+                let s = crate::app::sync_desktop(true)?;
+                let mut out = match s.saved {
+                    Some(seq) => format!("Saved your desktop in your configuration (change #{seq}).\n"),
+                    None => "Your desktop is saved: nothing has changed since.\n".to_string(),
+                };
+                if s.applied > 0 {
+                    out.push_str(&format!("{} settings from your configuration were put on this desktop.\n", s.applied));
+                }
+                if !s.failed.is_empty() {
+                    out.push_str(&format!("! Could not put these on the desktop: {}\n", s.failed.join(", ")));
+                }
+                Ok(out)
+            }
+            syntax::Request::DesktopSaving { automatic } => {
+                let how = if automatic { crate::desktop::Saving::Automatic } else { crate::desktop::Saving::Manual };
+                crate::app::desktop_saving(how)
+            }
             syntax::Request::RemoteClear => self.machine.remote_clear(&self.me),
             syntax::Request::LedgerAcknowledge => self.machine.acknowledge(&self.me),
             syntax::Request::RestoreData { change, path } => self.machine.restore_data(change, &path, &self.me),

@@ -72,8 +72,9 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
 /// full NixOS module (sudo rules, services, ...) wherever it lives, so it is system tier. Keep in
 /// step with broker/user-leaves.json, which modules/packages.nix reads (tested below). A leaf is
 /// added only together with the typed module that reads it, and with its shape in `user_leaf_ok`:
-/// `packages.json` (modules/packages.nix).
-pub const USER_LEAVES: &[&str] = &["packages.json", "flatpaks.json"];
+/// `packages.json` (modules/packages.nix). `desktop.json` is read by no module: it is the person's COSMIC
+/// settings, put on their desktop by their own session (cli/src/desktop.rs), never by root.
+pub const USER_LEAVES: &[&str] = &["packages.json", "flatpaks.json", "desktop.json"];
 
 /// The most packages one user's list may hold: a lightly-approved change must not be able to start
 /// hours of downloads and builds while holding the broker lock.
@@ -90,8 +91,48 @@ pub fn user_leaf_ok(leaf: &str, value: &serde_json::Value) -> bool {
         }),
         // A list of Flathub application ids (reverse DNS).
         "flatpaks.json" => value.as_array().is_some_and(|ids| ids.len() <= MAX_USER_PACKAGES && ids.iter().all(|i| i.as_str().is_some_and(flatpak_id_ok))),
+        // A person's COSMIC settings (cli/src/desktop.rs mirrors this): when to save, and each setting's text.
+        "desktop.json" => desktop_ok(value),
         _ => false,
     }
+}
+
+/// The most a user leaf may hold: a person's COSMIC settings are larger than a list of names.
+pub fn user_leaf_max(leaf: &str) -> u64 {
+    match leaf {
+        "desktop.json" => 4 * 1024 * 1024,
+        _ => 64 * 1024,
+    }
+}
+
+/// `desktop.json`: `save` (automatic or manual) and `cosmic`, COSMIC's settings by name, each its text.
+fn desktop_ok(value: &serde_json::Value) -> bool {
+    let Some(top) = value.as_object() else { return false };
+    let save_ok = top.get("save").is_none_or(|s| matches!(s.as_str(), Some("automatic" | "manual")));
+    let cosmic = match top.get("cosmic") {
+        None => Some(serde_json::Map::new()),
+        Some(c) => c.as_object().cloned(),
+    };
+    let Some(cosmic) = cosmic else { return false };
+    let total: usize = cosmic.values().filter_map(|v| v.as_str()).map(str::len).sum();
+    top.keys().all(|k| k == "save" || k == "cosmic")
+        && save_ok
+        && cosmic.len() <= 2000
+        && total <= 1024 * 1024
+        && cosmic.iter().all(|(k, v)| cosmic_key_ok(k) && v.as_str().is_some_and(|t| t.len() <= 64 * 1024 && !t.contains('\0')))
+}
+
+/// A COSMIC setting's name as it lays them out, `<reverse-DNS component>/v<n>/<key>`: never a path
+/// anywhere else, since a person's session writes it under their ~/.config/cosmic.
+fn cosmic_key_ok(k: &str) -> bool {
+    let word = |s: &str| !s.is_empty() && s.len() <= 128 && !s.starts_with('-') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let mut parts = k.split('/');
+    let (Some(component), Some(version), Some(key), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return false };
+    let dotted: Vec<&str> = component.split('.').collect();
+    dotted.len() >= 2
+        && dotted.iter().all(|p| word(p))
+        && version.strip_prefix('v').is_some_and(|n| !n.is_empty() && n.len() <= 4 && n.bytes().all(|b| b.is_ascii_digit()))
+        && word(key)
 }
 
 /// The form of a package name, mirroring modules/packages.nix (`isAttrName`, depth): a top-level
@@ -240,12 +281,35 @@ mod tests {
         for p in ["users/casey/packages.json", "users/_svc/packages.json", "users/a-b_9/packages.json"] {
             assert_eq!(tier_for_path(p), Tier::User, "{p}");
         }
-        assert_eq!(USER_LEAVES, ["packages.json", "flatpaks.json"]);
+        assert_eq!(USER_LEAVES, ["packages.json", "flatpaks.json", "desktop.json"]);
         // The modules read the same list (modules/packages.nix): the two cannot drift apart.
         let shared: Vec<String> = serde_json::from_str(include_str!("../user-leaves.json")).unwrap();
         assert_eq!(USER_LEAVES, shared, "broker/user-leaves.json");
     }
 
+
+    #[test]
+    fn a_persons_desktop_is_cosmics_settings_and_nothing_else() {
+        let ok = |json: &str| user_leaf_ok("desktop.json", &serde_json::from_str(json).unwrap());
+        assert!(ok(r#"{"save": "manual", "cosmic": {"com.system76.CosmicPanel.Panel/v1/size": "M", "com.system76.CosmicBackground/v1/same-on-all": "true\n"}}"#));
+        assert!(ok("{}"));
+        for bad in [
+            "[]",
+            r#"{"save": "sometimes"}"#,
+            r#"{"other": 1}"#,
+            r#"{"cosmic": []}"#,
+            r#"{"cosmic": {"com.x/v1/a": 1}}"#,
+            r#"{"cosmic": {"../../.bashrc/v1/a": "x"}}"#,
+            r#"{"cosmic": {"com.x/v1/../a": "x"}}"#,
+            r#"{"cosmic": {"com.x/v1/a/b": "x"}}"#,
+            r#"{"cosmic": {"com.x/1/a": "x"}}"#,
+            r#"{"cosmic": {"x/v1/a": "x"}}"#,
+        ] {
+            assert!(!ok(bad), "{bad}");
+        }
+        assert_eq!(tier_for_path("users/casey/desktop.json"), Tier::User);
+        assert!(user_leaf_max("desktop.json") > user_leaf_max("packages.json"));
+    }
 
     #[test]
     fn a_persons_flatpaks_are_ids() {

@@ -1719,3 +1719,46 @@ mod apps_remembered {
         assert_eq!(seqs, [2, 3]);
     }
 }
+
+// ── A person's desktop, kept in their configuration ──────────────────────────────────────────────
+
+pub use crate::desktop::{Saving, Status as DesktopStatus, Synced};
+
+/// One sync at a time for a person, whichever program starts it (the applet, TorqOS Settings, torqcli):
+/// two at once would save the same change twice.
+fn one_desktop_sync() -> Result<std::fs::File> {
+    let p = crate::desktop::Paths::of_home()?.state.with_extension("lock");
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&p)?;
+    f.lock()?;
+    Ok(f)
+}
+
+/// Bring this person's desktop and configuration together (crate::desktop::sync): what the configuration
+/// has newer goes on the desktop; their changes are saved if saving is automatic, or `save_now`.
+pub fn sync_desktop(save_now: bool) -> Result<Synced> {
+    let _one = one_desktop_sync()?;
+    let cli = cli();
+    let real = crate::shell::Real::new(&cli);
+    crate::desktop::sync(&real, &crate::candidate::Repo::new(&cli.repo), &crate::me()?, &crate::desktop::Paths::of_home()?, save_now)
+}
+
+/// `show system desktop`'s facts.
+pub fn desktop_status() -> Result<DesktopStatus> {
+    crate::desktop::status(&crate::candidate::Repo::new(&cli().repo), &crate::me()?, &crate::desktop::Paths::of_home()?)
+}
+
+/// `request system desktop saving automatic|manual`.
+pub fn desktop_saving(how: Saving) -> Result<String> {
+    let _one = one_desktop_sync()?;
+    let cli = cli();
+    let real = crate::shell::Real::new(&cli);
+    crate::desktop::set_saving(&real, &crate::candidate::Repo::new(&cli.repo), &crate::me()?, how)
+}
+
+/// The words for what is not saved yet: "panel, theme".
+pub fn desktop_words(keys: &[String]) -> String {
+    crate::desktop::what(keys.iter().cloned())
+}

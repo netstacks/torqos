@@ -21,6 +21,7 @@ pub mod history;
 mod tree;
 mod candidate;
 pub mod session;
+pub mod desktop;
 mod shell;
 pub mod complete;
 mod syntax;

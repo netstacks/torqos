@@ -127,6 +127,18 @@ pkgs.testers.runNixOSTest {
         code, v = answer(ask("dev", {"args": ["--json", "propose", f"--base={head()}", "--reason=not an id"], "diff": apps("dev", '["firefox"]')}))
         assert code == 1, (code, v)
 
+    with subtest("a person's desktop is their own setting: COSMIC's names only, never a path"):
+        def desk(name, body):
+            return f"--- /dev/null\n+++ b/users/{name}/desktop.json\n@@ -0,0 +1 @@\n+{body}\n"
+        good = '{"save": "automatic", "cosmic": {"com.system76.CosmicPanel.Panel/v1/size": "M"}}'
+        p = propose("sam", desk("sam", good), "a desktop")
+        code, v = answer(ask("sam", {"args": ["--json", "apply", str(p["seq"])]}))
+        assert code == 0, (code, v)
+        machine.succeed(f"git -C {repo} show HEAD:users/sam/desktop.json | grep -q CosmicPanel")
+        bad = '{"cosmic": {"../../.bashrc/v1/x": "evil"}}'
+        code, v = answer(ask("dev", {"args": ["--json", "propose", f"--base={head()}", "--reason=a path"], "diff": desk("dev", bad)}))
+        assert code == 1, (code, v)
+
     with subtest("a refused or busy request is an answer, not a failed unit: a switch must not fail for one"):
         machine.succeed("test -z \"$(systemctl list-units --failed --no-legend 'torq-broker@*')\"")
 
