@@ -992,6 +992,9 @@ pub struct Proposal {
     pub tainted: bool,
     /// Its apply failed once: it waits for a person again (ADR-008), who may apply it again or decline it.
     pub failed: bool,
+    /// Whether this person may decline it without anyone else's password: their own agent proposed it (the
+    /// ledger's `agent_for`). Decline is offered only then; anyone else's an administrator declines in torqcli.
+    pub yours: bool,
 }
 
 /// What became of each of these proposals (those the person's agent said it made), by the ledger: only
@@ -1006,6 +1009,12 @@ pub fn agent_fates(seqs: &[u64]) -> Result<Vec<(u64, crate::agent::conversation:
 
 /// Proposals waiting for a person: the agent's and other people's. One's own commit that did not go through leaves
 /// a proposal too, and that is not something waiting on them.
+/// Whether `me` may decline proposal `e` by their own say (the broker's rule, as far as the ledger shows it):
+/// their own agent proposed it.
+fn yours(e: &history::Entry, me: &str) -> bool {
+    e.data["agent_for"].as_str() == Some(me)
+}
+
 fn waiting_on_me<'a>(entries: &'a [history::Entry], me: &str) -> Vec<&'a history::Entry> {
     history::waiting_proposals(entries).into_iter().filter(|e| e.data["caller"].as_str().unwrap_or(&e.actor) != me).collect()
 }
@@ -1013,9 +1022,10 @@ fn waiting_on_me<'a>(entries: &'a [history::Entry], me: &str) -> Vec<&'a history
 /// The proposals waiting for a person.
 pub fn proposals() -> Result<Vec<Proposal>> {
     let entries = crate::read_ledger(&cli())?;
-    Ok(waiting_on_me(&entries, &crate::me()?)
+    let me = crate::me()?;
+    Ok(waiting_on_me(&entries, &me)
         .into_iter()
-        .map(|e| Proposal { seq: e.seq, reason: history::one_line(&e.reason, 300), by: history::one_line(&e.actor, 40), tainted: e.tainted, failed: history::failed_once(&entries, e.seq) })
+        .map(|e| Proposal { seq: e.seq, reason: history::one_line(&e.reason, 300), by: history::one_line(&e.actor, 40), tainted: e.tainted, failed: history::failed_once(&entries, e.seq), yours: yours(e, &me) })
         .collect())
 }
 
@@ -1088,7 +1098,10 @@ fn command(program: &str, args: &[&str]) -> std::process::Command {
 }
 
 fn spawn(program: &str, args: &[&str]) {
-    let _ = command(program, args).spawn();
+    // Waited for on a thread of its own: it leaves no zombie behind.
+    if let Ok(mut child) = command(program, args).spawn() {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 /// A `torq-settings` planted earlier on PATH is not what starts.
@@ -2058,6 +2071,13 @@ mod apps_remembered {
         let e = [p(1, "me", "user"), p(2, "sam", "user"), p(3, "torq-agent-me", "agent"), declined];
         let seqs: Vec<u64> = waiting_on_me(&e, "me").iter().map(|x| x.seq).collect();
         assert_eq!(seqs, [2]);
+        // Decline is offered only on one of the person's own agent's (`agent_for`): never another's agent's, nor
+        // someone else's change (an administrator's, in torqcli).
+        let mut mine = p(6, "torq-agent-me", "agent");
+        mine.data = serde_json::json!({ "caller": "torq-agent-me", "agent_for": "me" });
+        let mut sams = p(7, "torq-agent-sam", "agent");
+        sams.data = serde_json::json!({ "caller": "torq-agent-sam", "agent_for": "sam" });
+        assert!(yours(&mine, "me") && !yours(&sams, "me") && !yours(&p(2, "sam", "user"), "me"));
     }
 }
 

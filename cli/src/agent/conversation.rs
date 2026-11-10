@@ -256,7 +256,7 @@ impl Turn {
                     Some(Fate::Waiting) => "waiting for you to apply or refuse it",
                     Some(Fate::Applied) => "applied",
                     Some(Fate::Declined) => "declined",
-                    Some(Fate::Failed) => "its apply failed: apply it again or decline it",
+                    Some(Fate::Failed) => "its apply failed once — apply it again, or decline it",
                     Some(Fate::NotYours) => "not your agent's proposal",
                 };
                 ProposalRow { seq, text: format!("Proposed #{seq}{mark}: {said}"), review: matches!(fate, Some(Fate::Waiting | Fate::Failed)) }

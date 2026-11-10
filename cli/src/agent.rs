@@ -246,13 +246,16 @@ pub(crate) fn run(args: &[String]) -> Result<i32> {
 pub(crate) enum Asked {
     Question(String),
     Forget,
+    /// No words: the question is one line read from standard input, so it needs no quoting.
+    FromInput,
 }
 
-const ASK_USAGE: &str = "usage: torq ask \"<question>\" | torq ask --forget — e.g. torq ask \"why is my wifi flaky?\"";
+const ASK_USAGE: &str = "usage: torq ask \"<question>\" | torq ask (then type the question) | torq ask --forget — e.g. torq ask \"why is my wifi flaky?\"";
 
-/// `ask "<question>"`, `ask -- <words…>`, `ask --forget` (after `ask`).
+/// `ask "<question>"`, `ask -- <words…>`, `ask --forget`, or `ask` alone (the question from standard input).
 pub(crate) fn parse_ask(args: &[String]) -> Result<Asked> {
     let words = match args {
+        [] => return Ok(Asked::FromInput),
         [f] if f == "--forget" => return Ok(Asked::Forget),
         [d, rest @ ..] if d == "--" => rest,
         [first, ..] if first.starts_with('-') => bail!("unknown option {first}\n{ASK_USAGE}"),
@@ -263,6 +266,18 @@ pub(crate) fn parse_ask(args: &[String]) -> Result<Asked> {
         bail!("{ASK_USAGE}");
     }
     Ok(Asked::Question(q))
+}
+
+/// One line read as the question (`ask` alone): whatever it holds, no shell reads it. At most 8 KiB.
+fn question_from<R: std::io::BufRead>(r: &mut R) -> Result<String> {
+    use std::io::Read;
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut r.take(8 * 1024), &mut line).context("reading your question")?;
+    let q = line.trim();
+    if q.is_empty() {
+        bail!("{ASK_USAGE}");
+    }
+    Ok(q.to_string())
 }
 
 /// What a key does while an answer comes.
@@ -409,6 +424,13 @@ pub(crate) fn ask(args: &[String]) -> Result<i32> {
             };
         }
         Asked::Question(text) => text,
+        Asked::FromInput => {
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() {
+                eprint!("Ask your agent: ");
+            }
+            question_from(&mut std::io::stdin().lock())?
+        }
     };
     let answer = agent.ask(&text, None)?;
     use std::io::IsTerminal;
@@ -558,7 +580,11 @@ mod tests {
         assert_eq!(parse_ask(&a("--forget")).unwrap(), Asked::Forget);
         assert_eq!(parse_ask(&a("-- --forget me")).unwrap(), Asked::Question("--forget me".into()), "after --, words");
         assert_eq!(parse_ask(&a("forget --forget")).unwrap(), Asked::Question("forget --forget".into()));
-        for bad in ["", "   ", "--", "--stop", "-x why"] {
+        assert_eq!(parse_ask(&[]).unwrap(), Asked::FromInput, "no words: the question from standard input");
+        let mut typed = std::io::Cursor::new("why is my wifi slow? it's $HOME * \"odd\"\nnext line\n");
+        assert_eq!(question_from(&mut typed).unwrap(), "why is my wifi slow? it's $HOME * \"odd\"", "one line, as typed");
+        assert!(question_from(&mut std::io::Cursor::new("\n")).is_err(), "nothing typed");
+        for bad in ["--", "--stop", "-x why"] {
             assert!(parse_ask(&a(bad)).is_err(), "{bad:?}");
         }
         assert!(format!("{:#}", parse_ask(&a("--stop")).unwrap_err()).contains("unknown option --stop"));
