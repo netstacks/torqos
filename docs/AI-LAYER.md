@@ -2,8 +2,27 @@
 
 **Status (2026-11-11): experimental. M5 (ADR-034) is built in part: the account (ADR-035, ADR-041), doctor mode, proposals and session trust (ADR-042) exist and are in v0.3.x. Doctor is off by default, no model ships, and no real model has ever been tried (the tests use a scripted endpoint). The resident agent, torq-mcp and ADR-051 are not on main: they are parked on branch `work/agents` until after 0.4.0-rc1.**
 Everything built so far (the broker as the only writer, actors, tiers, the ledger) was built so
-this could be added without a bypass. The agent is an *account*, `torq-agent`, whose identity the
-kernel vouches for (`SO_PEERCRED`) — never a flag the caller sets.
+this could be added without a bypass. Each person's agent is an *account* of its own,
+`torq-agent-<person>` (ADR-051 3, amending ADR-041 1: `torq.agent.people`, the owner by default),
+whose identity the kernel vouches for (`SO_PEERCRED`) — never a flag the caller sets. The broker
+knows which agent serves whom from its map in /etc/torq/broker.json: an account is an agent only if
+the map names it and its uid is no person's.
+
+## One agent per person (ADR-051 3)
+
+- **Its account:** `torq-agent-<person>`, a static system user in its own group, no password, no
+  login, no other group, its home `/var/lib/torq-agent-<person>` (0700, its own). Neither agent reads
+  the other's home.
+- **What it may propose:** packages only in its own person's folder (`users/<person>/packages.json`),
+  never another person's; settings only as `torq.agent.mayPropose.settings` allows (the machine's
+  list, the same for every agent). A refusal is ledgered with the agent account that tried.
+- **Sessions and trust:** a session is its agent account's: no other agent reports into it or cites
+  it. A person's trust (`request system agent trust`) applies only their own agent's proposals,
+  judged by the broker's map at the time of the apply. Limits (proposals waiting, refusals ledgered,
+  sessions started and kept) are counted per agent, so one person's agent cannot crowd out another's.
+- **`torq agent run`** runs the caller's own agent, `torq-agent-$SUDO_USER`, never one the caller
+  names; a person with none is told so. A restore from a backup into any agent's folder is
+  refused.
 
 ## What it is for
 
@@ -24,8 +43,8 @@ owner's shell does not have; in a terminal it is torqcli's prompt, the same text
 
 | Component | Privilege | Language | Role |
 |---|---|---|---|
-| `torq-agent` (`agent/`, `torq-doctor`) | unprivileged, sandboxed (`torq agent run`) | Rust | Talks to the model (OpenAI-compatible chat API), calls its read-only tools; later *proposes* changes (ADR-042) |
-| MCP tool servers (`torq-mcp`) | unprivileged, read-mostly | Rust | Typed access per subsystem. Not built on main: planned, parked on `work/agents` |
+| `torq-doctor` (`agent/`), as the person's `torq-agent-<person>` | unprivileged, sandboxed (`torq agent run`) | Rust | Talks to the model (OpenAI-compatible chat API), calls its read-only tools; later *proposes* changes (ADR-042) |
+| MCP tool servers (`torq-mcp`) | unprivileged, read-mostly | Rust | Typed access per subsystem |
 | `torq-broker` | privileged (root, minimal) | Rust | Only writer of the config repo; tiers, commits, rebuild, rollback, ledger |
 | Model runtime | unprivileged (DynamicUser) | llama.cpp (`llama-server`, a unix socket) | Local inference; or a remote endpoint as a setting (ADR-042) |
 | torqcli | the person's | Rust | Shows proposals, diffs and the ledger; a person approves at a terminal |
@@ -51,8 +70,10 @@ broker and reports each tainting read there before the model sees it; the broker
 its own state directory, where the agent cannot write, and nothing clears it. The ledger holds a
 session where a proposal cites it: the proposal's entry carries the session and what tainted it.
 A proposal names its session and is tainted as the broker's record says;
-one that names no session — any other program run as the agent — is tainted. `request system apply`
-says what the session read; session trust never covers a tainted proposal. The broker holds what it
+one that names no session — any other program run as the agent — is tainted; one that names another
+agent's session is refused. `request system apply`
+says what the session read; session trust never covers a tainted proposal, nor another person's
+agent's. The broker holds what it
 is told, and cannot see what a program reads. So taint is reported by TorqOS's own doctor and held by the broker; a different program run as the agent (Claude Code under `torq agent run`, say) can open a session and simply not report, and its proposals then look untainted. Taint is a defence against a prompt injection reaching TorqOS's own doctor, not against a hostile program running as the agent. What bounds that is the rest of the design (trust is a person's own folder, at most 60 minutes, never the system tier): KNOWN-GAPS 6zq.
 
 ## Ledger format (v0)

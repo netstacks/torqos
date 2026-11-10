@@ -1081,3 +1081,24 @@ Its §5 lists claims without a test.
    dialog is a trusted path. The dialog leads with the broker's facts; the reason in it is the proposer's words (the
    agent's, if it proposed), shown as such. One person can still spend another's tries at the helper (its socket is open
    to `users`), and be locked out of the dialog, sudo and `torq-approve` for ten minutes; a service or the agent cannot.
+
+6zzk. **One agent account per person (ADR-051 3, step 1, built 2026-11-10, `tests/agents-per-person.nix`).** Open:
+   - **The old `torq-agent`'s home is left behind.** On a machine that had the single account, the update
+     removes `torq-agent` from /etc/passwd (users.mutableUsers is off) but not `/var/lib/torq-agent`: it stays,
+     owned by a uid that no account is named for now, with whatever a tool kept there (Claude Code's
+     `~/.claude` and its credentials, the doctor's session notes). Nothing runs as that uid, and the broker
+     refuses a restore into it; but were that uid ever given to another account, the folder would be its. What to do: look at what
+     is in it (`sudo ls -la /var/lib/torq-agent`), move anything still wanted (a tool's sign-in is simplest
+     made again as the new account) into the person's new agent's home — `sudo cp -a … /var/lib/torq-agent-<you>/`
+     then `sudo chown -R torq-agent-<you>: /var/lib/torq-agent-<you>` — and then remove the old one,
+     `sudo rm -rf /var/lib/torq-agent`. TorqOS does not delete it itself: it may hold the only copy of
+     something. The old account's shares (ACLs `u:<uid>` in a person's folders, shown by `getfacl` as a
+     number) stay too: `setfacl -R -P -x u:<uid>,d:u:<uid> -- <dir>` takes them off.
+   - **A proposal the old account left waiting can no longer be applied:** it names no agent the broker's
+     map does (`refused: the agent's limits no longer allow this`). Ask the new agent again.
+   - **`torq agent run` is still an administrator's** (its sudo rule is `wheel`'s, as before). A person
+     in `torq.agent.people` who is not an administrator has an agent account the broker answers for, but
+     cannot start a program as it; widening the rule is a decision of its own (the launcher's root step
+     taking a non-administrator's input).
+   - **One model key for every agent.** `torq.agent.doctor.apiKeyFile` is one path, which each person's
+     agent must be able to read; a key per person is ADR-051's Agent page.

@@ -32,7 +32,7 @@ tell a person from a program at a root shell — nothing can.
   is theirs to change; someone else's folder, or the system, takes an administrator (`wheel`) and
   **their password**, checked by the broker through PAM, with faillock stopping guessing (five
   wrong: ten minutes, counted where only root can reach — and sudo, su and passwd share the count:
-  `torq.security.passwordLockout`). The agent's account (`torq-agent`) proposes and can do nothing else. A
+  `torq.security.passwordLockout`). Each person's agent account (`torq-agent-<person>`, ADR-051 3) proposes and can do nothing else. A
   program in the owner's shell has their uid but not their password — the human gate. Its limit,
   stated: a program running as the owner could show a fake prompt and read what is typed into it;
   the password is safe from other accounts, and from that program once typed into torqcli (which

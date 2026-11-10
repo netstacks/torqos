@@ -292,6 +292,9 @@ acceptance tests, each a VM test.
       panel, a key, the launcher, Settings, the applets, crash notifications and the terminal; the
       screen by the person's portal grant, marked and ended by them; `torq-mcp`. Hermes and OpenClaw not bundled.
       Phase 1 of TorqOS as the harness (ADR-051 9): with its memory, shared folders, the screen and the whole `show` tree.
+      **Step 1 built** (2026-11-10, `work/agents`, `tests/agents-per-person.nix`): one agent account per person,
+      `torq-agent-<person>` (`torq.agent.people`), the broker's map of whom each serves, each agent's packages
+      its own person's only, trust and sessions per agent, `torq agent run` as the caller's own agent.
 - [ ] **The harness's tool catalogue** (ADR-051 9, phase 2; its own ADR first): apps and packages, settings
       explained and proposed, files written in shared folders, the web (tainting), a workbench, reminders and
       scheduled tasks, notifications; outside MCP servers as pinned, tiered tree settings.

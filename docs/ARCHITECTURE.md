@@ -4,7 +4,7 @@ Four layers, bottom up. Each lists what we **reuse** and what we **build**.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ 3  AI (next)       torq-agent, an account of its own ─► broker    │
+│ 3  AI (next)       torq-agent-<person>, one each ─► broker        │
 │                    read tools · proposals only · session trust    │
 ├──────────────────────────────────────────────────────────────────┤
 │ 2  Configurations  a server's · torqos-desktop · yours            │
@@ -60,7 +60,7 @@ A configuration is a config repo loaded on the base. The base does not know whic
 Layers 0 and 1 were built so it can be added without a bypass: the broker is the only writer,
 every proposal names its actor, tiers decide what needs a person. Now (ADR-034):
 
-- **Agent** (`torq-agent`: its own account, unprivileged, sandboxed): reads the system through
+- **Agent** (`torq-agent-<person>`: each person's own account, ADR-051 3; unprivileged, sandboxed): reads the system through
   typed tools, *proposes* changes. Its identity is the kernel's word (`SO_PEERCRED`, ADR-035), never
   a flag.
 - Proposals go to the broker like anyone's; what an agent may propose is a default-deny

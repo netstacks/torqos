@@ -1,8 +1,10 @@
 # The agent
 
-TorqOS's agent is an account of its own, `torq-agent`. It never changes your machine: it *proposes*
-changes, and you apply them. What it may propose at all is the owner's list,
-`torq agent mayPropose` (your own packages, by default).
+Each person has an agent of their own: an account, `torq-agent-<you>` (alice's is `torq-agent-alice`),
+its home `/var/lib/torq-agent-<you>`, which no other agent can read. It never changes your machine: it
+*proposes* changes, and you apply them. It proposes packages only for you, never for anyone else, and
+settings only as the owner's list `torq agent mayPropose settings` allows (none, by default). Who has
+an agent is `torq agent people` (the owner, by default); `torq agent run` says so plainly if you have none.
 
 !!! warning "Experimental"
     The agent's account, its proposals and its session trust exist and are tested, but no model
@@ -35,7 +37,7 @@ alice@machine:~$ torq doctor "why is my wifi flaky?"        # reads and explains
 alice@machine:~$ torq agent propose "install htop for me"   # may also propose one change
 ```
 
-Only an administrator can run them. Both run as the agent, in a sandbox, for that one question.
+Only an administrator can run them. Both run as your agent, in a sandbox, for that one question.
 `torq agent propose` ends with a proposal number, or nothing.
 
 ## What it read: taint
@@ -75,8 +77,8 @@ alice@torq> request system agent trust 30        # asks your password
 alice@torq> request system agent trust revoke
 ```
 
-For the next 30 minutes (at most 60), the agent's proposals **in your own folder** — your packages —
+For the next 30 minutes (at most 60), your agent's proposals **in your own folder** — your packages —
 apply as soon as it makes them, without asking you. Never a system change, never a proposal from a
-tainted session, never someone else's folder. Each one is its own change in the ledger, marked with
+tainted session, never someone else's folder, and never another person's agent. Each one is its own change in the ledger, marked with
 your trust, and `request system revert <n>` undoes it. While it holds, `show system alarms` says so.
 Only you can give trust for your folder, and you can end it at any time.

@@ -1176,6 +1176,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   changed input itself and checks its hash and signature.
 
 ## ADR-041 — The agent's account: `torq-agent`, and what it may propose
+- **Amended by ADR-051** (3, built 2026-11-10): one agent account per person, `torq-agent-<person>`, in place of the one `torq-agent` of 1; `torq.agent.mayPropose.users` replaced by `torq.agent.people`.
 - **Status:** accepted (the owner, 2026-11-04: "do it"); 1–4 built 2026-11-05, 5 designed and next. ADR-035's account lever, after ADR-040 (the socket). The owner:
   people will drive TorqOS with the AI tools they already use — Claude Code first — so the account
   is made to be one such a tool can run as, not only TorqOS's own agent (M5).
@@ -2208,6 +2209,29 @@ vouches for, that only proposes, every change ledgered and undone in one command
   tool as the machine's agent; anything applied because a tool auto-approved it; the agent's screen or input
   without the person's portal grant; a continuous recording; a network port for the agent; skills installed by
   the agent; credentials in the person's home; Omarchy's menus copied (its ideas are taken, not its look).
+- **As built (step 1, 2026-11-10, `work/agents`; decision 3's accounts, not yet its service):** `torq.agent.people`
+  (the owner by default) makes, for each person P, a static system user `torq-agent-P` in its own group, home
+  `/var/lib/torq-agent-P` (0700), password `!`, nologin, no other group; asserted: P is a normal user, the name fits
+  31 characters (NixOS's limit for the group; Linux's is 32), P does not itself begin with `torq-agent`, no one twice. The single `torq-agent` is gone;
+  `torq.agent.mayPropose.users` is removed (`mkRemovedOptionModule`, not renamed: its list meant whose packages the
+  one agent proposed, and the same list under `people` would silently mean who gets an agent). broker.json's
+  `agent.agents` maps each agent account to its person; `socket::caller` makes an account an agent
+  (`agent_for: Some(P)`) only if the map names it and its uid is outside `PEOPLE_UIDS`, and the gate is as before.
+  The socket adds `--agent <account>` (never taken from a caller) to an agent's `propose`, `session-start` and
+  `session-taint`; the broker judges the proposal as that account's (`agent::refusal`: packages only in
+  `users/P/packages.json`, settings by the machine's `mayPropose.settings`), records `data.agent` and
+  `data.agent_for`, and judges it again at apply by the map as it is then (a proposal of the old account is no
+  longer applicable). Session records carry their agent; another agent cannot report into one or cite it.
+  Trust from P applies a proposal only if the map, at the apply, says its agent serves P. Waiting proposals,
+  ledgered refusals and sessions (started an hour, kept) are counted per agent. A backup restore into any
+  account the map names, or any named `torq-agent…`, is refused. `torq agent run` (modules/agent-run.sh) runs
+  `torq-agent-$SUDO_USER`: SUDO_USER checked against its pattern and SUDO_UID, the account named P's in
+  broker.json, a system uid, home `/var/lib/torq-agent-P`; torqcli refuses first, plainly, a person with no
+  agent account, and its "am I the agent" is the name's prefix (convenience; the broker decides). Tests:
+  broker units (caller identification, another person's folder, trust and sessions across agents) and
+  `tests/agents-per-person.nix` (alice, bob, carol's look-alike account, dave with none). Not in this step:
+  the resident service, a non-administrator's `torq agent run` (the sudo rule stays `wheel`'s), a model key per
+  person (KNOWN-GAPS 6zzk).
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
