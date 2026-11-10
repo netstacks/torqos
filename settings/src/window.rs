@@ -315,7 +315,6 @@ pub enum Message {
     OpenAgent,
     Forget,
     ForgetAnswer(bool),
-    Forgot(Result<(), String>),
 }
 
 impl cosmic::Application for Settings {
@@ -1027,22 +1026,10 @@ impl cosmic::Application for Settings {
             Message::Forget => self.forgetting = true,
             Message::ForgetAnswer(yes) => {
                 self.forgetting = false;
+                // A torqcli line, as the page's other actions are: `request system agent forget`.
                 if yes {
-                    self.busy = Some("Forgetting the conversation".into());
-                    self.note = None;
-                    return cosmic::task::future(async {
-                        let got = off(|| Client::mine().and_then(|c| c.forget()).map_err(|e| e.to_string())).await.and_then(|r| r);
-                        Message::Forgot(got)
-                    });
+                    return self.act(At::Read, app::AGENT_FORGET.to_string());
                 }
-            }
-            Message::Forgot(r) => {
-                self.busy = None;
-                self.note = Some(match r {
-                    Ok(()) => ("Your agent has forgotten the conversation.".into(), false),
-                    Err(e) => (e, true),
-                });
-                return self.load();
             }
             Message::Typed(line, t) => {
                 self.busy = None;
@@ -2023,17 +2010,27 @@ impl Settings {
                 .control(widget::text::body(key)),
         );
         page = page.push(brain);
-        if let Some(Ok(st)) = &look.status {
-            let kept = match st.turns {
-                0 => "It remembers nothing of your conversation".to_string(),
-                1 => "It remembers 1 turn of your conversation".to_string(),
-                n => format!("It remembers {n} turns of your conversation"),
-            };
-            let forget = widget::button::destructive("Forget…").on_press_maybe((self.busy.is_none() && !st.running).then_some(Message::Forget));
+        let memory = match (&look.status, s.agent.is_some() && s.service) {
+            (Some(Ok(st)), _) => Some((
+                match st.turns {
+                    0 => "It remembers nothing of your conversation".to_string(),
+                    1 => "It remembers 1 turn of your conversation".to_string(),
+                    n => format!("It remembers {n} turns of your conversation"),
+                },
+                !st.running,
+            )),
+            // Not running: not asked (asking would start it). Forget still can, when asked to.
+            (None, true) => Some(("It is not running now: how much it remembers shows while it runs".to_string(), true)),
+            _ => None,
+        };
+        if let Some((kept, idle)) = memory {
+            let forget = widget::button::destructive("Forget…").on_press_maybe((self.busy.is_none() && idle).then_some(Message::Forget));
             page = page.push(
-                settings::section()
-                    .title("Its memory")
-                    .add(settings::item::builder(kept).description("Its last turns, kept by its service; an answer from a session that read untrusted text is never kept").control(forget)),
+                settings::section().title("Its memory").add(
+                    settings::item::builder(kept)
+                        .description(format!("Its last turns, kept by its service; an answer from a session that read untrusted text is never kept. Forget: {}", app::AGENT_FORGET))
+                        .control(forget),
+                ),
             );
         }
         page = page.push(
@@ -2101,10 +2098,11 @@ pub struct AgentLook {
     status: Option<Result<Status, String>>,
 }
 
-/// The Agent page's look: its status asked only where the person has an agent and its service is here.
+/// The Agent page's look: its status asked only where its service runs already — opening the page never starts it.
 fn agent_look() -> Result<AgentLook, String> {
     let setup = torq::agent::setup::setup().map_err(|e| app::said(&e))?;
-    let status = (setup.agent.is_some() && setup.service).then(|| Client::mine().and_then(|c| c.status()).map_err(|e| e.to_string()));
+    let running = setup.agent.is_some() && setup.service && torq::agent::setup::service_running(&setup.me);
+    let status = running.then(|| Client::mine().and_then(|c| c.status()).map_err(|e| e.to_string()));
     Ok(AgentLook { setup, status })
 }
 
