@@ -7,7 +7,9 @@ use cosmic::iced::futures::channel::mpsc::Sender;
 use cosmic::iced::futures::SinkExt as _;
 use cosmic::prelude::*;
 use cosmic::widget::icon;
-use torq::agent::client::Client;
+use torq::agent::client::{Client, Status, Unreachable};
+use torq::agent::conversation::Fate;
+use torq::agent::setup::{self, Brain};
 use torq::agent::conversation::Mood;
 use torq::agent::Event;
 
@@ -73,4 +75,36 @@ pub async fn off<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> R
         let _ = tx.send(f());
     });
     rx.await.map_err(|_| "the call stopped before it answered".to_string())
+}
+
+/// The agent as the applet and the window see it.
+#[derive(Debug, Clone)]
+pub struct Look {
+    /// The person's own agent (looked for again while there was none: a person added later is seen).
+    pub client: Result<Client, Unreachable>,
+    /// Its status, asked only of a service that runs (`None`: not running) — looking never starts it.
+    pub reach: Result<Option<Status>, Unreachable>,
+    pub brain: Option<Brain>,
+    /// What became of the proposals the conversation named.
+    pub fates: Vec<(u64, Fate)>,
+}
+
+/// Look at the agent, off the drawing thread: `client` as it was, `seqs` the proposals to look up.
+pub async fn look(client: Result<Client, Unreachable>, seqs: Vec<u64>) -> Look {
+    let failed = |e: String| Look { client: Err(Unreachable::Broken(e.clone())), reach: Err(Unreachable::Broken(e)), brain: None, fates: vec![] };
+    off(move || {
+        let client = client.or_else(|_| Client::mine());
+        let reach = match &client {
+            Err(e) => Err(e.clone()),
+            Ok(c) => match setup::setup() {
+                Ok(s) if setup::service_running(&s.me) => c.status().map(Some),
+                Ok(_) => Ok(None),
+                Err(e) => Err(Unreachable::Broken(torq::app::said(&e))),
+            },
+        };
+        let fates = torq::app::agent_fates(&seqs).unwrap_or_default();
+        Look { client, reach, brain: setup::brain().ok().flatten(), fates }
+    })
+    .await
+    .unwrap_or_else(failed)
 }

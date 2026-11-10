@@ -20,7 +20,7 @@ use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;
 use torq::agent::client::{Client, Status, Unreachable};
-use torq::agent::conversation::{self, Conversation, Ended, Turn};
+use torq::agent::conversation::{self, Conversation, Ended, Fate, Turn};
 use torq::agent::setup::{self, Brain};
 use torq::agent::Event;
 
@@ -65,7 +65,10 @@ fn check() -> std::process::ExitCode {
     }
 }
 
-/// How often the agent's state is asked, while the window is open.
+/// How many of the latest turns are shown in full.
+const FULL: usize = 8;
+
+/// How often the agent's state is looked at, while the window is open (its service asked only while it runs).
 const EVERY: Duration = Duration::from_secs(5);
 
 struct Window {
@@ -73,6 +76,9 @@ struct Window {
     client: Result<Client, Unreachable>,
     reach: Result<Option<Status>, Unreachable>,
     brain: Option<Brain>,
+    fates: Vec<(u64, Fate)>,
+    /// How many turns the agent remembered at the last look: fewer now is a Forget from elsewhere.
+    remembered: Option<usize>,
     looking: bool,
     talk: Conversation,
     question: String,
@@ -84,7 +90,7 @@ struct Window {
 #[derive(Debug, Clone)]
 enum Message {
     Look,
-    Looked(Result<Option<Status>, Unreachable>, Option<Brain>),
+    Looked(agentkit::Look),
     Question(String),
     Ask,
     Heard(Event),
@@ -103,31 +109,34 @@ impl Window {
         self.talk.working() || matches!(self.reach, Ok(Some(Status { running: true, .. })))
     }
 
-    fn turn<'a>(&self, t: &'a Turn) -> Element<'a, Message> {
+    /// A turn: its question; then, said first, whether its session read untrusted text; its answer (only the
+    /// question and its end for an older turn, `full` false, so a long sitting stays light to lay out); each
+    /// proposal with its fate, and Review where it waits.
+    fn turn<'a>(&self, t: &'a Turn, full: bool) -> Element<'a, Message> {
         let spacing = cosmic::theme::spacing();
         let theme = cosmic::theme::active();
         let warn: cosmic::iced::Color = theme.cosmic().warning_color().into();
         let mut col = widget::column::with_capacity(6).spacing(spacing.space_xxs);
         col = col.push(widget::text::heading(t.question.clone()).width(Length::Fill));
-        if !t.answer.is_empty() {
-            col = col.push(widget::text::body(t.answer.clone()).width(Length::Fill));
-        }
-        for e in &t.errors {
-            col = col.push(widget::text::body(e.clone()).width(Length::Fill));
-        }
         if let Some(taint) = t.taint() {
             col = col.push(widget::text::body(taint).class(cosmic::theme::Text::Color(warn)).width(Length::Fill));
         }
-        for &seq in &t.proposed {
-            col = col.push(
-                widget::row::with_capacity(2)
-                    .align_y(Alignment::Center)
-                    .spacing(spacing.space_xs)
-                    .push(widget::text::body(format!("Proposed #{seq}: it waits for a person to apply it")).width(Length::Fill))
-                    .push(widget::button::standard("Review").on_press(Message::Review)),
-            );
+        if full {
+            if !t.answer.is_empty() {
+                col = col.push(widget::text::body(t.answer.clone()).width(Length::Fill));
+            }
+            for e in &t.errors {
+                col = col.push(widget::text::body(e.clone()).width(Length::Fill));
+            }
         }
-        col = col.push(widget::text::caption(t.state()));
+        for row in t.proposal_rows(&self.fates) {
+            let mut line = widget::row::with_capacity(2).align_y(Alignment::Center).spacing(spacing.space_xs).push(widget::text::body(row.text).width(Length::Fill));
+            if row.review {
+                line = line.push(widget::button::standard("Review").on_press(Message::Review));
+            }
+            col = col.push(line);
+        }
+        col = col.push(widget::text::caption(if full { t.state() } else { format!("{} · its answer folded away (an earlier turn)", t.state()) }));
         widget::container(col).padding(spacing.space_s).class(cosmic::theme::Container::Card).width(Length::Fill).into()
     }
 }
@@ -147,7 +156,7 @@ impl cosmic::Application for Window {
     }
 
     fn init(core: cosmic::Core, _flags: Flags) -> (Self, Task<cosmic::Action<Message>>) {
-        let mut app = Window { core, client: Client::mine(), reach: Ok(None), brain: None, looking: false, talk: Conversation::default(), question: String::new(), forgetting: false, note: None };
+        let mut app = Window { core, client: Client::mine(), reach: Ok(None), brain: None, fates: vec![], remembered: None, looking: false, talk: Conversation::default(), question: String::new(), forgetting: false, note: None };
         let title = match app.core.main_window_id() {
             Some(id) => app.set_window_title("TorqOS Agent".into(), id),
             None => Task::none(),
@@ -159,6 +168,8 @@ impl cosmic::Application for Window {
     /// Started again (the applet's Open, the menu): this window raised. With the compositor's token, COSMIC's
     /// toolkit activates it itself; without one, it is asked for focus.
     fn dbus_activation(&mut self, _msg: cosmic::dbus_activation::Message) -> Task<cosmic::Action<Message>> {
+        // Said in its journal: started again, the window handed over here.
+        eprintln!("torq-agent-ui: started again: this window raised");
         match self.core.main_window_id() {
             Some(id) => cosmic::iced::window::gain_focus(id),
             None => Task::none(),
@@ -191,17 +202,23 @@ impl cosmic::Application for Window {
                     return Task::none();
                 }
                 self.looking = true;
-                let client = self.client.clone();
-                return cosmic::task::future(async move {
-                    agentkit::off(move || Message::Looked(client.and_then(|c| c.status()).map(Some), setup::brain().ok().flatten()))
-                        .await
-                        .unwrap_or_else(|e| Message::Looked(Err(Unreachable::Broken(e)), None))
-                });
+                let (client, seqs) = (self.client.clone(), self.talk.proposals().into_iter().map(|(s, _)| s).collect());
+                return cosmic::task::future(async move { Message::Looked(agentkit::look(client, seqs).await) });
             }
-            Message::Looked(reach, brain) => {
+            Message::Looked(l) => {
                 self.looking = false;
-                self.reach = reach;
-                self.brain = brain;
+                if let Ok(Some(st)) = &l.reach {
+                    // Forgotten elsewhere (the Agent page, torq ask --forget): not shown as current any more.
+                    if conversation::forgotten(self.remembered, st.turns) && !self.talk.working() {
+                        self.talk.clear();
+                        self.note = Some(("Your agent forgot the conversation (Forget, from elsewhere): what was shown here is gone from its memory.".into(), false));
+                    }
+                    self.remembered = Some(st.turns);
+                }
+                self.client = l.client;
+                self.reach = l.reach;
+                self.brain = l.brain;
+                self.fates = l.fates;
             }
             Message::Question(s) => self.question = s,
             Message::Ask => {
@@ -247,6 +264,7 @@ impl cosmic::Application for Window {
                 self.note = Some(match r {
                     Ok(()) => {
                         self.talk.clear();
+                        self.remembered = Some(0);
                         ("Your agent has forgotten the conversation.".into(), false)
                     }
                     Err(e) => (e, true),
@@ -295,8 +313,10 @@ impl cosmic::Application for Window {
         if self.talk.last().is_none() {
             talk = talk.push(widget::text::body("Ask your agent anything about this machine. It reads, explains, and proposes changes you approve; it never applies one itself."));
         }
-        for t in self.talk.turns() {
-            talk = talk.push(self.turn(t));
+        // The last turns in full; earlier ones folded (50 answers of 64 000 characters would be slow to lay out).
+        let count = self.talk.turns().count();
+        for (i, t) in self.talk.turns().enumerate() {
+            talk = talk.push(self.turn(t, i + FULL >= count));
         }
         page = page.push(widget::scrollable(talk).height(Length::Fill));
         let proposals = self.talk.proposals();
@@ -306,7 +326,10 @@ impl cosmic::Application for Window {
             for (seq, tainted) in proposals.iter().take(12) {
                 list = list.push(widget::text::body(if *tainted { format!("#{seq} (tainted)") } else { format!("#{seq}") }));
             }
-            list = list.push(widget::button::standard("Review").on_press(Message::Review));
+            // Review where one of them still waits for the person.
+            if self.fates.iter().any(|(s, f)| *f == Fate::Waiting && proposals.iter().any(|(p, _)| p == s)) {
+                list = list.push(widget::button::standard("Review").on_press(Message::Review));
+            }
             page = page.push(list);
         }
         let working = self.working();

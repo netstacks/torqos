@@ -21,8 +21,8 @@ use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget;
 use std::time::Duration;
 use torq::agent::client::{Client, Status, Unreachable};
-use torq::agent::conversation::{self, Conversation};
-use torq::agent::setup::{self, Brain};
+use torq::agent::conversation::{self, Conversation, Fate};
+use torq::agent::setup::Brain;
 use torq::agent::Event;
 
 fn main() -> cosmic::iced::Result {
@@ -35,7 +35,7 @@ const EVERY: Duration = Duration::from_secs(10);
 const OPEN: Duration = Duration::from_secs(2);
 /// The most of an answer the popup shows; the window has it all.
 const SHOWN: usize = 4000;
-/// The agent's window.
+/// The agent's window, by absolute path (torq::app::system_program).
 const WINDOW: &str = "torq-agent-ui";
 
 struct Applet {
@@ -46,6 +46,8 @@ struct Applet {
     /// What its service said when last asked (`None`: not running, not asked).
     reach: Result<Option<Status>, Unreachable>,
     brain: Option<Brain>,
+    /// What became of the proposals its answers made, by the ledger.
+    fates: Vec<(u64, Fate)>,
     /// A look under way: no second while it is.
     looking: bool,
     /// The questions asked here.
@@ -60,7 +62,7 @@ struct Applet {
 #[derive(Debug, Clone)]
 enum Message {
     Look,
-    Looked(Result<Option<Status>, Unreachable>, Option<Brain>),
+    Looked(agentkit::Look),
     Question(String),
     Ask,
     Heard(Event),
@@ -73,23 +75,6 @@ enum Message {
     Token(TokenUpdate),
     PopupClosed(Id),
     Surface(cosmic::surface::Action<Message>),
-}
-
-/// The agent's state and model: off the panel's thread. `closely`: ask the service even if it is not running.
-async fn look(client: Result<Client, Unreachable>, closely: bool) -> Message {
-    agentkit::off(move || {
-        let brain = setup::brain().ok().flatten();
-        let reach = match client {
-            Err(e) => Err(e),
-            Ok(c) => match setup::setup() {
-                Ok(s) if !closely && !setup::service_running(&s.me) => Ok(None),
-                _ => c.status().map(Some),
-            },
-        };
-        Message::Looked(reach, brain)
-    })
-    .await
-    .unwrap_or_else(|e| Message::Looked(Err(Unreachable::Broken(e)), None))
 }
 
 impl Applet {
@@ -119,26 +104,27 @@ impl Applet {
                 .on_submit_maybe((!self.working()).then_some(|_| Message::Ask)),
         );
         if let Some(t) = self.talk.last() {
+            col = col.push(widget::text::caption(t.question.clone()).width(Length::Fill));
+            // Said before the answer, never scrolled out of sight: what it proposes is marked so.
+            if let Some(taint) = t.taint() {
+                let theme = cosmic::theme::active();
+                col = col.push(widget::text::caption(taint).class(cosmic::theme::Text::Color(theme.cosmic().warning_color().into())).width(Length::Fill));
+            }
             let mut answer = widget::column::with_capacity(4).spacing(spacing.space_xxs);
-            answer = answer.push(widget::text::caption(t.question.clone()).width(Length::Fill));
             if !t.answer.is_empty() {
                 answer = answer.push(widget::text::body(conversation::shown(&t.answer, SHOWN)).width(Length::Fill));
             }
             for e in &t.errors {
                 answer = answer.push(widget::text::caption(e.clone()).width(Length::Fill));
             }
-            if let Some(taint) = t.taint() {
-                answer = answer.push(widget::text::caption(taint).width(Length::Fill));
-            }
             answer = answer.push(widget::text::caption(t.state()));
             col = col.push(widget::container(widget::scrollable(answer)).max_height(260.0));
-            for &seq in &t.proposed {
-                col = col.push(
-                    widget::row::with_capacity(2)
-                        .align_y(Alignment::Center)
-                        .push(widget::text::body(format!("Proposed #{seq}: a person applies it")).width(Length::Fill))
-                        .push(widget::button::standard("Review").on_press(Message::Review)),
-                );
+            for row in t.proposal_rows(&self.fates) {
+                let mut line = widget::row::with_capacity(2).align_y(Alignment::Center).push(widget::text::body(row.text).width(Length::Fill));
+                if row.review {
+                    line = line.push(widget::button::standard("Review").on_press(Message::Review));
+                }
+                col = col.push(line);
             }
         }
         if let Some(n) = &self.note {
@@ -193,8 +179,8 @@ impl cosmic::Application for Applet {
 
     fn init(core: cosmic::Core, _flags: ()) -> (Self, Task<cosmic::Action<Message>>) {
         let client = Client::mine();
-        let app = Applet { core, popup: None, client: client.clone(), reach: Ok(None), brain: None, looking: true, talk: Conversation::default(), question: String::new(), note: None, tokens: None };
-        (app, cosmic::task::future(look(client, false)))
+        let app = Applet { core, popup: None, client: client.clone(), reach: Ok(None), brain: None, fates: vec![], looking: true, talk: Conversation::default(), question: String::new(), note: None, tokens: None };
+        (app, cosmic::task::future(async move { Message::Looked(agentkit::look(client, vec![]).await) }))
     }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
@@ -214,14 +200,16 @@ impl cosmic::Application for Applet {
                     return Task::none();
                 }
                 self.looking = true;
-                // The service asked (and so started) only while the popup is open or a task runs.
-                let closely = self.popup.is_some() || self.working();
-                return cosmic::task::future(look(self.client.clone(), closely));
+                // The service asked only while it runs: looking never starts it.
+                let (client, seqs) = (self.client.clone(), self.talk.proposals().into_iter().map(|(s, _)| s).collect());
+                return cosmic::task::future(async move { Message::Looked(agentkit::look(client, seqs).await) });
             }
-            Message::Looked(reach, brain) => {
+            Message::Looked(l) => {
                 self.looking = false;
-                self.reach = reach;
-                self.brain = brain;
+                self.client = l.client;
+                self.reach = l.reach;
+                self.brain = l.brain;
+                self.fates = l.fates;
             }
             Message::Question(s) => self.question = s,
             Message::Ask => {
@@ -258,9 +246,9 @@ impl cosmic::Application for Applet {
                 };
                 return self.update(Message::Look);
             }
-            Message::Open => self.launch(WINDOW),
-            Message::Review => self.launch("torq-settings proposals"),
-            Message::Settings => self.launch("torq-settings agent"),
+            Message::Open => self.launch(&torq::app::system_program(WINDOW)),
+            Message::Review => self.launch(&format!("{} proposals", torq::app::system_program("torq-settings"))),
+            Message::Settings => self.launch(&format!("{} agent", torq::app::system_program("torq-settings"))),
             Message::Token(TokenUpdate::Init(tx)) => self.tokens = Some(tx),
             Message::Token(TokenUpdate::Finished) => self.tokens = None,
             Message::Token(TokenUpdate::ActivationToken { token, exec }) => spawn(&exec, token),

@@ -99,6 +99,9 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed(f"ps -o user= -p $(systemctl show -P MainPID {unit})").strip() == "torq-agent-alice"
         assert in_session("torq ask hello").strip() == "Hello alice."
         assert in_session("torq-agent-ui --check").splitlines()[0] == "Idle · remembers 1 turn"
+        # The Agent page's Forget is a torqcli line: through her own socket, and the count says so.
+        assert "forgotten the conversation" in in_session("torqcli request system agent forget")
+        assert in_session("torq-agent-ui --check").splitlines()[0] == "Idle · remembers nothing yet"
 
     with subtest("someone with no agent is told so, and reaches no one's"):
         # (Not a second person: COSMIC's greeter would no longer open on alice.)
@@ -120,6 +123,10 @@ pkgs.testers.runNixOSTest {
         # Started again (as the applet's Open does): it hands over to the one open and ends.
         window("agent-window-again")
         machine.wait_until_succeeds("test \"$(systemctl --user --machine=alice@ show -P ActiveState agent-window-again.service)\" != active", timeout=30)
+        # It handed over (the first was activated), and ended well: not merely ended.
+        machine.wait_until_succeeds("journalctl --no-pager _SYSTEMD_USER_UNIT=agent-window.service | grep -q 'started again: this window raised'", timeout=30)
+        # (A transient unit that ended well is gone, inactive; one that failed stays, failed.)
+        assert state("agent-window-again") == "inactive", log("agent-window-again")
         assert state("agent-window") == "active", log("agent-window")
         print(log("agent-window-again"))
   '';
