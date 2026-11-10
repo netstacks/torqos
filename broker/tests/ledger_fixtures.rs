@@ -39,7 +39,7 @@ fn every_fixture_line_is_written_back_as_it_was_and_verifies() {
               "confirmed", "rolled_back", "apply_scheduled", "apply_cancelled", "apply_refused", "refused",
               "backup_key", "backup_restored", "snapshot_taken", "snapshot_deleted", "snapshot_delete_failed",
               "password", "password_failed", "trust_granted", "trust_revoked", "trust_expired", "break_glass",
-              "ledger_mended", "commit", "harvest_moon"] {
+              "ledger_mended", "commit", "declined", "harvest_moon"] {
         assert!(kinds.contains(k), "no fixture has a {k} entry");
     }
 }
