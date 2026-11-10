@@ -2221,17 +2221,29 @@ vouches for, that only proposes, every change ledgered and undone in one command
   `session-taint`; the broker judges the proposal as that account's (`agent::refusal`: packages only in
   `users/P/packages.json`, settings by the machine's `mayPropose.settings`), records `data.agent` and
   `data.agent_for`, and judges it again at apply by the map as it is then (a proposal of the old account is no
-  longer applicable). Session records carry their agent; another agent cannot report into one or cite it.
-  Trust from P applies a proposal only if the map, at the apply, says its agent serves P. Waiting proposals,
-  ledgered refusals and sessions (started an hour, kept) are counted per agent. A backup restore into any
-  account the map names, or any named `torq-agent…`, is refused. `torq agent run` (modules/agent-run.sh) runs
-  `torq-agent-$SUDO_USER`: SUDO_USER checked against its pattern and SUDO_UID, the account named P's in
-  broker.json, a system uid, home `/var/lib/torq-agent-P`; torqcli refuses first, plainly, a person with no
-  agent account, and its "am I the agent" is the name's prefix (convenience; the broker decides). Tests:
-  broker units (caller identification, another person's folder, trust and sessions across agents) and
-  `tests/agents-per-person.nix` (alice, bob, carol's look-alike account, dave with none). Not in this step:
-  the resident service, a non-administrator's `torq agent run` (the sudo rule stays `wheel`'s), a model key per
-  person (KNOWN-GAPS 6zzk).
+  longer applicable). Session records carry their agent (`Record.agent`, empty for a record from before,
+  which the next session started removes); another agent cannot report into one or cite it. Trust from P
+  applies a proposal only if the map, at the apply, says its agent serves P, and the ledger says the agent
+  account itself sent it over the socket (`via: socket`, its caller that account — not root's `torq-broker
+  propose --agent …`). Waiting proposals, ledgered refusals and sessions (started an hour, kept) are counted per
+  agent. A backup restore into any account the map names, any folder named `torq-agent…`, or any folder no
+  account owns is refused. `commit at`'s approver check (at.rs) reads the map too. `torq agent run`
+  (modules/agent-run.sh) runs the agent of the person sudo says ran it: `SUDO_UID` → that uid's account P →
+  `torq-agent-P`, named P's in broker.json, a system uid, home `/var/lib/torq-agent-P`. What guarantees
+  `SUDO_UID` is sudo, not the kernel: sudo takes a caller's `SUDO_UID=…` as given where their rule has SETENV
+  (tried in a VM), so the module asserts no rule for the launcher has it, adds `env_reset` for it, and the
+  test checks sudo refuses bob's `sudo SUDO_UID=<alice's> …`; `/proc/self/loginuid` was tried and is unset
+  after su or runuser from a root shell, and the first person's after `su - <another>` (KNOWN-GAPS 6zzk).
+  torqcli refuses first, plainly, a person with no agent account; its "am I an agent" (`is_agent`, the
+  name's prefix: convenience, the broker decides) also decides `torq break-glass`'s refusal and whether
+  `torq doctor` runs the doctor directly. Also: `torq.agent.agents`, an internal read-only option, is the map
+  both modules read; `torq.agent.doctor.journal` puts every agent account in `systemd-journal`; one
+  `apiKeyFile` serves every agent; the module asserts no normal user's name begins `torq-agent`. Tests:
+  broker units (caller identification, another person's folder, trust and sessions across agents, trust only
+  from the socket, the map at apply, per-agent limits), `checks.agent-assertions` (each Nix assertion fails
+  evaluation with its message) and `tests/agents-per-person.nix` (alice, bob, carol's look-alike account,
+  dave with none). Not in this step: the resident service, a non-administrator's `torq agent run` (the sudo
+  rule stays `wheel`'s), a model key per person (KNOWN-GAPS 6zzk).
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

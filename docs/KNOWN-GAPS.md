@@ -1087,7 +1087,8 @@ Its §5 lists claims without a test.
      removes `torq-agent` from /etc/passwd (users.mutableUsers is off) but not `/var/lib/torq-agent`: it stays,
      owned by a uid that no account is named for now, with whatever a tool kept there (Claude Code's
      `~/.claude` and its credentials, the doctor's session notes). Nothing runs as that uid, and the broker
-     refuses a restore into it; but were that uid ever given to another account, the folder would be its. What to do: look at what
+     refuses a restore into it (by its name, and as a folder no account owns); but were that uid ever given to
+     another account, the folder would be its. What to do: look at what
      is in it (`sudo ls -la /var/lib/torq-agent`), move anything still wanted (a tool's sign-in is simplest
      made again as the new account) into the person's new agent's home — `sudo cp -a … /var/lib/torq-agent-<you>/`
      then `sudo chown -R torq-agent-<you>: /var/lib/torq-agent-<you>` — and then remove the old one,
@@ -1102,3 +1103,24 @@ Its §5 lists claims without a test.
      taking a non-administrator's input).
    - **One model key for every agent.** `torq.agent.doctor.apiKeyFile` is one path, which each person's
      agent must be able to read; a key per person is ADR-051's Agent page.
+   - **A configuration that sets `torq agent mayPropose users` no longer evaluates** after the update: the
+     option is removed (not renamed, its meaning changed), and NixOS says so ("no longer has any effect;
+     please remove it") at `commit check` and at the update's build, so the update is not applied. Take the
+     setting out first, on the TorqOS the machine runs now, then update:
+     `torqcli -c "configure; delete torq agent mayPropose users; commit comment \"before ADR-051\""`, then
+     `request system update` as usual. Whoever was listed there and should have an agent of their own goes
+     in `torq agent people` (the owner is there by default).
+   - **An administrator can still act as an agent.** Trust applies only a proposal the agent account sent
+     itself, over the socket (the ledger's `via` and its caller, the kernel's word) — not root's
+     `torq-broker propose --actor agent --agent …`. But outside strict mode an administrator is root, and
+     `sudo -u torq-agent-bob torqcli …` arrives at the socket as bob's agent: its proposals, under bob's trust,
+     apply. That is root acting, not the agent, and root is not what TorqOS prevents (ADR-035); strict mode
+     (`torq security strict enable true`) closes it: an administrator's sudo is then break-glass and the launcher alone, and the
+     launcher runs only the caller's own agent.
+   - **Whose agent `torq agent run` runs is sudo's word** (its `SUDO_UID`), not the kernel's: sudo takes a
+     caller's `SUDO_UID=…` as given wherever their rule has SETENV (tried in a VM, 2026-11-10). The module
+     asserts no rule for the launcher has it, and tests/agents-per-person.nix checks sudo refuses bob's
+     `sudo SUDO_UID=<alice's> torq-agent-run`. NixOS's own `%wheel … SETENV: ALL` rule covers the launcher
+     too, but asks the administrator's password — who is then root (above). `/proc/self/loginuid` is no
+     better: unset for a person reached by su or runuser from a root shell, and the first person's after
+     `su - <another>`.

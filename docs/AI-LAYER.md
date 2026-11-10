@@ -18,9 +18,11 @@ the map names it and its uid is no person's.
   list, the same for every agent). A refusal is ledgered with the agent account that tried.
 - **Sessions and trust:** a session is its agent account's: no other agent reports into it or cites
   it. A person's trust (`request system agent trust`) applies only their own agent's proposals,
-  judged by the broker's map at the time of the apply. Limits (proposals waiting, refusals ledgered,
+  judged by the broker's map at the time of the apply, and only one the agent sent itself over the socket.
+  Limits (proposals waiting, refusals ledgered,
   sessions started and kept) are counted per agent, so one person's agent cannot crowd out another's.
-- **`torq agent run`** runs the caller's own agent, `torq-agent-$SUDO_USER`, never one the caller
+- **`torq agent run`** runs the caller's own agent (the account of sudo's `SUDO_UID`, which the launcher's rule never
+  lets a caller set), never one the caller
   names; a person with none is told so. A restore from a backup into any agent's folder is
   refused.
 
