@@ -339,6 +339,8 @@ pub struct Session<'a> {
     pub schema: Schema,
     /// Every NixOS setting of the system (nixos.rs): the tree's paths.
     pub tree: crate::nixos::Tree,
+    /// The files the schema and the tree were read from, once `follow_schemas` has looked: a switch installs others.
+    schemas_read: Option<(PathBuf, PathBuf)>,
     pub repo: Repo,
     /// Where the candidate is kept between sessions; None: a private one (`torqcli -c`), discarded
     /// at the end.
@@ -452,7 +454,7 @@ fn word(out: &mut Vec<String>, w: String) -> Result<()> {
 
 impl<'a> Session<'a> {
     pub fn new(schema: Schema, tree: crate::nixos::Tree, repo: Repo, saved: Option<PathBuf>, machine: &'a dyn Machine, me: &str) -> Self {
-        Session { schema, tree, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true, exclusive: None, print: None, cache: crate::evalcache::Cache::none(), asks: false, from_configuration: false }
+        Session { schema, tree, schemas_read: None, repo, saved, mode: Mode::Operational, edit: Vec::new(), candidate: None, machine, me: me.into(), screen: || None, fit: None, done: false, page: true, exclusive: None, print: None, cache: crate::evalcache::Cache::none(), asks: false, from_configuration: false }
     }
 
     /// The whole tree over both kinds of files (whole.rs).
@@ -520,6 +522,32 @@ impl<'a> Session<'a> {
     /// is as this session read it): checked before what a write follows — a commit — is done.
     fn may_write(&mut self) -> Result<()> {
         self.write_shared(|_, _| Ok(())).map(drop)
+    }
+
+    /// The schema and the tree again, if the system running now has other files for them than those this
+    /// session read (a switch installed them): a session that stays open learns the settings of the system
+    /// it is on. The first call notes what was read. Whether they changed.
+    pub fn follow_schemas(&mut self, schema: &Path, nixos: &Path) -> bool {
+        let (Ok(a), Ok(b)) = (std::fs::canonicalize(schema), std::fs::canonicalize(nixos)) else { return false };
+        let now = (a, b);
+        match &self.schemas_read {
+            None => {
+                self.schemas_read = Some(now);
+                return false;
+            }
+            Some(was) if *was == now => return false,
+            Some(_) => {}
+        }
+        let read = |p: &Path| std::fs::read_to_string(p).map_err(anyhow::Error::from);
+        let (Ok(s), Ok(t)) = (read(&now.0).and_then(|j| Schema::parse(&j)), read(&now.1).and_then(|j| crate::nixos::Tree::parse(&j))) else {
+            return false;
+        };
+        self.schema = s;
+        self.tree = t;
+        self.schemas_read = Some(now);
+        // The candidate is read against the schema: read again, against this one.
+        self.reread();
+        true
     }
 
     /// Read the shared candidate again at the next command, as it is on disk now: for a session that lives
@@ -4422,6 +4450,29 @@ mod tests {
     }
 
     /// ADR-041: the agent's commit proposes and stops — no question (no one to ask), never applied;
+    /// A switch installs a new schema: a session left open takes it before its next line.
+    #[test]
+    fn a_session_left_open_learns_the_new_systems_settings() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        let files = tempfile::tempdir().unwrap();
+        let mut old: serde_json::Value = serde_json::from_str(include_str!("schema-fixture.json")).unwrap();
+        old["nodes"].as_object_mut().unwrap().remove("services");
+        let at = |n: &str| files.path().join(n);
+        std::fs::write(at("old.json"), old.to_string()).unwrap();
+        std::fs::write(at("new.json"), include_str!("schema-fixture.json")).unwrap();
+        std::fs::write(at("nixos.json"), include_str!("nixos-fixture.json")).unwrap();
+        std::os::unix::fs::symlink(at("old.json"), at("schema.json")).unwrap();
+        s.schema = Schema::parse(&old.to_string()).unwrap();
+        assert!(!s.follow_schemas(&at("schema.json"), &at("nixos.json")), "the first look notes what was read");
+        assert!(!s.follow_schemas(&at("schema.json"), &at("nixos.json")), "nothing changed");
+        assert!(!s.schema.nodes.contains_key("services"));
+        std::fs::remove_file(at("schema.json")).unwrap();
+        std::os::unix::fs::symlink(at("new.json"), at("schema.json")).unwrap();
+        assert!(s.follow_schemas(&at("schema.json"), &at("nixos.json")));
+        assert!(s.schema.nodes.contains_key("services"), "the new system's settings");
+    }
+
     /// a commit confirmed is not the agent's.
     #[test]
     fn the_agents_commit_proposes_and_stops() {

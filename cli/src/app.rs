@@ -453,6 +453,7 @@ fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
                 let r = match of(&mut made, at) {
                     Some(Ok(s)) => {
                         s.reread();
+                        s.follow_schemas(std::path::Path::new(crate::shell::SCHEMA), std::path::Path::new(crate::shell::NIXOS_SCHEMA));
                         s.exec(&line).map(cleaned).map_err(|e| said(&e))
                     }
                     Some(Err(e)) => Err(e.clone()),
@@ -466,6 +467,7 @@ fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
                 let t = match of(&mut made, At::Typed) {
                     Some(Ok(s)) => {
                         s.reread();
+                        s.follow_schemas(std::path::Path::new(crate::shell::SCHEMA), std::path::Path::new(crate::shell::NIXOS_SCHEMA));
                         let output = match refused_here(s.mode, &line) {
                             Some(why) => Err(why.to_string()),
                             None => s.exec(&line).map(cleaned).map_err(|e| said(&e)),
@@ -484,6 +486,7 @@ fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
                 let c = match of(&mut made, at) {
                     Some(Ok(s)) => {
                         s.reread();
+                        s.follow_schemas(std::path::Path::new(crate::shell::SCHEMA), std::path::Path::new(crate::shell::NIXOS_SCHEMA));
                         choices_of(s, &before)
                     }
                     _ => vec![],
@@ -494,6 +497,7 @@ fn serve(sessions: &'static [At], jobs: std::sync::mpsc::Receiver<Job>) {
                 let u = match of(&mut made, At::Watch) {
                     Some(Ok(s)) => {
                         s.reread();
+                        s.follow_schemas(std::path::Path::new(crate::shell::SCHEMA), std::path::Path::new(crate::shell::NIXOS_SCHEMA));
                         s.uncommitted().unwrap_or(false)
                     }
                     _ => false,
@@ -904,6 +908,7 @@ fn open_session<'a>(cli: &Cli, machine: &'a dyn crate::session::Machine, saved: 
     let tree = crate::nixos::Tree::parse(&std::fs::read_to_string(crate::shell::NIXOS_SCHEMA).with_context(|| format!("reading {}", crate::shell::NIXOS_SCHEMA))?)?;
     let who = crate::me()?;
     let mut s = crate::session::Session::new(schema, tree, crate::candidate::Repo::new(&cli.repo), saved, machine, &who);
+    s.follow_schemas(std::path::Path::new(crate::shell::SCHEMA), std::path::Path::new(crate::shell::NIXOS_SCHEMA));
     s.cache = crate::evalcache::Cache::personal();
     if at == At::Draft {
         s.exec("configure")?;

@@ -1419,6 +1419,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
     // Only the interactive shell keeps a candidate between runs; a script's is its own.
     let saved = if matches!(run, Invocation::Interactive | Invocation::Draft(_)) { Some(Candidate::default_path()?) } else { None };
     let mut s = Session::new(schema, tree, Repo::new(&cli.repo), saved, &machine, &who);
+    s.follow_schemas(Path::new(SCHEMA), Path::new(NIXOS_SCHEMA));
     s.screen = || crate::ui::columns(false);
     s.cache = crate::evalcache::Cache::personal();
     // Offered to go on (install what an update loaded) only where a person is at a terminal: never a
@@ -1630,6 +1631,7 @@ fn interactive(s: &mut Session, history: crate::complete::Later) -> Result<i32> 
     }
     let stdin = std::io::stdin();
     loop {
+        s.follow_schemas(Path::new(SCHEMA), Path::new(NIXOS_SCHEMA));
         let (above, p) = prompt(s, &user, &host);
         if let Some(a) = above {
             say(&format!("{a}\n"));
@@ -1748,7 +1750,7 @@ mod editor {
     #[derive(Clone)]
     struct Help {
         /// What `?` and Tab know: the schema and the NixOS tree (complete::Know borrows them).
-        know: Arc<(crate::tree::Schema, crate::nixos::Tree)>,
+        know: Arc<Mutex<Arc<(crate::tree::Schema, crate::nixos::Tree)>>>,
         /// Where the session is: mode, edit path (updated before each line is read).
         at: Arc<Mutex<complete::At>>,
     }
@@ -1768,7 +1770,8 @@ mod editor {
         fn choices(&self, before: &str) -> Option<(Vec<complete::Choice>, String)> {
             let (w, partial) = at_cursor(before)?;
             let at = self.at.lock().unwrap().clone();
-            let know = complete::Know { schema: &self.know.0, tree: &self.know.1 };
+            let knows = self.know.lock().unwrap().clone();
+            let know = complete::Know { schema: &knows.0, tree: &knows.1 };
             Some((complete::choices_at(&know, &at, &w, &partial), partial))
         }
     }
@@ -1803,7 +1806,8 @@ mod editor {
         fn handle(&self, _: &Event, _: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
             let (w, partial) = at_cursor(&ctx.line()[..ctx.pos()])?; // in quotes: a plain '?'
             let at = self.0.at.lock().unwrap().clone();
-            let know = complete::Know { schema: &self.0.know.0, tree: &self.0.know.1 };
+            let knows = self.0.know.lock().unwrap().clone();
+            let know = complete::Know { schema: &knows.0, tree: &knows.1 };
             let answer = complete::answer(&know, &at, &w, &partial, crate::ui::Ui::for_terminal(false).width());
             let text: String = answer.lines().map(|l| format!("{}\n", crate::history::clean(l))).collect();
             let text = crate::paint::paint(&text, &crate::ui::Ui::for_terminal(false));
@@ -1830,7 +1834,7 @@ mod editor {
         // stops the command's child — nix, the broker — and torqcli says so and stays, its terminal
         // put back by the Echo guard as the command returns.)
         let at = |s: &mut Session| complete::At { mode: s.mode, edit: s.edit_path().to_vec(), data: s.help_data(), configurations: history.clone(), files: s.nix_files(), interfaces: super::interfaces() };
-        let help = Help { know: Arc::new((s.schema.clone(), s.tree.clone())), at: Arc::new(Mutex::new(at(s))) };
+        let help = Help { know: Arc::new(Mutex::new(Arc::new((s.schema.clone(), s.tree.clone())))), at: Arc::new(Mutex::new(at(s))) };
         // Bracketed paste off: a paste arrives as typed, each line running at its newline as on a network
         // device (not held as one block until another Enter); the lines after the first were waiting
         // already, so they are one batch (below), and none is lost (rustyline's buffer-redux).
@@ -1847,6 +1851,10 @@ mod editor {
         // a question (or `load … terminal`) ended the batch being read.
         let (mut failed, mut after_question) = (0usize, false);
         loop {
+            // Updated since the last line: `?` and Tab know the new system's settings.
+            if s.follow_schemas(std::path::Path::new(super::SCHEMA), std::path::Path::new(super::NIXOS_SCHEMA)) {
+                *help.know.lock().unwrap() = Arc::new((s.schema.clone(), s.tree.clone()));
+            }
             *help.at.lock().unwrap() = at(s);
             let (above, p) = prompt(s, user, host);
             if let Some(a) = above {
