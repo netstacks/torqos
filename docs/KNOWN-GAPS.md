@@ -323,6 +323,15 @@ Its §5 lists claims without a test.
    still carries niri until M4 rewrites it.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
+9. **An applet that exits stays gone until the panel starts again (2026-11-10).** COSMIC 1.11's panel starts its
+   applets when it starts itself and does not start again one that exits: a crash of `torq-applet` (seen aborting when
+   the panel itself died, as COSMIC's own applets do) leaves the machine without TorqOS in the panel, and without
+   its restarting of the approval dialog after polkit is replaced, until the panel restarts or the person logs in
+   again. The dialog's restart no longer depends on the applet's memory (ADR-049), but it does on the applet running;
+   torqcli's own retry (cli/src/run.rs, `NO_APPROVAL_AGENT`) still starts the dialog again for a terminal's command.
+10. **Desktop VM tests on .52 (nested ESXi, software rendering).** COSMIC's launcher, app library and portal panic
+   on wgpu validation errors there, and the desktop is slow enough that the first approval after login can come
+   before COSMIC's dialog has registered with polkit (answered in 3 s, no dialog). The same test passes on the laptop.
 
 ## Dev host quirks (not TorqOS bugs)
 - **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test
