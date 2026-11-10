@@ -299,6 +299,11 @@ acceptance tests, each a VM test.
       `torq-agent@<person>.service` on its own socket (SO_PEERCRED checked), its conversation remembered, one task at a
       time as `torq-doctor --propose --task`; `torq ask "<question>"` (Ctrl-C stops it); `torq agent run --share`
       beside it, the service frozen through the walk (KNOWN-GAPS 6zg).
+      **Step 3 built** (2026-11-10, `work/agents`, `tests/desktop-agent.nix`): one client for every UI
+      (`torq::agent::client`, `torq ask` on it); the agent's applet `org.torqos.Agent` in the default panel beside
+      TorqOS's, its window `torq-agent-ui` ("TorqOS Agent", one a person), and TorqOS Settings' Agent page (the model
+      a tree line into the draft; the key's entry left to ADR-052). Next: the entry points of 4 (a key, the launcher,
+      Ask the agent in Settings and the applets, crashes), `torq-mcp`.
 - [ ] **The harness's tool catalogue** (ADR-051 9, phase 2; its own ADR first): apps and packages, settings
       explained and proposed, files written in shared folders, the web (tainting), a workbench, reminders and
       scheduled tasks, notifications; outside MCP servers as pinned, tiered tree settings.

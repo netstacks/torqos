@@ -1963,6 +1963,7 @@ A server's person reads torqcli's output; a desktop's person looks at the screen
 - **Amended (2026-11-09, the owner: "I dont think we should be requiring a reboot of a system without a true very pure need"): a restart is only asked for when nothing else can do.** The first version asked for one whenever the kernel, boot image, modules, firmware or driver differed from boot, and on the laptop every commit that changed the initrd (a host name) said so. Now: a new boot image, firmware or modules are not news; a new kernel is a sentence for the next start, not a badge or a request; COSMIC's compositor or session, or the graphics driver, asks for a log-out; only the desktop turned on from a machine booted without it asks for a restart. Nothing logs a person out unasked: a new login closes every open application, as a restart would.
 - **Amended (2026-11-09, the owner): what can be started again is, without a new login.** After a switch the applet ends the parts of COSMIC whose programs changed (`app::stale_parts`, `restart_parts`); COSMIC's session starts each again, new from the system's path, and open windows stay. Only the compositor and the session are the login; the greeter holds the lock screen and is left alone.
 - **As built (2026-11-09):** the badge is drawn from the mark in the panel's own text colour (a symbolic icon has one colour, and the badge is the news). The menu is refreshed by a file come and gone in `~/.local/share/applications`, which COSMIC's app library watches recursively; the system's own folder is replaced whole by a switch, so a watch on it sees nothing. The panel reads its default configuration whole or not at all (no `entries`: its compiled-in default, written to the person's config), so the package ships COSMIC's own `data/default_schema` from the pinned `cosmic-panel`, with the applet inserted, and its build stops if that list no longer reads as expected. The system a session started on is kept per login (`XDG_SESSION_ID`): the runtime directory outlives a logout while an SSH session is open. COSMIC's first-run wizard is left out: TorqOS has its own setup, and the wizard sets what the configuration owns.
+- **Amended (2026-11-10, ADR-051 4, settled by the owner): a second applet in the default panel.** The person's agent, `org.torqos.Agent` (`torq-agent-applet`), right after TorqOS's own: the same edit of `plugins_wings`, its build stopping unless the list then reads `"org.torqos.Applet", "org.torqos.Agent", "com.system76.CosmicAppletInputSources"`. The SSH tunnels applet stays out of it (ADR-050, settled 2).
 - **Not:** restarting or logging out on the person's behalf; a second status daemon (the applet asks the broker
   as torqcli does); the applet as a way to change the system (it confirms, opens TorqOS Settings, or asks the
   session to log out or restart).
@@ -2314,6 +2315,51 @@ vouches for, that only proposes, every change ledgered and undone in one command
   (its socket starts it again), the first failure's exit code kept. The memory is the service's own programs'
   (the service, the harness, its fixed tools — one uid, one unit), not the service process's alone (KNOWN-GAPS
   6zzl).
+- **As built (step 3, 2026-11-10, `work/agents`; decision 4's applet and window, 2's Agent page):** **One client for
+  every UI**, `torq::agent::client::Client` in torqcli's library: `Client::mine()` names the socket by the caller's
+  own uid (its name from /etc/passwd, never a name it is given), refuses a person with no agent account or an
+  agent, and connects only if the socket is a socket owned by that uid (its directory is root's); `status`,
+  `stop`, `forget` and `ask`, the answer an iterator of events ending at `done`. Every call is bounded: the
+  connection is made non-blocking (a frozen service's full queue is retried until 15 s, then given up), a short
+  answer gets 15 s, an answer's events 660 s apart at most (the model's own request limit is 600 s). `torq ask`
+  now speaks through it (its Ctrl-C sends `stop` on a connection of its own). `status` also says how many turns
+  the conversation keeps (`status {running, turns}`; the memory is the service's, unreadable by the person).
+  `torq::agent::conversation` keeps what a window shows of each turn (question, answer, tools called, taint,
+  proposals, errors, how it ended; each text cleaned again, the answer at most 64 000 characters, 50 turns) and
+  `glance`, the panel's line and mark; `torq::agent::setup` reads /etc/torq/agent.json (the model, local, on
+  this machine, or REMOTE and its host; whether `apiKeyFile` is named — never the key) and whether the service
+  runs (asked of systemd, so a look never starts it). **The applet**, `torq-agent-applet` (`org.torqos.Agent`),
+  in the default panel right after TorqOS's (ADR-049, amended): a drawn speech bubble at symbolic size, quiet,
+  accent while a task runs (anyone's of the person's), warning when its own last question failed or the service
+  cannot be reached; its popup the state, the model, a question box (Enter asks), the last answer streamed
+  (scrollable, 4 000 characters; the window has it all), each proposal with **Review** (TorqOS Settings,
+  Proposals), **Stop**, **Open**. It asks the service only while its popup is open or a task runs; otherwise
+  systemd's word is enough. Programs it opens get the compositor's activation token (libcosmic's
+  `applet-token`), so an open window is raised. A person with no agent is told so, with **Agent settings**.
+  **The window**, `torq-agent-ui` ("TorqOS Agent" in the menu, `org.torqos.AgentWindow`), single-instance on the
+  session bus (libcosmic's `single-instance`: started again, it activates the one open and ends): the
+  conversation of this sitting, taint said in the warning colour, a REMOTE model too, **Ask**, **Stop**,
+  **Forget…** (asked first; this window's record goes with the memory), **Review**; `torq-agent-ui --check`
+  prints the state through the same client and exits 0 only if the person's own service answered. **The Agent
+  page** (`torq-settings agent`): the person's agent account, whether the service is here and how it stands,
+  the model and its endpoint (a user or password in the URL never shown), whether a key is configured (yes or
+  no; entering one is ADR-052's, said on the page), how many turns it remembers with **Forget…** (asked first,
+  through the client: the person's own memory, no system change), the window and Proposals. What changes the
+  system is `app::AGENT_SETTINGS`, tree lines into the draft — `set torq agent doctor enable true`,
+  `set torq agent doctor endpoint …`, `… model …`, `delete torq agent doctor endpoint`, `set torq agent model
+  url …`/`hash …`, `set torq agent people …` — committed from Your Changes (the broker, the ledger, the
+  person's approval); a new `How::Draft` runs a whole line in the draft, and `everything_the_pages_offer_is_a_command`
+  checks them all. Not reachable from the tree, so not on the page: the key's contents (a file outside the
+  repository). Tests: torqcli (the client against a fake service on a temporary socket: an answer streamed and
+  nothing after `done`, status/stop/forget, a silent service, one that ends early, another uid's socket refused
+  before anything is sent, no socket, nothing listening, a full queue; the conversation, its bounds and its
+  glance; the model's line), agent (status's turns), torq-wire (the bytes), and `tests/desktop-agent.nix`.
+  Mutation-checked: the socket's owner check (fails `only_ones_own_socket`), the read timeouts (fails
+  `a_silent_service_times_out`), the connect deadline (`a_frozen_service_is_given_up_on` never ends), an Agent
+  page line made ungrammatical (fails `everything_the_pages_offer_is_a_command`). Not in this step: the other
+  entry points of 4 (a key, the launcher, Ask the agent from Settings and the applets, crashes), a context
+  attached from the UIs, the conversation's content shown on the Agent page (the service says only how much),
+  key entry (ADR-052), the applet's and window's drawing and buttons beyond starting (not driven in the VM).
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

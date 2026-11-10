@@ -57,6 +57,35 @@ a time. Only you can reach your agent: its socket is yours, and the agent answer
 included. What it remembers is kept where no program run as your agent (`torq agent run`) can read
 or change it, and an answer from a session that read untrusted text is not kept.
 
+## On the desktop: the panel, its window, and the Agent page
+
+**In the panel**, beside TorqOS's own mark, is your agent's: a speech bubble, quiet while it is idle,
+in the accent colour while it works, in the warning colour when something went wrong. Click it: it
+says how the agent stands (idle and how much it remembers, working, not set up for you, not
+reachable) and which model it asks — the local one, or **REMOTE** and where, when what it reads leaves
+the machine. Type a question and press Enter: the answer comes below as it is written. Each change it
+proposes is listed with **Review** (TorqOS Settings, at Proposals); **Stop** ends a task while it works,
+wherever you asked it; **Open** opens its window. Looking does not start your agent; asking does.
+
+**Its window**, *TorqOS Agent* in the menu, keeps the conversation of this sitting: each question, its
+answer, the tools it called, and — said plainly — when its session read untrusted text (*tainted*),
+so that what it proposed is marked so. **Stop**, **Forget…** (it asks first: your agent then forgets
+what it remembers), and **Review** for each proposal. There is one window for you: opening it again
+brings back the one that is open.
+
+**The Agent page** of TorqOS Settings shows what your agent is: your agent account and whether its
+service is on this machine, the model (local, or REMOTE with its endpoint), whether an API key is
+configured (only yes or no — never the key), how many turns it remembers with **Forget…**, and buttons
+to its window and to Proposals. Choosing the model is a change to the system like any other: the
+page's buttons put the line in your draft (`set torq agent doctor endpoint …`, `set torq agent doctor
+model …`, `delete torq agent doctor endpoint` for the local model again, `set torq agent people …`), and
+you commit it from *Your Changes* — recorded, undoable, with your approval. Entering the key itself is
+not on this page yet: it comes with TorqOS's secrets; until then an administrator puts its file in
+place (`torq agent doctor apiKeyFile`).
+
+Every one of these is your own program: it talks only to your own agent, runs nothing as root, and
+holds no secret.
+
 ## What it read: taint
 
 Logs, device names, the ledger and configuration values are text anyone could have written, and a
