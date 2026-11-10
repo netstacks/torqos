@@ -1992,6 +1992,109 @@ off many times a day.
   a VPN; setting up a browser's proxy (the person's own, in their profile); accepting a host key from the
   applet.
 
+## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
+- **Status:** proposed, 2026-11-10 (the owner: "is it possible to allow the torqos-agent to access and use
+  passwords from the secret manager without exposing the secret to the AI? … store secrets and allow AI to use
+  them and limit which ones"). Builds on ADR-035, ADR-038, ADR-041 and AI-LAYER.md's taint. Four questions
+  for the owner, below.
+- **Context:** ADR-038 keeps secrets out of the repository and leaves application credentials to a password
+  manager. The agent (ADR-041) runs as `torq-agent`, which reads nothing of the person's, so today a task that
+  needs a credential goes one of two ways. Either the person pastes it, and it is in the model's context: at
+  the model's provider, in a transcript, and one prompt injection away from being sent anywhere. Or the task
+  is not done. The line that matters is the uid, not the model. Whatever a process of `torq-agent`'s can
+  read, the model can read (it runs the tools), so "not exposed to the AI" means **the value never enters a
+  process of the agent's account, nor any bytes the agent decides where they go.** That has a precedent
+  people already trust: `ssh-agent`, which signs for a program that never holds the key. Hiding the value is
+  the easy half. The hard half is that a secret the agent can aim is a secret the agent has: put in an
+  environment variable (`echo $TOKEN`, base64 to pass any redaction), typed into a terminal it drives, sent
+  to a URL it chooses, or echoed back by a server that reflects request headers.
+- **Decision:**
+  1. **A store that only a small daemon reads.** `torq-secrets`, a new Rust service with
+     `#![forbid(unsafe_code)]` and `#![forbid(dead_code)]` like the broker, but not the broker: the broker stays the
+     only writer of the configuration, and this is the only reader of secrets. Values are kept under
+     `/var/lib/torq/secrets/store/`, root's alone, each encrypted at rest with `systemd-creds` (bound to the
+     TPM where there is one, to the host's key otherwise). A value is set, rotated or deleted only by a person:
+     `request system secret set <name>` asks for it twice at a terminal, an administrator's with their
+     password, as `request system backup key` does (ADR-038). The ledger records each set, rotation and deletion,
+     never the value. No command gives a value to the agent. A person reading one back (`request system
+     secret show <name>`) is an administrator's, at a terminal, with their password, its entry first.
+  2. **The rules are configuration; the values never are.** What each secret may be used for is in the tree,
+     reviewed and undone like any setting:
+     ```
+     secrets github-ci {
+         kind token;
+         use https { hosts [ api.github.com ]; header "Authorization: Bearer"; }
+         actors [ torq-agent ];
+         approve first-use;          # each-use | first-use | never
+     }
+     ```
+     A name is letters, digits, `-` and `_`. **The agent cannot widen its own access.** `secrets` is on the
+     agent's deny list (ADR-041 2): a proposal from `torq-agent` that touches it is refused at the broker,
+     however it is worded. Only a person grants a secret to the agent.
+  3. **Using a secret is one of a closed list of operations the daemon performs itself**, each bound to the
+     targets its rule names:
+     - **HTTPS with an injected header.** A reverse proxy per rule: the agent sends plain HTTP to a Unix socket
+       or a loopback port of the daemon's (`http://127.0.0.1:<port>/…`, so curl, git over HTTPS and any SDK
+       work unchanged). The daemon checks the caller's uid (`SO_PEERCRED`, or the socket's mode for a port),
+       adds the header, and makes the request to the rule's host itself: HTTPS only, TLS checked against the
+       system's CAs, no redirect followed to another host, no proxy settings taken from the caller. The
+       daemon makes the request with curl, its configuration on standard input as `torq::app::github` does, so the
+       value is never in an argv. The response goes back with the value scrubbed (exact, and its base64 and URL
+       encodings). That scrubbing is defence in depth, not the guarantee. The guarantee is the host list, and a
+       host that reflects credentials does not belong on it.
+     - **SSH, and signing with an SSH key.** The daemon is an `ssh-agent` for the agent's account, holding only
+       the keys the rules grant, each restricted to its rule's hosts with OpenSSH's own destination
+       constraints (`ssh-add -h`, OpenSSH 8.9 and later: the agent refuses to sign for any other host).
+       Known host keys only, never trust on first use (ADR-050 3). This also covers git over SSH, and signing
+       commits and artifacts (`ssh-keygen -Y sign`, namespace from the rule).
+     - **Not on the list, on purpose:** a value in an environment variable, a file, a command's arguments or
+       its standard input; typed into a window or terminal; HTTP to a host the request names; a shell "with the
+       secret loaded". Each would hand the value to something the agent controls. A new operation is added to
+       the list only by an ADR that says how it is bound.
+     What a use can do is what the credential can do at that host: a token with full `repo` scope used on
+     `api.github.com` can delete repositories there. The rule limits where the secret goes, not what the
+     remote end lets it do, so a narrow credential (a fine-grained token, a deploy key) is the person's
+     lever, and TorqOS Settings says so when one is added.
+  4. **Approval, and taint.** `approve` in the rule sets when a person confirms a use: never, the first use in
+     each agent session, or each use. Confirming happens in COSMIC's dialog or at a terminal (ADR-045's
+     approvals), showing the secret's name, the operation, the target, the session and its reason. **A tainted
+     session (AI-LAYER.md: one that has read a web page, an email or a downloaded file) needs approval for every
+     use, whatever the rule says.** Prompt injection is exactly when an agent should not spend a credential on
+     its own. A person's own uses (`actors` naming them) never ask.
+  5. **Every use is recorded.** The daemon writes each use to its own log: who, which secret, which operation,
+     which target, the session, allowed or refused, and the HTTP status. The log never holds the value or
+     the body. Each approval and refusal also goes to the ledger, as the session's taint does. `show system
+     secrets` lists each secret (name, kind, rules, last used, never the value) for anyone who may read the
+     tree; `show system secrets uses` shows the log.
+  6. **Backups and remotes.** The store is not in the repository (the fence) and not in a backup unless its
+     `paths` name it (ADR-038, amended 2026-11-07). A machine rebuilt from its URL comes back with every rule
+     and no value: each says it is empty until a person sets it again.
+- **Questions for the owner:**
+  1. **First operations:** HTTPS and SSH together, or HTTPS first (the common case: APIs, git over HTTPS)?
+  2. **A person's own secrets** (`users <name> secrets`, set without an administrator's password, used by
+     them and by the agent as their rules allow). In the first version, or system secrets only?
+  3. **Uses in the ledger too, or only approvals?** The ledger is the tamper-evident record of changes. An
+     agent making a hundred API calls would fill it, so this ADR records approvals and refusals there and
+     each use in the daemon's log.
+  4. **Entering values in TorqOS Settings.** A masked field in the window instead of the terminal. Today
+     typing a new secret is one of the things that takes a terminal (`app::needs_terminal`, ADR-045).
+- **Consequences:** New code: the `torq-secrets` daemon (store, rules, the proxy, the SSH agent, the log), the
+  `secrets` tree in the schema, its entry on the agent's deny list, the commands above, and a Secrets page in
+  TorqOS Settings. Reused: `systemd-creds`, curl, OpenSSH's agent and its destination constraints, the
+  approval dialog. VM tests, each of a claim: `torq-agent` cannot read the store or the daemon's memory (no
+  ptrace, a different uid); a use to a host not in the rule is refused, and a redirect to one is not followed;
+  the value never appears in the agent's environment, argv or a response, checked against a test server that
+  echoes headers; an SSH key granted for one host signs for it and is refused for another; a proposal from the
+  agent touching `secrets` is refused; a tainted session's use waits for the dialog; a rebuilt machine has its
+  rules and no values. Mutation-checked: the host check, the redirect check and the deny-list entry.
+- **Later, not now:** a person's own secret typed into the focused window by a COSMIC shortcut, theirs and never
+  the agent's (the owner's Alt+O, 2026-11-10; it needs a way to type into windows that COSMIC accepts, and it
+  never serves `torq-agent`); a service's secret from the same store (systemd's `LoadCredential`, instead of a
+  `passwordFile` by hand); OAuth device flows the daemon holds the refresh token for.
+- **Not:** a browser password manager (the person's own: KeePassXC, Bitwarden, the browser's); a sync service
+  for secrets (ADR-039); handing the agent any secret "just this once". There is no fallback route around the
+  guarantee: a task that needs a value in hand is done by a person.
+
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 
 **Status:** accepted and built, 2026-11-10 (the owner chose it: re-check at approval). ADR-051's proposals
