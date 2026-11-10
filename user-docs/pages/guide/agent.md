@@ -119,6 +119,17 @@ A change the agent proposes to the network or SSH, a service's unit or a file in
 off. It is applied as a **commit confirmed**: it rolls itself back in 10 minutes unless you confirm
 it (`configure`, then `commit`) — so if it cuts you off, you get your machine back by waiting.
 
+## Decline a proposal
+
+```text
+alice@torq> request system decline 42
+```
+
+Not wanted? Decline it: it is never applied after, by anything — not by you, a commit at, or your trust — and it
+no longer waits in `show system proposals`. Your agent's proposals, and anything wholly in your own folder, are
+yours to decline without a password; anyone else's needs an administrator's password. The agent cannot decline
+for you. It stays in the ledger as declined; to have it after all, ask for it again.
+
 ## Trust it for a while
 
 ```text

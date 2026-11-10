@@ -86,7 +86,7 @@ is told, and cannot see what a program reads. So taint is reported by TorqOS's o
 Append-only JSON Lines at `/var/lib/torq/state/ledger.jsonl`, owned by the broker.
 Entry kinds: `init`, `proposal`, `applied`, `apply_failed`, `reverted`, `revert_failed`,
 `interrupted`, `repaired`, `confirmed`, `rolled_back` (an unconfirmed `commit confirmed`), and a
-person's `trust_granted`, `trust_revoked`, `trust_expired`
+person's `trust_granted`, `trust_revoked`, `trust_expired`, and `declined` (a waiting proposal turned down)
 (failures and restores carry `restored: true|false` — see ADR-008).
 
 ```json
@@ -115,6 +115,12 @@ person's `trust_granted`, `trust_revoked`, `trust_expired`
 4. `apply` — snapshot data (ADR-038), commit, build and switch, ledger append, push and anchor
    (ADR-036). (Signing on the machine is not the defence — ADR-035; the anchor is.)
 5. `revert <seq>` (`request system revert` in torqcli) — a new commit that reverses one applied change, rebuild, ledger append. Going back to an earlier whole configuration is `rollback <n>` in torqcli, which loads it into the candidate to commit.
+
+Or, instead of 3–4, `decline` (ADR-051, amended): a person turns a waiting proposal down — `declined` in the
+ledger (who; the proposal), a commit at scheduled for it cancelled first, and from then on no path applies it
+(apply, commit confirmed, commit at, session trust) and it no longer waits. The person whose own folder it is,
+or whose agent proposed it, declines without a password; anyone else, an administrator with theirs; an agent
+never.
 
 ## Tool inventory
 

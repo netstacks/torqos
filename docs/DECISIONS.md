@@ -2386,6 +2386,22 @@ vouches for, that only proposes, every change ledgered and undone in one command
   agent account's own (`data.agent` is that account) and judged as ADR-053 (amended) has it — newest first, among
   that agent's newest `AGENT_WAITING_LOOK` not yet applied, each counted only if it could still land, its list
   judged as the agent that proposed it (`agent_check` by `data.agent`).
+- **Amended: Decline (the owner, 2026-11-10: "yes, add a decline button").** A person could not turn a waiting
+  proposal down; it waited until the agent's list was narrowed. Built in the broker and torqcli (the buttons in the
+  applet, window and Settings come after): `torq-broker decline <seq>` over the socket ledgers `declined` (who
+  declined; the proposal's seq), first cancelling a commit at scheduled for it (`apply_cancelled`, ledgered). After
+  it the proposal is never applied by any path — a person's apply, a commit confirmed, a commit at's schedule and its
+  run, session trust — all refuse it in `apply_locked` (and `schedule`); it no longer waits (the agent's cap frees
+  its slot; `show system proposals` drops it; its fate in the agent's turn is "declined"). Only a waiting proposal:
+  an applied one is reverted instead, a declined one is so already, a refused one never waited — each refused with
+  its reason. **Who may:** the person whose own folder the change wholly is, or whose agent proposed it (the
+  ledger's `agent_for`), without a password, as their own apply is; anyone else an administrator, with their
+  password; an agent never, nor a service. torqcli: `request system decline <n>` (shows it, asks). **Not:** an agent
+  withdrawing its own proposal. It may come later, as its own decision: a withdrawal changes nothing on the
+  machine and frees the agent's own slot, but it lets a program running as the agent remove from a person's view
+  what it proposed — the record stays in the ledger, yet what a person would have reviewed is gone from the list —
+  so it needs its own look at what a person is shown. Tested: broker units (each rule, each apply path, the cap
+  freed, the schedule cancelled) and `tests/agents-per-person.nix`.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

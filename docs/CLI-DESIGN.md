@@ -534,6 +534,7 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
 | `clear system commit` | cancel the commit scheduled with `commit at` (asks first; yours, or an administrator's with their password) |
 | `request system revert <change>` | undo one change, `#85` or `85` (a new change that reverses it; asks unless it only touches your own settings) |
+| `request system decline <proposal>` | turn a waiting proposal down (ADR-051, amended): shows it and asks; it is never applied after, by any path, and a commit scheduled for it is cancelled. Yours to decline without a password if it is wholly in your own folder or your agent proposed it; anyone else's needs an administrator's password; an agent cannot decline |
 | `configure` / `config` | enter configuration mode |
 | `configure exclusive` | enter it with the shared candidate held by this session alone, until it leaves: your other sessions read it, cannot change or commit it, and are told which session holds it |
 | `help [<command> \| <words>]` | (both modes) the commands; one command; or a search of commands and settings |
