@@ -28,6 +28,8 @@ let
     (refuses "not a person" { torq.agent.people = [ "ghost" ]; } "ghost is not a person on this machine")
     (refuses "too long" { torq.agent.people = [ "dev" "abcdefghijklmnopqrstu" ]; users.users.abcdefghijklmnopqrstu.isNormalUser = true; } "is longer than an account's and its group's name may be")
     (refuses "twice" { torq.agent.people = [ "dev" "dev" ]; } "a person is named twice")
+    (refuses "a key in the endpoint's query" { torq.agent.doctor.endpoint = "https://api.example.org/v1?key=secret"; } "no query (?) or fragment (#)")
+    (refuses "a fragment in the endpoint" { torq.agent.doctor.endpoint = "https://api.example.org/v1#secret"; } "no query (?) or fragment (#)")
     (refuses "a person in people named as an agent" { torq.agent.people = [ "torq-agent-x" ]; users.users.torq-agent-x.isNormalUser = true; } "torq-agent-x is named as an agent account is")
     (refuses "any person named as an agent" { users.users.torq-agent-y.isNormalUser = true; } "torq-agent-y is a person named as an agent account is")
     (refuses "SETENV on the launcher's rule" ({ config, ... }: {

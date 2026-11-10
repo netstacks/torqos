@@ -52,7 +52,7 @@ in
         Anything else is remote: what the tools return — logs, the configuration (a wifi network's key in
         it too), the ledger — leaves
         the machine, and the doctor says so each time it starts (ADR-005: indicated and ledgered).
-        Plain http is accepted only to this machine.
+        Plain http is accepted only to this machine; no query or fragment (a key belongs in apiKeyFile).
       '';
     };
 
@@ -162,6 +162,10 @@ in
         {
           assertion = cfg.apiKeyFile == null || !(lib.hasPrefix "/nix/store/" cfg.apiKeyFile || lib.hasPrefix "/var/lib/torq/config" cfg.apiKeyFile);
           message = "torq.agent.doctor.apiKeyFile: outside the store and the config repo (both are readable by everyone).";
+        }
+        {
+          assertion = cfg.endpoint == null || !(lib.hasInfix "?" cfg.endpoint || lib.hasInfix "#" cfg.endpoint);
+          message = "torq.agent.doctor.endpoint: no query (?) or fragment (#): a key or token in the URL would be in the configuration, readable by everyone and kept in its history, and shown where the agent is shown. Put a key in apiKeyFile.";
         }
         {
           assertion = refusedFlags == [ ];

@@ -48,10 +48,12 @@ fn host_of(url: &str) -> String {
     crate::history::one_line(host.rsplit('@').next().unwrap_or_default(), 80)
 }
 
-/// A URL without any user or password in it, as it is shown.
-fn without_user(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+/// A URL as it is shown: its scheme, host and path — never a user, password, query or fragment, where a key
+/// could be (the configuration refuses those too, modules/ai.nix).
+fn shown_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return url.split(['?', '#']).next().unwrap_or_default().to_string() };
+    let rest = rest.split(['?', '#']).next().unwrap_or_default();
+    let end = rest.find('/').unwrap_or(rest.len());
     let (authority, path) = rest.split_at(end);
     format!("{scheme}://{}{path}", authority.rsplit('@').next().unwrap_or_default())
 }
@@ -66,7 +68,7 @@ pub fn brain_of(json: &str) -> anyhow::Result<Brain> {
     } else {
         Place::ThisMachine(host_of(&w.endpoint))
     };
-    Ok(Brain { place, model: crate::history::one_line(&w.model, 80), endpoint: crate::history::one_line(&without_user(&w.endpoint), 200), key: w.api_key_file.is_some() })
+    Ok(Brain { place, model: crate::history::one_line(&w.model, 80), endpoint: crate::history::one_line(&shown_url(&w.endpoint), 200), key: w.api_key_file.is_some() })
 }
 
 /// The model this machine's agent asks: `None` when doctor mode is off (nothing configured).
@@ -140,6 +142,10 @@ mod tests {
         assert_eq!(remote.line(), "REMOTE: api.anthropic.com · claude-sonnet-4-5");
         assert!(remote.key && remote.remote());
         assert_eq!(remote.endpoint, "https://api.anthropic.com/v1", "no password shown");
+        let keyed = brain_of(r#"{"endpoint":"https://api.example.org/v1?key=secret#more","model":"m"}"#).unwrap();
+        assert_eq!(keyed.endpoint, "https://api.example.org/v1", "no query or fragment shown");
+        assert_eq!(shown_url("https://h?k=s"), "https://h");
+        assert_eq!(shown_url("https://u:p@h/p#f"), "https://h/p");
         let here = brain_of(r#"{"endpoint":"http://127.0.0.1:8099/v1","model":"fake","apiKeyFile":null}"#).unwrap();
         assert_eq!(here.place, Place::ThisMachine("127.0.0.1:8099".into()));
         assert!(!here.remote());
