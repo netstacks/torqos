@@ -148,7 +148,8 @@ alice@torq> request system decline 42
 Not wanted? Decline it: it is never applied after, by anything — not by you, a commit at, or your trust — and it
 no longer waits in `show system proposals`. Your agent's proposals, and anything wholly in your own folder, are
 yours to decline without a password; anyone else's needs an administrator's password. The agent cannot decline
-for you. It stays in the ledger as declined; to have it after all, ask for it again.
+for you. It stays in the ledger as declined; to have it after all, ask for it again. A proposal whose apply
+failed still waits (marked so in `show system proposals`): apply it again, or decline it.
 
 ## Trust it for a while
 

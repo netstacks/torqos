@@ -2402,6 +2402,18 @@ vouches for, that only proposes, every change ledgered and undone in one command
   what it proposed — the record stays in the ledger, yet what a person would have reviewed is gone from the list —
   so it needs its own look at what a person is shown. Tested: broker units (each rule, each apply path, the cap
   freed, the schedule cancelled) and `tests/agents-per-person.nix`.
+  **Its review (2026-11-10):** a decline cancels the commit at scheduled for that proposal *whoever scheduled it*
+  (an administrator, say), without cancel-scheduled's own gate: declining changes nothing on the machine, and the
+  decliner could have declined before it was scheduled, so it stays — tested with a decline by someone other than
+  the scheduler. A proposal whose apply **failed** is waiting, as ADR-008 always had it (a person may apply it
+  again): it counts against the agent's cap, `show system proposals` lists it, marked "its apply failed once", and
+  it may be declined; only `applied` and `declined` end a proposal. And the agent's count can no longer be
+  escaped by dying proposals (ones that cannot land, which ADR-053's window of `AGENT_WAITING_LOOK` judged and
+  that pushed live ones out of it): an agent has at most `AGENT_WAITING_LOOK` (100) proposals neither applied nor
+  declined, live or not — past that it is refused until a person declines the dead ones — so the window holds
+  every one. Within the per-agent count the list is judged by `data.agent`, which is the acting agent: the
+  count looks only at that agent's own proposals, so the two cannot differ there (at a person's apply, where there
+  is no acting agent, `data.agent` is the only one, and `an_agents_proposal_is_judged_at_apply_by_the_map…` holds it).
 - **As built (the Decline buttons, and step 4: decision 4's entry points, 2026-11-10, `work/agents`):** **Decline**
   beside Review on TorqOS Settings' Proposals page (each waiting proposal, and the proposal's own page), in the
   agent's applet popup and in its window (the person's own agent's waiting proposals): each runs
@@ -2791,9 +2803,8 @@ content at the next), and a proposal must be judged on what it does, not on what
   `the_agents_waiting_proposals_that_apply_would_refuse_do_not_count` (a narrowed list, a diff not kept);
   `the_agents_record_never_blocks_setup_or_the_agent` now frees the agent by a person changing the same file.
   Mutation-checked: counting by base only, counting every proposal, not judging the list, and counting a
-  proposal whose diff is gone each fail a test. Still open: a person cannot decline a proposal (narrowing the
-  agent's list is the one way, ADR-051's proposals page the place for a "decline"), and a re-check that fails
-  at apply writes no ledger entry.
+  proposal whose diff is gone each fail a test. Still open: a re-check that fails at apply writes no ledger entry.
+  (A person declining a proposal, open here before, is ADR-051's Decline amendment, built 2026-11-10.)
 
 ## ADR-054 — Touchpad gestures in the compositor, not a gesture daemon
 - **Status:** accepted and built, 2026-11-10; on the laptop since change #73, the owner: "the touchpad is working great". Asked for (the owner: "three finger swipe to see windows and down to see
