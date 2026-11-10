@@ -264,7 +264,7 @@ pkgs.testers.runNixOSTest {
         # Not a person's to ask for without being an administrator, nor the agent's.
         out = machine.fail(as_user("bob", f"torqcli request system snapshot restore {b['seq']} /home/bob/docs") + " 2>&1")
         assert "not an administrator" in out, out
-        out = machine.fail(f"su -s /bin/sh torq-agent -c 'torqcli request system snapshot restore {b['seq']} /home/bob/docs' 2>&1")
+        out = machine.fail(f"su -s /bin/sh torq-agent-dev -c 'torqcli request system snapshot restore {b['seq']} /home/bob/docs' 2>&1")
         assert "a person applies" in out, out
 
     with subtest("by hand: one taken, and one deleted; settings in the tree"):
@@ -289,7 +289,7 @@ pkgs.testers.runNixOSTest {
         # Not a person's without the group, nor the agent's, and no one's without a password.
         out = machine.fail(as_user("bob", "torqcli request system snapshot take") + " 2>&1")
         assert "not an administrator" in out, out
-        out = machine.fail("su -s /bin/sh torq-agent -c 'torqcli request system snapshot delete 1' 2>&1")
+        out = machine.fail("su -s /bin/sh torq-agent-dev -c 'torqcli request system snapshot delete 1' 2>&1")
         assert "a person applies" in out, out
         # In the tree, as any setting; what the broker runs for it stays out of reach.
         out = machine.succeed(as_user("dev", "torqcli -c 'configure; set torq snapshots keep 5; show | compare'"))
@@ -299,14 +299,14 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a disk filled by another account leaves the record room (the audit of M3, M2)"):
         # As the agent, in the home it has: until nothing more goes in.
-        machine.succeed("su -s /bin/sh torq-agent -c 'dd if=/dev/zero of=/var/lib/torq-agent/fill bs=1M status=none' || true")
-        machine.fail("su -s /bin/sh torq-agent -c 'echo x > /var/lib/torq-agent/more'")
+        machine.succeed("su -s /bin/sh torq-agent-dev -c 'dd if=/dev/zero of=/var/lib/torq-agent-dev/fill bs=1M status=none' || true")
+        machine.fail("su -s /bin/sh torq-agent-dev -c 'echo x > /var/lib/torq-agent-dev/more'")
         # The record is written all the same: an entry, and a person's change.
         n = int(machine.succeed("torq-broker log --json --brief | wc -l"))
         machine.succeed("torq-broker break-glass --by dev --reason 'the disk is full'")
         assert last()["kind"] == "break_glass", last()
         assert int(machine.succeed("torq-broker log --json --brief | wc -l")) == n + 1
-        machine.succeed("rm /var/lib/torq-agent/fill")
+        machine.succeed("rm /var/lib/torq-agent-dev/fill")
 
     with subtest("a store path changed in place is found, and said (the audit of M3, M5)"):
         machine.succeed("torq-broker verify-store")

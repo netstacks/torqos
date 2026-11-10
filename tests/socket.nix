@@ -19,9 +19,9 @@ pkgs.testers.runNixOSTest {
     users.users.dev.hashedPasswordFile = lib.mkForce null;
     users.users.dev.hashedPassword = devHash;
     users.users.sam = { isNormalUser = true; hashedPasswordFile = lib.mkForce null; hashedPassword = samHash; };
-    # The agent's account comes from modules/agent.nix (ADR-041); it may propose any person's
-    # packages here, so that what this test checks is the socket's rules, not the agent's list.
-    torq.agent.mayPropose.users = [ "dev" "sam" "torq-agent" ];
+    # The agents' accounts come from modules/agent.nix (ADR-041, ADR-051 3): dev's and sam's, so that
+    # what this test checks is the socket's rules, not the agents' lists.
+    torq.agent.people = [ "dev" "sam" ];
     # A rebuild that says a lot, as a real one does: every apply's answer and exit must still come
     # through a burst of the build's output (the third review of ADR-040).
     torq.broker.rebuildCommand = "seq 1 6000 >&2";
@@ -81,7 +81,7 @@ pkgs.testers.runNixOSTest {
     with subtest("the socket is anyone's to reach; what each may do is decided inside"):
         machine.succeed("test \"$(stat -c %a /run/torq/broker.sock)\" = 666")
         # Reading is open to every account, the agent's included (no sudo, nothing secret).
-        for who in ["dev", "sam", "torq-agent"]:
+        for who in ["dev", "sam", "torq-agent-dev"]:
             code, v = answer(ask(who, {"args": ["--json", "verify"]}))
             assert code == 0 and v["entries"] == 1, (who, code, v)
         # Root runs the broker itself: not through the socket.
@@ -89,7 +89,7 @@ pkgs.testers.runNixOSTest {
         assert code == 1 and "root runs torq-broker itself" in v["error"], v
 
     with subtest("no caller names itself, a file, or the broker's settings"):
-        for args in [["--json", "apply", "2", "--approved-by=dev"], ["--json", "propose", "--actor", "user"],
+        for args in [["--json", "apply", "2", "--approved-by=dev"], ["--json", "propose", "--actor", "user"], ["--json", "propose", "--agent=torq-agent-sam"],
                      ["--json", "propose", "--diff=/etc/shadow"], ["--json", "password", "--user", "sam", "--hash-file", "/etc/shadow"],
                      ["--json", "--rebuild-cmd=touch /tmp/pwned", "status"], ["--json", "--state-dir=/tmp/x", "log"]]:
             code, v = answer(ask("dev", {"args": args}))
@@ -271,7 +271,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("guessing stops: five wrong, locked, even with the right one"):
         # Someone else's folder: an administrator's password.
-        p = propose("dev", own_diff("torq-agent"), "for the agent's folder, by dev")
+        p = propose("dev", own_diff("torq-agent-dev"), "for the agent's folder, by dev")
         for _ in range(5):
             code, _v = answer(ask("dev", {"args": ["--json", "apply", str(p["seq"])], "password": "guess"}))
             assert code == 77
@@ -311,10 +311,10 @@ pkgs.testers.runNixOSTest {
         machine.sleep(10)
 
     with subtest("the agent proposes, and can do nothing else"):
-        p = propose("torq-agent", own_diff("dev"), "the agent suggests hello")
-        assert p["actor"] == "agent" and p["data"]["caller"] == "torq-agent", p
+        p = propose("torq-agent-dev", own_diff("dev"), "the agent suggests hello")
+        assert p["actor"] == "agent" and p["data"]["caller"] == "torq-agent-dev" and p["data"]["agent"] == "torq-agent-dev", p
         for args in [["apply", str(p["seq"])], ["revert", "3"], ["confirm"], ["reconcile"], ["repair"], ["password", "--user", "dev"]]:
-            code, v = answer(ask("torq-agent", {"args": ["--json"] + args, "password": "Torq-sock-2210", "hash": "$6$x$y"}))
+            code, v = answer(ask("torq-agent-dev", {"args": ["--json"] + args, "password": "Torq-sock-2210", "hash": "$6$x$y"}))
             assert code == 1 and "the agent proposes; a person applies" in v["error"], (args, code, v)
         # The machine's own commands are not on the socket for anyone.
         for args in [["init"], ["setup"], ["expire-confirm"], ["serve"]]:

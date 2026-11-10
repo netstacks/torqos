@@ -84,7 +84,7 @@ pkgs.testers.runNixOSTest {
         key = json.loads(machine.succeed("torq-broker --json remote-key"))["public_key"]
         assert key.startswith("ssh-ed25519 ") and key == json.loads(machine.succeed("torq-broker --json remote-key"))["public_key"], "made once, kept"
         machine.fail("su - dev -c 'cat /var/lib/torq/state/remote/key'")
-        machine.fail("su -s /bin/sh torq-agent -c 'cat /var/lib/torq/state/remote/key'")
+        machine.fail("su -s /bin/sh torq-agent-dev -c 'cat /var/lib/torq/state/remote/key'")
         gitserver.succeed(f"echo {shlex.quote(key)} > /home/git/.ssh/authorized_keys && chown git /home/git/.ssh/authorized_keys && chmod 600 /home/git/.ssh/authorized_keys")
         for n in [2, 3]:
             change(n)

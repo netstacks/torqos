@@ -1,4 +1,4 @@
-# NixOS VM test: the agent's account and what it may propose (ADR-041). Each claim is checked
+# NixOS VM test: the owner's agent account and what it may propose (ADR-041, ADR-051 3). Each claim is checked
 # against the broker itself, over its socket, as the agent's account: what its list allows is
 # proposed; everything else is refused, and the refusal is in the ledger.
 { pkgs, self }:
@@ -48,7 +48,7 @@ pkgs.testers.runNixOSTest {
         return machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
 
     def propose(diff, reason):
-        return ask("torq-agent", {"args": ["--json", "propose", f"--base={head()}", f"--reason={reason}"], "diff": diff})
+        return ask("torq-agent-dev", {"args": ["--json", "propose", f"--base={head()}", f"--reason={reason}"], "diff": diff})
 
     def last():
         return json.loads(machine.succeed("torq-broker log --json --brief | tail -1"))
@@ -60,20 +60,24 @@ pkgs.testers.runNixOSTest {
         return ("--- a/nixos/services.json\n+++ b/nixos/services.json\n@@ -1 +1 @@\n"
                 "-{\"nginx\": {\"enable\": false}, \"openssh\": {\"enable\": false}}\n+" + after + "\n")
 
-    with subtest("the account: its own, no password, no login, no groups, its home its own"):
-        machine.succeed("getent passwd torq-agent | grep -q ':/var/lib/torq-agent:.*nologin$'")
-        machine.succeed("test \"$(id -Gn torq-agent)\" = torq-agent")
-        machine.succeed("passwd -S torq-agent | grep -q ' L '")
-        machine.succeed("test \"$(stat -c %a:%U /var/lib/torq-agent)\" = 700:torq-agent")
-        machine.fail("su -s /bin/sh torq-agent -c 'sudo -n true'")
-        machine.fail("su - torq-agent -c true")  # its login shell is nologin
+    with subtest("the account: the owner's agent, its own, no password, no login, no groups, its home its own"):
+        machine.succeed("getent passwd torq-agent-dev | grep -q ':/var/lib/torq-agent-dev:.*nologin$'")
+        machine.succeed("test \"$(id -u torq-agent-dev)\" -lt 1000")
+        machine.succeed("test \"$(id -Gn torq-agent-dev)\" = torq-agent-dev")
+        machine.succeed("passwd -S torq-agent-dev | grep -q ' L '")
+        machine.succeed("test \"$(stat -c %a:%U /var/lib/torq-agent-dev)\" = 700:torq-agent-dev")
+        machine.fail("su -s /bin/sh torq-agent-dev -c 'sudo -n true'")
+        machine.fail("su - torq-agent-dev -c true")  # its login shell is nologin
         # The owner's home is not the agent's to read.
-        machine.fail("su -s /bin/sh torq-agent -c 'ls /home/dev'")
-        machine.succeed("jq -e '.agent.users == [\"dev\"] and .agent.settings == [\"services.nginx\"]' /etc/torq/broker.json")
+        machine.fail("su -s /bin/sh torq-agent-dev -c 'ls /home/dev'")
+        # The one account of before is gone; sam, not in torq.agent.people, has none.
+        machine.fail("getent passwd torq-agent")
+        machine.fail("getent passwd torq-agent-sam")
+        machine.succeed("jq -e '.agent.agents == {\"torq-agent-dev\": \"dev\"} and .agent.settings == [\"services.nginx\"]' /etc/torq/broker.json")
 
     with subtest("what its list allows, it proposes"):
         code, v = propose(new_file("users/dev/packages.json", "[\"htop\"]"), "htop for dev")
-        assert code == 0 and v["kind"] == "proposal" and v["actor"] == "agent" and v["data"]["caller"] == "torq-agent", (code, v)
+        assert code == 0 and v["kind"] == "proposal" and v["actor"] == "agent" and v["data"]["caller"] == "torq-agent-dev" and v["data"]["agent_for"] == "dev", (code, v)
         code, v = propose(services("{\"nginx\": {\"enable\": true}, \"openssh\": {\"enable\": false}}"), "nginx on")
         assert code == 0 and v["kind"] == "proposal", (code, v)
 
@@ -99,7 +103,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the agent cannot apply what it proposed; a person can"):
         p = [e for e in map(json.loads, machine.succeed("torq-broker log --json --brief").splitlines()) if e["kind"] == "proposal" and e["reason"] == "htop for dev"][0]
-        code, v = ask("torq-agent", {"args": ["--json", "apply", str(p["seq"])]})
+        code, v = ask("torq-agent-dev", {"args": ["--json", "apply", str(p["seq"])]})
         assert code == 1 and "a person applies" in v["error"], (code, v)
         # (No session at the broker: tainted, so said so explicitly — ADR-042, amended.)
         code, v = ask("dev", {"args": ["--json", "apply", str(p["seq"]), "--confirm-tainted"]})
@@ -111,7 +115,7 @@ pkgs.testers.runNixOSTest {
         code, v = propose(services("{\"nginx\": {\"enable\": true}, \"openssh\": {\"enable\": false}}"), "nginx on, now")
         assert code == 0, (code, v)
         out = machine.succeed("su - dev -c 'torqcli show system proposals'")
-        assert "nginx on" in out and "agent (torq-agent)" in out and "htop for dev" not in out, out
+        assert "nginx on" in out and "agent (torq-agent-dev)" in out and "htop for dev" not in out, out
         ssh = v["seq"]
         # Not a proposal, or one already applied: said, nothing done.
         out = machine.fail("su - dev -c 'torqcli request system apply 1' 2>&1")
@@ -123,7 +127,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"su - dev -c \"tmux new-session -d -s a -x 160 -y 50 'torqcli request system apply {ssh}; sleep 600'\"")
         pane = lambda: machine.succeed("su - dev -c 'tmux capture-pane -p -t a'")
         machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t a' | grep -q 'Apply?'", timeout=60)
-        assert "Proposal #" in pane() and "by torq-agent" in pane() and "nginx" in pane() and "This changes the system" in pane(), pane()
+        assert "Proposal #" in pane() and "by torq-agent-dev" in pane() and "nginx" in pane() and "This changes the system" in pane(), pane()
         machine.succeed("su - dev -c 'tmux send-keys -t a y Enter'")
         machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t a' | grep -q 'Password for dev:'", timeout=60)
         machine.succeed("su - dev -c 'tmux send-keys -t a Torq-sock-2210 Enter'")

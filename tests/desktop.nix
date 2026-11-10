@@ -124,7 +124,7 @@ pkgs.testers.runNixOSTest {
 
         # Only people reach the password helper: not a service, and not the agent.
         machine.succeed("test \"$(stat -c %a:%G /run/polkit/agent-helper.socket)\" = 660:users")
-        machine.fail("su -s /bin/sh torq-agent -c '${pkgs.socat}/bin/socat -u OPEN:/dev/null UNIX-CONNECT:/run/polkit/agent-helper.socket'")
+        machine.fail("su -s /bin/sh torq-agent-alice -c '${pkgs.socat}/bin/socat -u OPEN:/dev/null UNIX-CONNECT:/run/polkit/agent-helper.socket'")
         # A wrong password in the dialog counts toward the same lockout as one at a terminal.
         ask = on_the_desktop({"args": ["--json", "apply", seq]})
         def ask_in_the_dialog(out):

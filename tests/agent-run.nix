@@ -1,4 +1,4 @@
-# NixOS VM test: `torq agent run` (ADR-041, 5) — a program run as the agent's account, as a person
+# NixOS VM test: `torq agent run` (ADR-041, 5) — a program run as the person's own agent account (ADR-051 3), as a person
 # would run Claude Code: who it is, what it sees, the one directory shared with it, what it can
 # change (it proposes), and that a sandbox of its own still works inside the launcher's.
 { pkgs, self }:
@@ -42,7 +42,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("it runs as the agent, in the agent's home, without a password"):
         out = agent("id -un; echo $HOME; pwd; touch ~/state && stat -c %U ~/state")
-        assert out.split() == ["torq-agent", "/var/lib/torq-agent", "/var/lib/torq-agent", "torq-agent"], out
+        assert out.split() == ["torq-agent-dev", "/var/lib/torq-agent-dev", "/var/lib/torq-agent-dev", "torq-agent-dev"], out
         # No sudo from there, and no password was asked (sudo -n would have failed otherwise).
         agent("sudo -n true", ok=False)
 
@@ -55,19 +55,19 @@ pkgs.testers.runNixOSTest {
         out = agent("pwd; cat README; echo agent > made-by-agent; ls -A /home/dev; cat /home/dev/secret 2>/dev/null || echo HIDDEN", share="/home/dev/src/project")
         lines = out.splitlines()
         assert all(x in lines for x in ["/home/dev/src/project", "mine", "src", "HIDDEN"]) and "secret" not in lines, out
-        assert "Shared with the agent: /home/dev/src/project" in out, out
+        assert "Shared with your agent (torq-agent-dev): /home/dev/src/project" in out, out
         # What the agent made stays the person's to change, and theirs the agent's (default ACLs).
         as_dev("echo dev >> ~/src/project/made-by-agent && cat ~/src/project/made-by-agent | grep -q dev")
         agent("echo again >> made-by-agent && echo again >> README", share="/home/dev/src/project")
         # Outside the launcher, the agent has no way into the home at all — not even to the shared
         # directory by its name: it was handed the directory, open, not a path (and the home has no
         # ACL of the agent's).
-        machine.fail("su -s /bin/sh torq-agent -c 'test -d /home/dev/src/project'")
+        machine.fail("su -s /bin/sh torq-agent-dev -c 'test -d /home/dev/src/project'")
         machine.fail("getfacl -p /home/dev /home/dev/src 2>/dev/null | grep -q torq-agent")
-        machine.fail("su -s /bin/sh torq-agent -c 'ls /home/dev'")
+        machine.fail("su -s /bin/sh torq-agent-dev -c 'ls /home/dev'")
 
-        machine.fail("su -s /bin/sh torq-agent -c 'cat /home/dev/secret'")
-        machine.fail("su -s /bin/sh torq-agent -c 'ls /home/dev/other'")
+        machine.fail("su -s /bin/sh torq-agent-dev -c 'cat /home/dev/secret'")
+        machine.fail("su -s /bin/sh torq-agent-dev -c 'ls /home/dev/other'")
 
     with subtest("handed the directory, not a way to it: no descriptor of it left, no privilege to gain (the audit of M3, M6)"):
         # Every descriptor the agent's program holds, and what its process may do.
@@ -102,20 +102,20 @@ pkgs.testers.runNixOSTest {
                           "diff": "--- /dev/null\n+++ b/users/dev/packages.json\n@@ -0,0 +1 @@\n+[\"hello\"]\n"})
         out = agent(f"printf '%s\\n' {shlex.quote(req)} | socat -t 30 - UNIX-CONNECT:/run/torq/broker.sock")
         e = json.loads(machine.succeed("torq-broker log --json --brief | tail -1"))
-        assert e["kind"] == "proposal" and e["actor"] == "agent" and e["data"]["caller"] == "torq-agent", (e, out)
+        assert e["kind"] == "proposal" and e["actor"] == "agent" and e["data"]["caller"] == "torq-agent-dev", (e, out)
 
 
     with subtest("nothing it starts outlives it; one session at a time; nothing setuid; the homes stay hidden"):
         # A process it leaves behind, detached, ends with the session (its own process namespace).
         agent("setsid sleep 300 > /dev/null 2>&1 < /dev/null & echo left")
-        machine.wait_until_fails("pgrep -u torq-agent", timeout=20)
+        machine.wait_until_fails("pgrep -u torq-agent-dev", timeout=20)
         # While a session runs, no other may share a directory (its programs could race the ACLs).
         machine.succeed("su - dev -c 'torq agent run -- sleep 30' > /dev/null 2>&1 &")
-        machine.wait_until_succeeds("pgrep -u torq-agent sleep", timeout=20)
+        machine.wait_until_succeeds("pgrep -u torq-agent-dev sleep", timeout=20)
         out = as_dev("torq agent run --share /home/dev/src/project -- true", ok=False)
         assert "running already" in out, out
-        machine.succeed("pkill -u torq-agent sleep || true")
-        machine.wait_until_fails("pgrep -u torq-agent", timeout=20)
+        machine.succeed("pkill -u torq-agent-dev sleep || true")
+        machine.wait_until_fails("pgrep -u torq-agent-dev", timeout=20)
         # The share is nosuid and nodev; the hidden homes cannot be uncovered from the agent's own
         # namespaces (the mounts it was given are locked under it).
         out = agent("findmnt -no OPTIONS --target .", share="/home/dev/src/project")

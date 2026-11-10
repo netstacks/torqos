@@ -127,16 +127,16 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the agent's account can neither stop nor start alice's tunnel, nor read her file"):
         # It is a working account: each refusal below is the tunnel's, not runuser's.
-        desktop.succeed("runuser -u torq-agent -- true")
-        desktop.fail(f"runuser -u torq-agent -- env {bus} systemctl --user stop torq-tunnel@far.service")
-        desktop.fail("runuser -u torq-agent -- systemctl --user --machine=alice@ stop torq-tunnel@far.service")
-        desktop.fail("runuser -u torq-agent -- cat /home/alice/.config/torq/tunnels.toml")
-        desktop.fail("runuser -u torq-agent -- ls /home/alice/.ssh")
+        desktop.succeed("runuser -u torq-agent-alice -- true")
+        desktop.fail(f"runuser -u torq-agent-alice -- env {bus} systemctl --user stop torq-tunnel@far.service")
+        desktop.fail("runuser -u torq-agent-alice -- systemctl --user --machine=alice@ stop torq-tunnel@far.service")
+        desktop.fail("runuser -u torq-agent-alice -- cat /home/alice/.config/torq/tunnels.toml")
+        desktop.fail("runuser -u torq-agent-alice -- ls /home/alice/.ssh")
         assert unit("far", "ActiveState") == "active"
         desktop.succeed(socks)
         desktop.succeed(alice("systemctl --user stop torq-tunnel@far.service"))
-        desktop.fail(f"runuser -u torq-agent -- env {bus} systemctl --user start torq-tunnel@far.service")
-        desktop.fail("runuser -u torq-agent -- systemctl --user --machine=alice@ start torq-tunnel@far.service")
+        desktop.fail(f"runuser -u torq-agent-alice -- env {bus} systemctl --user start torq-tunnel@far.service")
+        desktop.fail("runuser -u torq-agent-alice -- systemctl --user --machine=alice@ start torq-tunnel@far.service")
         assert unit("far", "ActiveState") == "inactive"
         desktop.succeed(alice("systemctl --user start torq-tunnel@far.service"))
         desktop.wait_until_succeeds(socks, timeout=60)

@@ -84,7 +84,7 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"grep -rF {key} /var/lib/torq/state {repo}")
         machine.fail(f"git -C {repo} log -p --all | grep -F {key}")
         # Not a person's to give without being an administrator, nor the agent's.
-        out = machine.fail("su -s /bin/sh torq-agent -c 'torqcli request system backup key local' 2>&1 < /dev/null")
+        out = machine.fail("su -s /bin/sh torq-agent-dev -c 'torqcli request system backup key local' 2>&1 < /dev/null")
         assert "terminal" in out or "a person applies" in out, out
 
     with subtest("a backup of /home and /var/lib, without the machine's secrets"):
@@ -173,7 +173,7 @@ pkgs.testers.runNixOSTest {
             assert why in out, (path, out)
         out = machine.fail(as_user("bob", "torqcli request system restore local /home/bob/docs") + " 2>&1")
         assert "not an administrator" in out, out
-        out = machine.fail("su -s /bin/sh torq-agent -c 'torqcli request system restore local /home/bob/docs' 2>&1")
+        out = machine.fail("su -s /bin/sh torq-agent-dev -c 'torqcli request system restore local /home/bob/docs' 2>&1")
         assert "a person applies" in out, out
 
     with subtest("in the tree: where it goes is a setting, its key is not"):

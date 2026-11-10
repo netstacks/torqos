@@ -83,7 +83,7 @@ pkgs.testers.runNixOSTest {
         code, v = ask("dev", {"args": ["--json", "schedule", str(p), f"--at={in_seconds(60)}"]})
         assert code == 77 and v["password"], (code, v)
         # The agent schedules nothing; the timer's own command is not on the socket.
-        code, v = ask("torq-agent", {"args": ["--json", "schedule", str(p), f"--at={in_seconds(60)}"]})
+        code, v = ask("torq-agent-dev", {"args": ["--json", "schedule", str(p), f"--at={in_seconds(60)}"]})
         assert code == 1 and "the agent proposes" in v["error"], (code, v)
         code, v = ask("dev", {"args": ["--json", "run-scheduled", "1"]})
         assert code == 1 and "not run over the socket" in v["error"], (code, v)
@@ -115,7 +115,7 @@ pkgs.testers.runNixOSTest {
         # Someone else's is an administrator's to cancel; the agent's never. Its approver's own: theirs.
         code, v = ask("sam", {"args": ["--json", "cancel-scheduled", str(s["seq"])]})
         assert code == 1 and "not an administrator" in v["error"], (code, v)
-        code, v = ask("torq-agent", {"args": ["--json", "cancel-scheduled", str(s["seq"])]})
+        code, v = ask("torq-agent-dev", {"args": ["--json", "cancel-scheduled", str(s["seq"])]})
         assert code == 1 and "the agent proposes" in v["error"], (code, v)
         code, v = ask("dev", {"args": ["--json", "cancel-scheduled", str(s["seq"])]})
         assert code == 0 and v["kind"] == "apply_cancelled" and v["data"]["scheduled"] == s["seq"], (code, v)

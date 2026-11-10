@@ -1,4 +1,4 @@
-# NixOS VM test: doctor mode (ADR-042) — `torq doctor "<question>"` asks the agent, as `torq-agent`,
+# NixOS VM test: doctor mode (ADR-042) — `torq doctor "<question>"` asks the agent, as the person's agent `torq-agent-dev`,
 # against a fake model endpoint (a scripted server, not a model). It reads the journal, which holds a
 # hostile line; the model asks for a tool that writes, and is refused; the answer it gives, full of
 # escapes, reaches the person clean and headed as tainted; the session is tainted by each tool that
@@ -82,7 +82,7 @@ pkgs.testers.runNixOSTest {
     before = machine.succeed(f"wc -l < {ledger}").strip()
 
     with subtest("the agent reads the journal, read-only, and is in no other group"):
-        machine.succeed("test \"$(id -Gn torq-agent | tr ' ' '\\n' | sort | tr '\\n' ' ')\" = 'systemd-journal torq-agent '")
+        machine.succeed("test \"$(id -Gn torq-agent-dev | tr ' ' '\\n' | sort | tr '\\n' ' ')\" = 'systemd-journal torq-agent-dev '")
         machine.succeed("jq -e '.endpoint == \"http://127.0.0.1:8099/v1\" and .journal == true and .apiKeyFile == null' /etc/torq/agent.json")
 
     # A hostile line in the journal: escapes, and instructions for the model.
@@ -112,9 +112,9 @@ pkgs.testers.runNixOSTest {
         assert tool["c1"].startswith("refused: ") and tool["c2"].startswith("refused: "), tool
 
     with subtest("the session's record is the agent's, and says it is tainted"):
-        rec = machine.succeed("ls /var/lib/torq-agent/.local/state/torq-agent/sessions/*.json").split()
+        rec = machine.succeed("ls /var/lib/torq-agent-dev/.local/state/torq-agent/sessions/*.json").split()
         assert len(rec) == 1, rec
-        machine.succeed(f"test \"$(stat -c %U {rec[0]})\" = torq-agent")
+        machine.succeed(f"test \"$(stat -c %U {rec[0]})\" = torq-agent-dev")
         r = json.loads(machine.succeed(f"cat {rec[0]}"))
         # Each tool it called that returns untrusted text, by name; the option docs not.
         assert r["tainted"] is True and r["proposed"] == [] and len(r["brokerSession"]) == 32, r
@@ -129,7 +129,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"test \"$(stat -c %a:%U {held})\" = 600:root")
         b = json.loads(machine.succeed(f"cat {held}"))
         assert b["tainted"] is True and sorted(b["tainted_by"]) == sorted(r["taintedBy"]), (b, r)
-        machine.fail(f"su -s /bin/sh torq-agent -c 'cat {held}'")
+        machine.fail(f"su -s /bin/sh torq-agent-dev -c 'cat {held}'")
         machine.succeed("torq-broker verify")
   '';
 }

@@ -97,12 +97,12 @@ pkgs.testers.runNixOSTest {
         # What a person needs needs no sudo, the agent's program still starts, and polkit's
         # administrator is root.
         machine.succeed(as_dev("torqcli show system ledger"))
-        assert machine.succeed(as_dev("torq agent run -- id -un")).strip() == "torq-agent"
+        assert machine.succeed(as_dev("torq agent run -- id -un")).strip() == "torq-agent-dev"
         machine.succeed("grep -Rq 'unix-user:0' /etc/polkit-1/rules.d")
         machine.fail("grep -R wheel /etc/polkit-1/rules.d")
         # The agent's account has no way at all.
-        machine.fail("su -s /bin/sh torq-agent -c 'sudo -n true'")
-        out = machine.fail("su -s /bin/sh torq-agent -c 'torq break-glass anything' 2>&1")
+        machine.fail("su -s /bin/sh torq-agent-dev -c 'sudo -n true'")
+        out = machine.fail("su -s /bin/sh torq-agent-dev -c 'torq break-glass anything' 2>&1")
         assert "no root shell" in out, out
 
     with subtest("no reason, no shell"):
