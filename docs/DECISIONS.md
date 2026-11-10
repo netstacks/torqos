@@ -2050,12 +2050,18 @@ content at the next), and a proposal must be judged on what it does, not on what
 - **Amended (2026-11-10, the fresh review of the desktop line):** the agent's limit of 20 waiting proposals
   (ADR-041) counted only those on the current head, because one on an older head could never land. Since this
   ADR it can, so every desktop save (every 15 minutes) emptied the count, and the agent could leave 20 more
-  waiting each time. Now a proposal counts while it could still land: on its base, or re-checked by effect on
-  the current head by `recheck_on_head`, the same judgement apply makes (`could_still_land`, newest first,
-  stopping at the limit). Tests: `the_agents_waiting_proposals_still_count_when_another_file_moves_the_head`
-  (the review's case); `the_agents_record_never_blocks_setup_or_the_agent` now frees the agent by a person
-  changing the same file. Mutation-checked both ways: counting by base only fails the first, counting every
-  proposal fails the second. Still open: a re-check that fails at apply writes no ledger entry.
+  waiting each time. Now a proposal counts while it could still land, judged as apply judges it
+  (`could_still_land`): its diff kept here, its effect re-checked on the current head by `recheck_on_head`, and
+  the agent's list as it is now (`agent_check`), so narrowing the list frees the slots. Newest first, stopping
+  at the limit, among the newest 100 not yet applied (`AGENT_WAITING_LOOK`): each judgement costs git runs
+  under the broker's lock, and a machine's dead proposals are not judged again forever. Tests:
+  `the_agents_waiting_proposals_still_count_when_another_file_moves_the_head` (the review's case);
+  `the_agents_waiting_proposals_that_apply_would_refuse_do_not_count` (a narrowed list, a diff not kept);
+  `the_agents_record_never_blocks_setup_or_the_agent` now frees the agent by a person changing the same file.
+  Mutation-checked: counting by base only, counting every proposal, not judging the list, and counting a
+  proposal whose diff is gone each fail a test. Still open: a person cannot decline a proposal (narrowing the
+  agent's list is the one way, ADR-051's proposals page the place for a "decline"), and a re-check that fails
+  at apply writes no ledger entry.
 
 ## ADR-054 — Touchpad gestures in the compositor, not a gesture daemon
 - **Status:** accepted and built, 2026-11-10; on the laptop since change #73, the owner: "the touchpad is working great". Asked for (the owner: "three finger swipe to see windows and down to see

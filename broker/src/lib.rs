@@ -208,6 +208,8 @@ pub const AGENT_MAX_DIFF: u64 = 1 << 20;
 /// once, its refusals ledgered in an hour.
 pub const AGENT_REASON_MAX: usize = 200;
 pub const AGENT_WAITING_MAX: usize = 20;
+/// How many of the agent's newest proposals not yet applied are judged for the waiting count.
+pub const AGENT_WAITING_LOOK: usize = 100;
 pub const AGENT_REFUSALS_AN_HOUR: usize = 30;
 
 /// How often the rollback of an unconfirmed commit may fail to take before it is ledgered as not
@@ -2044,7 +2046,10 @@ impl Broker {
             // a head that has moved on, if they would still do there exactly what was shown — judged as
             // apply judges it. Not by base alone: the desktop's own saves move the head every quarter of
             // an hour, and each would empty the count (the review of the desktop line, 2026-11-10).
-            // Newest first, and no further than the limit.
+            // Newest first, no further than the limit, and among the newest AGENT_WAITING_LOOK not yet
+            // applied: each one judged costs git runs under the lock, and the dead ones of a machine's
+            // whole life are not judged again on every proposal. Older ones pass out of the count only
+            // as newer ones stop being able to land, which takes a person's commits (the review).
             let done: std::collections::HashSet<u64> = entries
                 .iter()
                 .filter(|e| matches!(e.body.kind.as_str(), "applied" | "apply_failed"))
@@ -2055,6 +2060,7 @@ impl Broker {
                 .iter()
                 .rev()
                 .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent" && !done.contains(&p.body.seq))
+                .take(AGENT_WAITING_LOOK)
             {
                 if self.could_still_land(p)? {
                     waiting += 1;
@@ -2195,20 +2201,19 @@ impl Broker {
         Ok(Some(head))
     }
 
-    /// Whether a waiting proposal could still be applied: on its base (or naming none), or re-checked
-    /// on the current head by `recheck_on_head`, the judgement apply makes. One whose diff is not kept
-    /// here cannot be applied either. Writing its diff to judge it is the one error: the caller refuses.
+    /// Whether an agent's waiting proposal could still be applied, judged as apply judges it: its diff
+    /// kept here, its effect re-checked on the current head if that has moved (`recheck_on_head`), and
+    /// the agent's list as it is now (`agent_check`), so narrowing the list frees the agent's slots
+    /// (the review of the fix). Writing its diff to judge it is the one error: the caller refuses.
     fn could_still_land(&self, p: &Entry) -> Result<bool> {
-        let head = self.repo.head().ok();
-        match p.body.data["base"].as_str() {
-            None => return Ok(true),
-            Some(base) if Some(base) == head.as_deref() => return Ok(true),
-            Some(_) => {}
-        }
         let Ok(diff) = self.proposal_text(p, "diff") else { return Ok(false) };
         let tmp = DropFile(self.state_dir.join(format!("waiting-{}.diff", p.body.seq)));
         fs::write(&tmp.0, &diff)?;
-        Ok(self.recheck_on_head(p, &tmp.0).is_ok())
+        if self.recheck_on_head(p, &tmp.0).is_err() {
+            return Ok(false);
+        }
+        let Ok(files) = self.repo.diff_files(&tmp.0) else { return Ok(false) };
+        Ok(matches!(self.agent_check(&tmp.0, &files), Ok(Ok(_))))
     }
 
     fn find_child(&self, kind: &str, key: &str, seq: u64) -> Result<Option<Entry>> {

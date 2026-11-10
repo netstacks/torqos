@@ -2425,6 +2425,37 @@ fn the_agents_waiting_proposals_still_count_when_another_file_moves_the_head() {
     b.apply(first.body.seq, "casey", true).unwrap();
 }
 
+/// The review of that fix: the count judges as apply judges, so what apply would refuse frees a slot.
+/// The owner narrowing the agent's list, the one way a person has to turn the agent's proposals down,
+/// frees them all; a proposal whose diff is no longer kept here frees its own.
+#[test]
+fn the_agents_waiting_proposals_that_apply_would_refuse_do_not_count() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    assert!(b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).is_err());
+    // One proposal's diff gone from the state directory: it cannot be applied, so one more may wait.
+    let first = b.ledger.read_all().unwrap().into_iter().find(|e| e.body.kind == "proposal" && e.body.actor == "agent").unwrap();
+    fs::remove_file(dir.path().join("state/proposals").join(first.body.data["diff_sha256"].as_str().unwrap())).ok();
+    let still = b.ledger.read_all().unwrap().into_iter().filter(|e| e.body.kind == "proposal" && e.body.actor == "agent").count();
+    // All twenty share one diff (the same text, kept once by its hash): gone for every one of them.
+    assert_eq!(still, torq_broker::AGENT_WAITING_MAX);
+    b.propose_on(Some(&head), &write_diff(dir.path(), "q.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"vim\"]\n"), "vim", Actor::Agent, false).unwrap();
+
+    // The owner narrows the list: none of the earlier ones could be applied now, nor count.
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    let b = b.with_agent_limits(&torq_broker::agent::Limits { users: vec![], settings: vec!["services.openssh".into()] });
+    let ssh = write_diff(dir.path(), "ssh.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
+    b.propose_on(Some(&head), &ssh, "ssh", Actor::Agent, false).unwrap();
+}
+
 /// ADR-036, the review of adopt: what a repository must be for a new machine to adopt it. A staged
 /// repository (as `stage_from` leaves one) built here from a real broker's repo and ledger.
 #[test]
@@ -2958,8 +2989,8 @@ fn diffs_beside_the_ledger_and_no_padding() {
 /// audit of M3, M6).
 #[test]
 fn the_agents_limits_are_these_numbers() {
-    use torq_broker::{AGENT_MAX_DIFF, AGENT_REASON_MAX, AGENT_REFUSALS_AN_HOUR, AGENT_WAITING_MAX, MAX_DIFF};
-    assert_eq!((AGENT_REASON_MAX, AGENT_WAITING_MAX, AGENT_REFUSALS_AN_HOUR), (200, 20, 30));
+    use torq_broker::{AGENT_MAX_DIFF, AGENT_REASON_MAX, AGENT_REFUSALS_AN_HOUR, AGENT_WAITING_LOOK, AGENT_WAITING_MAX, MAX_DIFF};
+    assert_eq!((AGENT_REASON_MAX, AGENT_WAITING_MAX, AGENT_WAITING_LOOK, AGENT_REFUSALS_AN_HOUR), (200, 20, 100, 30));
     assert_eq!((MAX_DIFF, AGENT_MAX_DIFF), (4 << 20, 1 << 20));
 }
 
