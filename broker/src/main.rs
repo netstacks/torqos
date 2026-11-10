@@ -84,6 +84,7 @@ enum Cmd {
     SecretDelete { name: String, user: Option<String>, approved_by: String },
     SecretShow { name: String, user: Option<String>, approved_by: String },
     Secrets,
+    SecretUse { name: String, user: Option<String>, host: String, client_port: u16, server_port: u16, session: Option<String> },
     AdoptKey { url: String },
     AdoptInspect { url: String },
     Adopt { url: String, own: PathBuf, head: String, tip: String, user: String },
@@ -233,6 +234,7 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("backups").about("The backups the configuration declares (ADR-038): whether each has its key, the snapshots its repository holds, and how it last ran. Read only."))
         .subcommand(Command::new("backup-key").about("Keep a declared backup's key (its passphrase, read from a file) root's alone, outside the config repo, where its passwordFile points; ledgered without the key.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("key-file").long("key-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
         .subcommand(Command::new("backup-restore").about("Put a path back from a declared backup (ADR-038): restic restores it where only root can reach it, then its owner writes it, what is there set aside; ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("snapshot").long("snapshot").help("A snapshot's id [default: latest].")).arg(Arg::new("path").long("path").required(true)).arg(by()))
+        .subcommand(Command::new("secret-use").about("For the secrets daemon alone (ADR-052): one use of a secret, judged by its rule, the caller read from the kernel's table of the loopback connection; its value printed.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("host").long("host").required(true)).arg(Arg::new("client-port").long("client-port").required(true).value_parser(value_parser!(u16))).arg(Arg::new("server-port").long("server-port").required(true).value_parser(value_parser!(u16))).arg(Arg::new("session").long("session")))
         .subcommand(Command::new("secrets").about("The secrets that have a value (ADR-052): whose, and their names. Never a value."))
         .subcommand(Command::new("secret-set").about("Keep a secret's value (read from a file) encrypted, root's alone, outside the config repo: the system's, or with --user a person's own; ledgered without the value.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("value-file").long("value-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
         .subcommand(Command::new("secret-delete").about("Delete a secret's value (its rule stays the configuration's): ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(by()))
@@ -300,6 +302,7 @@ fn parse_cli() -> Cli {
         "fetch-incoming" => Cmd::FetchIncoming,
         "backups" => Cmd::Backups,
         "secrets" => Cmd::Secrets,
+        "secret-use" => Cmd::SecretUse { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), host: s(sub, "host").unwrap_or_default(), client_port: *sub.get_one::<u16>("client-port").unwrap_or(&0), server_port: *sub.get_one::<u16>("server-port").unwrap_or(&0), session: s(sub, "session") },
         "secret-set" => Cmd::SecretSet { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), value_file: p(sub, "value-file").unwrap_or_default(), approved_by: by(sub) },
         "secret-delete" => Cmd::SecretDelete { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), approved_by: by(sub) },
         "secret-show" => Cmd::SecretShow { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), approved_by: by(sub) },
@@ -543,6 +546,28 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
         }
         Cmd::Secrets => println!("{}", serde_json::to_string(&b.kept_secrets())?),
+        // Always JSON, as show is: the value for the daemon to put in one request, and nothing else.
+        Cmd::SecretUse { name, user, host, client_port, server_port, session } => {
+            no_core()?;
+            use torq_broker::secrets::{uid_of_connection, Owner, Use};
+            use torq_wire::secrets::{DAEMON, PORT};
+            if server_port != PORT {
+                anyhow::bail!("refused: a use is of a connection to the secrets daemon's port ({PORT})");
+            }
+            let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+            let tables = format!("{}{}", read("/proc/net/tcp"), read("/proc/net/tcp6"));
+            let (passwd, group) = (read("/etc/passwd"), read("/etc/group"));
+            let account = |uid: u32| torq_broker::socket::caller(uid, &passwd, &group).map(|c| c.name);
+            // Both ends, from the kernel: the client's is the actor, and the other is the daemon's own.
+            let daemon = uid_of_connection(&tables, server_port, client_port).map(account).transpose()?;
+            if daemon.as_deref() != Some(DAEMON) {
+                anyhow::bail!("refused: no connection from 127.0.0.1:{client_port} to the secrets daemon");
+            }
+            let actor = account(uid_of_connection(&tables, client_port, server_port).context("refused: the connection has gone")?)?;
+            let u = Use { owner: Owner::of(user.as_deref())?, name, host, actor, session };
+            let g = b.use_secret(&u)?;
+            println!("{}", json!({ "value": g.value, "header": g.header, "prefix": g.prefix, "actor": u.actor }));
+        }
         Cmd::SecretSet { name, user, value_file, approved_by } => {
             no_core()?;
             let owner = torq_broker::secrets::Owner::of(user.as_deref())?;

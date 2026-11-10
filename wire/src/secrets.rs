@@ -13,6 +13,13 @@ pub const SYSTEM_RULES: &str = "secrets/system.json";
 pub const PERSON_RULES: &str = "secrets.json";
 /// The agent's account (ADR-041): the only actor besides people.
 pub const AGENT: &str = "torq-agent";
+/// The daemon that uses secrets (`torq-secrets`, its own account): the only caller of the broker's `secret-use`.
+pub const DAEMON: &str = "torq-secrets";
+/// Where the daemon listens: one loopback port, a path for each use (`/system/<secret>/<host>/…`,
+/// `/user/<person>/<secret>/<host>/…`).
+pub const PORT: u16 = 7800;
+/// The header an agent's request names its session in.
+pub const SESSION_HEADER: &str = "x-torq-session";
 
 /// The most secrets one file names, and the most hosts one use names.
 pub const MAX_SECRETS: usize = 64;

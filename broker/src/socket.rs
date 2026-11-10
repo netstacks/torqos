@@ -112,6 +112,14 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
             Gate::Refused(format!("{} is not an administrator ({ADMINS}): a system change is theirs to approve", who.name))
         }
     };
+    // A use of a secret is the secrets daemon's to ask, and it asks nothing else (ADR-052): who the use is for,
+    // the broker reads from the kernel itself.
+    if who.name == torq_wire::secrets::DAEMON {
+        return if cmd == "secret-use" { Gate::Open } else { Gate::Refused("the secrets daemon asks for uses of secrets, and nothing else".into()) };
+    }
+    if cmd == "secret-use" {
+        return Gate::Refused("a use of a secret is asked by the secrets daemon, for the one connected to it".into());
+    }
     if OBSERVE.contains(&cmd) {
         return Gate::Open;
     }
@@ -308,7 +316,7 @@ pub fn start_time(stat: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent:x:990:990::/var/empty:/run/current-system/sw/bin/nologin\nnobody:x:65534:65534::/var/empty:/run/current-system/sw/bin/nologin\nsshd:x:998:998::/var/empty:/run/current-system/sw/bin/nologin\n";
+    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent:x:990:990::/var/empty:/run/current-system/sw/bin/nologin\nnobody:x:65534:65534::/var/empty:/run/current-system/sw/bin/nologin\nsshd:x:998:998::/var/empty:/run/current-system/sw/bin/nologin\ntorq-secrets:x:989:989::/var/empty:/run/current-system/sw/bin/nologin\n";
     const GROUP: &str = "root:x:0:\nwheel:x:1:viper\nusers:x:100:sam\n";
 
     fn who(uid: u32) -> Caller {
@@ -404,6 +412,14 @@ mod tests {
         let mixed = change(Tier::System, &["nixos/services.json", "users/sam/secrets.json"]);
         assert!(matches!(gate(&who(1000), "apply", Some(&mixed), None), Gate::Refused(_)));
         assert_eq!(gate(&who(1000), "apply", Some(&change(Tier::User, &["users/viper/secrets.json"])), None), Gate::Open, "their own, as any of theirs");
+        // A use is the daemon's to ask, and it asks nothing else; no one else asks one, a person nor the agent.
+        assert_eq!(gate(&who(989), "secret-use", None, None), Gate::Open);
+        for cmd in ["log", "secret-show", "secret-set", "propose", "apply"] {
+            assert!(matches!(gate(&who(989), cmd, None, Some("sam")), Gate::Refused(_)), "{cmd}");
+        }
+        for uid in [1000, 1001, 990, 65534] {
+            assert!(matches!(gate(&who(uid), "secret-use", None, None), Gate::Refused(_)), "{uid}");
+        }
         let s = with_identity(&["secret-set".into(), "--name=t".into(), "--user=sam".into()], "secret-set", &who(1001), None, None, Some("/run/v")).unwrap();
         assert_eq!(s, ["secret-set", "--name=t", "--user=sam", "--value-file", "/run/v", "--approved-by", "sam"]);
         assert!(with_identity(&["secret-set".into()], "secret-set", &who(1001), None, None, None).is_err(), "a value comes in the request");

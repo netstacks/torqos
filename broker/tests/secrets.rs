@@ -154,3 +154,48 @@ fn a_persons_value_is_theirs_alone_whoever_runs_the_broker() {
     // Deleting it is an administrator's too: the gate (socket.rs) says who may.
     m.b.delete_secret(&alice(), "gh", "casey").unwrap();
 }
+
+/// A use (ADR-052, step 2): judged by the rules at HEAD; the agent's first use in each session on the record once,
+/// and each refusal of the agent's once; a person's own uses add nothing to it.
+#[test]
+fn a_use_is_judged_by_its_rule_and_the_agents_first_is_recorded() {
+    use torq_broker::secrets::Use;
+    let m = Machine::new();
+    let repo = m.b.repo.root().to_path_buf();
+    fs::create_dir_all(repo.join("users/alice")).unwrap();
+    fs::write(
+        repo.join("users/alice/secrets.json"),
+        r#"{"gh":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"],"approve":"never"},"own":{"kind":"token","https":{"hosts":["api.github.com"]}}}"#,
+    )
+    .unwrap();
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success());
+    git(&["add", "-A"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "rules"]);
+    m.b.set_secret(&alice(), "gh", VALUE, "alice").unwrap();
+    m.b.set_secret(&alice(), "own", "alice's own", "alice").unwrap();
+    let session = torq_broker::session::start(&m.b).unwrap().id;
+    let agent = |name: &str, host: &str, session: Option<&str>| Use { owner: alice(), name: name.into(), host: host.into(), actor: "torq-agent".into(), session: session.map(String::from) };
+    let count = |kind: &str| m.ledger().matches(&format!("\"kind\":\"{kind}\"")).count();
+    assert_eq!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).unwrap().value, VALUE);
+    assert_eq!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).unwrap().value, VALUE);
+    assert_eq!(count("secret_first_use"), 1, "the first use in a session, once");
+    let other = torq_broker::session::start(&m.b).unwrap().id;
+    m.b.use_secret(&agent("gh", "api.github.com", Some(&other))).unwrap();
+    assert_eq!(count("secret_first_use"), 2, "and once in each session");
+    for _ in 0..3 {
+        assert!(m.b.use_secret(&agent("gh", "evil.example.com", Some(&session))).is_err());
+        assert!(m.b.use_secret(&agent("own", "api.github.com", Some(&session))).is_err());
+    }
+    assert_eq!(count("secret_use_refused"), 2, "each refusal once, not each time");
+    torq_broker::session::taint(&m.b, &session, "web").unwrap();
+    assert!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).is_err(), "tainted: a person approves, not built yet");
+    assert!(m.b.use_secret(&agent("gh", "api.github.com", None)).is_err(), "no session is a tainted one");
+    assert!(m.b.use_secret(&agent("gh", "api.github.com", Some("0123456789abcdef0123456789abcdef"))).is_err(), "no such session");
+    let before = m.ledger();
+    let own = Use { owner: alice(), name: "own".into(), host: "api.github.com".into(), actor: "alice".into(), session: None };
+    let g = m.b.use_secret(&own).unwrap();
+    assert_eq!((g.value.as_str(), g.header.as_str(), g.prefix.as_str()), ("alice's own", "Authorization", "Bearer "));
+    assert_eq!(m.ledger(), before, "a person's own use: the daemon's log, not the ledger");
+    assert!(m.b.use_secret(&Use { session: Some(session.clone()), ..own }).is_err(), "a person names no session");
+    assert!(!m.ledger().contains(VALUE));
+}

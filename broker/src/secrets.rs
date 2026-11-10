@@ -229,6 +229,15 @@ impl Broker {
             bail!("{} has no value", owner.whose(name));
         }
         let entry = self.record(owner, name, by, "secret_shown", format!("The value of {} shown to {by}", owner.whose(name)), None)?;
+        Ok((entry, self.decrypt(owner, name)?))
+    }
+
+    /// The value of `owner`'s secret `name`, decrypted by systemd-creds under the name it was bound to.
+    fn decrypt(&self, owner: &Owner, name: &str) -> Result<String> {
+        let file = self.secret_file(owner, name)?;
+        if !fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) {
+            bail!("{} has no value", owner.whose(name));
+        }
         let mut child = crate::config::command(&self.secrets.creds)
             .args(["decrypt", &format!("--name={}", Self::cred_name(owner, name))])
             .arg(&file)
@@ -244,8 +253,7 @@ impl Broker {
         if !out.status.success() {
             bail!("systemd-creds could not decrypt it: {}", said(String::from_utf8_lossy(&out.stderr).trim()));
         }
-        let value = String::from_utf8(value).context("the value is not text")?;
-        Ok((entry, value))
+        String::from_utf8(value).context("the value is not text")
     }
 
     /// Every secret that has a value, the system's first: names only.
@@ -283,4 +291,193 @@ impl Broker {
 /// Text from systemd-creds, safe to show and to ledger.
 fn said(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(300).collect()
+}
+
+/// Who holds the client end of the loopback connection from `client` to `server` (ports), by the kernel's own
+/// table of them (`/proc/net/tcp` or `tcp6`'s text): the uid of the socket whose local end is 127.0.0.1:`client`
+/// and whose remote end is 127.0.0.1:`server`, established. The daemon is not taken at its word for who asks:
+/// the broker reads it here itself, so even a daemon that lied could use a secret only for someone connected to it.
+pub fn uid_of_connection(table: &str, client: u16, server: u16) -> Option<u32> {
+    // 127.0.0.1 as the table writes it: in IPv4's, and as IPv6's maps it.
+    const LOOPBACK: [&str; 2] = ["0100007F", "0000000000000000FFFF00000100007F"];
+    let at = |field: &str| -> Option<u16> {
+        let (addr, port) = field.split_once(':')?;
+        LOOPBACK.contains(&addr).then(|| u16::from_str_radix(port, 16).ok()).flatten()
+    };
+    table.lines().skip(1).find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        // sl local remote st tx:rx tr:tm retrnsmt uid …; 01 is ESTABLISHED.
+        (f.len() > 7 && at(f[1]) == Some(client) && at(f[2]) == Some(server) && f[3] == "01").then(|| f[7].parse().ok()).flatten()
+    })
+}
+
+/// What a use of a secret is for: one HTTPS request to `host`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Use {
+    pub owner: Owner,
+    pub name: String,
+    pub host: String,
+    /// The account using it (the broker's reading of the connection).
+    pub actor: String,
+    /// The agent's session, if its request named one (`X-Torq-Session`).
+    pub session: Option<String>,
+}
+
+/// Why `u` may not happen by these rules (Err), or the rule that lets it. `tainted`: whether the agent's session
+/// read untrusted text (None: no session, which is tainted too, as an agent's proposal naming none is).
+/// Until a person can approve a use (step 4), the agent's uses are those its rule lets without asking, from a
+/// session that read nothing untrusted; anything else is refused, never let through.
+pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, tainted: Option<bool>) -> Result<&'a torq_wire::secrets::Rule> {
+    use torq_wire::secrets::{Approve, Kind, AGENT};
+    let whose = u.owner.whose(&u.name);
+    let r = rules.get(&u.name).with_context(|| format!("{whose} has no rule: it is used for nothing"))?;
+    if r.kind != Kind::Token {
+        bail!("{whose} is an SSH key: it is never sent");
+    }
+    if !r.https.as_ref().is_some_and(|h| h.hosts.contains(&u.host)) {
+        bail!("{whose} is not sent to {}", u.host);
+    }
+    let named = r.actors.iter().any(|a| *a == u.actor);
+    let allowed = match &u.owner {
+        Owner::Person(p) => *p == u.actor || (u.actor == AGENT && named),
+        Owner::System => named,
+    };
+    if !allowed {
+        bail!("{} may not use {whose}", u.actor);
+    }
+    if u.actor == AGENT {
+        match tainted {
+            None => bail!("the agent's request names no session (X-Torq-Session): a person approves such a use, and approving is not built yet"),
+            Some(true) => bail!("the agent's session read untrusted text: a person approves each of its uses, and approving is not built yet"),
+            Some(false) if r.approve != Approve::Never => bail!("{whose} is used by the agent with a person's approval ({}), and approving is not built yet", r.approve.word()),
+            Some(false) => {}
+        }
+    }
+    Ok(r)
+}
+
+impl Broker {
+    /// The rules `owner`'s secrets have now (the repository's HEAD): none is none; a file that is not one, refused.
+    fn rules_of(&self, owner: &Owner) -> Result<torq_wire::secrets::Rules> {
+        let (path, parse): (String, fn(&[u8]) -> std::result::Result<torq_wire::secrets::Rules, String>) = match owner {
+            Owner::System => (torq_wire::secrets::SYSTEM_RULES.into(), torq_wire::secrets::parse),
+            Owner::Person(p) => (format!("users/{p}/{}", torq_wire::secrets::PERSON_RULES), torq_wire::secrets::parse_person),
+        };
+        match self.repo.file_at_head(&path, torq_wire::secrets::MAX_FILE)? {
+            None => Ok(Default::default()),
+            Some(b) => parse(&b).map_err(|why| anyhow::anyhow!("{path}: {why}")),
+        }
+    }
+
+    /// One use of a secret, for the daemon (ADR-052, step 2): judged by its rule, the agent's first use in each
+    /// session on the record (and every refusal of the agent's, once per session, secret and reason), and its
+    /// value. Every use the daemon logs itself. No broker lock: a rebuild does not hold a use up.
+    pub fn use_secret(&self, u: &Use) -> Result<Granted> {
+        let _l = Lock::acquire_named(&self.state_dir, "secrets.lock", 10)?;
+        let agent = u.actor == torq_wire::secrets::AGENT;
+        let tainted = match &u.session {
+            Some(id) if agent => Some(crate::session::read(self, id)?.context("refused: the request names no session the broker holds")?.tainted),
+            Some(_) => bail!("refused: a session is the agent's; a person's use names none"),
+            None => None,
+        };
+        let judged = self.rules_of(&u.owner).and_then(|rules| may_use(&rules, u, tainted).map(|r| r.https.clone().unwrap_or_else(|| torq_wire::secrets::Https { hosts: vec![], header: "Authorization".into(), prefix: "Bearer ".into() })));
+        let entries = || self.ledger.read_all();
+        let said_before = |kind: &str, extra: &dyn Fn(&serde_json::Value) -> bool| -> Result<bool> {
+            Ok(entries()?.iter().any(|e| {
+                e.body.kind == kind && e.body.data["secret"] == json!(u.name) && e.body.data["owner"] == u.owner.data(&u.name)["owner"] && e.body.data["user"] == u.owner.data(&u.name)["user"] && e.body.data["session"] == json!(u.session) && extra(&e.body.data)
+            }))
+        };
+        let note = |kind: &str, reason: String, extra: serde_json::Value| -> Result<Entry> {
+            let mut data = u.owner.data(&u.name);
+            data["session"] = json!(u.session);
+            data["host"] = json!(u.host);
+            if let serde_json::Value::Object(x) = extra {
+                for (k, v) in x {
+                    data[k] = v;
+                }
+            }
+            self.ledger.append(NewEntry { actor: if agent { "agent".into() } else { "user".into() }, approved_by: None, kind: kind.into(), tier: u.owner.tier().to_string(), tainted: tainted.unwrap_or(agent), reason, data })
+        };
+        let https = match judged {
+            Ok(h) => h,
+            Err(e) => {
+                let why: String = said(&format!("{e:#}"));
+                if agent && !said_before("secret_use_refused", &|d| d["error"] == json!(why))? {
+                    note("secret_use_refused", format!("The agent's use of {} refused", u.owner.whose(&u.name)), json!({ "error": why }))?;
+                }
+                return Err(e);
+            }
+        };
+        if agent && !said_before("secret_first_use", &|_| true)? {
+            note("secret_first_use", format!("The agent used {} for the first time in its session", u.owner.whose(&u.name)), json!({}))?;
+        }
+        Ok(Granted { value: self.decrypt(&u.owner, &u.name)?, header: https.header, prefix: https.prefix })
+    }
+}
+
+/// A use granted: the value, and where in the request it goes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Granted {
+    pub value: String,
+    pub header: String,
+    pub prefix: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use torq_wire::secrets::parse;
+
+    /// `/proc/net/tcp` as the kernel writes it, the two ends of one loopback connection and one other.
+    const TABLE: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1E78 00000000:0000 0A 00000000:00000000 00:00000000 00000000   990        0 1 1 0000000000000000 100 0 0 10 0
+   1: 0100007F:C350 0100007F:1E78 01 00000000:00000000 00:00000000 00000000  4343        0 2 1 0000000000000000 20 4 30 10 -1
+   2: 0100007F:1E78 0100007F:C350 01 00000000:00000000 00:00000000 00000000   990        0 3 1 0000000000000000 20 4 30 10 -1
+   3: 0A00000F:C351 0100007F:1E78 01 00000000:00000000 00:00000000 00000000  1000        0 4 1 0000000000000000 20 4 30 10 -1
+";
+
+    #[test]
+    fn the_caller_is_the_kernels_answer() {
+        assert_eq!(uid_of_connection(TABLE, 0xC350, 0x1E78), Some(4343), "the client's end, not the daemon's");
+        assert_eq!(uid_of_connection(TABLE, 0x1E78, 0xC350), Some(990), "read the other way, the daemon's own");
+        assert_eq!(uid_of_connection(TABLE, 0xC351, 0x1E78), None, "not from loopback");
+        assert_eq!(uid_of_connection(TABLE, 0xC352, 0x1E78), None, "no such connection");
+        let six = "  sl  local_address                         remote_address                        st\n   0: 0000000000000000FFFF00000100007F:C350 0000000000000000FFFF00000100007F:1E78 01 00000000:00000000 00:00000000 00000000  4343 0 9\n";
+        assert_eq!(uid_of_connection(six, 0xC350, 0x1E78), Some(4343));
+        let listening = TABLE.replace(" 01 00000000:00000000 00:00000000 00000000  4343", " 06 00000000:00000000 00:00000000 00000000  4343");
+        assert_eq!(uid_of_connection(&listening, 0xC350, 0x1E78), None, "established only");
+    }
+
+    fn rules() -> torq_wire::secrets::Rules {
+        parse(br#"{"gh":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"],"approve":"never"},
+                   "asks":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"]},
+                   "mine":{"kind":"token","https":{"hosts":["api.github.com"]}},
+                   "key":{"kind":"ssh-key","ssh":{"hosts":["github.com"]},"actors":["torq-agent"],"approve":"never"}}"#).unwrap()
+    }
+
+    fn u(owner: Owner, name: &str, host: &str, actor: &str, session: Option<&str>) -> Use {
+        Use { owner, name: name.into(), host: host.into(), actor: actor.into(), session: session.map(String::from) }
+    }
+
+    #[test]
+    fn a_use_is_what_its_rule_says_and_nothing_else() {
+        let r = rules();
+        let sam = || Owner::Person("sam".into());
+        assert!(may_use(&r, &u(sam(), "mine", "api.github.com", "sam", None), None).is_ok(), "its owner's own");
+        assert!(may_use(&r, &u(sam(), "gh", "api.github.com", "torq-agent", Some("s")), Some(false)).is_ok(), "the agent, as the rule lets it");
+        for (use_, tainted, why) in [
+            (u(sam(), "mine", "api.github.com", "torq-agent", Some("s")), Some(false), "not the agent's"),
+            (u(sam(), "mine", "api.github.com", "viper", None), None, "not another person's"),
+            (u(sam(), "gh", "evil.example.com", "sam", None), None, "not to another host"),
+            (u(sam(), "key", "github.com", "torq-agent", Some("s")), Some(false), "an SSH key is never sent"),
+            (u(sam(), "none", "api.github.com", "sam", None), None, "no rule"),
+            (u(sam(), "gh", "api.github.com", "torq-agent", None), None, "no session"),
+            (u(sam(), "gh", "api.github.com", "torq-agent", Some("s")), Some(true), "a tainted session"),
+            (u(sam(), "asks", "api.github.com", "torq-agent", Some("s")), Some(false), "approval needed"),
+            (u(Owner::System, "mine", "api.github.com", "sam", None), None, "a system secret is used by the actors it names"),
+        ] {
+            assert!(may_use(&r, &use_, tainted).is_err(), "{why}");
+        }
+        assert!(may_use(&r, &u(Owner::System, "gh", "api.github.com", "torq-agent", Some("s")), Some(false)).is_ok());
+    }
 }
