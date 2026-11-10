@@ -3,7 +3,9 @@
 //! panel's window) sends a `Request`; the service answers with `Event`s, streamed as they come. The
 //! service runs each task as its own process, TorqOS's harness (`torq-doctor --propose --task`), which
 //! is handed a `Task` on its input and writes the task's own events (`say`, `called`, `proposed`,
-//! `tainted`, `error`) on its output; the service relays them and says `done` last.
+//! `tainted`, `error`) on its output; the service relays them and says `done` last. Every request ends
+//! with a last frame, on every way it can go: `done` (an ask; and any refusal or error, exit 1),
+//! `status` (status, stop) or `forgotten` (forget).
 //!
 //! Who is asking is never in a request: the service takes it from the kernel (SO_PEERCRED) and answers
 //! only the person it serves.

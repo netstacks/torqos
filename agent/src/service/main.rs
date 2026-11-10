@@ -38,6 +38,8 @@ struct Agent {
     home: PathBuf,
     memory: memory::Memory,
     running: Mutex<Option<Running>>,
+    /// The unit's `cgroup.procs`: every process of the task is there (none outside a unit, e.g. in a test).
+    procs: Option<PathBuf>,
 }
 
 /// The task running now: its process group, and the connection that asked for it.
@@ -65,19 +67,35 @@ fn peer_is(conn: &UnixStream, uid: u32) -> Result<bool> {
     Ok(peer.uid.as_raw() == uid)
 }
 
-/// One line of at most `MAX_LINE` bytes, without its newline; `None` at the end. A longer line is an error.
-fn read_line(r: &mut impl BufRead) -> Result<Option<String>> {
+/// A line read: its text, or one that was dropped (longer than `MAX_LINE` bytes, read to its end and
+/// thrown away; or not UTF-8), or the end.
+#[derive(Debug, PartialEq)]
+enum Line {
+    Text(String),
+    Dropped,
+    End,
+}
+
+/// One line of at most `MAX_LINE` bytes, without its newline. A longer one is read to its end and
+/// dropped, so that whoever writes it is never left blocked on a pipe no one reads.
+fn read_line(r: &mut impl BufRead) -> std::io::Result<Line> {
     let mut buf = Vec::new();
     let n = r.by_ref().take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf)?;
     if n == 0 {
-        return Ok(None);
+        return Ok(Line::End);
     }
     if buf.last() == Some(&b'\n') {
         buf.pop();
     } else if buf.len() > MAX_LINE {
-        bail!("a line longer than {MAX_LINE} bytes");
+        loop {
+            buf.clear();
+            let n = r.by_ref().take(64 * 1024).read_until(b'\n', &mut buf)?;
+            if n == 0 || buf.last() == Some(&b'\n') {
+                return Ok(Line::Dropped);
+            }
+        }
     }
-    Ok(Some(String::from_utf8(buf).context("a line that is not UTF-8")?))
+    Ok(String::from_utf8(buf).map(Line::Text).unwrap_or(Line::Dropped))
 }
 
 /// A word as the harness names a tool or a taint's source: at most 64 of letters, digits, `_` and `-`.
@@ -107,34 +125,50 @@ impl Agent {
         *self.running.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Serve one connection: the person's, or no one's.
+    /// Serve one connection: the person's, or no one's. Every request's answer ends with a last frame
+    /// (`done`, `status` or `forgotten`), on every way it can go — a refusal and an error included.
     fn serve(self: &Arc<Self>, conn: UnixStream, id: u64) -> Result<()> {
         let out = Out(Arc::new(Mutex::new(conn.try_clone()?)));
+        let refuse = |text: String| {
+            out.send(&Event::Error { text });
+            out.send(&Event::Done { exit: 1 });
+        };
         if !peer_is(&conn, self.uid)? {
-            out.send(&Event::Error { text: format!("this is {}'s agent: it answers {} alone", self.person, self.person) });
-            // Closed only once what it sent is read (a little of it, for a little while): closed with it
-            // unread, the kernel could reset the connection before the refusal reached the other end.
+            refuse(format!("this is {}'s agent: it answers {} alone", self.person, self.person));
+            // Closed only once what it sent is read (a little of it, for at most 2 s in all): closed with
+            // it unread, the kernel could reset the connection before the refusal reached the other end.
             let _ = conn.shutdown(std::net::Shutdown::Write);
-            let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
-            let _ = std::io::copy(&mut (&conn).take(64 * 1024), &mut std::io::sink());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut left, mut buf) = (64 * 1024usize, [0u8; 4096]);
+            while left > 0 {
+                let Some(wait) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else { break };
+                let _ = conn.set_read_timeout(Some(wait));
+                match (&conn).read(&mut buf) {
+                    Ok(n) if n > 0 => left = left.saturating_sub(n),
+                    _ => break,
+                }
+            }
             return Ok(());
         }
         let mut r = BufReader::new(conn);
         loop {
             let line = match read_line(&mut r) {
-                Ok(Some(l)) => l,
-                Ok(None) => break,
+                Ok(Line::Text(l)) => l,
+                Ok(Line::End) => break,
+                Ok(Line::Dropped) => {
+                    refuse(format!("not a request: longer than {MAX_LINE} bytes, or not UTF-8"));
+                    continue;
+                }
                 Err(e) => {
-                    out.send(&Event::Error { text: format!("{e:#}") });
+                    refuse(format!("reading the request: {e}"));
                     break;
                 }
             };
             match serde_json::from_str::<Request>(&line) {
-                Err(e) => out.send(&Event::Error { text: format!("not a request: {e}") }),
+                Err(e) => refuse(format!("not a request: {e}")),
                 Ok(Request::Ask { text, context }) => {
                     if let Err(e) = self.ask(text, context, &out, id) {
-                        out.send(&Event::Error { text: format!("{e:#}") });
-                        out.send(&Event::Done { exit: 1 });
+                        refuse(format!("{e:#}"));
                     }
                 }
                 Ok(Request::Stop) => {
@@ -142,13 +176,16 @@ impl Agent {
                     out.send(&Event::Status { running: self.running().is_some() });
                 }
                 Ok(Request::Status) => out.send(&Event::Status { running: self.running().is_some() }),
-                Ok(Request::Forget) => match self.running() {
-                    Some(_) => out.send(&Event::Error { text: "a task is running: stop it first, or wait".into() }),
-                    None => match self.memory.forget() {
+                Ok(Request::Forget) => {
+                    // Under the task slot's lock: a task starting now reads the memory after this.
+                    let slot = self.running.lock().unwrap_or_else(|p| p.into_inner());
+                    let forgot = if slot.is_some() { Err(anyhow::anyhow!("a task is running: stop it first, or wait")) } else { self.memory.forget() };
+                    drop(slot);
+                    match forgot {
                         Ok(()) => out.send(&Event::Forgotten),
-                        Err(e) => out.send(&Event::Error { text: format!("{e:#}") }),
-                    },
-                },
+                        Err(e) => refuse(format!("{e:#}")),
+                    }
+                }
             }
         }
         // Whoever asked is gone: no one hears the rest, so it is stopped.
@@ -164,11 +201,12 @@ impl Agent {
         if text.trim().is_empty() {
             bail!("ask what? (an empty question)");
         }
-        let task = Task { question: text.clone(), context, memory: self.memory.recent() };
         let mut slot = self.running.lock().unwrap_or_else(|p| p.into_inner());
         if slot.is_some() {
             bail!("a task is running already (one at a time): stop it, or wait");
         }
+        // The memory read with the slot held: a `forget` before this is honoured.
+        let task = Task { question: text.clone(), context, memory: self.memory.recent() };
         use std::os::unix::process::CommandExt;
         let mut child = Command::new(&self.harness)
             .args(["--propose", "--task"])
@@ -189,24 +227,42 @@ impl Agent {
         let stdout = child.stdout.take().context("the task's output")?;
         let line = serde_json::to_string(&task)?;
         let (me, out) = (self.clone(), out.clone());
-        std::thread::spawn(move || {
+        // The task's events relayed as they come (a thread of their own); this one waits for the harness
+        // to end, sweeps what is left of it — which also closes the output anything left could hold —
+        // and only then takes the relay's end, remembers the turn, frees the slot and says `done`.
+        let relay_out = out.clone();
+        let relay = std::thread::spawn(move || {
             let _ = writeln!(stdin, "{line}");
             drop(stdin);
             let (mut said, mut tainted) = (None, false);
             let mut r = BufReader::new(stdout);
-            while let Ok(Some(l)) = read_line(&mut r) {
+            loop {
+                let l = match read_line(&mut r) {
+                    Ok(Line::Text(l)) => l,
+                    // Read to its end and thrown away: the task goes on, and is never left blocked.
+                    Ok(Line::Dropped) => {
+                        relay_out.send(&Event::Error { text: format!("the task said something longer than {MAX_LINE} bytes, or not text: left out") });
+                        continue;
+                    }
+                    Ok(Line::End) | Err(_) => break,
+                };
                 let Some(e) = relayed(&l) else { continue };
                 match &e {
                     Event::Say { text } => said = Some(text.trim().to_string()),
                     Event::Tainted { .. } => tainted = true,
                     _ => {}
                 }
-                out.send(&e);
+                relay_out.send(&e);
             }
+            (said, tainted)
+        });
+        std::thread::spawn(move || {
             let exit = match child.wait() {
                 Ok(s) => s.code().unwrap_or_else(|| 128 + std::os::unix::process::ExitStatusExt::signal(&s).unwrap_or(0)),
                 Err(_) => 1,
             };
+            me.sweep();
+            let (said, tainted) = relay.join().unwrap_or((None, true));
             if exit == 0 {
                 let answer = if tainted { None } else { said };
                 if let Err(e) = me.memory.remember(Turn { question: text, answer }) {
@@ -219,37 +275,60 @@ impl Agent {
         Ok(())
     }
 
-    /// End the running task: its process group, then anything of it left in this service's own
-    /// control group (a tool's program runs in a group of its own, ADR-042 5). Waits, a little, for
-    /// it to be gone.
+    /// End the running task: its process group; then the rest of it goes as the task ends (`sweep`, by
+    /// the task's waiter, before the slot is free). Waits, at most 5 s, for it to be over.
     fn stop(&self) {
         let Some(r) = self.running() else { return };
         let _ = rustix::process::kill_process_group(r.group, rustix::process::Signal::KILL);
-        let unit = format!("/torq-agent@{}.service", self.person);
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.running().is_some() && Instant::now() < deadline {
-            for pid in left_in_unit(&unit) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Nothing of a task outlives it: every other process in this service's own control group is
+    /// killed, again and again until none is left (for at most 5 s) — a tool's program runs in a group of
+    /// its own (ADR-042 5), and anything can make itself undumpable, and so out of sight in /proc. The
+    /// unit's `cgroup.procs` lists them all, however they look; leaving the group needs a write to the
+    /// cgroup files, read-only here (ProtectControlGroups). Everything in the unit but the service is the
+    /// task's: one task at a time.
+    fn sweep(&self) {
+        let me = std::process::id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = self.procs.as_deref().map(|p| left_in(p, me)).unwrap_or_default();
+            if left.is_empty() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                eprintln!("torq-agent-service: {} processes of the task were not gone after 5 s", left.len());
+                return;
+            }
+            for pid in left {
                 let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }
-
-/// The processes of this one's own user in this one's own control group, but itself — only when that
-/// group is the person's agent's unit (`unit`, its path's end): never anything elsewhere.
-fn left_in_unit(unit: &str) -> Vec<rustix::process::Pid> {
-    use std::os::unix::fs::MetadataExt;
-    let cgroup = |pid: &str| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok().and_then(|c| c.lines().find_map(|l| l.strip_prefix("0::").map(String::from)));
-    let Some(mine) = cgroup("self").filter(|c| c.ends_with(unit)) else { return vec![] };
-    let (me, uid) = (std::process::id(), rustix::process::getuid().as_raw());
-    let Ok(dir) = std::fs::read_dir("/proc") else { return vec![] };
-    dir.flatten()
-        .filter_map(|e| {
-            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
-            (pid != me && e.metadata().ok()?.uid() == uid && cgroup(&pid.to_string())? == mine).then(|| rustix::process::Pid::from_raw(pid as i32)).flatten()
-        })
+/// The unit's processes but `me`, from its `cgroup.procs` (`procs`): those still alive.
+fn left_in(procs: &Path, me: u32) -> Vec<rustix::process::Pid> {
+    let text = std::fs::read_to_string(procs).unwrap_or_default();
+    text.split_whitespace()
+        .filter_map(|p| p.parse::<i32>().ok())
+        .filter(|&p| p as u32 != me)
+        .filter_map(rustix::process::Pid::from_raw)
+        // Alive: a signal reaches it, and it is not a zombie waiting to be reaped (if /proc shows it).
+        .filter(|&p| rustix::process::test_kill_process(p).is_ok() && !std::fs::read_to_string(format!("/proc/{}/stat", p.as_raw_nonzero())).is_ok_and(|s| s.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z'))))
         .collect()
+}
+
+/// This service's own unit's `cgroup.procs`, from /proc/self/cgroup — only when that group is the
+/// person's agent's unit (`unit`, its path's end): it never sweeps anything elsewhere.
+fn unit_procs(unit: &str) -> Option<PathBuf> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let path = cgroup.lines().find_map(|l| l.strip_prefix("0::"))?;
+    path.ends_with(unit).then(|| PathBuf::from(format!("/sys/fs/cgroup{path}/cgroup.procs")))
 }
 
 /// The uid of account `name`, from /etc/passwd.
@@ -282,6 +361,7 @@ fn agent(args: &[String]) -> Result<Agent> {
         home: PathBuf::from(format!("/var/lib/{account}")),
         memory: memory::Memory::new(Path::new(&state)),
         running: Mutex::new(None),
+        procs: unit_procs(&format!("/torq-agent@{person}.service")),
     })
 }
 
@@ -327,7 +407,7 @@ mod tests {
         // The harness is run with PATH the machine's: the test's own, for its script.
         std::fs::write(&h, format!("#!/bin/sh\nPATH={}\n{harness}\n", std::env::var("PATH").unwrap_or_default())).unwrap();
         std::fs::set_permissions(&h, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let a = Arc::new(Agent { person: "alice".into(), uid, harness: h, home: d.path().into(), memory: memory::Memory::new(d.path()), running: Mutex::new(None) });
+        let a = Arc::new(Agent { person: "alice".into(), uid, harness: h, home: d.path().into(), memory: memory::Memory::new(d.path()), running: Mutex::new(None), procs: Some(d.path().join("procs")) });
         let sock = d.path().join("s.sock");
         let l = UnixListener::bind(&sock).unwrap();
         let served = a.clone();
@@ -348,7 +428,7 @@ mod tests {
         }
         let mut r = BufReader::new(c.try_clone().unwrap());
         let mut seen = vec![];
-        while let Ok(Some(l)) = read_line(&mut r) {
+        while let Ok(Line::Text(l)) = read_line(&mut r) {
             let e: Event = serde_json::from_str(&l).unwrap();
             let end = until(&e);
             seen.push(e);
@@ -375,7 +455,7 @@ mod tests {
         assert!(!peer_is(&a, me() + 1).unwrap());
         let (_a, sock, _d) = agent("echo never", me() + 1);
         let seen = talk(&sock, &[ask("hi")], |_| false);
-        assert_eq!(seen, vec![Event::Error { text: "this is alice's agent: it answers alice alone".into() }], "refused, and nothing run");
+        assert_eq!(seen, vec![Event::Error { text: "this is alice's agent: it answers alice alone".into() }, Event::Done { exit: 1 }], "refused, and nothing run");
     }
 
     /// What the harness says is relayed, cleaned; `done` last; the turn remembered — its answer only
@@ -420,7 +500,7 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
         let child = std::fs::read_to_string(d.path().join("child")).unwrap();
         assert!(!Path::new(&format!("/proc/{}", child.trim())).exists(), "the task's child is gone with it");
         let mut r = BufReader::new(c);
-        let last: Event = serde_json::from_str(&read_line(&mut r).unwrap().unwrap()).unwrap();
+        let last: Event = serde_json::from_str(&text(&mut r)).unwrap();
         assert_eq!(last, Event::Done { exit: 137 }, "killed");
         assert_eq!(a.memory.recent(), vec![], "a stopped task is not a turn");
     }
@@ -453,18 +533,165 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
         writeln!(c, r#"{{"type":"ask","text":"   "}}"#).unwrap();
         writeln!(c, r#"{{"type":"forget"}}"#).unwrap();
         let mut r = BufReader::new(c);
-        let e = |r: &mut BufReader<UnixStream>| serde_json::from_str::<Event>(&read_line(r).unwrap().unwrap()).unwrap();
+        let e = |r: &mut BufReader<UnixStream>| serde_json::from_str::<Event>(&text(r)).unwrap();
         assert!(matches!(e(&mut r), Event::Error { text } if text.starts_with("not a request")));
+        assert_eq!(e(&mut r), Event::Done { exit: 1 }, "every request ends with a last frame");
         assert_eq!(e(&mut r), Event::Error { text: "ask what? (an empty question)".into() });
         assert_eq!(e(&mut r), Event::Done { exit: 1 }, "an ask always ends with done");
         assert_eq!(e(&mut r), Event::Forgotten);
     }
 
+    /// A line too long is read to its end and dropped: whoever wrote it goes on.
     #[test]
-    fn a_line_too_long_is_refused() {
-        let long = "x".repeat(MAX_LINE + 10);
-        assert!(read_line(&mut std::io::Cursor::new(long.as_bytes())).is_err());
-        assert_eq!(read_line(&mut std::io::Cursor::new(b"a\nb".as_slice())).unwrap(), Some("a".into()));
+    fn a_line_too_long_is_dropped_whole() {
+        let long = format!("{}\nnext\n", "x".repeat(MAX_LINE * 2 + 10));
+        let mut c = std::io::Cursor::new(long.as_bytes());
+        assert_eq!(read_line(&mut c).unwrap(), Line::Dropped);
+        assert_eq!(read_line(&mut c).unwrap(), Line::Text("next".into()));
+        assert_eq!(read_line(&mut c).unwrap(), Line::End);
+        assert_eq!(read_line(&mut std::io::Cursor::new(b"\xff\nb\n".as_slice())).unwrap(), Line::Dropped);
+    }
+
+    /// A task that says something over the bound (an answer of 2 MB): dropped, said so, and the task runs
+    /// on to its end — never left blocked on a pipe no one reads.
+    #[test]
+    fn a_task_saying_too_much_is_not_left_hanging() {
+        let (_a, sock, _d) = agent(r#"read -r t; printf '{"type":"say","text":"'; head -c 2000000 /dev/zero | tr '\0' x; printf '"}\n'; printf '%s\n' '{"type":"say","text":"after"}'"#, me());
+        let seen = talk(&sock, &[ask("long")], done);
+        assert_eq!(seen.len(), 3, "{:?}", seen.iter().map(|e| format!("{e:?}").chars().take(80).collect::<String>()).collect::<Vec<_>>());
+        assert!(matches!(&seen[0], Event::Error { text } if text.contains("left out")));
+        assert_eq!(seen[1..], [Event::Say { text: "after".into() }, Event::Done { exit: 0 }]);
+    }
+
+    /// `forget` while a task runs: refused, and ended (no client waits); after it, done.
+    #[test]
+    fn forget_while_a_task_runs_ends_too() {
+        let (a, sock, d) = agent(r#"read -r t; echo started > "$HOME/started"; sleep 300"#, me());
+        a.memory.remember(Turn { question: "kept".into(), answer: None }).unwrap();
+        let mut c = UnixStream::connect(&sock).unwrap();
+        writeln!(c, "{}", serde_json::to_string(&ask("long")).unwrap()).unwrap();
+        wait_for(&d.path().join("started"));
+        let seen = talk(&sock, &[Request::Forget], |e| matches!(e, Event::Done { .. } | Event::Forgotten));
+        assert_eq!(seen, [Event::Error { text: "a task is running: stop it first, or wait".into() }, Event::Done { exit: 1 }]);
+        assert_eq!(a.memory.recent().len(), 1, "not forgotten while it ran");
+        talk(&sock, &[Request::Stop], |e| matches!(e, Event::Status { .. }));
+        assert_eq!(talk(&sock, &[Request::Forget], |e| matches!(e, Event::Forgotten)), [Event::Forgotten]);
+        assert_eq!(a.memory.recent(), vec![]);
+    }
+
+    fn wait_for(f: &Path) {
+        let t = Instant::now();
+        while !f.exists() {
+            assert!(t.elapsed() < Duration::from_secs(10), "{} never came", f.display());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Gone: no signal reaches it, or it is a zombie (dead, waiting to be reaped).
+    fn gone(pid: i32) -> bool {
+        let p = rustix::process::Pid::from_raw(pid).unwrap();
+        rustix::process::test_kill_process(p).is_err() || std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit_once(") ").is_some_and(|(_, r)| r.starts_with('Z')))
+    }
+
+    /// Not part of the suite: run by the next test as a process of the task that has made itself
+    /// undumpable (so /proc shows it as root's, and hides it from the service's ProtectProc), then waits.
+    #[test]
+    #[ignore]
+    fn undumpable_helper() {
+        if std::env::var_os("TORQ_TEST_UNDUMPABLE").is_some() {
+            rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).unwrap();
+            std::thread::sleep(Duration::from_secs(300));
+        }
+    }
+
+    /// `stop` ends all of the task: its group, a process in a group of its own, and one that made itself
+    /// undumpable — every process the unit's `cgroup.procs` lists (here a file the harness writes) — even
+    /// once the harness itself is gone.
+    #[test]
+    fn stop_ends_every_process_of_the_task() {
+        let helper = std::env::current_exe().unwrap();
+        let script = format!(
+            r#"read -r t; set -m
+sleep 300 & echo $! > "$HOME/own-group"
+TORQ_TEST_UNDUMPABLE=1 {} --exact tests::undumpable_helper --ignored --test-threads=1 >/dev/null 2>&1 & echo $! > "$HOME/undumpable"
+echo $$ $(cat "$HOME/own-group") $(cat "$HOME/undumpable") > "$HOME/procs"
+echo ready > "$HOME/ready"; wait"#,
+            helper.display()
+        );
+        let (a, sock, d) = agent(&script, me());
+        let mut c = UnixStream::connect(&sock).unwrap();
+        writeln!(c, "{}", serde_json::to_string(&ask("long")).unwrap()).unwrap();
+        wait_for(&d.path().join("ready"));
+        let pid = |f: &str| std::fs::read_to_string(d.path().join(f)).unwrap().trim().parse::<i32>().unwrap();
+        let (own, undumpable) = (pid("own-group"), pid("undumpable"));
+        // Its own group: not the harness's, so the group's kill does not reach it.
+        let pgid = |p: i32| std::fs::read_to_string(format!("/proc/{p}/stat")).ok().and_then(|s| s.rsplit_once(") ").and_then(|(_, r)| r.split(' ').nth(2).map(String::from)));
+        let harness: i32 = std::fs::read_to_string(d.path().join("procs")).unwrap().split_whitespace().next().unwrap().parse().unwrap();
+        assert!(pgid(own).is_some() && pgid(own) != pgid(harness), "a group of its own");
+        // Undumpable: /proc shows its files as root's, not ours.
+        let t = Instant::now();
+        loop {
+            use std::os::unix::fs::MetadataExt;
+            if std::fs::metadata(format!("/proc/{undumpable}/cgroup")).is_ok_and(|m| m.uid() != me()) {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "the helper never made itself undumpable");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(talk(&sock, &[Request::Stop], |e| matches!(e, Event::Status { .. })), [Event::Status { running: false }]);
+        assert!(gone(own), "the process in a group of its own is gone");
+        assert!(gone(undumpable), "the undumpable process is gone");
+        let mut r = BufReader::new(c);
+        assert_eq!(serde_json::from_str::<Event>(&text(&mut r)).unwrap(), Event::Done { exit: 137 });
+        assert!(a.running().is_none());
+    }
+
+
+    /// A task that ends by itself leaves nothing behind: a process it left in a group of its own,
+    /// holding its output open, and an undumpable one, are gone by `done` — and `done` comes.
+    #[test]
+    fn nothing_of_a_task_outlives_it() {
+        let helper = std::env::current_exe().unwrap();
+        let script = format!(
+            r#"read -r t; set -m
+sleep 300 & echo $! > "$HOME/own-group"
+TORQ_TEST_UNDUMPABLE=1 {} --exact tests::undumpable_helper --ignored --test-threads=1 >/dev/null 2>&1 </dev/null & echo $! > "$HOME/undumpable"
+echo $$ $(cat "$HOME/own-group") $(cat "$HOME/undumpable") > "$HOME/procs"
+printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
+            helper.display()
+        );
+        let (_a, sock, d) = agent(&script, me());
+        let seen = talk(&sock, &[ask("go")], done);
+        assert_eq!(seen, [Event::Say { text: "bye".into() }, Event::Done { exit: 0 }]);
+        let pid = |f: &str| std::fs::read_to_string(d.path().join(f)).unwrap().trim().parse::<i32>().unwrap();
+        assert!(gone(pid("own-group")) && gone(pid("undumpable")), "left behind");
+    }
+
+    /// The refusal's wait for what was sent is one deadline: a peer that keeps sending is cut off.
+    #[test]
+    fn a_refused_peer_is_cut_off_in_time() {
+        let (_a, sock, _d) = agent("echo never", me() + 1);
+        let mut c = UnixStream::connect(&sock).unwrap();
+        let t = Instant::now();
+        let w = c.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let mut w = w;
+            while writeln!(w, "{{\"type\":\"status\"}}").is_ok() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut all = String::new();
+        let _ = c.read_to_string(&mut all);
+        assert!(all.contains("answers alice alone"), "{all}");
+        assert!(t.elapsed() < Duration::from_secs(4), "closed after {:?}", t.elapsed());
+    }
+
+    fn text(r: &mut impl BufRead) -> String {
+        match read_line(r).unwrap() {
+            Line::Text(l) => l,
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -474,9 +701,9 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
         assert!(super::agent(&["Alice".into()]).is_err() && super::agent(&[]).is_err() && super::agent(&["a;b".into()]).is_err());
     }
 
-    /// Never a process outside the person's agent's own unit: here (a test, in no such unit), none.
+    /// Never a process outside the person's agent's own unit: here (a test, in no such unit), no sweep.
     #[test]
     fn the_sweep_is_the_units_alone() {
-        assert_eq!(left_in_unit("/torq-agent@alice.service"), vec![]);
+        assert_eq!(unit_procs("/torq-agent@alice.service"), None);
     }
 }

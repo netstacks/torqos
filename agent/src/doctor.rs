@@ -224,7 +224,7 @@ pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: 
         writeln!(out, "{TAINTED} ({}): it may carry instructions or commands planted there. Read it as advice; do not paste commands from it.]", session.taint_sources().join(", "))?;
         writeln!(err, "doctor: this session read untrusted text ({}): anything proposed from it is marked tainted", session.taint_sources().join(", "))?;
     }
-    writeln!(out, "{}", clean(answer.trim()))?;
+    writeln!(out, "{}", cut_answer(&clean(answer.trim())))?;
     session.save()?;
     if session.proposed.is_empty() {
         writeln!(err, "doctor: proposed nothing, changed nothing")?;
@@ -232,6 +232,19 @@ pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: 
         writeln!(err, "doctor: it applied nothing itself; the broker decides, and a person applies (show system proposals): {}", session.proposed.join("; "))?;
     }
     Ok(session)
+}
+
+/// The most of an answer that is shown (characters): a model can answer megabytes, and the agent
+/// service relays an answer as one line.
+pub const MAX_ANSWER: usize = 64_000;
+
+/// `answer`, at most `MAX_ANSWER` characters of its beginning, and said so if cut.
+fn cut_answer(answer: &str) -> String {
+    let n = answer.chars().count();
+    if n <= MAX_ANSWER {
+        return answer.to_string();
+    }
+    format!("{}\n[… {} characters left out]", answer.chars().take(MAX_ANSWER).collect::<String>(), n - MAX_ANSWER)
 }
 
 /// The proposals the broker's record of session `broker` names that are not in `seen` (then added
@@ -672,5 +685,17 @@ mod tests {
         let (ep, seen) = fake_model(vec![answer("x")]);
         assert!(ask_task(&config(ep, d.path()), &h, &task, true, &mut Vec::new(), &mut Vec::new(), &mut |_| Ok(())).is_err());
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    /// A model that answers 2 MB: the answer is cut to its first `MAX_ANSWER` characters, and says so —
+    /// one line the agent service relays whole.
+    #[test]
+    fn a_long_answer_is_cut() {
+        let h = host("");
+        let (_, out, _, _, _d) = run(vec![answer(&"x".repeat(2_000_000))], &h);
+        assert!(out.len() < MAX_ANSWER + 100, "{}", out.len());
+        assert!(out.starts_with(&"x".repeat(MAX_ANSWER)) && out.trim_end().ends_with(&format!("[… {} characters left out]", 2_000_000 - MAX_ANSWER)));
+        let event = serde_json::to_string(&Event::Say { text: out }).unwrap();
+        assert!(event.len() < torq_wire::agent::MAX_LINE, "fits the service's line");
     }
 }
