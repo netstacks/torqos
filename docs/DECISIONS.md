@@ -1243,6 +1243,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   model, tools or prompts (M5).
 
 ## ADR-042 — The agent's runtime: doctor mode, the model, the tool boundary
+- **Amended by ADR-051 (step 2)** (3, built 2026-11-10): 1 is no longer so — each person's agent is resident, `torq-agent@<person>.service` on its socket, holding their conversation and running one task at a time, each still its own process with its own session and record (`torq ask`); `torq doctor` and `torq agent propose` stay one question, one process.
 - **Status:** proposed (2026-11-07); built (status updated 2026-11-11 from ROADMAP M5): doctor mode (1–5) on `work/w3`, Proposals (6) and Session trust (7) on `work/w5`, all 2026-11-07, in v0.3.x, the taint held by the broker, amended from their design as each says; `tests/doctor.nix`, `tests/agent-proposals.nix` and `tests/commit-at.nix` ran green in the v0.3.2 release run (CI 42667820600). Experimental: doctor is off by default, no real model has been tried. ROADMAP M5's first item, building
   on ADR-005 (local by default), ADR-034, ADR-040 and ADR-041 (the account, `torq agent run`).
 - **Context:** M5 starts with doctor mode: "why is my wifi flaky?" — read logs, hardware and the
@@ -2244,6 +2245,53 @@ vouches for, that only proposes, every change ledgered and undone in one command
   evaluation with its message) and `tests/agents-per-person.nix` (alice, bob, carol's look-alike account,
   dave with none). Not in this step: the resident service, a non-administrator's `torq agent run` (the sudo
   rule stays `wheel`'s), a model key per person (KNOWN-GAPS 6zzk).
+- **As built (step 2, 2026-11-10, `work/agents`; decision 3's service, 4's terminal entry point; amends ADR-042 1):**
+  for each person P in `torq.agent.people`, where doctor mode is on (`torq.agent.service.enable`, on by default;
+  not tied to the desktop: `torq ask` works on a server), `torq-agent@P.socket` listens on
+  `/run/torq-agent/P.sock` (P's, 0600, in a directory root owns) and starts `torq-agent@P.service` the first
+  time P asks. It runs `torq-agent-service P` (agent/, a second program beside `torq-doctor`) as `torq-agent-P`:
+  the launcher's sandbox (ProtectHome, PrivateTmp — the homes, /root and the people's runtime directories out
+  of reach — NoNewPrivileges, no capabilities, its home its own) and systemd's hardening besides
+  (ProtectSystem=strict with its home and its memory writable, ProtectProc=invisible, the kernel's tunables,
+  modules, logs and clock, the control groups, RestrictNamespaces, LockPersonality, MemoryDenyWriteExecute,
+  SystemCallFilter=@system-service, RestrictAddressFamilies AF_UNIX AF_INET AF_INET6 and AF_NETLINK — the
+  doctor's `ip` and `iw` need netlink; not PrivateUsers, under which SO_PEERCRED names every caller nobody):
+  `systemd-analyze security` 1.8. It takes the listening socket as its standard input, and answers a
+  connection only if the kernel (SO_PEERCRED) says it is P — root, or another person through a socket P made
+  world-writable, is told "this is P's agent: it answers P alone". The protocol is torq-wire's `agent`
+  (newline-delimited JSON, an unknown kind or field refused): requests `ask {text, context?}`, `stop`,
+  `status`, `forget`; events `say {text}`, `called {tool}`, `proposed {seq}`, `tainted {why}`, `error {text}`,
+  `done {exit}` (every ask ends with it: the task's exit code, or 1 if refused), `status {running}`,
+  `forgotten`. One task at a time: each `ask` runs TorqOS's harness, `torq-doctor --propose --task`, as its own
+  process group, as the agent, its own session at the broker and record, handed a `Task` on its input (the
+  question, the conversation's recent turns, what was attached); the harness writes its events (each tool
+  called; each taint, after the broker is told; each proposal the broker's record names; the answer, cleaned
+  and headed as a tainted session's is), which the service relays cleaned again and checked (a task cannot say
+  `done`). What is attached taints the session (source `attached`), reported to the broker before the model
+  reads it. **Memory** (decision 9, phase 1): the last 8 turns, each question and answer cut to 2 000
+  characters, one file in the service's StateDirectory `/var/lib/torq-agent-memory/P` (the agent's, 0700) — not
+  the agent's home, which every program run as the agent can write; the launcher hides the directory from
+  `torq agent run`'s programs; an answer is kept only from a session that read nothing untrusted, so memory
+  never carries a taint into a later session; a file over 256 KiB, or reached through a link, is no memory;
+  `forget` (`torq ask --forget`) erases it. `stop` (and a client gone) kills the task's process group, then
+  whatever of it is left in the unit's own control group (a tool's program has a group of its own) — never a
+  process elsewhere. **`torq ask "<question>"`** (torqcli; like `torq doctor`, an entry before the grammar)
+  connects to the caller's own socket, streams the answer to standard output with `Proposed #n` for each
+  proposal, the steps to standard error; on a terminal, Ctrl-C is read as a key and sends `stop`. A person with
+  no agent account, or on a machine without the service, is told so plainly. **Sharing beside it** (KNOWN-GAPS
+  6zg): `torq agent run --share` asks the launcher, as root (`torq-agent-run --hold-frozen`, under the same
+  sudo rule), to freeze `torq-agent@P.service` (systemd's freezer, checked `FreezerState=frozen`) and to refuse
+  if any process of the agent's runs outside that unit's control group (another `torq agent run`); it says
+  `frozen`, torqcli walks and sets the ACLs as the person, and the launcher thaws when its input ends — torqcli
+  done, failed or killed. The rejected alternative: a link-proof walk (openat with O_NOFOLLOW from the
+  directory's descriptor down, `fsetxattr` on each opened file) — it would make the walk itself safe against a
+  running agent, but setfacl has no such mode, so it means writing ACLs' xattr format in torqcli, more code
+  than freezing, and still leaves a session's programs running beside a share it did not ask for. Tests:
+  torq-wire (the bytes, unknown kinds and fields refused, what a task may say), agent (the service: SO_PEERCRED,
+  relay and cleaning, one at a time, stop of the whole group, a gone asker, memory's bounds and taint; the
+  harness: events in order, memory as messages, the attached text tainting first), torqcli (`torq ask`'s
+  arguments, how events are shown) and `tests/agent-service.nix`. Not in this step: the panel's window
+  (`torq-agent-ui`), the Agent page, `torq-mcp`, an idle exit, a key per person (KNOWN-GAPS 6zzl).
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

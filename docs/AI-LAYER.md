@@ -24,7 +24,9 @@ the map names it and its uid is no person's.
 - **`torq agent run`** runs the caller's own agent (the account of sudo's `SUDO_UID`, which the launcher's rule never
   lets a caller set), never one the caller
   names; a person with none is told so. A restore from a backup into any agent's folder is
-  refused.
+  refused. With the agent's service running, `--share` holds it still (systemd's freezer) through the walk.
+- **Its service** (ADR-051 3, step 2): `torq-agent@<person>.service`, reached only by that person (`torq ask
+  "<question>"`), keeps their conversation in its own state directory, which no other program of the agent's sees.
 
 ## What it is for
 
@@ -45,7 +47,8 @@ owner's shell does not have; in a terminal it is torqcli's prompt, the same text
 
 | Component | Privilege | Language | Role |
 |---|---|---|---|
-| `torq-doctor` (`agent/`), as the person's `torq-agent-<person>` | unprivileged, sandboxed (`torq agent run`) | Rust | Talks to the model (OpenAI-compatible chat API), calls its read-only tools; later *proposes* changes (ADR-042) |
+| `torq-doctor` (`agent/`), as the person's `torq-agent-<person>` | unprivileged, sandboxed (`torq agent run`, or the agent service) | Rust | TorqOS's harness: talks to the model (OpenAI-compatible chat API), calls its read-only tools, *proposes* changes (ADR-042); one process per question or task |
+| `torq-agent@<person>.service` (`agent/`: `torq-agent-service`), as `torq-agent-<person>` | unprivileged, the launcher's sandbox and systemd's hardening; socket-activated, its socket the person's alone, SO_PEERCRED checked | Rust | The person's agent, resident (ADR-051 3, step 2): holds their conversation (its last turns), runs one task at a time as its own `torq-doctor --propose --task`, streams its events to `torq ask` (later the panel's window); `stop` ends a task |
 | MCP tool servers (`torq-mcp`) | unprivileged, read-mostly | Rust | Typed access per subsystem |
 | `torq-broker` | privileged (root, minimal) | Rust | Only writer of the config repo; tiers, commits, rebuild, rollback, ledger |
 | Model runtime | unprivileged (DynamicUser) | llama.cpp (`llama-server`, a unix socket) | Local inference; or a remote endpoint as a setting (ADR-042) |

@@ -679,8 +679,13 @@ Its §5 lists claims without a test.
      shared project is); a review of what changed there (`git status`, `.git/hooks`) after a session
      is the defence, for now. The agent can also make its own files there unreadable to the person
      (it owns them); the person can still remove them.
-   - **The agent as a service** (M5) runs as the same account: `torq agent run --share` refuses while
-     any agent process runs, so a running agent service will block sharing until that is designed.
+   - ~~**The agent as a service** (M5) runs as the same account: `torq agent run --share` refuses while
+     any agent process runs, so a running agent service will block sharing until that is designed.~~
+     Fixed (ADR-051 3, step 2, 2026-11-10, `tests/agent-service.nix`): the launcher, as root
+     (`--hold-frozen`), freezes the person's `torq-agent@<person>.service` with systemd's freezer for the
+     walk and thaws it after, however the walk ends; any other process of the agent's (another `torq agent
+     run`) still refuses the share. A service that starts during the walk has every home hidden. What is
+     left is 6zzl's.
    - **The agent's own `commit`** (it proposes and stops) is tested in torqcli's unit tests, not in a
      VM: the VM tests' configurations are stubs torqcli cannot evaluate.
    - **Stale proposals stay listed.** A proposal prepared against an older configuration that would now do
@@ -1124,3 +1129,30 @@ Its §5 lists claims without a test.
      too, but asks the administrator's password — who is then root (above). `/proc/self/loginuid` is no
      better: unset for a person reached by su or runuser from a root shell, and the first person's after
      `su - <another>`.
+
+6zzl. **The agent service (ADR-051 3, step 2, built 2026-11-10, `tests/agent-service.nix`).** Open:
+   - **The freeze is held for the walk only.** A service the person's socket starts during the walk is not
+     frozen; it has every home hidden (ProtectHome), so it cannot reach the directory. After the thaw, the
+     service and the `torq agent run` session run side by side as the same account, and the service could
+     reach the shared directory through the session's `/proc/<pid>/root` (same uid): the share is that
+     account's, so this is the share, not a way around it.
+   - **A frozen task's clock runs on.** A tool's 30 s, the propose step's 30 minutes and the model's 600 s
+     count the time the service was frozen; a task in the middle of one while a large directory is shared
+     may be stopped as timed out after the thaw (failing the task, never doing more).
+   - **The memory keeps the person's questions** (the last 8, each at most 2 000 characters) and only
+     untainted answers, in `/var/lib/torq-agent-memory/<person>` — the agent's, written by its service alone and
+     hidden from `torq agent run`'s programs; root reads it. `torq ask --forget` erases it; showing it is the
+     Agent page's (ADR-051 9).
+   - **`torq ask` is every listed person's, administrator or not**: it reaches the service over its socket,
+     no sudo involved. What the agent can do is propose; a person in `torq.agent.people` has had an agent
+     account since step 1 — this is the first way a non-administrator reaches it.
+   - **Netlink is allowed** (`RestrictAddressFamilies` has `AF_NETLINK` beside `AF_UNIX`, `AF_INET`,
+     `AF_INET6`): the doctor's `ip` and `iw` read the interfaces through it. `PrivateDevices` is off (rfkill,
+     lsblk), and `PrivateUsers` must stay off (SO_PEERCRED would name every caller nobody). systemd-analyze
+     security: 1.8.
+   - **Resident once started**: it does not exit when idle (it holds no model; the doctor's process is per
+     task). It ends with the machine or `systemctl stop`.
+   - **The service needs doctor mode on** (its harness and model are the doctor's): without it there is no
+     socket, and `torq ask` says so.
+   - **The VM test's proposal is made by a stand-in torqcli** (its commit evaluates the configuration, which
+     a VM test cannot: 6zn's); the doctor, its session, the broker and the ledger are the real ones.

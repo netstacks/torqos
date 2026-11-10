@@ -538,6 +538,12 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `configure exclusive` | enter it with the shared candidate held by this session alone, until it leaves: your other sessions read it, cannot change or commit it, and are told which session holds it |
 | `help [<command> \| <words>]` | (both modes) the commands; one command; or a search of commands and settings |
 
+Beside the shell, each its own entry before the grammar (as `torq doctor`, `torq agent run` and `torq break-glass` are):
+
+| Command | Does |
+|---|---|
+| `torq ask "<question>"` | ask your own agent, resident (`torq-agent@<you>.service`, ADR-051 3 and 4): the answer streamed on standard output, what it read and called on standard error, `Proposed #<n>` for each change it proposes (a person applies it: `request system apply <n>`). Ctrl-C stops it. It remembers the conversation (its last turns); `torq ask --forget` erases that. A person with no agent account, or on a machine without the service (doctor mode off), is told so |
+
 (`save` / `load`: built, S5; `configure exclusive` and `commit at`: built, above.)
 
 As built (3e, 4a, 4e): all of the above. The candidate holds the software too (4e): `request system

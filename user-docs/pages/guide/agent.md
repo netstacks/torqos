@@ -40,6 +40,23 @@ alice@machine:~$ torq agent propose "install htop for me"   # may also propose o
 Only an administrator can run them. Both run as your agent, in a sandbox, for that one question.
 `torq agent propose` ends with a proposal number, or nothing.
 
+## Ask your agent
+
+Where doctor mode is on, your agent is resident: it keeps your conversation (its last few turns) and
+answers from your terminal, on a server as on a desktop.
+
+```text
+alice@torq> torq ask "why is my wifi flaky?"
+alice@torq> torq ask "install htop for me"            # ends with "Proposed #12" if it proposes
+alice@torq> torq ask --forget                         # it forgets the conversation
+```
+
+The answer comes as it is written; what the agent read and called is shown on the way (standard
+error), and each change it proposes by its number. **Ctrl-C** stops it — the whole task. One task at
+a time. Only you can reach your agent: its socket is yours, and the agent answers no one else, root
+included. What it remembers is kept where no program run as your agent (`torq agent run`) can read
+or change it, and an answer from a session that read untrusted text is not kept.
+
 ## What it read: taint
 
 Logs, device names, the ledger and configuration values are text anyone could have written, and a

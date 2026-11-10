@@ -295,6 +295,10 @@ acceptance tests, each a VM test.
       **Step 1 built** (2026-11-10, `work/agents`, `tests/agents-per-person.nix`): one agent account per person,
       `torq-agent-<person>` (`torq.agent.people`), the broker's map of whom each serves, each agent's packages
       its own person's only, trust and sessions per agent, `torq agent run` as the caller's own agent.
+      **Step 2 built** (2026-11-10, `work/agents`, `tests/agent-service.nix`): each person's agent resident,
+      `torq-agent@<person>.service` on its own socket (SO_PEERCRED checked), its conversation remembered, one task at a
+      time as `torq-doctor --propose --task`; `torq ask "<question>"` (Ctrl-C stops it); `torq agent run --share`
+      beside it, the service frozen through the walk (KNOWN-GAPS 6zg).
 - [ ] **The harness's tool catalogue** (ADR-051 9, phase 2; its own ADR first): apps and packages, settings
       explained and proposed, files written in shared folders, the web (tainting), a workbench, reminders and
       scheduled tasks, notifications; outside MCP servers as pinned, tiered tree settings.
