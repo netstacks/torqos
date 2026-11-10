@@ -1424,8 +1424,9 @@ configuration it was not prepared for.
   is not approved for another); so is one whose approver no longer has an account, is not a person's,
   or is no longer an administrator, unless the change is wholly their own folder (as the socket reads
   a caller). Its approver may cancel their own; anyone else's is an administrator's to cancel.
-- **One at a time**, refused rather than queued: two schedules prepared on one configuration cannot
-  both land (the first moves HEAD, so the second is stale by construction); refusing the second when
+- **One at a time**, refused rather than queued: of two schedules prepared on one configuration, the second
+  could land only if, on the HEAD the first made, it still did exactly what was shown (ADR-052: amended; it
+  was "stale by construction" before), which one of the same setting never does; refusing the second when
   it is made tells the person while they are there, instead of at night in the ledger.
 - **Not with `commit confirmed`:** nobody would be there to confirm it.
 
@@ -1990,3 +1991,59 @@ off many times a day.
 - **Not:** tunnels in the configuration tree for a person (a server's are `services autossh`, already there);
   a VPN; setting up a browser's proxy (the person's own, in their profile); accepting a host key from the
   applet.
+
+## ADR-052 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
+
+**Status:** accepted and built, 2026-11-10 (the owner chose it: re-check at approval). ADR-051's proposals
+from TorqOS's own agent will rely on it: an agent's proposal waits for a person, and the configuration moves
+meanwhile.
+**Context:** `tests/desktop.nix` failed at "a system change from the desktop is approved in COSMIC's dialog":
+`refused: the configuration has changed since this change was prepared`. The panel applet saves the person's
+COSMIC settings by itself ("save my desktop", `cli/src/desktop.rs`): at login, when the ledger changes and every
+15 minutes, each save a ledgered commit to `users/<name>/desktop.json`. A change waiting for approval was
+prepared on the commit before, and apply refused any proposal whose base was not HEAD. So most proposals,
+the agent's above all, would become unapprovable before a person reached them. The refusal was there for the
+audit of M3's H1: a diff's effect depends on HEAD (a copy can be nothing to a file at one commit and its whole
+content at the next), and a proposal must be judged on what it does, not on what was recorded.
+- **Decision:** when a waiting proposal with a base is applied and HEAD is no longer its base, the broker:
+  1. applies its recorded diff to the current head in a scratch index and computes what it does there, by the
+     function `propose` uses (`Repo::proposal_effect`), not a second implementation;
+  2. goes ahead only if that effect is byte for byte the one recorded and shown (its `effect_sha256`), and then,
+     as every apply does, the files it touches and its tier are the ones recorded and gated on (H1's check), the
+     user-tier files are checked as data, and an agent's proposal passes the agent's list as it is now. It builds
+     on the current head, and the `applied` entry says `rechecked_on: <head>`;
+  3. otherwise refuses: `refused: proposal <n> would now do something different from what was shown: the
+     configuration has changed since this change was prepared (prepared on …, now at …); prepare it again from
+     the current configuration`. A diff that no longer applies is refused the same way.
+
+  One function (`recheck_on_head`, `broker/src/lib.rs`) on every path that applies a waiting proposal:
+  `apply_locked` holds it, and a person's `apply`, a `commit confirmed` (`apply --confirm`), session trust's
+  automatic apply (`session::apply_trusted`) and a scheduled `commit at`'s run (`at::Scheduler::run`) all go
+  through `apply_locked`. Scheduling a `commit at` takes the same re-check at once (its entry says
+  `rechecked_on` too), and its run no longer refuses a moved head by itself: apply judges it, and a refusal
+  of apply's is ledgered as the schedule's `apply_refused`. `refuse_unledgered_head` is unchanged: nothing is
+  applied on a HEAD the ledger did not make. `propose --base` is still refused when stale (the person, or the
+  agent, prepares on what they see).
+- **Why it keeps H1:** the effect is what `git diff --cached HEAD` writes after the diff, so equal bytes mean the
+  same files changed, each from the same blob (the `index` line) by the same hunks, to the same result: the
+  change the person approved, on a configuration whose other commits were each ledgered and approved in turn.
+  The audit's copy is nothing to the other list at the base and its content at the new head: a different
+  effect, refused (and H1's files-and-tier check would refuse it too). A base-less proposal (torq-broker by root
+  only, as KNOWN-GAPS 6g) is not re-checked by effect: H1's check holds it, as before.
+- **Known:** the `index` line's blob ids are abbreviated as git chooses; a repository grown past a size where git
+  writes a longer abbreviation, or a new ambiguous prefix, makes an unchanged change's effect differ and so be
+  refused — the safe way. Any commit to the same file, even far from the change, changes that line, so it
+  refuses too (the test's case (c)): the change is prepared again.
+- **Tests:** `broker/tests/trust_loop.rs` — another file moved HEAD: applied, `rechecked_on` the new head, built on
+  it (`proposal_whose_base_moved_by_another_file_applies_rechecked`); the audit's copy with a base: refused by the
+  re-check (`the_audits_copy_with_a_base_is_refused_by_the_recheck`); the same file changed so the diff still
+  applies, same files and tier: refused (`proposal_whose_file_changed_since_is_refused`); re-checked, but its tier
+  or files not the ones gated on: refused (`a_rechecked_proposal_is_still_held_to_its_tier_and_files`); an agent's
+  re-judged by its narrowed list (`an_agents_rechecked_proposal_is_judged_by_its_list_on_the_new_head`); a
+  `commit at` applied and refused at its run, and re-checked when scheduled. `broker/tests/sessions.rs`: trust's
+  apply, both ways. VM: `tests/desktop.nix` waits for the applet's desktop save to land between propose and
+  approval, and the approval then applies with `rechecked_on`; `tests/commit-at.nix`, the refusal's words.
+  Mutation-checked: the effect comparison made always true fails five tests; H1's check removed fails three.
+- **Not:** rebasing a change whose effect differs (merging, or applying "what it would do now") — a person is
+  never asked to trust what they were not shown; applying on an unledgered head; re-checking a base-less one by
+  effect.
