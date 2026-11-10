@@ -1349,7 +1349,7 @@ fn an_agents_rechecked_proposal_is_judged_by_its_list_on_the_new_head() {
     let o = b.propose(&write_diff(dir.path(), "nl.diff", NIGHT_LIGHT), "night", Actor::User, false).unwrap();
     b.apply(o.body.seq, "casey", false).unwrap();
     // The owner narrowed the agent's list meanwhile.
-    let narrowed = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_agent_limits(&torq_broker::agent::Limits::default());
+    let narrowed = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_agent_limits(&torq_broker::agent::Limits { agents: Default::default(), settings: vec![] });
     let err = format!("{:#}", narrowed.apply(p.body.seq, "casey", true).unwrap_err());
     assert!(err.contains("the agent's limits no longer allow this"), "{err}");
     assert!(!b.repo.root().join("users/casey/packages.json").exists());
