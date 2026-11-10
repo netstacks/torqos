@@ -239,12 +239,8 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--diff".into(), diff.context("a proposal needs its diff, in the request")?.into()]);
         }
         // A session is its agent account's own: no other agent starts, reports into or cites it.
-        "session-start" | "session-taint" => {
-            if who.agent_for.is_none() {
-                bail!("a session is an agent's");
-            }
-            a.extend(["--agent".into(), who.name.clone()]);
-        }
+        // (Anyone else's is refused by the gate: a session is an agent's.)
+        "session-start" | "session-taint" if who.agent_for.is_some() => a.extend(["--agent".into(), who.name.clone()]),
         "password" => {
             a.extend(["--hash-file".into(), hash.context("a password needs its hash, in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
@@ -382,7 +378,8 @@ mod tests {
         // Each agent's identity is its own account, as the kernel says.
         let s = with_identity(&["session-start".into()], "session-start", &who(991), None, None, None).unwrap();
         assert_eq!(s, ["session-start", "--agent", "torq-agent-sam"]);
-        assert!(with_identity(&["session-start".into()], "session-start", &who(1000), None, None, None).is_err());
+        assert_eq!(with_identity(&["session-start".into()], "session-start", &who(1000), None, None, None).unwrap(), ["session-start"], "a person names no agent");
+        assert!(matches!(gate(&who(1000), "session-start", None, None), Gate::Refused(_)));
         assert!(check_args(&["propose".into(), "--agent=torq-agent-viper".into()]).is_err(), "no caller names its agent");
     }
 
