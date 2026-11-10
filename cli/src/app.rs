@@ -957,11 +957,11 @@ pub fn stale_parts(old: &std::path::Path, new: &std::path::Path) -> Vec<&'static
     LIVE_PARTS.iter().filter(|(_, programs)| programs.iter().any(|b| of(old, b) != of(new, b))).map(|(part, _)| *part).collect()
 }
 
-/// End each of these programs of this person's, by its exact command line: COSMIC's session starts it again.
-pub fn restart_parts(parts: &[&str]) {
+/// This person's processes, each with its command line when that is one word, as COSMIC's session starts its parts.
+fn my_parts() -> Vec<(i32, String)> {
     let me = rustix::process::geteuid().as_raw();
-    let Ok(procs) = std::fs::read_dir("/proc") else { return };
-    let running: Vec<(i32, String)> = procs
+    let Ok(procs) = std::fs::read_dir("/proc") else { return vec![] };
+    procs
         .flatten()
         .filter_map(|e| {
             use std::os::unix::fs::MetadataExt as _;
@@ -972,7 +972,12 @@ pub fn restart_parts(parts: &[&str]) {
             let word = cmdline.strip_suffix(&[0])?;
             (!word.contains(&0)).then(|| Some((pid, String::from_utf8_lossy(word).into_owned())))?
         })
-        .collect();
+        .collect()
+}
+
+/// End each of these programs of this person's, by its exact command line: COSMIC's session starts it again.
+pub fn restart_parts(parts: &[&str]) {
+    let running = my_parts();
     for part in parts {
         for (pid, _) in running.iter().filter(|(_, c)| c == part) {
             if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
@@ -1391,13 +1396,39 @@ mod app_tests {
     }
 }
 
-/// polkit's process, to notice when it is replaced (a switch that changes it restarts it): COSMIC's agent
-/// registered with the old one, and does not register again by itself.
-pub fn polkit_pid() -> Option<i32> {
-    std::fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
+/// When a process started, in clock ticks since boot: the 22nd field of its `/proc/<pid>/stat`, counted after
+/// the command's name, which may itself hold spaces and parentheses (so after its last `)`).
+fn start_time(stat: &str) -> Option<u64> {
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+}
+
+fn started(pid: i32) -> Option<u64> {
+    start_time(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// polkit's start, if this person's approval dialog (COSMIC's agent, `cosmic-osd`) is older than the polkit now
+/// running: it registered with one that has gone (a switch that changes polkit restarts it), does not register
+/// again by itself, and no approval can be asked of the person until it starts again. Read afresh each time, from
+/// the processes themselves, so an applet that starts after polkit was replaced still sees it.
+pub fn approval_agent_outlived() -> Option<u64> {
+    let polkit = std::fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
         let pid: i32 = e.file_name().to_str()?.parse().ok()?;
         (std::fs::read_to_string(e.path().join("comm")).ok()?.trim() == "polkitd").then_some(pid)
-    })
+    })?;
+    let polkit = started(polkit)?;
+    let agent = my_parts().into_iter().filter(|(_, c)| c == "cosmic-osd").filter_map(|(pid, _)| started(pid)).min()?;
+    (agent < polkit).then_some(polkit)
+}
+
+#[cfg(test)]
+#[test]
+fn a_start_time_is_read_after_the_commands_name() {
+    let stat = |comm: &str| format!("4242 ({comm}) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 12345678 300");
+    assert_eq!(start_time(&stat("polkitd")), Some(987654));
+    // A name with a space and a parenthesis of its own does not shift the fields.
+    assert_eq!(start_time(&stat("a) b (c")), Some(987654));
+    assert_eq!(start_time("4242 (cut"), None);
+    assert_eq!(start_time("4242 (short) S 1 2"), None);
 }
 
 /// Start COSMIC's approval dialog again, so that it registers with polkit.

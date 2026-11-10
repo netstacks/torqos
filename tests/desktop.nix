@@ -136,10 +136,15 @@ pkgs.testers.runNixOSTest {
         machine.succeed("pkill -x pkcheck || true")
         machine.sleep(3)
 
-        # polkit replaced, as a switch that changes it does: the applet has COSMIC's agent register again.
+        # polkit replaced, as a switch that changes it does: the applet has COSMIC's agent register again. Even an
+        # applet that itself starts after the replacement (the panel restarting it, a crash): it reads the processes'
+        # start times, not a pid it remembered (the full check on .52, 2026-11-10, where it did not).
+        machine.succeed("pgrep -u alice -fx torq-applet")
         osd = machine.succeed("pgrep -u alice -fx cosmic-osd").strip()
         machine.succeed("systemctl restart polkit")
-        machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-osd | grep -vx {osd}", timeout=30)
+        machine.succeed("pkill -u alice -fx torq-applet")
+        machine.wait_until_succeeds("pgrep -u alice -fx torq-applet", timeout=60)
+        machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-osd | grep -vx {osd}", timeout=60)
         machine.sleep(3)
 
         # Meanwhile the applet saved alice's desktop (it saves when the ledger changes, and every 15

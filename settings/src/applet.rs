@@ -44,9 +44,11 @@ struct Applet {
     running: Option<PathBuf>,
     /// The system a switch has just left: once it has settled, what it changed is started again.
     switched_from: Option<PathBuf>,
-    /// polkit's process when last looked at, and whether it was replaced at that look.
-    polkit: Option<i32>,
-    polkit_replaced: bool,
+    /// The start of a polkit COSMIC's approval dialog was older than, seen at the last look, and the one acted on
+    /// (the dialog started again): once per polkit, one look after it is seen, so the new one is on the bus. Lost
+    /// with the applet, harmlessly: what is looked at is the processes themselves, never a remembered pid.
+    agent_outlived: Option<u64>,
+    agent_restarted_for: Option<u64>,
     /// The latest change, when last looked at: another (an undo, a pull) may change the person's desktop.
     last_change: Option<String>,
     /// What was last notified, so each state is said once.
@@ -308,15 +310,20 @@ impl cosmic::Application for Applet {
                 });
             }
             Message::Looked => {
-                // polkit replaced (a switch can): COSMIC's agent must register again, or no approval can be asked.
-                // One look later, once the new one is on the bus.
-                if std::mem::take(&mut self.polkit_replaced) {
-                    app::restart_approval_agent();
-                }
-                let polkit = app::polkit_pid();
-                self.polkit_replaced = polkit.is_some() && self.polkit.is_some() && polkit != self.polkit;
-                if polkit.is_some() {
-                    self.polkit = polkit;
+                // polkit replaced (a switch can): COSMIC's agent registered with the old one and must start again,
+                // or no approval can be asked. Seen from the processes' start times, so also when this applet itself
+                // started after the replacement (a panel restarted, a crash, a login while polkit restarts).
+                match app::approval_agent_outlived() {
+                    Some(polkit) if self.agent_restarted_for != Some(polkit) => {
+                        if self.agent_outlived == Some(polkit) {
+                            app::restart_approval_agent();
+                            self.agent_restarted_for = Some(polkit);
+                            self.agent_outlived = None;
+                        } else {
+                            self.agent_outlived = Some(polkit);
+                        }
+                    }
+                    _ => self.agent_outlived = None,
                 }
                 let now = running();
                 if now != self.running {
