@@ -2047,3 +2047,28 @@ content at the next), and a proposal must be judged on what it does, not on what
 - **Not:** rebasing a change whose effect differs (merging, or applying "what it would do now") — a person is
   never asked to trust what they were not shown; applying on an unledgered head; re-checking a base-less one by
   effect.
+## ADR-051 — Touchpad gestures in the compositor, not a gesture daemon
+- **Status:** proposed, 2026-11-10 (the owner: "three finger swipe to see windows and down to see
+  workspace", "four finger pinch to open applications", no three-finger left/right).
+- **Context:** COSMIC's compositor (cosmic-comp 1.11.0) has one touchpad gesture: four fingers left and
+  right (up and down on a vertical layout) switch workspaces. Three-finger swipes are its `TODO`, taken and
+  dropped; pinches go to the app under the pointer. Linux's usual answer, a gesture daemon (libinput-gestures,
+  fusuma, touchegg), reads `/dev/input` itself, so the person joins the `input` group — which reads every
+  input device, the keyboard included. Any program of theirs could then read their password as they type it
+  into the approval prompt or COSMIC's polkit dialog: the one thing ADR-035 says a program in the owner's
+  session does not have.
+- **Decision:** the gestures go into cosmic-comp, carried as a patch in the desktop's overlay
+  (`modules/cosmic/cosmic-comp-gestures.patch`, `modules/desktop.nix`), as ADR-045 3 carries cosmic-settings'.
+  The compositor has the touchpad already; nothing gains access to input. Each gesture runs the command of
+  COSMIC's own system action (its keyboard shortcut's), from `system_actions`:
+  1. **Three fingers up:** the workspace overview (`WorkspaceOverview`). With it open, **three fingers down**
+     closes it (it toggles), so three-finger swipes are the compositor's even while the overview is open.
+  2. **Three fingers down:** the window switcher (`WindowSwitcher`).
+  3. **Four fingers pinched in** to three quarters of where they started: the app library (`AppLibrary`,
+     toggles), once per pinch. Pinches of fewer fingers stay the app's (zoom).
+  4. Three fingers left and right do nothing: four fingers switch workspaces, unchanged.
+- **Consequences:** cosmic-comp is built on the machine, not taken from NixOS's cache (a few minutes, at
+  each COSMIC bump), and the patch is checked again at each. That build is heavy: on the laptop (20 threads,
+  22 GB) its final crate with every core froze the desktop until a reboot (2026-11-10). A desktop machine's own builds want such a limit (`nix settings cores`), open. Offered upstream (cosmic-comp #1799 is a step
+  towards four-finger overview gestures). The gestures fire when recognised; they do not follow the fingers.
+  Not tested in a VM: QEMU has no multi-finger touchpad to drive; checked by hand on the laptop.

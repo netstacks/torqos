@@ -79,7 +79,15 @@ in
       assertion = config.security.polkit.enablePkexecWrapper;
       message = "security.polkit.enablePkexecWrapper = false has no effect on NixOS 26.05: pkexec is installed with polkit.";
     };
-    nixpkgs.overlays = [ (_: _: lib.genAttrs fromCosmic (n: cosmicPkgs.${n})) ];
+    nixpkgs.overlays = [ (_: _: lib.genAttrs fromCosmic (n: cosmicPkgs.${n}) // {
+      # Touchpad gestures COSMIC leaves to do: three fingers up for the workspace overview (down closes it),
+      # down for the window switcher, four fingers pinched in for the app library. In the compositor, which
+      # has the touchpad already, so no program needs the `input` group (it reads every keyboard too, the
+      # owner's password with it). Built here, not taken from the cache; checked again at each COSMIC bump.
+      cosmic-comp = cosmicPkgs.cosmic-comp.overrideAttrs (old: {
+        patches = (old.patches or [ ]) ++ [ ./cosmic/cosmic-comp-gestures.patch ];
+      });
+    }) ];
     # The graphics driver from the same nixpkgs: COSMIC's compositor and the driver it loads must be one Mesa.
     hardware.graphics.package = cosmicPkgs.mesa;
 
