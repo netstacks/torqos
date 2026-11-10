@@ -23,6 +23,8 @@ pkgs.testers.runNixOSTest {
     users.users.bob = { isNormalUser = true; extraGroups = [ "wheel" ]; hashedPasswordFile = lib.mkForce null; hashedPassword = hash; };
     users.users.carol = { isNormalUser = true; extraGroups = [ "wheel" ]; hashedPasswordFile = lib.mkForce null; hashedPassword = hash; };
     users.users.dave = { isNormalUser = true; extraGroups = [ "wheel" ]; hashedPasswordFile = lib.mkForce null; hashedPassword = hash; };
+    # A person who is not an administrator, with no agent: for who may decline (ADR-051, amended).
+    users.users.erin = { isNormalUser = true; hashedPasswordFile = lib.mkForce null; hashedPassword = hash; };
     torq.agent.people = [ "alice" "bob" ];
     # Named like an agent account, made by hand, not in torq.agent.people: no agent.
     users.users.torq-agent-carol = { isSystemUser = true; group = "torq-agent-carol"; home = "/var/lib/torq-agent-carol"; createHome = true; };
@@ -132,6 +134,34 @@ pkgs.testers.runNixOSTest {
         assert code != 0 and "not allowed to set" in out, (code, out)
         code, out = run_as("bob", f"sudo {launcher} -- id -un")
         assert code == 0 and out.strip() == "torq-agent-bob", (code, out)
+
+    with subtest("decline: the person whose agent proposed it, without a password; an administrator, with one; the agent never"):
+        code, p = propose("torq-agent-alice", "--- a/users/alice/packages.json\n+++ b/users/alice/packages.json\n@@ -1 +1 @@\n-[\"tree\"]\n+[\"tree\", \"cowsay\"]\n", "cowsay for alice")
+        assert code == 0 and p["kind"] == "proposal", (code, p)
+        seq = str(p["seq"])
+        # alice's agent cannot decline (nor withdraw) it; erin, no administrator, cannot; bob, one, only with his password.
+        code, v = ask("torq-agent-alice", {"args": ["--json", "decline", seq]})
+        assert code == 1 and "the agent proposes; a person applies" in v["error"], (code, v)
+        code, v = ask("erin", {"args": ["--json", "decline", seq]})
+        assert code == 1 and "not an administrator" in v["error"], (code, v)
+        code, v = ask("bob", {"args": ["--json", "decline", seq]})
+        assert code == 77, ("bob is asked his password", code, v)
+        # alice: her own agent's proposal, no password.
+        code, d = ask("alice", {"args": ["--json", "decline", seq]})
+        assert code == 0 and d["kind"] == "declined" and d["approved_by"] == "alice" and d["data"]["proposal"] == p["seq"], (code, d)
+        # Never applied after, and no longer waiting.
+        code, v = ask("alice", {"args": ["--json", "apply", seq], "password": PASSWORD})
+        assert code == 1 and "declined" in v["error"], (code, v)
+        machine.fail(f"git -C {repo} show HEAD:users/alice/packages.json | grep -q cowsay")
+        assert "cowsay for alice" not in machine.succeed("su - alice -c 'torqcli show system proposals'")
+        code, v = ask("alice", {"args": ["--json", "decline", seq]})
+        assert code == 1 and "declined already" in v["error"], (code, v)
+        # An administrator declines anyone's, with their password: bob, of alice's agent's next one.
+        code, p2 = propose("torq-agent-alice", "--- a/users/alice/packages.json\n+++ b/users/alice/packages.json\n@@ -1 +1 @@\n-[\"tree\"]\n+[\"tree\", \"sl\"]\n", "sl for alice")
+        assert code == 0, (code, p2)
+        code, d = ask("bob", {"args": ["--json", "decline", str(p2["seq"])], "password": PASSWORD})
+        assert code == 0 and d["kind"] == "declined" and d["approved_by"] == "bob", (code, d)
+        machine.succeed("torq-broker verify")
 
     with subtest("a person with no agent account is told so; a look-alike account is no agent"):
         # dave has no agent account at all: torqcli says so before anything runs.
