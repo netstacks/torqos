@@ -47,3 +47,8 @@ path = "src/agent_applet.rs"
 [[bin]]
 name = "torq-agent-ui"
 path = "src/agent_ui.rs"
+
+# A crash of the person's, offered to their agent when they say so (ADR-051 4, step 4): their own user service.
+[[bin]]
+name = "torq-crash-watch"
+path = "src/crash_watch.rs"

@@ -72,6 +72,10 @@ in
     # Above NixOS's own default (bash, mkDefault), below anything set in the tree.
     users.defaultUserShell = lib.mkOverride 900 pkgs.zsh;
     environment.systemPackages = [ pkgs.fzf ];
+    # The terminal's way to the person's agent (ADR-051 4): `ask <question>` is `torq ask <question>`.
+    # (zsh with noglob: a question's `?` is not a pattern, so `ask why is it slow?` works unquoted.)
+    programs.zsh.shellAliases.ask = lib.mkDefault "noglob torq ask";
+    programs.bash.shellAliases.ask = lib.mkDefault "torq ask";
     # fzf (Ctrl-R, Ctrl-T) in the same colours: matches and the pointer in Torque.
     environment.variables.FZF_DEFAULT_OPTS = lib.mkDefault (lib.concatStringsSep "," [
       "--color=fg:${colour.fg}" "hl:${colour.torque}" "fg+:${colour.fg}" "bg+:${colour.line}" "hl+:${colour.torque}"

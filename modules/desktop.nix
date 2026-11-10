@@ -193,6 +193,32 @@ in
     # home, as their Wi-Fi networks are: never the configuration's, and never the agent's to reach.
     systemd.packages = [ cfg.settingsPackage ];
 
+    # The person's agent from everywhere on the desktop (ADR-051 4, step 4). A crash of theirs, offered to their
+    # agent only when they click the notification: their own user service, with their graphical session, reading
+    # what they may read of the journal; no privilege.
+    systemd.user.services.torq-crash-watch = {
+      description = "Offers your crashes to your agent, when you say so (TorqOS, ADR-051)";
+      wantedBy = [ "graphical-session.target" ];
+      partOf = [ "graphical-session.target" ];
+      after = [ "graphical-session.target" ];
+      serviceConfig = {
+        ExecStart = "${cfg.settingsPackage}/bin/torq-crash-watch";
+        Restart = "on-failure";
+        RestartSec = "5s";
+      };
+    };
+    # COSMIC's launcher: `ask <question>` (pop-launcher reads the system's plugins from /etc/pop-launcher). The
+    # program runs as the person, by absolute path (pop-launcher runs `bin.path` as written when it is one).
+    environment.etc."pop-launcher/plugins/torq-agent/plugin.ron".text = ''
+      (
+          name: "Ask your agent",
+          description: "Syntax: ask <question>\nExample: ask why is my wifi slow?",
+          query: (regex: "^(ask )", help: "ask ", isolate: true, priority: High),
+          bin: (path: "/run/current-system/sw/bin/torq-agent-launcher"),
+          icon: Name("torqos"),
+      )
+    '';
+
     environment.systemPackages = [
       # TorqOS's icons (branding/), for what shows the system's logo (os-release's LOGO).
       config.torq.branding.package
