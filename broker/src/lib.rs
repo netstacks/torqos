@@ -1815,9 +1815,10 @@ impl Broker {
     }
 
     /// Propose a change prepared against the configuration at commit `base`. It is refused now if
-    /// the configuration has moved on since, and again at `apply` if it moves before then: applied
-    /// on top of a newer configuration, a change prepared against an older one can silently undo or
-    /// mix with the commit in between. Without a base, the diff is applied wherever it applies.
+    /// the configuration has moved on since: applied on top of a newer configuration, a change
+    /// prepared against an older one can silently undo or mix with the commit in between. If it moves
+    /// before `apply`, apply re-checks it there and goes ahead only if it does exactly what was shown
+    /// (ADR-053). Without a base, the diff is applied wherever it applies.
     pub fn propose_on(&self, base: Option<&str>, diff_path: &Path, reason: &str, actor: Actor, tainted: bool) -> Result<Entry> {
         self.propose_in(base, diff_path, reason, actor, tainted, None)
     }
@@ -2039,19 +2040,29 @@ impl Broker {
                 bail!("refused: the agent's reason is at most {AGENT_REASON_MAX} characters");
             }
             let entries = self.ledger.read_all()?;
-            // Only those still able to land: an agent's proposal carries its base, and one prepared
-            // against an older configuration can never be applied (the second review).
-            let head = self.repo.head().ok();
+            // Only those still able to land (the second review): on their base, or, since ADR-053, on
+            // a head that has moved on, if they would still do there exactly what was shown — judged as
+            // apply judges it. Not by base alone: the desktop's own saves move the head every quarter of
+            // an hour, and each would empty the count (the review of the desktop line, 2026-11-10).
+            // Newest first, and no further than the limit.
             let done: std::collections::HashSet<u64> = entries
                 .iter()
                 .filter(|e| matches!(e.body.kind.as_str(), "applied" | "apply_failed"))
                 .filter_map(|e| e.body.data["proposal"].as_u64())
                 .collect();
-            let waiting = entries
+            let mut waiting = 0;
+            for p in entries
                 .iter()
+                .rev()
                 .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent" && !done.contains(&p.body.seq))
-                .filter(|p| head.is_some() && p.body.data["base"].as_str() == head.as_deref())
-                .count();
+            {
+                if self.could_still_land(p)? {
+                    waiting += 1;
+                    if waiting >= AGENT_WAITING_MAX {
+                        break;
+                    }
+                }
+            }
             if waiting >= AGENT_WAITING_MAX {
                 bail!("refused: {waiting} of the agent's proposals are waiting for a person already (at most {AGENT_WAITING_MAX})");
             }
@@ -2182,6 +2193,22 @@ impl Broker {
             );
         }
         Ok(Some(head))
+    }
+
+    /// Whether a waiting proposal could still be applied: on its base (or naming none), or re-checked
+    /// on the current head by `recheck_on_head`, the judgement apply makes. One whose diff is not kept
+    /// here cannot be applied either. Writing its diff to judge it is the one error: the caller refuses.
+    fn could_still_land(&self, p: &Entry) -> Result<bool> {
+        let head = self.repo.head().ok();
+        match p.body.data["base"].as_str() {
+            None => return Ok(true),
+            Some(base) if Some(base) == head.as_deref() => return Ok(true),
+            Some(_) => {}
+        }
+        let Ok(diff) = self.proposal_text(p, "diff") else { return Ok(false) };
+        let tmp = DropFile(self.state_dir.join(format!("waiting-{}.diff", p.body.seq)));
+        fs::write(&tmp.0, &diff)?;
+        Ok(self.recheck_on_head(p, &tmp.0).is_ok())
     }
 
     fn find_child(&self, kind: &str, key: &str, seq: u64) -> Result<Option<Entry>> {

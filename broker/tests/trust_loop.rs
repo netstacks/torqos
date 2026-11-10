@@ -2375,7 +2375,7 @@ fn the_agents_list_is_checked_again_at_apply() {
 
 /// The second review of ADR-041: a refusal before the ledger has begun is not entry #1 (setup
 /// would take it for a machine already set up); and the agent's waiting proposals are only those
-/// that can still land — once a person changes anything, the older ones no longer count.
+/// that can still land — once a person's change means they cannot, they no longer count.
 #[test]
 fn the_agents_record_never_blocks_setup_or_the_agent() {
     let (dir, repo) = config_dir();
@@ -2392,11 +2392,37 @@ fn the_agents_record_never_blocks_setup_or_the_agent() {
         b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
     }
     assert!(b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).is_err());
-    // A person's change moves the configuration on: the twenty can no longer land, nor count.
+    // A person writes the same file: the twenty would now do something else, so they can no longer
+    // land (ADR-053's re-check), nor count.
+    let mine = write_diff(dir.path(), "m.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"vim\"]\n");
+    let p = b.propose(&mine, "mine", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    let now = write_diff(dir.path(), "n.diff", "--- a/users/casey/packages.json\n+++ b/users/casey/packages.json\n@@ -1 +1 @@\n-[\"vim\"]\n+[\"vim\", \"htop\"]\n");
+    b.propose_on(Some(&b.repo.head().unwrap()), &now, "htop, now", Actor::Agent, false).unwrap();
+}
+
+/// The review of the desktop line (2026-11-10): since ADR-053 an agent's proposal prepared on an older
+/// head still lands if it does the same there, so it still counts. Another file moving the head (the
+/// desktop's own save, every quarter of an hour) must not empty the count, or the agent could leave
+/// twenty more waiting each time — the burying ADR-041's limit is for.
+#[test]
+fn the_agents_waiting_proposals_still_count_when_another_file_moves_the_head() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
     let mine = write_diff(dir.path(), "m.diff", NIGHT_LIGHT);
     let p = b.propose(&mine, "mine", Actor::User, false).unwrap();
     b.apply(p.body.seq, "casey", false).unwrap();
-    b.propose_on(Some(&b.repo.head().unwrap()), &d, "htop, now", Actor::Agent, false).unwrap();
+    let moved = b.repo.head().unwrap();
+    assert_ne!(moved, head);
+    let e = format!("{:#}", b.propose_on(Some(&moved), &d, "twenty-first", Actor::Agent, false).unwrap_err());
+    assert!(e.contains("waiting for a person already"), "{e}");
+    // They still land: the count was right to hold them.
+    let first = b.ledger.read_all().unwrap().into_iter().find(|e| e.body.kind == "proposal" && e.body.actor == "agent").unwrap();
+    b.apply(first.body.seq, "casey", true).unwrap();
 }
 
 /// ADR-036, the review of adopt: what a repository must be for a new machine to adopt it. A staged

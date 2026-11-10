@@ -2047,6 +2047,15 @@ content at the next), and a proposal must be judged on what it does, not on what
 - **Not:** rebasing a change whose effect differs (merging, or applying "what it would do now") — a person is
   never asked to trust what they were not shown; applying on an unledgered head; re-checking a base-less one by
   effect.
+- **Amended (2026-11-10, the fresh review of the desktop line):** the agent's limit of 20 waiting proposals
+  (ADR-041) counted only those on the current head, because one on an older head could never land. Since this
+  ADR it can, so every desktop save (every 15 minutes) emptied the count, and the agent could leave 20 more
+  waiting each time. Now a proposal counts while it could still land: on its base, or re-checked by effect on
+  the current head by `recheck_on_head`, the same judgement apply makes (`could_still_land`, newest first,
+  stopping at the limit). Tests: `the_agents_waiting_proposals_still_count_when_another_file_moves_the_head`
+  (the review's case); `the_agents_record_never_blocks_setup_or_the_agent` now frees the agent by a person
+  changing the same file. Mutation-checked both ways: counting by base only fails the first, counting every
+  proposal fails the second. Still open: a re-check that fails at apply writes no ledger entry.
 
 ## ADR-054 — Touchpad gestures in the compositor, not a gesture daemon
 - **Status:** accepted and built, 2026-11-10; on the laptop since change #73, the owner: "the touchpad is working great". Asked for (the owner: "three finger swipe to see windows and down to see
