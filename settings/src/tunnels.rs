@@ -16,6 +16,7 @@ use cosmic::prelude::*;
 use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget::{self, icon};
 use std::time::Duration;
+use torq::agent::handoff::{self, About, Handoff};
 use torq::tunnels::{self, State};
 
 fn main() -> cosmic::iced::Result {
@@ -63,6 +64,7 @@ enum Message {
     Save,
     Cancel,
     Edit,
+    AskAgent(Handoff),
     PopupClosed(Id),
     Surface(cosmic::surface::Action<Message>),
 }
@@ -161,11 +163,17 @@ impl Applet {
                         .push(widget::text::body(t.name.clone()).width(Length::Fill))
                         .push(widget::toggler(state.on()).on_toggle(move |on| Message::Switch(name.clone(), on)));
                     let name = t.name.clone();
-                    let row = widget::column::with_capacity(3)
+                    // One that will not come up: the agent can look at it with the person (its name, where it
+                    // goes and its last word attached; ADR-051 4).
+                    let ask = matches!(state, State::Retrying(_) | State::Failed(_)).then(|| About::Tunnel { name: &t.name, destination: &t.destination, state: &line }.handoff());
+                    let mut row = widget::column::with_capacity(4)
                         .spacing(spacing.space_xxs)
                         .push(head)
                         .push(widget::text::caption(line).width(Length::Fill))
                         .push(widget::checkbox(*login).label("Start at login").on_toggle(move |on| Message::AtLogin(name.clone(), on)));
+                    if let Some(h) = ask {
+                        row = row.push(widget::button::text("Ask the agent").on_press(Message::AskAgent(h)));
+                    }
                     col = col.push(row);
                 }
             }
@@ -302,6 +310,11 @@ impl cosmic::Application for Applet {
                 }
                 Err(e) => self.error = Some(format!("{e:#}")),
             },
+            Message::AskAgent(h) => {
+                if let Err(e) = handoff::open_window(&h) {
+                    self.error = Some(format!("{e:#}"));
+                }
+            }
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;

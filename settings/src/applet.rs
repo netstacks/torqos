@@ -79,6 +79,7 @@ enum Message {
     LogOut,
     Restart,
     Open(&'static str),
+    AskAgent(String),
     PopupClosed(Id),
     Surface(cosmic::surface::Action<Message>),
 }
@@ -236,7 +237,11 @@ impl Applet {
                     _ => widget::button::suggested("Log out…").on_press(Message::LogOut),
                 });
             }
-            State::Alarm(a) => col = col.push(line(a.to_string())),
+            State::Alarm(a) => {
+                col = col.push(line(a.to_string()));
+                // The agent can look at it with the person: the alarm attached (ADR-051 4).
+                col = col.push(widget::button::text("Ask the agent").on_press(Message::AskAgent(a.to_string())));
+            }
             State::Waiting(n, tainted) => {
                 open = "proposals";
                 let what = if n == 1 { "A proposal is".to_string() } else { format!("{n} proposals are") };
@@ -422,6 +427,9 @@ impl cosmic::Application for Applet {
             Message::LogOut => app::ask_log_out(),
             Message::Restart => app::ask_restart(),
             Message::Open(page) => app::open_settings(page),
+            Message::AskAgent(alarm) => {
+                let _ = torq::agent::handoff::open_window(&torq::agent::handoff::About::Alarm(&alarm).handoff());
+            }
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
