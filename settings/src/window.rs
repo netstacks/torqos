@@ -1719,6 +1719,9 @@ impl Settings {
                 let mut section = settings::section().title("Waiting for you");
                 for p in list {
                     let mut who = format!("Proposed by {}", p.by);
+                    if p.failed {
+                        who.push_str(" · its apply failed once — apply it again, or decline it");
+                    }
                     if p.tainted {
                         who.push_str(" · ⚠ tainted: made after reading untrusted content");
                     }
@@ -1727,9 +1730,13 @@ impl Settings {
                         icon::from_name("go-next-symbolic").size(16).icon().into(),
                     ])
                     .spacing(spacing.space_s);
-                    // Decline beside it (torqcli shows the proposal and asks first); the row opens what it does.
-                    let decline = widget::button::destructive("Decline…").on_press(Message::Act(At::Read, app::decline_line(p.seq)));
-                    section = section.add(settings::item_row(vec![widget::mouse_area(row).on_press(Message::OpenProposal(p.seq)).into(), decline.into()]).spacing(spacing.space_s).align_y(Alignment::Center));
+                    // Decline beside one of the person's own agent's (torqcli shows the proposal and asks first);
+                    // anyone else's an administrator declines in torqcli. The row opens what it does.
+                    let mut cells: Vec<Element<'_, Message>> = vec![widget::mouse_area(row).on_press(Message::OpenProposal(p.seq)).into()];
+                    if p.yours {
+                        cells.push(widget::button::destructive("Decline…").on_press(Message::Act(At::Read, app::decline_line(p.seq))).into());
+                    }
+                    section = section.add(settings::item_row(cells).spacing(spacing.space_s).align_y(Alignment::Center));
                 }
                 page = page.push(section);
             }
@@ -1746,19 +1753,22 @@ impl Settings {
             if let Some(p) = list.iter().find(|p| p.seq == seq) {
                 page = page.push(widget::text::title3(p.reason.clone()));
                 let mut who = format!("#{} · proposed by {}", p.seq, p.by);
+                if p.failed {
+                    who.push_str(" · its apply failed once — apply it again, or decline it");
+                }
                 if p.tainted {
                     who.push_str(" · ⚠ tainted: made after reading untrusted content");
                 }
                 page = page.push(widget::text::caption(who));
             }
         }
-        page = page.push(
-            widget::row::with_capacity(2)
-                .spacing(spacing.space_xs)
-                .push(widget::button::suggested("Review and apply…").on_press(Message::Act(At::Read, format!("request system apply {seq}"))))
-                // Turned down: never applied after. torqcli shows it and asks first.
-                .push(widget::button::destructive("Decline…").on_press(Message::Act(At::Read, app::decline_line(seq)))),
-        );
+        // Decline only on one of the person's own agent's (as on the list); torqcli shows it and asks first.
+        let yours = matches!(&self.proposals, Loaded::Got(list) if list.iter().any(|p| p.seq == seq && p.yours));
+        let mut buttons = widget::row::with_capacity(2).spacing(spacing.space_xs).push(widget::button::suggested("Review and apply…").on_press(Message::Act(At::Read, format!("request system apply {seq}"))));
+        if yours {
+            buttons = buttons.push(widget::button::destructive("Decline…").on_press(Message::Act(At::Read, app::decline_line(seq))));
+        }
+        page = page.push(buttons);
         page = page.push(widget::text::heading("What it does"));
         page.push(self.diff(&format!("proposal {seq}"))).into()
     }

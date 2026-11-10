@@ -14,7 +14,9 @@
 use std::io::BufRead;
 use std::os::unix::fs::MetadataExt;
 use torq::agent::client::Client;
-use torq::agent::crash::{self, Crash};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use torq::agent::crash::{self, Crash, Offers};
 use torq::agent::handoff;
 
 /// The notification's action that asks the agent.
@@ -29,6 +31,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let offers = Arc::new(Mutex::new(Offers::default()));
     loop {
         match crash::watch_command().stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() {
             Ok(mut journal) => {
@@ -36,7 +39,7 @@ fn main() {
                     for line in std::io::BufReader::new(out).lines() {
                         let Ok(line) = line else { break };
                         if let Some(c) = crash::crash_of(&line, uid) {
-                            offer(c);
+                            offer(c, uid, &offers);
                         }
                     }
                 }
@@ -49,37 +52,49 @@ fn main() {
     }
 }
 
-/// The notification, on a thread of its own that waits for it to be clicked or closed. Only to a person who
-/// has an agent here: to anyone else it would offer nothing.
-fn offer(c: Crash) {
+/// The notification, on a thread of its own that waits for it to be clicked, closed or expire. Only to a
+/// person who has an agent here (to anyone else it would offer nothing), and bounded (`Offers`).
+fn offer(c: Crash, uid: u32, offers: &Arc<Mutex<Offers>>) {
     if Client::mine().is_err() {
         return;
     }
+    let admitted = offers.lock().map(|mut o| o.admit(&c, Instant::now())).unwrap_or(false);
+    if !admitted {
+        eprintln!("torq-crash-watch: not offered again yet: {} ({}, pid {})", c.program, c.signal, c.pid);
+        return;
+    }
     eprintln!("torq-crash-watch: offered: {} ({}, pid {})", c.program, c.signal, c.pid);
+    let offers = offers.clone();
     std::thread::spawn(move || {
-        if let Err(e) = notify(&c) {
+        if let Err(e) = notify(&c, uid) {
             eprintln!("torq-crash-watch: the notification: {e}");
+        }
+        if let Ok(mut o) = offers.lock() {
+            o.closed();
         }
     });
 }
 
-fn notify(c: &Crash) -> zbus::Result<()> {
+fn notify(c: &Crash, uid: u32) -> zbus::Result<()> {
     let (summary, body) = c.notification();
     let connection = zbus::blocking::Connection::session()?;
     let bus = zbus::blocking::Proxy::new(&connection, "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications")?;
     // Only the notification daemon's own signals: the proxy listens to the name's owner.
     let signals = bus.receive_all_signals()?;
     let hints = std::collections::HashMap::<&str, zbus::zvariant::Value>::new();
-    let id: u32 = bus.call("Notify", &("TorqOS", 0u32, "torqos", summary.as_str(), body.as_str(), vec!["default", "Ask the agent about this crash", ASK, "Ask the agent about this crash"], hints, 0i32))?;
+    let expires = i32::try_from(crash::EXPIRES.as_millis()).unwrap_or(i32::MAX);
+    let id: u32 = bus.call("Notify", &("TorqOS", 0u32, "torqos", summary.as_str(), body.as_str(), vec![ASK, "Ask the agent about this crash"], hints, expires))?;
+    let deadline = Instant::now() + crash::EXPIRES + std::time::Duration::from_secs(30);
     for signal in signals {
         let header = signal.header();
         let member = header.member().map(|m| m.to_string()).unwrap_or_default();
         if member == "ActionInvoked" {
-            let (of, _action): (u32, String) = signal.body().deserialize()?;
-            if of == id {
+            let (of, action): (u32, String) = signal.body().deserialize()?;
+            // Its own action on its own notification: nothing else asks.
+            if of == id && action == ASK {
                 // The person said so: only now is the crash read, and attached.
                 eprintln!("torq-crash-watch: asked about pid {}", c.pid);
-                if let Err(e) = handoff::open_window(&c.handoff(c.info().as_deref())) {
+                if let Err(e) = handoff::open_window(&c.handoff(c.info(uid).as_deref())) {
                     eprintln!("torq-crash-watch: opening the agent's window: {e:#}");
                 }
                 break;
@@ -89,6 +104,10 @@ fn notify(c: &Crash) -> zbus::Result<()> {
             if of == id {
                 break;
             }
+        }
+        // A daemon that never says it closed: given up on after its expiry (checked as signals come).
+        if Instant::now() > deadline {
+            break;
         }
     }
     Ok(())

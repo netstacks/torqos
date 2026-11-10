@@ -178,7 +178,10 @@ fn spawn(exec: &str, token: Option<String>) {
     if let Some(t) = token {
         c.env("XDG_ACTIVATION_TOKEN", &t).env("DESKTOP_STARTUP_ID", &t);
     }
-    let _ = c.spawn();
+    // Waited for on a thread of its own: it leaves no zombie behind.
+    if let Ok(mut child) = c.spawn() {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 impl cosmic::Application for Applet {

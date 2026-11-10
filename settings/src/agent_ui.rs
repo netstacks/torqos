@@ -141,7 +141,7 @@ impl Window {
     }
 
     /// A question handed over in a file (`--ask <file>`): put in the box with what it is about attached, for
-    /// the person to read and ask — or asked at once, when the person already did (the launcher).
+    /// the person to read and ask: nothing is sent by itself.
     fn handed(&mut self, files: &[String]) -> Task<cosmic::Action<Message>> {
         let Some(file) = files.first() else { return Task::none() };
         match handoff::take(std::path::Path::new(file)) {
@@ -149,9 +149,6 @@ impl Window {
                 self.question = h.question;
                 self.attached = h.context;
                 self.note = None;
-                if h.ask_now {
-                    return cosmic::Application::update(self, Message::Ask);
-                }
             }
             Err(e) => self.note = Some((torq::app::said(&e), true)),
         }
