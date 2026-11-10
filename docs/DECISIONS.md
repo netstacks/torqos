@@ -2157,7 +2157,33 @@ vouches for, that only proposes, every change ledgered and undone in one command
      page and ended there). Building an application (ADR-034 b) is a shared folder plus a user-tier install. The
      agent never gets the person's browser, keyring, mail or SSH keys; a task that needs one is handed back as a
      step for the person.
-- **Settled by the owner (2026-11-10):** one agent account per person (3); the agent's applet in the default
+  9. **TorqOS is the harness** (the owner, 2026-11-10: "I want TorqOS to BE a harness … AI first-class features
+     with subagents, UIs … those can come after the initial setup"). The resident agent is not a model behind a
+     chat box: it is TorqOS's own harness, the program that runs the model, offers it tools, keeps its memory and
+     context, starts its subagents and shows all of it — grown from `torq-doctor` (`agent/`, ADR-042). That is
+     what makes TorqOS's limits real rather than advice: TorqOS chooses which tools exist and checks every call
+     (ADR-042 5), the broker sees every read (so taint is known, not guessed, and session trust can apply), a
+     subagent is a process with its own record and limits, and the UI shows exactly what each did. What stays
+     true as it grows: the code that reads the model's output has no way to apply anything (ADR-042 2, the
+     broker's allow-list and the person's approval are the only way in); every tool is in a closed, typed set
+     with its tier (AI-LAYER.md: observe, user, system, forbidden), and a tool added later taints unless it is
+     said not to; it runs unprivileged as the person's agent account. Built in phases, each its own ADR before
+     it is built:
+     - **Phase 1, the initial setup (this ADR):** the account per person, the resident service, the Agent page,
+       the model and its key, the applet and window, the entry points of 4, `torq-mcp`, Claude Code as a tool,
+       the screen grant — with the tools that exist (the doctor's, `propose_change`) and the few that make it
+       useful at once: its memory (notes in its own home, shown and erasable on the Agent page), the shared
+       folders' files (8), `screen_capture` / `screen_watch` (6), and torqcli's whole `show` tree.
+     - **Phase 2, the tool catalogue:** the rest of what a person asks a machine for — packages and apps (search,
+       propose; ADR-037), settings explained and proposed, files in shared folders written, the web read (always
+       tainting), a workbench (a shell in its own sandbox, for builds and tests: ADR-034 b), reminders and
+       scheduled tasks of its own, notifications to the person; outside MCP servers the owner adds, each a
+       pinned tree setting whose tools are tiered like TorqOS's.
+     - **Phase 3, subagents and their UIs:** a task split into subagents, each its own process and session at
+       the broker (its taint its own; a parent that reads a tainted child's answer is tainted), each with the
+       tools the parent gives it and no more; a window that shows them working (what each read, called,
+       proposed, how long), stops one or all, and keeps the record.
+- **Settled by the owner (2026-11-10):** TorqOS is the harness, in phases (9); one agent account per person (3); the agent's applet in the default
   panel (4); TorqOS's agent and Claude Code first, then Codex and opencode (5); screen frames to whichever model
   is chosen, remote included, once chosen (6); Hermes and OpenClaw not bundled (1). `Super`+`A` as the key unless
   the owner says otherwise.

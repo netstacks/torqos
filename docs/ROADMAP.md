@@ -291,6 +291,12 @@ acceptance tests, each a VM test.
       TorqOS Settings (local, Claude, OpenAI), resident as each person's own agent account (Claude Code, Codex, opencode as its tools), in the default
       panel, a key, the launcher, Settings, the applets, crash notifications and the terminal; the
       screen by the person's portal grant, marked and ended by them; `torq-mcp`. Hermes and OpenClaw not bundled.
+      Phase 1 of TorqOS as the harness (ADR-051 9): with its memory, shared folders, the screen and the whole `show` tree.
+- [ ] **The harness's tool catalogue** (ADR-051 9, phase 2; its own ADR first): apps and packages, settings
+      explained and proposed, files written in shared folders, the web (tainting), a workbench, reminders and
+      scheduled tasks, notifications; outside MCP servers as pinned, tiered tree settings.
+- [ ] **Subagents and their UIs** (ADR-051 9, phase 3; its own ADR first): each subagent its own process and
+      broker session, its own taint and tools; a window that shows them working, stops them, keeps the record.
 - [ ] **Build me an application**: the agent writes and builds in the person's home, installs via
       rung 3 (ADR-037), tests, undoes.
 - [ ] **Watch the desktop**: screenshot and input through COSMIC's portal (ADR-045 6), granted per
