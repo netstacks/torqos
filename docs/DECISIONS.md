@@ -2047,7 +2047,8 @@ content at the next), and a proposal must be judged on what it does, not on what
 - **Not:** rebasing a change whose effect differs (merging, or applying "what it would do now") — a person is
   never asked to trust what they were not shown; applying on an unledgered head; re-checking a base-less one by
   effect.
-## ADR-051 — Touchpad gestures in the compositor, not a gesture daemon
+
+## ADR-054 — Touchpad gestures in the compositor, not a gesture daemon
 - **Status:** proposed, 2026-11-10 (the owner: "three finger swipe to see windows and down to see
   workspace", "four finger pinch to open applications", no three-finger left/right).
 - **Context:** COSMIC's compositor (cosmic-comp 1.11.0) has one touchpad gesture: four fingers left and
