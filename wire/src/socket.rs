@@ -3,6 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// How the broker says no approval could be asked (the desktop's agent is gone): a caller may repair it and ask again.
+pub const NO_APPROVAL_AGENT: &str = "no authentication agent is running";
+
 /// Where the socket is (modules/broker.nix sets the unit to it).
 pub const SOCKET: &str = "/run/torq/broker.sock";
 

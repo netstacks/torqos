@@ -237,7 +237,8 @@ pub fn glance(session: Option<&std::path::Path>, draft: bool) -> Result<Glance> 
         Confirm { seq, deadline: history::one_line(&history::local_stamp(ts, &clock), 40), at: history::parse_ts(ts) }
     });
     let entries = crate::read_ledger(&cli)?;
-    let w = history::waiting_proposals(&entries);
+    // A person's own commit that did not go through leaves a proposal too: not something waiting on them.
+    let agents: Vec<_> = history::waiting_proposals(&entries).into_iter().filter(|e| e.actor == "agent").collect();
     let needs = needs(std::path::Path::new("/run/booted-system"), std::path::Path::new("/run/current-system"), session);
     Ok(Glance {
         version: version(),
@@ -246,7 +247,7 @@ pub fn glance(session: Option<&std::path::Path>, draft: bool) -> Result<Glance> 
         confirm,
         draft,
         needs,
-        waiting: (w.len(), w.iter().filter(|e| e.tainted).count()),
+        waiting: (agents.len(), agents.iter().filter(|e| e.tainted).count()),
         last: history::last_change(&entries),
     })
 }
@@ -780,11 +781,12 @@ pub struct Proposal {
     pub tainted: bool,
 }
 
-/// The proposals waiting: `show system proposals`' rows.
+/// The agent's proposals waiting for a person.
 pub fn proposals() -> Result<Vec<Proposal>> {
     let entries = crate::read_ledger(&cli())?;
     Ok(history::waiting_proposals(&entries)
         .into_iter()
+        .filter(|e| e.actor == "agent")
         .map(|e| Proposal { seq: e.seq, reason: history::one_line(&e.reason, 300), by: history::one_line(&e.actor, 40), tainted: e.tainted })
         .collect())
 }
@@ -1373,4 +1375,18 @@ mod app_tests {
         let tools = tools_of("  htop   3.4.1   An interactive process viewer\n");
         assert_eq!(tools[0], Tool { name: "htop".into(), version: "3.4.1".into(), summary: "An interactive process viewer".into() });
     }
+}
+
+/// polkit's process, to notice when it is replaced (a switch that changes it restarts it): COSMIC's agent
+/// registered with the old one, and does not register again by itself.
+pub fn polkit_pid() -> Option<i32> {
+    std::fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
+        let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+        (std::fs::read_to_string(e.path().join("comm")).ok()?.trim() == "polkitd").then_some(pid)
+    })
+}
+
+/// Start COSMIC's approval dialog again, so that it registers with polkit.
+pub fn restart_approval_agent() {
+    restart_parts(&["cosmic-osd"]);
 }

@@ -131,6 +131,12 @@ pkgs.testers.runNixOSTest {
         machine.succeed("pkill -x pkcheck || true")
         machine.sleep(3)
 
+        # polkit replaced, as a switch that changes it does: the applet has COSMIC's agent register again.
+        osd = machine.succeed("pgrep -u alice -fx cosmic-osd").strip()
+        machine.succeed("systemctl restart polkit")
+        machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-osd | grep -vx {osd}", timeout=30)
+        machine.sleep(3)
+
         # The right one, in the dialog: the change is made.
         machine.succeed(f"(setsid {ask} > /tmp/approved.out 2>&1 < /dev/null &)")
         machine.wait_until_succeeds("pgrep -x pkcheck", timeout=30)

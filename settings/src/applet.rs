@@ -42,6 +42,9 @@ struct Applet {
     running: Option<PathBuf>,
     /// The system a switch has just left: once it has settled, what it changed is started again.
     switched_from: Option<PathBuf>,
+    /// polkit's process when last looked at, and whether it was replaced at that look.
+    polkit: Option<i32>,
+    polkit_replaced: bool,
     /// What was last notified, so each state is said once.
     told: Option<String>,
     /// The confirmation already warned of as about to expire.
@@ -299,6 +302,16 @@ impl cosmic::Application for Applet {
                 });
             }
             Message::Looked => {
+                // polkit replaced (a switch can): COSMIC's agent must register again, or no approval can be asked.
+                // One look later, once the new one is on the bus.
+                if std::mem::take(&mut self.polkit_replaced) {
+                    app::restart_approval_agent();
+                }
+                let polkit = app::polkit_pid();
+                self.polkit_replaced = polkit.is_some() && self.polkit.is_some() && polkit != self.polkit;
+                if polkit.is_some() {
+                    self.polkit = polkit;
+                }
                 let now = running();
                 if now != self.running {
                     // The first system left, if a switch follows a switch: what is running came from it.

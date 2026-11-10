@@ -313,7 +313,7 @@ fn approve_in_dialog(pid: i32, uid: u32, text: &str) -> Result<()> {
         Some(0) => Ok(()),
         Some(3) => bail!("not approved: the dialog was dismissed"),
         Some(1) => bail!("not approved"),
-        Some(2) => bail!("not approved: nothing in this session can ask (no authentication agent is running); use a text console"),
+        Some(2) => bail!("not approved: nothing in this session can ask ({}); use a text console (Ctrl+Alt+F3) or SSH", torq_wire::socket::NO_APPROVAL_AGENT),
         _ => bail!("not approved: polkit could not ask"),
     }
 }

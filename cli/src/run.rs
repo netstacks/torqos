@@ -239,7 +239,7 @@ pub enum Call {
 
 /// The broker's socket and its words, the broker's own (ADR-044).
 pub use torq_wire::socket::SOCKET;
-use torq_wire::socket::{Frame, Request, BUSY, NEED_PASSWORD, OK, REFUSED, USAGE};
+use torq_wire::socket::{Frame, Request, BUSY, NEED_PASSWORD, NO_APPROVAL_AGENT, OK, REFUSED, USAGE};
 
 /// The arguments torqcli builds for any broker, as a socket request: `--actor` and `--approved-by`
 /// left out (the broker decides them), `--diff`, `--hash-file` and `--key-file` sent as what they hold.
@@ -342,6 +342,13 @@ fn exec(call: Call, err: &mut dyn Write, err_stdio: impl Fn() -> Result<Stdio>, 
                 r.args.push("--json".into());
             }
             let mut answer = over_socket(&r, err)?;
+            // The desktop's dialog could not appear (its agent gone, or registered with a polkit since replaced):
+            // it is started again, and asked once more. Nothing was done: the broker stopped before the change.
+            if answer.0 == Some(REFUSED) && String::from_utf8_lossy(&answer.1).contains(NO_APPROVAL_AGENT) {
+                crate::app::restart_approval_agent();
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                answer = over_socket(&r, err)?;
+            }
             for again in [false, true, true] {
                 if answer.0 != Some(NEED_PASSWORD) {
                     break;
