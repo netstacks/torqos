@@ -16,7 +16,7 @@ fn setup(settings: &[&str]) -> (tempfile::TempDir, Broker) {
     fs::create_dir_all(repo.join("users")).unwrap();
     fs::write(repo.join("desktop.nix"), "{ }\n").unwrap();
     let limits = Limits { agents: agents(&["casey"]), settings: settings.iter().map(|s| s.to_string()).collect() };
-    let b = Broker::new(&repo, dir.path().join("state"), "true").with_agent_limits(&limits).as_agent(Some("torq-agent-casey"));
+    let b = by_socket(Broker::new(&repo, dir.path().join("state"), "true").with_agent_limits(&limits).as_agent(Some("torq-agent-casey")), "torq-agent-casey");
     b.init().unwrap();
     (dir, b)
 }
@@ -226,7 +226,33 @@ fn trust_is_the_persons_own_folder_only() {
 
 /// The same machine's state, as another agent account sees it: a second broker run for `agent`.
 fn as_agent(dir: &Path, agent: &str, people: &[&str]) -> Broker {
-    Broker::new(dir.join("config"), dir.join("state"), "true").with_agent_limits(&Limits { agents: agents(people), settings: vec![] }).as_agent(Some(agent))
+    by_socket(Broker::new(dir.join("config"), dir.join("state"), "true").with_agent_limits(&Limits { agents: agents(people), settings: vec![] }).as_agent(Some(agent)), agent)
+}
+
+/// What the ledger records of a call that came over the socket from `caller` (serve.rs sets it so).
+fn by_socket(mut b: Broker, caller: &str) -> Broker {
+    b.ledger.set_via(Some("socket".into()), Some(caller.into()));
+    b
+}
+
+/// The review of ADR-051 step 1: trust applies only what the agent itself sent, over the socket. A
+/// proposal that only says it is casey's agent's — root's `torq-broker propose --actor agent --agent
+/// torq-agent-casey`, through sudo or at a root shell, or another account's over the socket — is not.
+#[test]
+fn trust_applies_only_what_the_agent_itself_sent() {
+    let (dir, b) = setup(&[]);
+    session::grant(&b, "casey", 30).unwrap();
+    let s = session::start(&b).unwrap();
+    for (via, caller) in [(None, None), (Some("sudo"), None), (Some("socket"), Some("dev")), (Some("socket"), Some("torq-agent-sam"))] {
+        let mut root = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey"));
+        root.ledger.set_via(via.map(String::from), caller.map(String::from));
+        let p = propose(&root, &diff(dir.path(), "r.diff", "users/casey/packages.json", "[\"nmap\"]"), Actor::Agent, false, Some(&s.id)).unwrap();
+        assert!(session::apply_trusted(&root, &p).unwrap().is_none(), "{via:?} {caller:?}");
+        assert_eq!(kinds(&b, "applied"), 0, "{via:?} {caller:?}");
+    }
+    // The agent itself, over the socket: applied.
+    let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    assert!(session::apply_trusted(&b, &p).unwrap().is_some());
 }
 
 /// ADR-051 3: casey's trust covers casey's agent alone. sam's agent cannot propose in casey's folder

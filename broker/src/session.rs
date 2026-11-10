@@ -378,7 +378,13 @@ fn trusted_by(b: &Broker, p: &Entry) -> Option<String> {
     }
     let files: Vec<String> = e.data["files"].as_array()?.iter().filter_map(|f| f.as_str().map(String::from)).collect();
     let person = files.first()?.strip_prefix("users/")?.split_once('/')?.0.to_string();
-    if b.agent_limits.serves(e.data["agent"].as_str()?) != Some(person.as_str()) {
+    let agent = e.data["agent"].as_str()?;
+    if b.agent_limits.serves(agent) != Some(person.as_str()) {
+        return None;
+    }
+    // Made by that agent itself, over the socket (the kernel's word for who called): never a proposal
+    // that only says it is the agent's — `torq-broker propose --actor agent --agent …` as root (the review).
+    if e.data["via"].as_str() != Some("socket") || e.data["caller"].as_str() != Some(agent) {
         return None;
     }
     socket::theirs(&person, &socket::Change { tier: Tier::User, files }).then_some(person)
