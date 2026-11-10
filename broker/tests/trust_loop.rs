@@ -3762,3 +3762,76 @@ fn a_build_that_leaves_a_process_holding_its_output_does_not_hold_the_broker() {
     b.apply(p.body.seq, "casey", false).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
 }
+
+/// Decline (ADR-051, amended: the owner, 2026-11-10): a person turns a waiting proposal down, on the
+/// record, and no path applies it after — a plain apply, a commit confirmed, a commit at.
+#[test]
+fn a_declined_proposal_is_never_applied_by_any_path() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let d = t.s().decline(p, "casey").unwrap();
+    assert_eq!((d.body.kind.as_str(), d.body.approved_by.as_deref(), d.body.data["proposal"].as_u64()), ("declined", Some("casey"), Some(p)));
+    for err in [
+        t.m.b.apply(p, "casey", true).unwrap_err(),
+        t.m.b.apply_confirmed(p, "casey", true, 5).unwrap_err(),
+        t.s().schedule(p, "casey", &At::in_seconds(60)).unwrap_err(),
+    ] {
+        assert!(format!("{err:#}").contains("declined"), "{err:#}");
+    }
+    assert!(t.theme().contains("dark"), "nothing applied");
+    assert!(format!("{:#}", t.s().decline(p, "viper").unwrap_err()).contains("declined already"));
+    t.m.b.ledger.verify().unwrap();
+}
+
+/// A commit at waiting for a proposal that is declined is cancelled first, on the record, and its
+/// timer's run applies nothing.
+#[test]
+fn declining_a_scheduled_proposal_cancels_its_commit_at() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let s = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    let timer = s.body.data["timer"].as_u64().unwrap();
+    let d = t.s().decline(p, "casey").unwrap();
+    let cancelled = t.m.b.ledger.read_all().unwrap().into_iter().find(|e| e.body.kind == "apply_cancelled").expect("cancelled, ledgered");
+    assert_eq!((cancelled.body.data["scheduled"].as_u64(), cancelled.body.data["proposal"].as_u64()), (Some(s.body.seq), Some(p)));
+    assert!(cancelled.body.seq < d.body.seq && d.body.data["cancelled"].as_u64() == Some(cancelled.body.seq));
+    assert!(t.m.log().contains(&format!("cancel {timer}")), "its timer stopped");
+    assert!(t.s().scheduled().unwrap().is_empty());
+    assert!(t.s().run(timer).unwrap().is_none(), "its run finds nothing");
+    assert!(t.theme().contains("dark"));
+}
+
+/// Only a waiting proposal is declined: one applied is reverted instead, a refused one never waited,
+/// and an entry that is no proposal is not one.
+#[test]
+fn only_a_waiting_proposal_is_declined() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let a = t.m.b.apply(p, "casey", false).unwrap();
+    let e = format!("{:#}", t.s().decline(p, "casey").unwrap_err());
+    assert!(e.contains("applied already") && e.contains(&format!("revert {}", a.body.seq)), "{e}");
+    assert!(format!("{:#}", t.s().decline(1, "casey").unwrap_err()).contains("not a proposal"));
+    let (dir, b) = setup("true");
+    let policy = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/policy/new.toml\n@@ -0,0 +1 @@\n+x = 1\n");
+    assert!(b.propose_on(Some(&b.repo.head().unwrap()), &policy, "loosen", Actor::Agent, false).is_err());
+    let refused = b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!(refused.body.kind, "refused");
+    let s = torq_broker::at::Scheduler::new(&b, "true", "true");
+    assert!(format!("{:#}", s.decline(refused.body.seq, "casey").unwrap_err()).contains("refused proposal"));
+    assert!(s.decline(refused.body.seq, "not a name!").is_err());
+}
+
+/// A declined proposal no longer waits: the agent's cap frees its slot.
+#[test]
+fn declining_frees_the_agents_slot() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let first = b.propose_on(Some(&head), &d, "htop 0", Actor::Agent, false).unwrap();
+    for i in 1..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    assert!(format!("{:#}", b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).unwrap_err()).contains("waiting"));
+    torq_broker::at::Scheduler::new(&b, "true", "true").decline(first.body.seq, "casey").unwrap();
+    b.propose_on(Some(&head), &d, "one more, now", Actor::Agent, false).unwrap();
+}

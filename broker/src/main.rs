@@ -58,6 +58,7 @@ enum Cmd {
     Schedule { seq: u64, at: String, approved_by: String },
     RunScheduled { timer: u64 },
     CancelScheduled { seq: u64, approved_by: String },
+    Decline { seq: u64, approved_by: String },
     Scheduled,
     ResumeScheduled,
     Revert { seq: u64, approved_by: String },
@@ -207,6 +208,7 @@ fn command_line() -> clap::Command {
         )
         .subcommand(Command::new("run-scheduled").about("Apply the commit scheduled with this timer id, or refuse it on the record (its timer runs this).").arg(Arg::new("id").required(true).value_parser(value_parser!(u64))))
         .subcommand(Command::new("cancel-scheduled").about("Cancel a scheduled commit (its `apply_scheduled` entry): ledgered, its timer stopped.").arg(seq()).arg(by()))
+        .subcommand(Command::new("decline").about("Decline a waiting proposal (ADR-051, amended): ledgered as declined, never applied after by any path; a commit scheduled for it is cancelled.").arg(seq()).arg(by()))
         .subcommand(Command::new("scheduled").about("The commits scheduled and waiting for their time."))
         .subcommand(Command::new("resume-scheduled").about("At boot: arm again the timers of commits scheduled before the restart; refuse those whose time passed meanwhile."))
         .subcommand(Command::new("revert").about("Undo one applied change: a new commit that reverts it, rebuild, ledger.").arg(seq()).arg(by()))
@@ -292,6 +294,7 @@ fn parse_cli() -> Cli {
         "schedule" => Cmd::Schedule { seq: seq(sub).unwrap_or_default(), at: s(sub, "at").unwrap_or_default(), approved_by: by(sub) },
         "run-scheduled" => Cmd::RunScheduled { timer: *sub.get_one::<u64>("id").unwrap_or(&0) },
         "cancel-scheduled" => Cmd::CancelScheduled { seq: seq(sub).unwrap_or_default(), approved_by: by(sub) },
+        "decline" => Cmd::Decline { seq: seq(sub).unwrap_or_default(), approved_by: by(sub) },
         "scheduled" => Cmd::Scheduled,
         "resume-scheduled" => Cmd::ResumeScheduled,
         "revert" => Cmd::Revert { seq: seq(sub).unwrap_or_default(), approved_by: by(sub) },
@@ -442,7 +445,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     let writes = matches!(
         cli.cmd,
         Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. } | Cmd::SessionStart | Cmd::SessionTaint { .. } | Cmd::TrustGrant { .. } | Cmd::TrustRevoke { .. }
-            | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. } | Cmd::SecretSet { .. } | Cmd::SecretDelete { .. } | Cmd::SecretShow { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::Decline { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. } | Cmd::SecretSet { .. } | Cmd::SecretDelete { .. } | Cmd::SecretShow { .. }
     );
     let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
     let sched = torq_broker::at::Scheduler::new(&b, &s.commit_at, &s.commit_at_cancel);
@@ -736,6 +739,13 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 return print_entry(&e);
             }
             println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::Decline { seq, approved_by } => {
+            let e = sched.decline(seq, &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{}): it is never applied", printable(&e.body.reason), e.body.seq);
         }
         Cmd::Scheduled => println!("{}", json!({ "scheduled": sched.scheduled()? })),
         Cmd::ResumeScheduled => {

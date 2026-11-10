@@ -424,3 +424,17 @@ fn a_commit_at_refuses_what_could_cut_the_machine_off() {
     assert!(err.contains("could lose the network or the screen"), "{err}");
     assert_eq!(kinds(&b, "apply_scheduled"), 0);
 }
+
+/// Decline (ADR-051, amended): session trust's apply refuses a declined proposal too — the one path
+/// with no person there.
+#[test]
+fn trust_never_applies_a_declined_proposal() {
+    let (dir, b) = setup(&[]);
+    let s = session::start(&b).unwrap();
+    let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    torq_broker::at::Scheduler::new(&b, "true", "true").decline(p.body.seq, "casey").unwrap();
+    session::grant(&b, "casey", 30).unwrap();
+    let r = session::apply_trusted(&b, &p);
+    assert!(r.as_ref().map_or_else(|e| format!("{e:#}").contains("declined"), |a| a.is_none()), "{r:?}");
+    assert_eq!(kinds(&b, "applied"), 0);
+}

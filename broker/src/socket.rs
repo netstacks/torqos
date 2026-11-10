@@ -174,6 +174,14 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         },
         // Their own password: the current one first, as passwd asks.
         "password" if user == Some(who.name.as_str()) => Gate::Password,
+        // Declining a waiting proposal (ADR-051, amended): the person whose own folder it wholly is, or
+        // whose agent proposed it (`user`: the ledger's word for whom that agent serves), as their own
+        // apply is — no password; anyone else's, an administrator's, with their password.
+        "decline" => match change {
+            None => Gate::Refused("that is not a proposal: only a waiting proposal is declined".into()),
+            Some(c) if theirs(&who.name, c) || user == Some(who.name.as_str()) => Gate::Open,
+            Some(_) => admins_only(),
+        },
         // A commit at, by the one who approved it (`user`: theirs); anyone else's, an administrator's.
         "cancel-scheduled" if user == Some(who.name.as_str()) => Gate::Open,
         "cancel-scheduled" => admins_only(),
@@ -255,7 +263,7 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--approved-by".into(), who.name.clone()]);
         }
         "secret-delete" | "secret-show" => a.extend(["--approved-by".into(), who.name.clone()]),
-        "apply" | "revert" | "schedule" | "cancel-scheduled" | "trust-grant" | "trust-revoke" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
+        "apply" | "revert" | "schedule" | "cancel-scheduled" | "decline" | "trust-grant" | "trust-revoke" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
         _ => {}
     }
     Ok(a)
@@ -550,6 +558,32 @@ mod tests {
         assert!(with_identity(&["propose".into()], "propose", &who(1000), None, None, None).is_err(), "a proposal brings its diff");
     }
 
+
+    /// Decline (ADR-051, amended): the person whose folder a proposal wholly is, or whose agent proposed
+    /// it, without a password; anyone else's an administrator's, with theirs; never an agent, nor a
+    /// service; only a proposal. Who declined is the kernel's answer.
+    #[test]
+    fn who_may_decline() {
+        let sams = change(Tier::User, &["users/sam/packages.json"]);
+        let vipers = change(Tier::User, &["users/viper/packages.json"]);
+        let sys = change(Tier::System, &["nixos/services.json"]);
+        assert_eq!(gate(&who(1001), "decline", Some(&sams), None), Gate::Open, "sam's own folder");
+        assert_eq!(gate(&who(1001), "decline", Some(&sys), Some("sam")), Gate::Open, "sam's agent proposed it");
+        assert!(matches!(gate(&who(1001), "decline", Some(&vipers), None), Gate::Refused(_)), "another's, not an administrator");
+        assert!(matches!(gate(&who(1001), "decline", Some(&vipers), Some("viper")), Gate::Refused(_)), "another's agent's");
+        assert!(matches!(gate(&who(1001), "decline", Some(&sys), None), Gate::Refused(_)));
+        assert_eq!(gate(&who(1000), "decline", Some(&sams), Some("sam")), Gate::Password, "an administrator, with their password");
+        assert_eq!(gate(&who(1000), "decline", Some(&vipers), None), Gate::Open, "viper's own folder");
+        for agent in [990, 991] {
+            for c in [&sams, &vipers, &sys] {
+                assert!(matches!(gate(&who(agent), "decline", Some(c), Some("sam")), Gate::Refused(_)), "an agent declines nothing");
+            }
+        }
+        assert!(matches!(gate(&who(65534), "decline", Some(&sams), None), Gate::Refused(_)), "a service");
+        assert!(matches!(gate(&who(1000), "decline", None, None), Gate::Refused(_)), "not a proposal");
+        let a = with_identity(&["decline".into(), "7".into()], "decline", &who(1001), None, None, None).unwrap();
+        assert_eq!(a, ["decline", "7", "--approved-by", "sam"]);
+    }
     /// The audit of ADR-040 (2026-11-04, its 2): `apply --confirm` holds every other change back
     /// until it is confirmed or expires — an administrator's to do, own folder or not.
     #[test]

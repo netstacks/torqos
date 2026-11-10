@@ -2259,7 +2259,7 @@ impl Broker {
             // as newer ones stop being able to land, which takes a person's commits (the review).
             let done: std::collections::HashSet<u64> = entries
                 .iter()
-                .filter(|e| matches!(e.body.kind.as_str(), "applied" | "apply_failed"))
+                .filter(|e| matches!(e.body.kind.as_str(), "applied" | "apply_failed" | "declined"))
                 .filter_map(|e| e.body.data["proposal"].as_u64())
                 .collect();
             let mut waiting = 0;
@@ -2889,6 +2889,11 @@ impl Broker {
         }
         if self.find_child("applied", "proposal", proposal_seq)?.is_some() {
             bail!("proposal {proposal_seq} was already applied");
+        }
+        // Declined by a person (ADR-051, amended): never applied, by any path — a person's apply, a
+        // commit confirmed, a scheduled commit's run, or session trust's.
+        if let Some(d) = self.find_child("declined", "proposal", proposal_seq)? {
+            bail!("refused: proposal {proposal_seq} was declined by {} (#{}): it is never applied; propose it again", d.body.approved_by.as_deref().unwrap_or("a person"), d.body.seq);
         }
         if p.body.tainted && !confirm_tainted {
             bail!(

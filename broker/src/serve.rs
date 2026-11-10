@@ -203,10 +203,12 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     // Whose a scheduled commit is: its approver may cancel it (the ledger's word, not the caller's).
     let user = match (name, seq) {
         ("cancel-scheduled", Some(seq)) => scheduled_by(&settings.state_dir, seq),
+        // Whose agent proposed it: whom it served when it proposed, as the broker ledgered it (ADR-051 3).
+        ("decline", Some(seq)) => agent_served(&settings.state_dir, seq),
         _ => sub.try_get_one::<String>("user").ok().flatten().cloned(),
     };
     let change = match (name, seq) {
-        ("apply" | "schedule" | "revert", Some(seq)) => change(&settings.state_dir, seq, if name == "revert" { "applied" } else { "proposal" }),
+        ("apply" | "schedule" | "revert" | "decline", Some(seq)) => change(&settings.state_dir, seq, if name == "revert" { "applied" } else { "proposal" }),
         _ => None,
     };
     // A commit confirmed holds everyone else's changes back while it waits: its own case.
@@ -275,6 +277,7 @@ fn approval_text(cmd: &str, state_dir: &Path, seq: Option<u64>, secret: Option<(
     let verb = match cmd {
         "apply" => "Apply",
         "schedule" => "Schedule",
+        "decline" => "Decline",
         "revert" => "Undo",
         "remote-key" => return "Show this machine's key for its configuration repository".to_string(),
         "secret-set" | "secret-delete" | "secret-show" => {
@@ -353,6 +356,13 @@ fn one_at_a_time(uid: u32) -> Result<std::fs::File> {
 fn scheduled_by(state_dir: &Path, seq: u64) -> Option<String> {
     let e = Ledger::open(state_dir.join("ledger.jsonl")).get(seq).ok()?;
     (e.body.kind == "apply_scheduled").then_some(e.body.approved_by).flatten()
+}
+
+/// The person whose agent made proposal `seq`, as the broker recorded it (`data.agent_for`): None for a
+/// person's proposal, or one that is not an agent's.
+fn agent_served(state_dir: &Path, seq: u64) -> Option<String> {
+    let e = Ledger::open(state_dir.join("ledger.jsonl")).get(seq).ok()?;
+    (e.body.kind == "proposal" && e.body.actor == "agent").then(|| e.body.data["agent_for"].as_str().map(String::from)).flatten()
 }
 
 /// The change `seq` is, if it is a `kind` entry: its tier and the files it touches.

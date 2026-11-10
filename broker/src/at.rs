@@ -195,6 +195,9 @@ impl<'a> Scheduler<'a> {
         if b.find_child("applied", "proposal", proposal_seq)?.is_some() {
             bail!("proposal {proposal_seq} was already applied");
         }
+        if let Some(d) = b.find_child("declined", "proposal", proposal_seq)? {
+            bail!("refused: proposal {proposal_seq} was declined (#{}): it is never applied", d.body.seq);
+        }
         // Read step by step, by the person, at the time: not something to leave to a timer.
         if p.body.tainted {
             bail!("refused: proposal {proposal_seq} came from a session that read untrusted content; apply it yourself");
@@ -350,28 +353,73 @@ impl<'a> Scheduler<'a> {
         if !policy::user_name_ok(by) {
             bail!("{by:?} is not a person's name");
         }
-        let b = self.b;
-        let lock = Lock::acquire(&b.state_dir)?;
+        let lock = Lock::acquire(&self.b.state_dir)?;
         let Some(s) = self.scheduled()?.into_iter().find(|s| s.seq == seq) else {
             bail!("#{seq} is not a commit scheduled and waiting");
         };
+        self.cancel_locked(&lock, &s, by, &format!("Cancelled the commit scheduled for {}: {}", s.at, s.reason))
+    }
+
+    fn cancel_locked(&self, lock: &Lock, s: &Scheduled, by: &str, reason: &str) -> Result<Entry> {
+        let b = self.b;
         let e = b.ledger.append(NewEntry {
             actor: "user".into(),
             approved_by: Some(by.into()),
             kind: "apply_cancelled".into(),
             tier: s.tier.clone(),
             tainted: false,
-            reason: format!("Cancelled the commit scheduled for {}: {}", s.at, s.reason),
+            reason: reason.into(),
             data: json!({ "proposal": s.proposal, "scheduled": s.seq, "timer": s.timer }),
         })?;
         // The ledger already says it is cancelled, and a run reads the ledger: a timer that cannot be
         // stopped (gone already, say) applies nothing.
         if !self.cancel.is_empty() {
-            if let Err(err) = b.run_command(&lock, "commit-at timer stop", &self.cancel, &[("id", &s.timer.to_string())]) {
+            if let Err(err) = b.run_command(lock, "commit-at timer stop", &self.cancel, &[("id", &s.timer.to_string())]) {
                 eprintln!("note: {err:#} (cancelled all the same: its run finds the cancel in the ledger)");
             }
         }
         Ok(e)
+    }
+
+    /// Decline proposal `proposal_seq` (ADR-051, amended: the owner, 2026-11-10): `by` turns it down, on
+    /// the record (`declined`), and it is never applied after — every apply path refuses it (lib.rs
+    /// `apply_locked`, `schedule` here), and it no longer waits (the agent's cap frees its slot). A commit
+    /// scheduled for it is cancelled first, ledgered as such. Only a proposal still waiting: one applied is
+    /// reverted, not declined; one declined is so already; a refused one never waited. Who may decline is
+    /// the socket's gate (socket.rs): the person whose folder it wholly is, or whose agent proposed it;
+    /// anyone else an administrator, with their password; an agent never.
+    pub fn decline(&self, proposal_seq: u64, by: &str) -> Result<Entry> {
+        if !policy::user_name_ok(by) {
+            bail!("{by:?} is not a person's name");
+        }
+        let b = self.b;
+        let lock = Lock::acquire(&b.state_dir)?;
+        let p = b.ledger.get(proposal_seq)?;
+        match p.body.kind.as_str() {
+            "proposal" => {}
+            "refused" => bail!("refused: #{proposal_seq} is a refused proposal: it never waited, so there is nothing to decline"),
+            other => bail!("refused: entry #{proposal_seq} is a '{other}', not a proposal"),
+        }
+        if let Some(a) = b.find_child("applied", "proposal", proposal_seq)? {
+            bail!("refused: proposal #{proposal_seq} was applied already (change #{}): `request system revert {}` undoes it", a.body.seq, a.body.seq);
+        }
+        if let Some(d) = b.find_child("declined", "proposal", proposal_seq)? {
+            bail!("refused: proposal #{proposal_seq} was declined already (#{})", d.body.seq);
+        }
+        let mut cancelled = None;
+        for s in self.scheduled()?.into_iter().filter(|s| s.proposal == proposal_seq) {
+            let why = format!("Cancelled the commit scheduled for {}: its proposal #{proposal_seq} was declined", s.at);
+            cancelled = Some(self.cancel_locked(&lock, &s, by, &why)?.body.seq);
+        }
+        b.ledger.append(NewEntry {
+            actor: "user".into(),
+            approved_by: Some(by.into()),
+            kind: "declined".into(),
+            tier: p.body.tier.clone(),
+            tainted: false,
+            reason: format!("Declined proposal #{proposal_seq}: {}", p.body.reason),
+            data: json!({ "proposal": proposal_seq, "files": p.body.data["files"], "cancelled": cancelled }),
+        })
     }
 
     /// At boot: the timers were transient, and are gone. A schedule from an earlier boot whose time
