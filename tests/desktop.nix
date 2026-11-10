@@ -17,6 +17,7 @@ pkgs.testers.runNixOSTest {
     imports = [ self.nixosModules.default ];
     torq.user = "alice";
     torq.desktop.enable = true;
+    torq.desktop.dimInsteadOfSuspend = true;
     # As every TorqOS machine has it (lib.mkSystem); the desktop reads it to take COSMIC from its own nixpkgs.
     nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
     # NixOS's test instrumentation gives root an empty password; TorqOS asserts root has none.
@@ -141,5 +142,17 @@ pkgs.testers.runNixOSTest {
     with subtest("Flathub is the person's, not the system's"):
         machine.wait_until_succeeds("su - alice -c 'flatpak remotes --user' | grep -q flathub", timeout=60)
         machine.fail("flatpak remotes --system | grep -q flathub")
+
+    # Last: it locks the session.
+    with subtest("a laptop that cannot wake from suspend never sleeps: the lid dims and locks, and gives it back"):
+        machine.succeed("grep -qx 'HandleLidSwitch=ignore' /etc/systemd/logind.conf")
+        machine.succeed("grep -qx 'AllowSuspend=no' /etc/systemd/sleep.conf")
+        machine.succeed("mkdir -p /tmp/bl/panel && echo 260000 > /tmp/bl/panel/brightness")
+        close = "TORQ_BACKLIGHT=/tmp/bl /etc/torq/lid-action 'button/lid LID close'"
+        machine.succeed(close)
+        machine.succeed("test \"$(cat /tmp/bl/panel/brightness)\" = 0")
+        machine.succeed(close)  # closed twice: the brightness kept is the first one
+        machine.succeed("TORQ_BACKLIGHT=/tmp/bl /etc/torq/lid-action 'button/lid LID open'")
+        machine.succeed("test \"$(cat /tmp/bl/panel/brightness)\" = 260000")
   '';
 }

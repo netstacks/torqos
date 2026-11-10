@@ -1653,6 +1653,7 @@ hardware file leaves CPU microcode off with it), and the base has networkd but n
   Wi-Fi device — a wireless interface, or a PCI device of the wireless class before its firmware is up —
   and its hardware file turns on iwd (`cli/src/install.rs` `found`). The firmware and iwd are not in the
   image's closure: ADR-048 5's carried build closure must hold them.
+- **Amended (2026-11-09, the owner): `torq desktop dimInsteadOfSuspend`, for a panel that cannot wake.** The Zenbook's OLED display does not come back from suspend (a real suspend at 18:44 ended in a hard reboot). The option refuses all sleep (`AllowSuspend=no` and the rest, so COSMIC's idle suspend cannot reach it either), ignores the lid in logind, and on the lid's event locks every session and turns the backlight to 0, restoring it on open. Off by default: a setting of this machine's. When the hardware profiles of point 3 are built, the Zenbook's turns it on.
 
 ## ADR-047 — The install: one console UI, and recipes — anyone's setup as a starting point
 

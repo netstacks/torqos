@@ -2,6 +2,34 @@
 
 let
   cfg = config.torq.desktop;
+  # The lid, on a machine that must not suspend: dark and locked when it closes, as it was when it opens.
+  # (`TORQ_BACKLIGHT`: for the test; acpid, as root, starts this with its own environment.)
+  lidAction = pkgs.writeShellScript "torq-lid-action" ''
+    PATH=${lib.makeBinPath [ pkgs.coreutils ]}
+    backlights=''${TORQ_BACKLIGHT:-/sys/class/backlight}
+    kept=/run/torq/lid-brightness
+    mkdir -p "$kept"
+    case "$1" in
+      *close)
+        for b in "$backlights"/*; do
+          name=''${b##*/}
+          # Closed twice: what it was before the first, not the dark one.
+          [ -e "$kept/$name" ] || cp "$b/brightness" "$kept/$name"
+          echo 0 > "$b/brightness"
+        done
+        ${config.systemd.package}/bin/loginctl lock-sessions
+        ;;
+      *open)
+        for b in "$backlights"/*; do
+          name=''${b##*/}
+          if [ -e "$kept/$name" ]; then
+            cat "$kept/$name" > "$b/brightness"
+            rm -f "$kept/$name"
+          fi
+        done
+        ;;
+    esac
+  '';
   # COSMIC from the nixpkgs that has its latest release (ADR-045, amended); the release's nixpkgs keeps
   # the version it shipped with for six months, while COSMIC releases every few weeks.
   cosmicPkgs = import cfg.cosmicNixpkgs { localSystem = config.nixpkgs.hostPlatform.system; };
@@ -16,6 +44,11 @@ in
       # Off in the base: the desktop is a configuration (`torqos-desktop`, ADR-034), not the product.
       default = false;
       description = "TorqOS Desktop: COSMIC on Wayland with the cosmic-greeter (ADR-045). Off in the base.";
+    };
+    dimInsteadOfSuspend = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Never suspend: closing the lid locks the machine and turns the display fully down, and opening it brings the brightness back. For a laptop that cannot wake its display from suspend (some OLED panels).";
     };
     cosmicNixpkgs = lib.mkOption {
       type = lib.types.path;
@@ -71,6 +104,22 @@ in
       SocketGroup = "users";
     };
     services.desktopManager.cosmic.showExcludedPkgsWarning = false;
+
+    # A machine that cannot wake its display must never go to sleep, by the lid or anything else (COSMIC's own
+    # idle suspend included): sleep is refused, and the lid dims and locks instead.
+    services.logind.settings.Login = lib.mkIf cfg.dimInsteadOfSuspend {
+      HandleLidSwitch = "ignore";
+      HandleLidSwitchExternalPower = "ignore";
+      HandleLidSwitchDocked = "ignore";
+    };
+    systemd.sleep.settings.Sleep = lib.mkIf cfg.dimInsteadOfSuspend {
+      AllowSuspend = "no";
+      AllowHibernation = "no";
+      AllowHybridSleep = "no";
+      AllowSuspendThenHibernate = "no";
+    };
+    services.acpid.lidEventCommands = lib.mkIf cfg.dimInsteadOfSuspend ''${lidAction} "$1"'';
+    environment.etc."torq/lid-action" = lib.mkIf cfg.dimInsteadOfSuspend { source = lidAction; };
 
     # A desktop's network: NetworkManager, for COSMIC's network applet and settings page, with iwd as its
     # Wi-Fi backend (ADR-046 2): one Wi-Fi stack, so networks joined at setup with iwctl stay joined. The
