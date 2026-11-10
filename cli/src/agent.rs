@@ -17,6 +17,7 @@
 /// conversation shows, and what the agent is here.
 pub mod client;
 pub mod conversation;
+pub mod crash;
 pub mod handoff;
 pub mod launcher;
 pub mod setup;

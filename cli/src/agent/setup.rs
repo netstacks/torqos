@@ -129,7 +129,7 @@ pub fn service_running(me: &str) -> bool {
 }
 
 /// What `c` prints, if it ends well within `limit`; killed, and nothing, if not.
-fn output_within(mut c: std::process::Command, limit: std::time::Duration) -> Option<String> {
+pub(crate) fn output_within(mut c: std::process::Command, limit: std::time::Duration) -> Option<String> {
     use std::io::Read;
     let mut child = c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
     let deadline = std::time::Instant::now() + limit;
