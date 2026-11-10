@@ -1,10 +1,12 @@
-# NixOS VM test: the person's agent on the desktop (ADR-051 4, step 3). After alice logs in to COSMIC, the
+# NixOS VM test: the person's agent on the desktop (ADR-051 4, steps 3 and 4). After alice logs in to COSMIC, the
 # agent's applet, `torq-agent-applet`, runs in her panel without anyone adding it — org.torqos.Agent is in
 # the panel's default right after TorqOS's own applet; the agent's window, "TorqOS Agent", is in the menu;
 # the applet's looking never starts her agent's service (only asking does); the client every UI shares
 # reaches her own service from her session (`torq-agent-ui --check`) and says what it remembers; someone
 # with no agent is told so; and the window is one a person — started again, the one open stays the only one.
-# The model is scripted (as in tests/agent-service.nix).
+# Step 4's entry points: `ask` in the login shell, the launcher's plugin where pop-launcher looks, a crash offered
+# with nothing sent until the person asks, Super+A opening the window. The model is scripted (as in
+# tests/agent-service.nix).
 { pkgs, self }:
 
 let
@@ -107,6 +109,39 @@ pkgs.testers.runNixOSTest {
         # (Not a second person: COSMIC's greeter would no longer open on alice.)
         code, out = machine.execute("su -s /bin/sh nobody -c 'torq-agent-ui --check' 2>&1")
         assert code != 0 and "The agent is not set up for you" in out, out
+
+    with subtest("step 4: the terminal's ask, in the login shell"):
+        out = machine.succeed("su - alice -c \"zsh -i -c 'alias ask'\" 2>/dev/null")
+        assert "noglob torq ask" in out, out
+
+    with subtest("step 4: the launcher's plugin is where pop-launcher looks, and offers the question"):
+        ron = machine.succeed("cat /etc/pop-launcher/plugins/torq-agent/plugin.ron")
+        assert 'bin: (path: "/run/current-system/sw/bin/torq-agent-launcher")' in ron and 'regex: "^(ask )"' in ron, ron
+        machine.succeed("test -x /run/current-system/sw/bin/torq-agent-launcher")
+        said = machine.succeed("printf '%s\\n' '{\"Search\":\"ask why is it slow?\"}' '\"Exit\"' | su - alice -c torq-agent-launcher")
+        assert "Ask your agent: why is it slow?" in said, said
+
+    with subtest("step 4: a crash is offered, and nothing reaches the agent until the person asks"):
+        machine.wait_until_succeeds("systemctl --user --machine=alice@ is-active torq-crash-watch.service", timeout=60)
+        before = in_session("torq-agent-ui --check").splitlines()[0]
+        in_session("sh -c 'ulimit -c unlimited; kill -SEGV $$'", ok=False)
+        machine.wait_until_succeeds("journalctl --no-pager _SYSTEMD_USER_UNIT=torq-crash-watch.service | grep -q 'torq-crash-watch: offered: '", timeout=90)
+        machine.sleep(5)
+        log = machine.succeed("journalctl --no-pager _SYSTEMD_USER_UNIT=torq-crash-watch.service")
+        assert "asked about pid" not in log, log
+        # Nothing handed to the window, and the agent asked nothing.
+        machine.fail("ls /run/user/$(id -u alice)/torq-agent/ask-* 2>/dev/null")
+        assert in_session("torq-agent-ui --check").splitlines()[0] == before
+
+    with subtest("step 4: Super+A opens the agent's window, a default of COSMIC's shortcuts"):
+        custom = machine.succeed("cat /run/current-system/sw/share/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom")
+        assert '(modifiers: [Super], key: "a"): Spawn("/run/current-system/sw/bin/torq-agent-ui")' in custom, custom
+        machine.send_key("meta_l-a")
+        machine.wait_until_succeeds("pgrep -u alice -f 'bin/torq-agent-ui$'", timeout=60)
+        machine.sleep(5)
+        machine.screenshot("agent-key")
+        machine.succeed("pkill -u alice -f 'bin/torq-agent-ui$'")
+        machine.wait_until_fails("pgrep -u alice -f 'bin/torq-agent-ui$'", timeout=30)
 
     with subtest("the agent's window: one a person"):
         display = machine.succeed("ls /run/user/$(id -u alice) | grep -x 'wayland-[0-9]*' | head -1").strip()
