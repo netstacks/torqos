@@ -49,6 +49,7 @@ answers from your terminal, on a server as on a desktop.
 alice@torq> torq ask "why is my wifi flaky?"
 alice@torq> torq ask "install htop for me"            # ends with "Proposed #12" if it proposes
 alice@torq> torq ask --forget                         # it forgets the conversation
+alice@torq> request system agent forget                # the same, in torqcli (the Agent page's Forget)
 ```
 
 The answer comes as it is written; what the agent read and called is shown on the way (standard

@@ -2333,7 +2333,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
   accent while a task runs (anyone's of the person's), warning when its own last question failed or the service
   cannot be reached; its popup the state, the model, a question box (Enter asks), the last answer streamed
   (scrollable, 4 000 characters; the window has it all), each proposal with **Review** (TorqOS Settings,
-  Proposals), **Stop**, **Open**. It asks the service only while its popup is open or a task runs; otherwise
+  Proposals), **Stop**, **Open**. It asks the service only while systemd says it runs (as amended below); otherwise
   systemd's word is enough. Programs it opens get the compositor's activation token (libcosmic's
   `applet-token`), so an open window is raised. A person with no agent is told so, with **Agent settings**.
   **The window**, `torq-agent-ui` ("TorqOS Agent" in the menu, `org.torqos.AgentWindow`), single-instance on the
@@ -2344,7 +2344,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
   page** (`torq-settings agent`): the person's agent account, whether the service is here and how it stands,
   the model and its endpoint (a user or password in the URL never shown), whether a key is configured (yes or
   no; entering one is ADR-052's, said on the page), how many turns it remembers with **Forget…** (asked first,
-  through the client: the person's own memory, no system change), the window and Proposals. What changes the
+  `request system agent forget`, as amended below: the person's own memory, no system change), the window and Proposals. What changes the
   system is `app::AGENT_SETTINGS`, tree lines into the draft — `set torq agent doctor enable true`,
   `set torq agent doctor endpoint …`, `… model …`, `delete torq agent doctor endpoint`, `set torq agent model
   url …`/`hash …`, `set torq agent people …` — committed from Your Changes (the broker, the ledger, the
@@ -2360,6 +2360,28 @@ vouches for, that only proposes, every change ledgered and undone in one command
   entry points of 4 (a key, the launcher, Ask the agent from Settings and the applets, crashes), a context
   attached from the UIs, the conversation's content shown on the Agent page (the service says only how much),
   key entry (ADR-052), the applet's and window's drawing and buttons beyond starting (not driven in the VM).
+  **Fixed from its review (2026-11-10):** the applet's taint line comes before the answer, out of its scroll, and
+  every proposal row (applet and window) is marked `(tainted)` where its session was; each row says what became
+  of it by the ledger (`conversation::fates`: waiting, applied, did not apply, or not the person's own agent's),
+  with **Review** only for one of their own agent's that waits. No look starts the service: the applet, the
+  window and the Agent page ask its status only while systemd says it runs (`systemctl` by absolute path,
+  killed after 5 s); asking a question, Forget and `--check` start it. The Agent page's Forget is a torqcli line,
+  `request system agent forget` (new, beside `request system agent trust`; the grammar checks it), and an open
+  window notices a Forget from elsewhere (its count shrank: `conversation::forgotten`) and stops showing that
+  conversation. The endpoint is shown as scheme, host and path only, and `torq.agent.doctor.endpoint` refuses
+  a query or fragment (an assertion, `checks.agent-assertions`). torqcli's `me()` is the uid's name in
+  /etc/passwd (not `id` on PATH) — an account only NSS knows (homed, LDAP) is not found, and TorqOS declares
+  every account (KNOWN-GAPS 6zzm); the desktop's programs start `torq-settings`, `torq-agent-ui`, `cosmic-osd`,
+  `xdg-open` and `flatpak` from `/run/current-system/sw/bin`. The applet and window look for the person's
+  agent again while they have none, so one added later is seen without restarting the panel. A short answer
+  (status, stop, forget) is read by one deadline however slowly it comes. The window lays out the last 8
+  answers in full and folds the earlier ones. The second window's hand-over is checked by the first saying it
+  was raised. The Agent page's people button says the first `set torq agent people` replaces the default
+  (the owner): name yourself too. **In the diff, not said above:** `torq::agent` exposes only `client`,
+  `conversation`, `setup` and `Event` (the rest of agent.rs is the crate's); `torq ask` now gives up on an
+  answer silent for 660 s (it had no limit), and its refusals are the client's words ("your agent did not
+  answer …", "… not yours to connect to"); the applet's and window's mark is drawn SVG, and both desktop entries
+  use TorqOS's `torqos` icon. Open: KNOWN-GAPS 6zzm.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

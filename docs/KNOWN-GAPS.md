@@ -1171,3 +1171,21 @@ Its §5 lists claims without a test.
      socket, and `torq ask` says so.
    - **The VM test's proposal is made by a stand-in torqcli** (its commit evaluates the configuration, which
      a VM test cannot: 6zn's); the doctor, its session, the broker and the ledger are the real ones.
+
+6zzm. **The agent's applet, window and Agent page (ADR-051 4, step 3, built 2026-11-10, `tests/desktop-agent.nix`).** Open:
+   - **The window's single-instance name is first come, first served.** `torq-agent-ui` holds
+     `org.torqos.AgentWindow` on the person's session bus; another program of the person's that took the name
+     first would be the one "raised" (and the window would not open). It is the person's own session bus, so
+     only their own programs could; not the agent's (no agent account reaches the session bus, ADR-051 6).
+   - **A panel the person already configured keeps its applets.** `org.torqos.Agent` is in the panel's
+     *default*: a person whose `~/.config/cosmic/com.system76.CosmicPanel.Panel/v1/plugins_wings` already exists
+     (any COSMIC user before this change, the owner's laptop included) does not get it until they add it in
+     COSMIC Settings → Desktop → Panel → Applets, or remove that file. TorqOS does not write into a person's
+     panel settings.
+   - **Who you are is the uid's name in /etc/passwd** (torqcli's `me()`, the agent client): an account only an
+     NSS module knows (systemd-homed, LDAP) is not found. TorqOS declares every account in its configuration,
+     so none is.
+   - **Not driven in the VM:** the applet's popup and the window's buttons (the test starts both, checks the
+     client, the hand-over of a second window, and `request system agent forget`; its screenshots show no
+     applet drawn in the panel of the test's software-rendered COSMIC). The Agent page is not opened in a VM.
+   - **The memory is shown as a count**, not its turns: the service says how many; showing them is later.
