@@ -2402,6 +2402,52 @@ vouches for, that only proposes, every change ledgered and undone in one command
   what it proposed — the record stays in the ledger, yet what a person would have reviewed is gone from the list —
   so it needs its own look at what a person is shown. Tested: broker units (each rule, each apply path, the cap
   freed, the schedule cancelled) and `tests/agents-per-person.nix`.
+- **As built (the Decline buttons, and step 4: decision 4's entry points, 2026-11-10, `work/agents`):** **Decline**
+  beside Review on TorqOS Settings' Proposals page (each waiting proposal, and the proposal's own page), in the
+  agent's applet popup and in its window (the person's own agent's waiting proposals): each runs
+  `app::decline_line`, `request system decline <n>`, as the pages run their lines (torqcli's session; torqcli
+  shows the proposal and asks first — the window in a dialog, the applet inline — and the broker says who may);
+  `everything_the_pages_offer_is_a_command` checks it; after it the row's fate, from the ledger, is "declined".
+  **Every entry point hands the window a question and what it is about the same way** (`torq::agent::handoff`):
+  a 0600 file of the person's in `$XDG_RUNTIME_DIR/torq-agent`, its path given as `torq-agent-ui --ask <file>`
+  (by absolute path), never the text on a command line others read in /proc; the window (single-instance: a
+  second start's `ask` action reaches the open one) takes only a regular file of the person's own, directly
+  there, not through a link, at most 64 KiB, once, and bounds it again: the question to 2 000 characters, what
+  is attached to 16 000. What is attached is shown above the box, marked untrusted, removable, and sent with the
+  person's next question only — the person asks; it taints that session (the service reports `attached`). Only
+  the launcher asks at once (the person typed and sent the question; nothing attached). The entry points:
+  1. **The key**: Super+A runs `/run/current-system/sw/bin/torq-agent-ui`, a default of COSMIC's own *custom*
+     shortcuts (`share/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom` in the settings package, read
+     where the panel's default is; cosmic-settings-daemon merges custom over defaults; the person changes it in
+     COSMIC Settings, which then writes their own). It takes Super+A from COSMIC's App Library (still on the
+     dock and in the launcher) — the ADR's key, kept until the owner says otherwise (KNOWN-GAPS 6zzn).
+  2. **The launcher**: `torq-agent-launcher` (torqcli's crate; `torq::agent::launcher`), a pop-launcher plugin
+     in `/etc/pop-launcher/plugins/torq-agent/plugin.ron` (pop-launcher's system plugin directory; it runs
+     `bin.path` as written when absolute): `ask <question>` offers "Ask your agent: …"; choosing it opens the
+     window asking at once. No change to COSMIC.
+  3. **TorqOS Settings**: **Ask the agent** beside each alarm (Overview), under a failed command's words (what
+     ran and what it said), in a setting's side panel (its place, help and value) and on Your Changes (`show |
+     compare`) — `handoff::About`'s question with the thing attached.
+  4. **The other applets**: TorqOS's applet on an alarm; the SSH tunnels applet on a tunnel that is retrying or
+     stopped (its name, destination and last word).
+  5. **Crashes**: `torq-crash-watch`, the person's own user service (`graphical-session.target`), follows the
+     journal for systemd-coredump's entries as the person (`journalctl -f`, absolute path) and keeps only their
+     own (`COREDUMP_UID`; `torq::agent::crash`), and only for a person with an agent account. Each gives a
+     notification, **Ask the agent about this crash**, saying nothing of the crash's contents; only its click
+     reads `coredumpctl info <pid>` as the person (20 s at most) and opens the window with it attached. Its
+     signals are the notification daemon's own (the proxy follows the name's owner), so another program on the
+     session bus cannot click for the person.
+  6. **The terminal**: `ask <question>` is an alias in TorqOS's login shell (zsh `noglob torq ask`, so a `?` is
+     not a pattern; bash `torq ask`).
+  Tests: torqcli units (the handoff's bounds, file mode, once only, refused when elsewhere, someone else's, a
+  link or too large; each About's question and context; the launcher's search, activation and end; a crash
+  read only when it is the person's, its notification without its contents, its handoff bounded and
+  tainting); `everything_the_pages_offer_is_a_command` (`request system decline <n>`); `tests/desktop-agent.nix`
+  (`ask` in alice's login shell; the plugin where pop-launcher looks, answering a search; a deliberate SIGSEGV of
+  alice's offered by the watcher while nothing is handed to the window and the agent asks nothing; Super+A in
+  her session starting the window). Mutation-checked: the handoff's owner check and its no-link open, the crash
+  filter's uid. Not driven in a VM: the buttons themselves (Decline, each Ask the agent), a crash notification's
+  click, the plugin through pop-launcher (KNOWN-GAPS 6zzn).
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

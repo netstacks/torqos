@@ -1189,3 +1189,19 @@ Its §5 lists claims without a test.
      client, the hand-over of a second window, and `request system agent forget`; its screenshots show no
      applet drawn in the panel of the test's software-rendered COSMIC). The Agent page is not opened in a VM.
    - **The memory is shown as a count**, not its turns: the service says how many; showing them is later.
+
+6zzn. **The agent's entry points and Decline buttons (ADR-051 4, step 4, built 2026-11-10, `tests/desktop-agent.nix`).** Open:
+   - **Super+A is taken from COSMIC's App Library**: TorqOS's custom-shortcut default wins over COSMIC's defaults
+     (cosmic-settings-daemon merges custom over them). The App Library stays on the dock and in the launcher; the
+     key is the ADR's until the owner chooses another.
+   - **A person who already has custom shortcuts** (`~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom`,
+     written the first time they changed one) does not get Super+A: their file replaces the default, as with the
+     panel (6zzm). They add it in COSMIC Settings → Keyboard → Shortcuts.
+   - **Not driven in a VM**: each Ask the agent and Decline button (the test checks what they hand over in
+     torqcli's units and the window's handoff path end to end through the key and the launcher's program), a crash
+     notification's click (the notification daemon's own signal; a test cannot click it, nor fake it from another
+     sender), and the launcher plugin through pop-launcher itself (the test runs the plugin's program with
+     pop-launcher's words).
+   - **A crash's backtrace can hold anything the program had** (arguments, paths, a line of a file): it is
+     attached only after the person's click, shown before it is sent, removable, and tainting; with a remote
+     model it then leaves the machine, as anything the person asks does (ADR-051 2).

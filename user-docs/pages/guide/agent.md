@@ -86,6 +86,26 @@ you commit it from *Your Changes* — recorded, undoable, with your approval. En
 not on this page yet: it comes with TorqOS's secrets; until then an administrator puts its file in
 place (`torq agent doctor apiKeyFile`).
 
+**Decline.** Beside **Review**, wherever a proposal waits for you — TorqOS Settings' Proposals page, the
+agent's applet, its window — **Decline** turns it down: it shows you the proposal and asks first, and a
+declined proposal is never applied (`request system decline <n>` in torqcli does the same).
+
+### Ask from anywhere
+
+- **Super+A** opens the agent's window. (It takes Super+A from COSMIC's App Library, which stays on the dock
+  and in the launcher; change it in COSMIC Settings → Keyboard → Shortcuts.)
+- **The launcher** (Super+/): type `ask why is my wifi slow?` and press Enter.
+- **The terminal**: `ask why is my wifi slow?` (the same as `torq ask …`).
+- **Ask the agent** beside an alarm, under a command that failed, in a setting's side panel and on your
+  uncommitted changes in TorqOS Settings; on an alarm in TorqOS's applet; on a tunnel that will not come up in
+  the SSH tunnels applet.
+- **A crash**: when one of your programs crashes, a notification offers **Ask the agent about this crash**.
+  Nothing about the crash is read or sent unless you click it.
+
+Whatever these attach (the alarm, the error, the crash's summary) is shown above the question before it is
+sent, and you can remove it. You press Ask. It is text anyone could have put there, so the agent's session is
+marked tainted when it reads it, and so is anything it then proposes.
+
 Every one of these is your own program: it talks only to your own agent, runs nothing as root, and
 holds no secret.
 
