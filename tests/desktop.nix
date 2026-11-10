@@ -142,7 +142,12 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("pgrep -x pkcheck", timeout=30)
         machine.sleep(8)
         machine.send_chars("torq-desktop\n", delay=0.1)
-        machine.wait_until_succeeds("grep -q '\"exit\":0' /tmp/approved.out", timeout=60)
+        try:
+            machine.wait_until_succeeds("grep -q '\"exit\":0' /tmp/approved.out", timeout=60)
+        except Exception:
+            # What the broker answered, and what it and polkit logged: a failure here says why.
+            print(machine.execute("cat /tmp/approved.out; journalctl -b --no-pager -u 'torq-broker@*' -u polkit -u 'polkit-agent-helper@*' | tail -40")[1])
+            raise
         machine.succeed(f"git -C {repo} show HEAD:desktop.nix | grep -q 'nightLight = true'")
 
     with subtest("Flathub is the person's, not the system's"):

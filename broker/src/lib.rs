@@ -2154,6 +2154,36 @@ impl Broker {
         Ok(())
     }
 
+    /// A waiting proposal approved on a configuration that has moved on from its base (ADR-052): its
+    /// diff (at `diff_path`) applied to the current head as `propose` applies it, by the same function,
+    /// must do byte for byte what was recorded and shown — its `effect`, by the hash its entry holds.
+    /// Otherwise refused, never judged again. None: the head is its base (or it names none: H1's
+    /// files-and-tier check is what holds a base-less one); Some(head): re-checked on that head.
+    fn recheck_on_head(&self, p: &Entry, diff_path: &Path) -> Result<Option<String>> {
+        let Some(base) = p.body.data["base"].as_str() else { return Ok(None) };
+        let head = self.repo.head()?;
+        if head == base {
+            return Ok(None);
+        }
+        // A diff that no longer applies does something different too: nothing.
+        let now = self.repo.proposal_effect(diff_path).ok();
+        let same = match (now, p.body.data["effect_sha256"].as_str()) {
+            (Some(now), Some(sha)) => hex::encode(Sha256::digest(now.as_bytes())) == sha,
+            // As the ledger once kept it, in the entry.
+            (Some(now), None) => p.body.data["effect"].as_str() == Some(now.as_str()),
+            (None, _) => false,
+        };
+        if !same {
+            bail!(
+                "refused: proposal {} would now do something different from what was shown: the configuration \
+                 has changed since this change was prepared (prepared on {base}, now at {head}); prepare it again \
+                 from the current configuration",
+                p.body.seq
+            );
+        }
+        Ok(Some(head))
+    }
+
     fn find_child(&self, kind: &str, key: &str, seq: u64) -> Result<Option<Entry>> {
         Ok(self
             .ledger
@@ -2597,15 +2627,15 @@ impl Broker {
             );
         }
         let diff = self.proposal_text(&p, "diff")?;
-        if let Some(base) = p.body.data["base"].as_str() {
-            self.refuse_stale_base(base)?;
-        }
 
         // Re-validate against the current repo state (it may have changed since proposing).
         // Gone however this ends (the review of 0.2.1, L1).
         let tmp = DropFile(self.state_dir.join(format!("proposal-{proposal_seq}.diff")));
         let tmp = &tmp.0;
         fs::write(tmp, &diff)?;
+        // Moved on from its base (a desktop saved meanwhile, say): applied only if it does exactly what
+        // was shown (ADR-052); then its files, tier and the agent's list are judged again below, as always.
+        let rechecked_on = self.recheck_on_head(&p, tmp)?;
         let files = self.repo.diff_files(&tmp)?;
         self.check_user_data(&tmp, &files)?;
         let tier = policy::tier_for_paths(&files);
@@ -2737,6 +2767,10 @@ impl Broker {
         let mut data = at::note(with_snapshot(json!({ "proposal": proposal_seq, "commit": commit, "files": files }), &snapshot), scheduled);
         if let Some(c) = confirm_record {
             data["confirm"] = c;
+        }
+        // The history says it landed on a configuration other than the one it was prepared on (ADR-052).
+        if let Some(head) = rechecked_on {
+            data["rechecked_on"] = head.into();
         }
         let e = self.ledger.append(NewEntry {
             actor: p.body.actor.clone(),
