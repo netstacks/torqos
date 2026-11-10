@@ -1351,6 +1351,11 @@ impl<'a> Session<'a> {
             syntax::Request::Apply { proposal } => self.machine.apply_proposal(proposal, &self.me),
             syntax::Request::Trust { minutes } => self.machine.trust(Some(minutes)),
             syntax::Request::TrustRevoke => self.machine.trust(None),
+            // The person's own agent, on their own socket: no change to the system, nothing for the broker.
+            syntax::Request::AgentForget => {
+                crate::agent::client::Client::mine()?.forget()?;
+                Ok("Your agent has forgotten the conversation.\n".into())
+            }
             syntax::Request::RemoteKey => self.machine.remote_key(),
             syntax::Request::DesktopSave => {
                 let s = crate::app::sync_desktop(true)?;

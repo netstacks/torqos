@@ -823,6 +823,9 @@ const fn draft(label: &'static str, command: &'static str) -> Action {
 /// What the agent may do without asking, and every button on the Proposals page besides each proposal's own.
 pub const AGENT: &[Action] = &[op("Trust the agent for a while…", "request system agent trust "), run("End that trust now", "request system agent trust revoke")];
 
+/// The Agent page's Forget (asked first): the person's own agent's memory erased, through its own socket.
+pub const AGENT_FORGET: &str = "request system agent forget";
+
 /// The Agent page's buttons (ADR-051 2): the agent's model and who has one, each a line of the tree, into the draft
 /// and committed as every other change is. Its API key is not one: a file outside the repository, entered with
 /// TorqOS's secrets (ADR-052), not here.
@@ -915,6 +918,7 @@ mod page_tests {
         }
         AGENT.iter().for_each(check);
         AGENT_SETTINGS.iter().for_each(check);
+        whole(Mode::Operational, AGENT_FORGET);
         // The Agent page's lines as the person finishes them, then commits them.
         for c in ["set torq agent doctor endpoint https://api.anthropic.com/v1", "set torq agent doctor model claude-sonnet-4-5", "set torq agent model url https://example.org/m.gguf", "set torq agent people alice"] {
             whole(Mode::Configuration, c);
