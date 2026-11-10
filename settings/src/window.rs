@@ -11,7 +11,7 @@ use cosmic::iced::futures::channel::mpsc::Sender;
 use cosmic::iced::futures::SinkExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use torq::app::{self, Action, App, At, Choice, Console, Glance, How, Machine, Mode, Needs, Proposal, Tool, Typed, View, VIEWS};
+use torq::app::{self, Action, App, At, Choice, Console, DeviceCode, GitHubToken, Glance, How, Machine, Mode, Needs, Proposal, Tool, Typed, View, VIEWS};
 use torq::history::Row;
 
 /// How many changes History shows.
@@ -25,6 +25,7 @@ const DRAFT: &str = "show | display set";
 const ACTIVE: &str = "show configuration | display set";
 const COMPARE: &str = "show | compare";
 const COMMITS: &str = "show system commit";
+const REMOTE: &str = "show system remote";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -44,6 +45,10 @@ enum Tab {
     Changes,
     Earlier,
 }
+
+/// System's Backup tab, beside the pages that are commands' output.
+#[derive(Clone, Copy)]
+struct BackupTab;
 
 /// The Apps page's tabs.
 #[derive(Clone, Copy, PartialEq)]
@@ -140,6 +145,15 @@ pub struct Settings {
     syncing: bool,
     tool_search: String,
     tool_results: Option<Loaded<Vec<Tool>>>,
+    // Backup:
+    remote_url: String,
+    machine_key: Option<Result<String, String>>,
+    gh_code: Option<DeviceCode>,
+    /// The GitHub sign-in, for this setup only: in memory, gone when the window closes.
+    github: Option<(GitHubToken, String)>,
+    repo_name: String,
+    /// The repository the sign-in set up, waiting for this machine's key.
+    gh_repo: Option<(String, String)>,
     proposal: Option<u64>,
     // Commands:
     line: String,
@@ -251,6 +265,23 @@ pub enum Message {
     AddTool(String),
     RemoveTool(String),
     ToolDone(String, Result<(), String>),
+    // Backup:
+    RemoteUrl(String),
+    Connect,
+    Connected(Result<String, String>),
+    ShowKey,
+    KeyShown(Result<String, String>),
+    CopyKey(String),
+    OpenUrl(String),
+    GhStart,
+    GhCode(Result<DeviceCode, String>),
+    GhSigned(Result<(GitHubToken, String), String>),
+    RepoName(String),
+    GhCreate,
+    GhCreated(Result<String, String>),
+    GhFinish,
+    GhKey(Result<String, String>),
+    GhKeyAdded(Result<(), String>),
     // Commands:
     Line(String),
     Offers(u64, Vec<Choice>),
@@ -281,6 +312,7 @@ impl cosmic::Application for Settings {
             "proposals" => Page::Proposals,
             "commands" => Page::Commands,
             "apps" => Page::Apps,
+            "backup" => Page::System,
             s if VIEWS.iter().any(|v| v.id == s) => Page::System,
             _ => Page::Overview,
         };
@@ -312,6 +344,10 @@ impl cosmic::Application for Settings {
             if v.id == start || (i == 0 && !VIEWS.iter().any(|v| v.id == start)) {
                 item.activate();
             }
+        }
+        let backup = sys_tabs.insert().text("Backup").data(BackupTab).id();
+        if start == "backup" {
+            sys_tabs.activate(backup);
         }
         let mut diff_tabs = SingleSelectModel::default();
         diff_tabs.insert().text("What changed").data(DiffTab::Plain).activate();
@@ -356,6 +392,12 @@ impl cosmic::Application for Settings {
             syncing: false,
             tool_search: String::new(),
             tool_results: None,
+            remote_url: String::new(),
+            machine_key: None,
+            gh_code: None,
+            github: None,
+            repo_name: format!("torqos-{}", app::host()),
+            gh_repo: None,
             proposal: None,
             line: String::new(),
             typed_cf: false,
@@ -759,6 +801,96 @@ impl cosmic::Application for Settings {
                 return self.load();
             }
 
+            Message::RemoteUrl(s) => self.remote_url = s,
+            Message::Connect => {
+                let url = self.remote_url.trim().to_string();
+                if !url.is_empty() {
+                    let line = app::line(&["set", "torq", "remote", "url", &url]);
+                    return self.act_then(At::Draft, line, Message::Connected);
+                }
+            }
+            Message::Connected(r) => {
+                self.busy = None;
+                return match r {
+                    Ok(_) => {
+                        self.remote_url.clear();
+                        self.update(Message::Review)
+                    }
+                    Err(e) => {
+                        self.note = Some((e, true));
+                        Task::none()
+                    }
+                };
+            }
+            Message::ShowKey => return self.act_then(At::Read, "request system remote key".into(), Message::KeyShown),
+            Message::KeyShown(r) => {
+                self.busy = None;
+                self.machine_key = Some(r);
+            }
+            Message::CopyKey(key) => return cosmic::iced::clipboard::write(key),
+            Message::OpenUrl(url) => app::open_url(&url),
+
+            Message::GhStart => {
+                self.note = None;
+                return cosmic::task::future(async { Message::GhCode(blocking(app::github_start).await) });
+            }
+            Message::GhCode(r) => match r {
+                Ok(code) => {
+                    let waiting_on = code.clone();
+                    self.gh_code = Some(code);
+                    return cosmic::task::future(async move { Message::GhSigned(blocking(move || app::github_wait(&waiting_on)).await) });
+                }
+                Err(e) => self.note = Some((e, true)),
+            },
+            Message::GhSigned(r) => {
+                self.gh_code = None;
+                match r {
+                    Ok(signed) => self.github = Some(signed),
+                    Err(e) => self.note = Some((e, true)),
+                }
+            }
+            Message::RepoName(s) => self.repo_name = s,
+            Message::GhCreate => {
+                if let Some((token, login)) = self.github.clone() {
+                    let name = self.repo_name.trim().to_string();
+                    self.busy = Some(format!("Creating {login}/{name}"));
+                    self.note = None;
+                    return cosmic::task::future(async move { Message::GhCreated(blocking(move || app::github_create_repo(&token, &login, &name)).await) });
+                }
+            }
+            Message::GhCreated(r) => {
+                self.busy = None;
+                match r {
+                    Ok(url) => {
+                        self.gh_repo = app::github_repo(&url);
+                        self.remote_url = url;
+                        return self.update(Message::Connect);
+                    }
+                    Err(e) => self.note = Some((e, true)),
+                }
+            }
+            Message::GhFinish => return self.act_then(At::Read, "request system remote key".into(), Message::GhKey),
+            Message::GhKey(r) => {
+                self.busy = None;
+                let public = r.as_ref().ok().and_then(|t| t.lines().next()).unwrap_or_default().to_string();
+                self.machine_key = Some(r);
+                if let (false, Some((token, _)), Some((owner, repo))) = (public.is_empty(), self.github.clone(), self.gh_repo.clone()) {
+                    return cosmic::task::future(async move { Message::GhKeyAdded(blocking(move || app::github_add_key(&token, &owner, &repo, &public)).await) });
+                }
+            }
+            Message::GhKeyAdded(r) => {
+                match r {
+                    Ok(()) => {
+                        // Done with the sign-in: only the machine's own key, for this one repository, stays.
+                        self.github = None;
+                        self.gh_repo = None;
+                        self.note = Some(("Connected. The first copy goes up within 15 minutes, and after every change from now on.".into(), false));
+                    }
+                    Err(e) => self.note = Some((e, true)),
+                }
+                return self.load();
+            }
+
             Message::Line(s) => {
                 self.line = s;
                 return self.offer();
@@ -908,6 +1040,10 @@ impl Settings {
                 tasks.push(self.read(At::Read, ACTIVE.into()));
             }
             Page::System => {
+                if self.sys_tabs.active_data::<BackupTab>().is_some() {
+                    tasks.push(self.read(At::Read, REMOTE.into()));
+                    tasks.push(self.read(At::Read, ACTIVE.into()));
+                }
                 if let Some(v) = self.view_shown() {
                     tasks.extend(v.sections.iter().map(|(_, c)| self.read(At::Read, c.to_string())));
                 }
@@ -971,12 +1107,18 @@ impl Settings {
         }
         self.busy = Some(line.clone());
         self.note = None;
+        self.act_then(at, line.clone(), move |r| Message::Did(line, r))
+    }
+
+    /// Run a line that may ask a person something, its answer going to `done`.
+    fn act_then(&mut self, at: At, line: String, done: impl FnOnce(Result<String, String>) -> Message + Send + 'static) -> Task<cosmic::Action<Message>> {
+        self.busy = Some(line.clone());
+        self.note = None;
         let console = self.console.clone();
         Task::stream(cosmic::iced::stream::channel(4, async move |mut out: Sender<Message>| {
             let ask = asker(out.clone());
-            let c = line.clone();
-            let got = off(move || console.act(at, &c, ask)).await.and_then(|r| r);
-            let _ = out.send(Message::Did(line, got)).await;
+            let got = off(move || console.act(at, &line, ask)).await.and_then(|r| r);
+            let _ = out.send(done(got)).await;
         }))
         .map(cosmic::Action::App)
     }
@@ -1586,10 +1728,83 @@ impl Settings {
         page.push(section).into()
     }
 
+    fn backup_tab(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let mut page = widget::column::with_capacity(5).spacing(spacing.space_m);
+        let status = match self.outputs.get(REMOTE) {
+            Some(Loaded::Got(t)) => t,
+            Some(Loaded::Failed(why)) => return failed(why),
+            _ => return waiting(),
+        };
+        let source = vec!["system".to_string(), "software".to_string(), "torq".to_string(), "source".to_string()];
+        if self.active.get(&source).is_some_and(|s| s.iter().any(|v| v.starts_with("path:"))) {
+            page = page.push(widget::text::caption("This machine builds TorqOS from a folder on its own disk. Your configuration is backed up, but restoring it elsewhere needs a machine that takes TorqOS from its releases."));
+        }
+        if status.starts_with("No remote") {
+            page = page.push(widget::text::body("Keep a copy of this machine's configuration and its history in a private repository. If the machine is ever lost, a new install can rebuild it from there. Passwords and secrets are never in it."));
+            // GitHub, the easy way.
+            let mut github = settings::section().title("GitHub");
+            match (&self.gh_code, &self.github) {
+                (Some(code), _) => {
+                    github = github.add(settings::item_row(vec![widget::column::with_capacity(2).spacing(spacing.space_xxs).push(widget::text::title3(code.user_code.clone())).push(widget::text::caption("Enter this code at GitHub. This page moves on when you approve it.")).width(Length::Fill).into(), widget::button::standard("Copy").on_press(Message::CopyKey(code.user_code.clone())).into(), widget::button::suggested("Open GitHub").on_press(Message::OpenUrl(code.verification_uri.clone())).into()]).spacing(spacing.space_xs).align_y(Alignment::Center));
+                }
+                (None, Some((_, login))) => {
+                    github = github.add(settings::item::builder(format!("Signed in as {login}")).description("A private repository, for this machine alone").control(widget::row::with_capacity(2).spacing(spacing.space_xs).align_y(Alignment::Center).width(Length::FillPortion(2)).push(widget::text_input("Repository name", &self.repo_name).on_input(Message::RepoName).width(Length::Fill)).push(widget::button::suggested("Create and connect").on_press(Message::GhCreate))));
+                }
+                (None, None) => {
+                    github = github.add(settings::item::builder("Sign in with GitHub").description("In your browser: your GitHub password never touches TorqOS, and the sign-in is forgotten when setup is done").control(widget::button::suggested("Sign in").on_press(Message::GhStart)));
+                }
+            }
+            page = page.push(github);
+            let host = app::host();
+            let new = format!("https://github.com/new?name=torqos-{host}&visibility=private&description=TorqOS%20configuration%20of%20{host}");
+            page = page.push(
+                settings::section()
+                    .title("Or use another Git server")
+                    .add(settings::item::builder("1. Create a private repository").description("On GitHub, or any Git server you reach over SSH").control(widget::button::standard("Open GitHub").on_press(Message::OpenUrl(new))))
+                    .add(
+                        settings::item::builder("2. Paste its SSH address").description("Like git@github.com:you/torqos-laptop.git").control(
+                            widget::row::with_capacity(2)
+                                .spacing(spacing.space_xs)
+                                .align_y(Alignment::Center)
+                                .width(Length::FillPortion(2))
+                                .push(widget::text_input("git@github.com:you/repository.git", &self.remote_url).on_input(Message::RemoteUrl).on_submit(|_| Message::Connect).width(Length::Fill))
+                                .push(widget::button::suggested("Connect").on_press(Message::Connect)),
+                        ),
+                    ),
+            );
+            return page.push(widget::text::caption("Connecting is a change like any other: you review it and commit it, then give the repository this machine's key.")).into();
+        }
+        if self.gh_repo.is_some() && self.github.is_some() {
+            page = page.push(settings::section().title("One step left").add(settings::item::builder("Give the repository this machine's key").description("TorqOS Settings adds it for you: only this machine, and only this repository").control(widget::button::suggested("Finish").on_press(Message::GhFinish))));
+        }
+        page = page.push(settings::section().title("This machine's repository").add(settings::item_row(vec![widget::text::monotext(status.trim_end().to_string()).width(Length::Fill).into()])));
+        let mut key = settings::section().title("This machine's key");
+        key = key.add(settings::item::builder("Lets this machine, and only it, write to this one repository").control(widget::button::standard("Show key").on_press(Message::ShowKey)));
+        match &self.machine_key {
+            Some(Ok(text)) => {
+                let public = text.lines().next().unwrap_or_default().to_string();
+                let url = status.lines().next().and_then(|l| l.strip_prefix("Remote: ")).unwrap_or_default();
+                let mut buttons = widget::row::with_capacity(2).spacing(spacing.space_xs).push(widget::button::standard("Copy").on_press(Message::CopyKey(public.clone())));
+                if let Some((owner, repo)) = app::github_repo(url.trim()) {
+                    buttons = buttons.push(widget::button::standard("Add it on GitHub").on_press(Message::OpenUrl(format!("https://github.com/{owner}/{repo}/settings/keys/new"))));
+                }
+                key = key.add(settings::item_row(vec![widget::text::monotext(public).width(Length::Fill).into()]));
+                key = key.add(settings::item::builder("Add it as a deploy key, with write access").control(buttons));
+            }
+            Some(Err(e)) => key = key.add(failed(e)),
+            None => {}
+        }
+        page.push(key).push(actions(app::BACKUP)).into()
+    }
+
     fn system(&self) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let tabs = widget::tab_bar::horizontal(&self.sys_tabs).on_activate(Message::SysTab);
         let mut page = widget::column::with_capacity(4).push(tabs).spacing(spacing.space_l);
+        if self.sys_tabs.active_data::<BackupTab>().is_some() {
+            return page.push(self.backup_tab()).into();
+        }
         let Some(v) = self.view_shown() else { return page.into() };
         page = page.push(actions(v.actions));
         for (title, command) in v.sections {

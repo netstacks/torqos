@@ -273,6 +273,7 @@ fn approval_text(cmd: &str, state_dir: &Path, seq: Option<u64>) -> String {
         "apply" => "Apply",
         "schedule" => "Schedule",
         "revert" => "Undo",
+        "remote-key" => return "Show this machine's key for its configuration repository".to_string(),
         other => return crate::printable(&format!("Approve `{other}` on this machine")),
     };
     let Some(e) = entry else { return format!("{verb} a change to this machine") };

@@ -683,14 +683,11 @@ pub static VIEWS: &[View] = &[
         id: "machine",
         name: "This Machine",
         icon: "computer-symbolic",
-        sections: &[("How long it has run", "show system uptime"), ("People", "show users"), ("Its configuration's remote", "show system remote"), ("Nix files of the configuration", "file list")],
+        sections: &[("How long it has run", "show system uptime"), ("People", "show users"), ("Nix files of the configuration", "file list")],
         actions: &[
             run("Change your password", "request system password"),
             op("Change someone's password…", "request system password "),
             run("Return the machine to its history", "request system repair"),
-            run("Load what waits on the remote into the draft", "request system pull"),
-            run("Show this machine's key for the remote", "request system remote key"),
-            run("Clear the remote's alarm", "request system remote clear"),
             run("Say no more of a ledger disagreement", "request system ledger acknowledge"),
             run("Cancel the commit scheduled", "clear system commit"),
         ],
@@ -722,10 +719,11 @@ mod page_tests {
             v.actions.iter().for_each(check);
         }
         AGENT.iter().for_each(check);
-        for c in ["show system alarms", "show system ledger", "show system proposals", "show system commit", "help nginx"] {
+        BACKUP.iter().for_each(check);
+        for c in ["show system alarms", "show system ledger", "show system proposals", "show system commit", "show system remote", "request system remote key", "help nginx"] {
             whole(Mode::Operational, c);
         }
-        for c in ["show", "show | compare", "commit check", "commit comment \"x\" confirmed 5", "commit at 12:00", "rollback 0", "rollback 3", "set a b", "delete a b"] {
+        for c in ["set torq remote url git@github.com:a/b.git", "show", "show | compare", "commit check", "commit comment \"x\" confirmed 5", "commit at 12:00", "rollback 0", "rollback 3", "set a b", "delete a b"] {
             whole(Mode::Configuration, c);
         }
         whole(Mode::Operational, "request system revert 5");
@@ -1389,4 +1387,269 @@ pub fn polkit_pid() -> Option<i32> {
 /// Start COSMIC's approval dialog again, so that it registers with polkit.
 pub fn restart_approval_agent() {
     restart_parts(&["cosmic-osd"]);
+}
+
+// ── Backing the configuration up to a repository ─────────────────────────────────────────────────
+
+/// What the Backup tab offers once a repository is connected.
+pub const BACKUP: &[Action] = &[run("Load what waits on the repository into your draft", "request system pull"), run("Clear the repository's alarm, having looked into it", "request system remote clear")];
+
+/// A GitHub repository's owner and name, from its SSH address.
+pub fn github_repo(url: &str) -> Option<(String, String)> {
+    let path = url.strip_prefix("git@github.com:").or_else(|| url.strip_prefix("ssh://git@github.com/"))?;
+    let (owner, repo) = path.trim_end_matches('/').trim_end_matches(".git").split_once('/')?;
+    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/')).then(|| (owner.to_string(), repo.to_string()))
+}
+
+/// This machine's name.
+pub fn host() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_string()
+}
+
+/// Open a web page in the person's browser. Only https: what is opened is built here.
+pub fn open_url(url: &str) {
+    if url.starts_with("https://") {
+        spawn("xdg-open", &[url]);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_github_address_names_a_repository() {
+    let got = |o: &str, r: &str| Some((o.to_string(), r.to_string()));
+    assert_eq!(github_repo("git@github.com:netstacks/torqos-laptop.git"), got("netstacks", "torqos-laptop"));
+    assert_eq!(github_repo("ssh://git@github.com/netstacks/x"), got("netstacks", "x"));
+    assert_eq!(github_repo("git@gitlab.com:a/b.git"), None);
+    assert_eq!(github_repo("git@github.com:a/b/c.git"), None);
+}
+
+// ── Signing in to GitHub, for setting a repository up ────────────────────────────────────────────
+
+/// TorqOS's registration with GitHub: a public identifier, for the device flow (no secret goes with it).
+const GITHUB_CLIENT: &str = "Ov23liVjvg3exXm64Wxz";
+
+/// A person's GitHub sign-in: held by the window for the setup, written nowhere, and never printed.
+#[derive(Clone)]
+pub struct GitHubToken(String);
+
+impl std::fmt::Debug for GitHubToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GitHubToken(hidden)")
+    }
+}
+
+/// What a person types at GitHub to sign this machine in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceCode {
+    pub user_code: String,
+    pub verification_uri: String,
+    device_code: String,
+    interval: u64,
+    expires_in: u64,
+}
+
+/// A value for a curl configuration file: quoted, so a value cannot add an option of its own.
+fn curl_quoted(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
+}
+
+/// The configuration curl reads on standard input: the token and the body stay out of the process list.
+fn curl_config(token: Option<&GitHubToken>, body: Option<&str>) -> String {
+    let mut c = String::from("header = \"Accept: application/json\"\nheader = \"User-Agent: TorqOS\"\n");
+    if let Some(t) = token {
+        c.push_str(&format!("header = {}\n", curl_quoted(&format!("Authorization: Bearer {}", t.0))));
+    }
+    if let Some(b) = body {
+        c.push_str(&format!("data = {}\n", curl_quoted(b)));
+    }
+    c
+}
+
+/// A request to GitHub, over HTTPS only: its status and JSON.
+fn github(url: &str, token: Option<&GitHubToken>, body: Option<&str>) -> Result<(u16, serde_json::Value)> {
+    use anyhow::Context as _;
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("curl")
+        .args(["--silent", "--show-error", "--proto", "=https", "--max-time", "30", "--write-out", "\n%{http_code}", "--config", "-", url])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("running curl")?;
+    child.stdin.take().context("curl's input")?.write_all(curl_config(token, body).as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        anyhow::bail!("could not reach GitHub: {}", history::one_line(&String::from_utf8_lossy(&out.stderr), 200));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (json, code) = text.rsplit_once('\n').context("GitHub's answer")?;
+    Ok((code.trim().parse().unwrap_or(0), serde_json::from_str(json).unwrap_or(serde_json::Value::Null)))
+}
+
+/// Ask GitHub for a code the person approves in their browser.
+pub fn github_start() -> Result<DeviceCode> {
+    let body = format!("client_id={GITHUB_CLIENT}&scope=repo");
+    let (_, v) = github("https://github.com/login/device/code", None, Some(&body))?;
+    device_code_of(&v)
+}
+
+fn device_code_of(v: &serde_json::Value) -> Result<DeviceCode> {
+    use anyhow::Context as _;
+    let text = |k: &str| v[k].as_str().map(String::from);
+    Ok(DeviceCode {
+        user_code: history::one_line(&text("user_code").with_context(|| format!("GitHub did not give a code: {}", history::one_line(&v.to_string(), 200)))?, 20),
+        verification_uri: text("verification_uri").filter(|u| u.starts_with("https://github.com/")).context("GitHub gave no page to open")?,
+        device_code: text("device_code").context("GitHub gave no device code")?,
+        interval: v["interval"].as_u64().unwrap_or(5),
+        expires_in: v["expires_in"].as_u64().unwrap_or(900),
+    })
+}
+
+/// Where a sign-in has got to.
+#[derive(Debug, PartialEq)]
+enum Poll {
+    Signed(String),
+    Wait,
+    Slower,
+    Stopped(String),
+}
+
+fn poll_of(v: &serde_json::Value) -> Poll {
+    if let Some(t) = v["access_token"].as_str() {
+        return Poll::Signed(t.to_string());
+    }
+    match v["error"].as_str() {
+        Some("authorization_pending") => Poll::Wait,
+        Some("slow_down") => Poll::Slower,
+        Some("expired_token") => Poll::Stopped("the code expired: start again".into()),
+        Some("access_denied") => Poll::Stopped("the sign-in was declined at GitHub".into()),
+        other => Poll::Stopped(format!("GitHub said: {}", history::one_line(other.unwrap_or("nothing we understand"), 120))),
+    }
+}
+
+/// Wait while the person approves the code: their sign-in, and their account's name.
+pub fn github_wait(code: &DeviceCode) -> Result<(GitHubToken, String)> {
+    let body = format!("client_id={GITHUB_CLIENT}&device_code={}&grant_type=urn:ietf:params:oauth:grant-type:device_code", code.device_code);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(code.expires_in);
+    let mut interval = code.interval.max(1);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+        // A dropped connection is not the end of a sign-in: ask again.
+        let Ok((_, v)) = github("https://github.com/login/oauth/access_token", None, Some(&body)) else { continue };
+        match poll_of(&v) {
+            Poll::Signed(t) => {
+                let token = GitHubToken(t);
+                let (_, me) = github("https://api.github.com/user", Some(&token), None)?;
+                let login = me["login"].as_str().map(|l| history::one_line(l, 60)).unwrap_or_default();
+                return Ok((token, login));
+            }
+            Poll::Wait => {}
+            Poll::Slower => interval += 5,
+            Poll::Stopped(why) => anyhow::bail!("{why}"),
+        }
+    }
+    anyhow::bail!("the code expired: start again")
+}
+
+/// Create a private repository, or find it if the person already has it: its SSH address.
+pub fn github_create_repo(token: &GitHubToken, login: &str, name: &str) -> Result<String> {
+    use anyhow::Context as _;
+    if !repo_name_ok(name) {
+        anyhow::bail!("a repository's name is letters, numbers, dots, dashes and underscores");
+    }
+    let body = serde_json::json!({ "name": name, "private": true, "description": format!("TorqOS configuration of {}", host()) }).to_string();
+    let (code, v) = github("https://api.github.com/user/repos", Some(token), Some(&body))?;
+    if code == 201 {
+        return v["ssh_url"].as_str().map(String::from).context("GitHub gave no address");
+    }
+    if code == 422 {
+        let (found, v) = github(&format!("https://api.github.com/repos/{login}/{name}"), Some(token), None)?;
+        if found == 200 {
+            // A configuration names the machine's people and software: never into a public repository.
+            if v["private"].as_bool() != Some(true) {
+                anyhow::bail!("{login}/{name} already exists and is public: choose another name");
+            }
+            return v["ssh_url"].as_str().map(String::from).context("GitHub gave no address");
+        }
+    }
+    anyhow::bail!("GitHub would not create it: {}", history::one_line(v["message"].as_str().unwrap_or("no reason given"), 200))
+}
+
+/// Give a repository this machine's key, able to write to it and to nothing else.
+pub fn github_add_key(token: &GitHubToken, owner: &str, repo: &str, key: &str) -> Result<()> {
+    let body = serde_json::json!({ "title": format!("TorqOS {}", host()), "key": key, "read_only": false }).to_string();
+    let (code, v) = github(&format!("https://api.github.com/repos/{owner}/{repo}/keys"), Some(token), Some(&body))?;
+    if code == 201 {
+        return Ok(());
+    }
+    // 422 is this key already on this repository, or on another (a key serves one repository): only the first is done.
+    if code == 422 {
+        let (listed, keys) = github(&format!("https://api.github.com/repos/{owner}/{repo}/keys?per_page=100"), Some(token), None)?;
+        if listed == 200 && keys.as_array().is_some_and(|k| k.iter().any(|e| e["key"].as_str().is_some_and(|have| same_key(have, key)))) {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("GitHub would not take the key: {}", history::one_line(&github_refusal(&v), 200))
+}
+
+/// GitHub's reason: its message, and the first detail under it (where "key is already in use" is said).
+fn github_refusal(v: &serde_json::Value) -> String {
+    let message = v["message"].as_str().unwrap_or("no reason given");
+    match v["errors"][0]["message"].as_str() {
+        Some(detail) => format!("{message}: {detail}"),
+        None => message.to_string(),
+    }
+}
+
+/// Whether two public keys are one: their type and body, whatever comment follows.
+fn same_key(a: &str, b: &str) -> bool {
+    let body = |k: &str| k.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+    !body(a).is_empty() && body(a) == body(b)
+}
+
+/// A name GitHub would give a repository, and nothing that could change the address it goes into.
+fn repo_name_ok(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && name.len() <= 100 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+#[cfg(test)]
+mod github_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_sign_in_as_github_answers_it() {
+        assert_eq!(poll_of(&json!({"access_token": "t"})), Poll::Signed("t".into()));
+        assert_eq!(poll_of(&json!({"error": "authorization_pending"})), Poll::Wait);
+        assert_eq!(poll_of(&json!({"error": "slow_down"})), Poll::Slower);
+        assert!(matches!(poll_of(&json!({"error": "access_denied"})), Poll::Stopped(_)));
+        assert!(matches!(poll_of(&json!({})), Poll::Stopped(_)));
+        let c = device_code_of(&json!({"user_code": "AB-12", "verification_uri": "https://github.com/login/device", "device_code": "d", "interval": 5, "expires_in": 900})).unwrap();
+        assert_eq!(c.user_code, "AB-12");
+        assert!(device_code_of(&json!({"user_code": "AB", "verification_uri": "https://evil.example/", "device_code": "d"})).is_err(), "only GitHub's own page");
+    }
+
+    #[test]
+    fn what_goes_to_curl_cannot_become_an_option() {
+        assert_eq!(curl_quoted("a\"b\\c\nd"), "\"a\\\"b\\\\c\\nd\"");
+        let c = curl_config(Some(&GitHubToken("sec\"\nurl = \"http://x".into())), None);
+        assert_eq!(c.lines().filter(|l| l.starts_with("url")).count(), 0, "{c}");
+    }
+
+    #[test]
+    fn a_key_is_its_body_and_a_name_stays_a_name() {
+        assert!(same_key("ssh-ed25519 AAAA torq-broker@x", "ssh-ed25519 AAAA"));
+        assert!(!same_key("ssh-ed25519 AAAA", "ssh-ed25519 BBBB"));
+        assert!(!same_key("", ""));
+        assert!(repo_name_ok("torqos-torqlaptop"));
+        for bad in ["", "..", "a/b", "a?x=1", "a b"] {
+            assert!(!repo_name_ok(bad), "{bad}");
+        }
+        assert_eq!(github_refusal(&json!({"message": "Validation Failed", "errors": [{"message": "key is already in use"}]})), "Validation Failed: key is already in use");
+    }
+
+    #[test]
+    fn a_sign_in_is_never_printed() {
+        assert_eq!(format!("{:?}", GitHubToken("secret".into())), "GitHubToken(hidden)");
+    }
 }

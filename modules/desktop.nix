@@ -162,6 +162,8 @@ in
     environment.systemPackages = [
       # TorqOS's icons (branding/), for what shows the system's logo (os-release's LOGO).
       config.torq.branding.package
+      # TorqOS Settings talks to GitHub through it, for setting up a backup.
+      pkgs.curl
       # TorqOS Settings (ADR-045 2): torqcli in a COSMIC window, the person's own, no privilege.
       cfg.settingsPackage
     ];
