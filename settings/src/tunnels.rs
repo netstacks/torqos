@@ -315,7 +315,11 @@ impl cosmic::Application for Applet {
 
     fn view(&self) -> Element<'_, Message> {
         let open = self.popup;
-        let button = self.core.applet.icon_button_from_handle(self.icon()).on_press_with_rectangle(move |offset, bounds| {
+        // At a symbolic icon's size, as the panel's other status icons are: the handle is drawn SVG (its badge has
+        // its own colour), which `icon_button_from_handle` would size as a full-colour app icon, a size larger.
+        let (w, h) = self.core.applet.suggested_size(true);
+        let glyph = widget::icon(self.icon()).width(Length::Fixed(w as f32)).height(Length::Fixed(h as f32));
+        let button = self.core.applet.button_from_element(glyph, true).on_press_with_rectangle(move |offset, bounds| {
             if let Some(id) = open {
                 return Message::Surface(destroy_popup(id));
             }
