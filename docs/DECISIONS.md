@@ -2382,6 +2382,10 @@ vouches for, that only proposes, every change ledgered and undone in one command
   answer silent for 660 s (it had no limit), and its refusals are the client's words ("your agent did not
   answer …", "… not yours to connect to"); the applet's and window's mark is drawn SVG, and both desktop entries
   use TorqOS's `torqos` icon. Open: KNOWN-GAPS 6zzm.
+- **As built (step 1 on ADR-053's waiting count, 2026-11-10):** the cap on an agent's waiting proposals is both: each
+  agent account's own (`data.agent` is that account) and judged as ADR-053 (amended) has it — newest first, among
+  that agent's newest `AGENT_WAITING_LOOK` not yet applied, each counted only if it could still land, its list
+  judged as the agent that proposed it (`agent_check` by `data.agent`).
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
