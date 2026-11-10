@@ -221,3 +221,28 @@ fn an_agent_sockets_grant_is_who_asked() {
     }
     assert!(m.b.ssh_keys_for("alice").is_empty(), "no keys yet");
 }
+
+/// An SSH key's public half, read from its own header (no program given the private key, no file of it), beside it;
+/// a key under a passphrase, or another form, refused saying why, and the old one left listed.
+#[test]
+fn an_ssh_keys_public_half_is_kept_beside_it() {
+    const KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACALEJlaQgiCLSgzMKjXIAECACR/bjD9FbMY71yZLrLm3AAAAIjyZMAb8mTA\n";
+    let m = Machine::new();
+    let Some(key) = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../wire/src/secrets.rs")).ok().and_then(|w| {
+        let start = w.find("const TEST_KEY: &str = \"")? + "const TEST_KEY: &str = \"".len();
+        Some(w[start..start + w[start..].find('"')?].replace("\\n", "\n"))
+    }) else {
+        panic!("the test key")
+    };
+    assert!(key.starts_with(KEY), "the same key as torq-wire's test");
+    m.b.set_secret(&alice(), "deploy", &key, "alice").unwrap();
+    let public = fs::read_to_string(m.store().join("users/alice/deploy.pub")).unwrap();
+    assert_eq!(public.trim(), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAsQmVpCCIItKDMwqNcgAQIAJH9uMP0VsxjvXJkusubc");
+    let left: Vec<String> = fs::read_dir(m.store().join("users/alice")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(left.iter().all(|n| n == "deploy" || n == "deploy.pub"), "nothing else, no key file of any kind: {left:?}");
+    let e = format!("{:#}", m.b.set_secret(&alice(), "deploy", "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----", "alice").unwrap_err());
+    assert!(e.contains("PEM"), "{e}");
+    assert_eq!(fs::read_to_string(m.store().join("users/alice/deploy.pub")).unwrap(), public, "the old one still listed");
+    m.b.set_secret(&alice(), "deploy", "now a token", "alice").unwrap();
+    assert!(!m.store().join("users/alice/deploy.pub").exists(), "not a key now: no public half");
+}

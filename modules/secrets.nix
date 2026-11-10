@@ -38,7 +38,8 @@ in
       after = [ "network.target" "torq-broker.socket" ];
       wants = [ "torq-broker.socket" ];
       # curl makes each request; its CA bundle is the system's (/etc/ssl/certs).
-      path = [ pkgs.curl ];
+      # And OpenSSH's agent signs, a private one for each signature (secrets/src/agent.rs).
+      path = [ pkgs.curl pkgs.openssh ];
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} serve";
         User = "torq-secrets";
@@ -71,6 +72,9 @@ in
         SystemCallArchitectures = "native";
         SystemCallFilter = [ "@system-service" "~@privileged" ];
         UMask = "0077";
+        # The agent sockets (POST /ssh-agent): anyone may reach the folder; each socket answers one account.
+        RuntimeDirectory = "torq-secrets";
+        RuntimeDirectoryMode = "0755";
         # Bounded: a few requests at once, each at most 32 MiB each way.
         MemoryMax = "1G";
         TasksMax = 64;

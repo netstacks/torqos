@@ -273,6 +273,94 @@ pub fn render(rules: &Rules) -> String {
     s
 }
 
+/// Standard base64, as an SSH key carries it (no line breaks; padding optional).
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let s = s.trim_end_matches('=').as_bytes();
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    for chunk in s.chunks(4) {
+        if chunk.len() == 1 {
+            return None;
+        }
+        let mut n = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            n |= val(c)? << (18 - 6 * i);
+        }
+        out.push((n >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
+fn base64_encode(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in b.chunks(3) {
+        let n = (u32::from(c[0]) << 16) | (u32::from(*c.get(1).unwrap_or(&0)) << 8) | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            out.push(if i <= c.len() { A[((n >> (18 - 6 * i)) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+/// A string of SSH's wire format (uint32 length, then the bytes) at the start of `b`: it, and what follows.
+pub fn ssh_string(b: &[u8]) -> Option<(&[u8], &[u8])> {
+    let n = u32::from_be_bytes(b.get(..4)?.try_into().ok()?) as usize;
+    let s = b.get(4..4usize.checked_add(n)?)?;
+    Some((s, &b[4 + n..]))
+}
+
+/// The public half of an OpenSSH private key (`-----BEGIN OPENSSH PRIVATE KEY-----`), as a `.pub` file says it
+/// (`<type> <base64>`), read from the key's own header, where it is in the clear: no program is given the private
+/// key to say it, and no file holds it. A key under a passphrase, or another format, is refused, saying why.
+pub fn openssh_public(value: &str) -> Result<String, String> {
+    const BEGIN: &str = "-----BEGIN OPENSSH PRIVATE KEY-----";
+    const END: &str = "-----END OPENSSH PRIVATE KEY-----";
+    let v = value.trim();
+    if !v.starts_with(BEGIN) {
+        return Err(if v.contains("PRIVATE KEY-----") {
+            "not an OpenSSH key (an older PEM one): `ssh-keygen -p -f <key>` writes it in OpenSSH's form".into()
+        } else {
+            "not an SSH private key".into()
+        });
+    }
+    let body: String = v.trim_start_matches(BEGIN).split(END).next().unwrap_or("").chars().filter(|c| !c.is_whitespace()).collect();
+    let raw = base64_decode(&body).ok_or("the key is not base64")?;
+    let rest = raw.strip_prefix(b"openssh-key-v1\0".as_slice()).ok_or("the key is not openssh-key-v1")?;
+    let (cipher, rest) = ssh_string(rest).ok_or("the key is cut short")?;
+    if cipher != b"none" {
+        return Err("the key has a passphrase: a secret is kept encrypted already, so give it one without (`ssh-keygen -p -N \"\" -f <a copy>`)".into());
+    }
+    let (_kdf, rest) = ssh_string(rest).ok_or("the key is cut short")?;
+    let (_opts, rest) = ssh_string(rest).ok_or("the key is cut short")?;
+    let count = u32::from_be_bytes(rest.get(..4).ok_or("the key is cut short")?.try_into().map_err(|_| "the key is cut short")?);
+    if count != 1 {
+        return Err("a file of one key, not several".into());
+    }
+    let (blob, _) = ssh_string(&rest[4..]).ok_or("the key is cut short")?;
+    let (kind, _) = ssh_string(blob).ok_or("the key's public half is cut short")?;
+    let kind = std::str::from_utf8(kind).map_err(|_| "the key's type is not text")?;
+    if !kind.chars().all(|c| c.is_ascii_alphanumeric() || "-@.".contains(c)) {
+        return Err("the key's type is not one".into());
+    }
+    Ok(format!("{kind} {}", base64_encode(blob)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +445,23 @@ mod tests {
         assert!(parse(br#"{"t":{"kind":"token","actors":["sam"]}}"#).is_ok(), "a system secret may be a person's to use");
     }
 
+    /// A throwaway key, made for this test alone (ssh-keygen -t ed25519 -N ""), and its public half as ssh-keygen wrote it.
+    const TEST_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACALEJlaQgiCLSgzMKjXIAECACR/bjD9FbMY71yZLrLm3AAAAIjyZMAb8mTA\nGwAAAAtzc2gtZWQyNTUxOQAAACALEJlaQgiCLSgzMKjXIAECACR/bjD9FbMY71yZLrLm3A\nAAAECXsWvw0VEbFBpa7vFncHfWTTRsPvpgrZQU6IYMrdmZMAsQmVpCCIItKDMwqNcgAQIA\nJH9uMP0VsxjvXJkusubcAAAABHRlc3QB\n-----END OPENSSH PRIVATE KEY-----";
+    const TEST_PUB: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAsQmVpCCIItKDMwqNcgAQIAJH9uMP0VsxjvXJkusubc";
+    const TEST_KEY_PASSPHRASE: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABBBz7TCRp\nqxE77REhi+I6auAAAAIAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIJi8NxsfM8PIPeSi\nDH2BhaL5F+kiWpAYBq5QrqpCetmtAAAAkBCutpUgJK6Cgx45e1nbTrKM1RwUMwNcr6e4JO\nibQhzoOaOz2zA6qbAopFdLLhZfCpNp44x5wlifs3DWXzEjP2FsFSpXUe3V75Hc0ueGhLpi\nZzA3DVq8w3DEMNAyTr7CH8PdDVxilz+IqwGZ9WPdNy3o9k429o+zbyxUuSRlxbeDVmgE3h\nD4KffEuUBf43mTQQ==\n-----END OPENSSH PRIVATE KEY-----";
+
+    #[test]
+    fn a_keys_public_half_from_its_own_header() {
+        assert_eq!(openssh_public(TEST_KEY).unwrap(), TEST_PUB, "as ssh-keygen -y says it");
+        assert_eq!(openssh_public(&format!("\n{TEST_KEY}\n\n")).unwrap(), TEST_PUB);
+        assert!(openssh_public(TEST_KEY_PASSPHRASE).unwrap_err().contains("passphrase"));
+        assert!(openssh_public("-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----").unwrap_err().contains("PEM"));
+        assert!(openssh_public("ghp_token").is_err());
+        assert!(openssh_public("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbg==\n-----END OPENSSH PRIVATE KEY-----").is_err(), "cut short");
+        assert_eq!(base64_decode("aGVsbG8="), Some(b"hello".to_vec()));
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+        assert_eq!(base64_decode("a"), None);
+    }
     #[test]
     fn names() {
         assert!(name_ok("github-ci") && name_ok("a_1") && !name_ok("") && !name_ok("-x") && !name_ok("a/b") && !name_ok(".x") && !name_ok(&"a".repeat(65)));

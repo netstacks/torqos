@@ -64,6 +64,19 @@ pkgs.testers.runNixOSTest {
       wantedBy = [ "multi-user.target" ];
       serviceConfig.ExecStart = "${pkgs.python3}/bin/python3 ${server}";
     };
+    # A git host over SSH: `git`, whose key is put in by the test.
+    services.openssh = { enable = true; settings.PasswordAuthentication = false; };
+    users.users.git = { isNormalUser = true; };
+    # Light: sshd and a small server, on a laptop that runs the test.
+    virtualisation.memorySize = 512;
+  };
+
+  # Another SSH host the key is let in at, which no rule names: the key must not sign for it.
+  nodes.elsewhere = { ... }: {
+    services.openssh = { enable = true; settings.PasswordAuthentication = false; };
+    users.users.git = { isNormalUser = true; };
+    # Light: sshd and a small server, on a laptop that runs the test.
+    virtualisation.memorySize = 512;
   };
 
   nodes.machine = { pkgs, lib, nodes, ... }: {
@@ -76,7 +89,8 @@ pkgs.testers.runNixOSTest {
     users.users.sam = { isNormalUser = true; hashedPasswordFile = lib.mkForce null; hashedPassword = samHash; };
     torq.broker.rebuildCommand = "true";
     security.pki.certificateFiles = [ "${certs}/ca.crt" ];
-    networking.hosts.${nodes.far.networking.primaryIPAddress} = [ "api.example.test" "other.example.test" ];
+    networking.hosts.${nodes.far.networking.primaryIPAddress} = [ "api.example.test" "other.example.test" "git.example.test" ];
+    networking.hosts.${nodes.elsewhere.networking.primaryIPAddress} = [ "elsewhere.example.test" ];
     environment.systemPackages = [ pkgs.socat pkgs.curl pkgs.jq ];
   };
 
@@ -198,6 +212,54 @@ pkgs.testers.runNixOSTest {
         assert code == 0
         status, body, _ = use("torq-agent", "/user/dev/gh/api.example.test/echo", "-H", f"X-Torq-Session: {session}")
         assert status == 403 and "untrusted" in body, (status, body)
+
+    with subtest("an SSH key, from a file, for the host the person checked: its key in the rule (step 3)"):
+        machine.succeed("su - dev -c " + shlex.quote("mkdir -p ~/.ssh && ssh-keygen -q -t ed25519 -N \"\" -C deploy -f ~/.ssh/deploy"))
+        public = machine.succeed("cat /home/dev/.ssh/deploy.pub").strip()
+        for host in [far, elsewhere]:
+            host.wait_for_unit("sshd.service")
+            host.succeed(f"install -d -o git -m 700 /home/git/.ssh && echo {shlex.quote(public)} > /home/git/.ssh/authorized_keys && chown git /home/git/.ssh/authorized_keys")
+        # dev checks git.example.test's key once, as a person does (their own known_hosts), and only that host.
+        machine.succeed("su - dev -c 'ssh-keyscan -t ed25519 git.example.test > ~/.ssh/known_hosts 2>/dev/null'")
+        machine.succeed("su - dev -c 'torq request system secret set deploy file /home/dev/.ssh/deploy user dev'")
+        machine.succeed("su - dev -c 'torq request system secret allow deploy ssh git.example.test user dev'")
+        machine.fail("su - dev -c 'torq request system secret allow deploy ssh elsewhere.example.test user dev'")
+        machine.succeed("su - dev -c 'torq request system secret allow deploy agent user dev'")
+        machine.succeed("su - dev -c 'torq request system secret approve deploy never user dev'")
+        rules = json.loads(machine.succeed(f"git -C {repo} show HEAD:users/dev/secrets.json"))
+        assert rules["deploy"]["ssh"]["hosts"] == ["git.example.test"] and rules["deploy"]["ssh"]["known"][0].startswith("git.example.test ssh-ed25519 "), rules
+        assert machine.succeed("stat -c %a /var/lib/torq/secrets/store/users/dev/deploy.pub").strip() == "644"
+        shown = machine.succeed("su - dev -c 'torq show system secrets'")
+        assert "deploy" in shown and "SSH key, has a value; ssh to git.example.test" in shown, shown
+
+    with subtest("the agent signs in with it, through its own agent socket, and never holds it"):
+        code, s = ask("torq-agent", {"args": ["--json", "session-start"]})
+        session2 = s["session"]
+        out = machine.succeed(f"su -s /bin/sh torq-agent -c \"curl -s -X POST -H 'X-Torq-Session: {session2}' http://127.0.0.1:7800/ssh-agent\"")
+        sock = json.loads(out)["socket"]
+        assert sock.startswith("/run/torq-secrets/ssh-"), out
+        machine.succeed("cp /home/dev/.ssh/known_hosts /tmp/agent-known && ssh-keyscan -t ed25519 elsewhere.example.test >> /tmp/agent-known 2>/dev/null && chmod 644 /tmp/agent-known")
+        ssh = f"SSH_AUTH_SOCK={sock} ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/tmp/agent-known -o IdentitiesOnly=no"
+        listed = machine.succeed(f"su -s /bin/sh torq-agent -c 'SSH_AUTH_SOCK={sock} ssh-add -l'")
+        assert "torq:dev/deploy" in listed, listed
+        assert machine.succeed(f"su -s /bin/sh torq-agent -c '{ssh} git@git.example.test echo signed-in'").strip() == "signed-in"
+        ledger = machine.succeed("torq-broker log")
+        assert "dev's secret deploy for the first time" in ledger, ledger
+        assert "PRIVATE KEY" not in ledger
+        # Not for a host its rule does not name, though the key is let in there.
+        machine.fail(f"su -s /bin/sh torq-agent -c '{ssh} git@elsewhere.example.test echo signed-in'")
+        # The socket answers its own account alone; it takes no key, nor gives one.
+        machine.fail(f"su -s /bin/sh sam -c 'SSH_AUTH_SOCK={sock} ssh-add -l'")
+        machine.succeed("su -s /bin/sh torq-agent -c 'ssh-keygen -q -t ed25519 -N \"\" -f /tmp/agents-own'")
+        machine.fail(f"su -s /bin/sh torq-agent -c 'SSH_AUTH_SOCK={sock} ssh-add /tmp/agents-own'")
+        journal = machine.succeed("journalctl -u torq-secrets --no-pager")
+        assert "torq-agent used dev's secret deploy for ssh to git.example.test: signed" in journal, journal
+        assert "PRIVATE KEY" not in journal
+
+    with subtest("its owner signs in with it the same way"):
+        out = machine.succeed("su - dev -c 'curl -s -X POST http://127.0.0.1:7800/ssh-agent'")
+        sock = json.loads(out)["socket"]
+        assert machine.succeed(f"su - dev -c 'SSH_AUTH_SOCK={sock} ssh -o BatchMode=yes git@git.example.test echo mine'").strip() == "mine"
 
     with subtest("no one but the daemon asks the broker for a use, and the value is nowhere it can be read"):
         for user in ["torq-agent", "dev", "sam"]:

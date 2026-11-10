@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 #![forbid(dead_code)]
 
+pub mod agent;
 pub mod http;
 pub mod scrub;
 pub mod upstream;
@@ -58,11 +59,15 @@ fn serve() -> Result<()> {
             let _ = stream.write_all(&http::refusal(503, "too many requests at once: try again"));
             continue;
         }
-        std::thread::spawn(move || {
+        // A thread that cannot be had (the unit's TasksMax) is a request turned away, not a daemon that stops.
+        let spawned = std::thread::Builder::new().name("request".into()).spawn(move || {
             let answer = one(&stream);
             let _ = stream.write_all(&answer);
             RUNNING.fetch_sub(1, Ordering::SeqCst);
         });
+        if spawned.is_err() {
+            RUNNING.fetch_sub(1, Ordering::SeqCst);
+        }
     }
     Ok(())
 }
@@ -79,7 +84,6 @@ struct Granted {
 /// Ask the broker for a use (`secret-use`): what it granted, or why not. The value is in this answer, and in
 /// nothing kept.
 fn ask_broker(route: &http::Route, client_port: u16, session: Option<&str>) -> Result<std::result::Result<Granted, String>> {
-    use std::io::BufRead;
     let mut args = vec!["--json".to_string(), "secret-use".into(), "--name".into(), route.name.clone(), "--host".into(), route.host.clone()];
     args.extend(["--client-port".into(), client_port.to_string(), "--server-port".into(), PORT.to_string()]);
     if let Some(u) = &route.user {
@@ -88,6 +92,13 @@ fn ask_broker(route: &http::Route, client_port: u16, session: Option<&str>) -> R
     if let Some(s) = session {
         args.extend(["--session".into(), s.to_string()]);
     }
+    broker(args)
+}
+
+/// One request of the broker's (the daemon's account may ask only `secret-use` and `secret-agent`): its answer as
+/// `T`, or why it refused.
+fn broker<T: serde::de::DeserializeOwned>(args: Vec<String>) -> Result<std::result::Result<T, String>> {
+    use std::io::BufRead;
     let mut s = std::os::unix::net::UnixStream::connect(SOCKET).with_context(|| format!("reaching the broker at {SOCKET}"))?;
     s.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     writeln!(s, "{}", serde_json::to_string(&BrokerRequest { args, ..Default::default() })?)?;
@@ -107,6 +118,42 @@ fn ask_broker(route: &http::Route, client_port: u16, session: Option<&str>) -> R
             Ok(Err(v["error"].as_str().unwrap_or("refused").to_string()))
         }
         None => bail!("the broker hung up"),
+    }
+}
+
+/// An SSH use, for a socket's key (`agent.rs`): judged by the broker by the socket's grant; the value and the host's keys.
+fn ask_ssh(key: &agent::Key, grant: &str, host: &str) -> Result<std::result::Result<(String, Vec<String>), String>> {
+    #[derive(serde::Deserialize)]
+    struct Use {
+        value: String,
+        known: Vec<String>,
+    }
+    let mut args = vec!["--json".to_string(), "secret-use".into(), "--ssh".into(), "--name".into(), key.name.clone(), "--host".into(), host.into(), "--grant".into(), grant.into()];
+    if let Some(u) = key.owner.get("person").and_then(|p| p.as_str()) {
+        args.extend(["--user".into(), u.into()]);
+    }
+    Ok(broker::<Use>(args)?.map(|u| (u.value, u.known)))
+}
+
+/// `POST /ssh-agent`: an agent socket for the one connected, granted by the broker (who, read from the kernel).
+fn agent_socket(req: &http::Request, client_port: u16) -> Vec<u8> {
+    let mut args = vec!["--json".to_string(), "secret-agent".into(), "--client-port".into(), client_port.to_string(), "--server-port".into(), PORT.to_string()];
+    if let Some(s) = req.header(torq_wire::secrets::SESSION_HEADER) {
+        args.extend(["--session".into(), s.to_string()]);
+    }
+    let g: agent::Granted = match broker(args) {
+        Ok(Ok(g)) => g,
+        Ok(Err(why)) => return http::refusal(403, &why),
+        Err(e) => return http::refusal(503, &format!("{e:#}")),
+    };
+    let (actor, keys) = (g.actor.clone(), g.keys.iter().map(|k| k.name.clone()).collect::<Vec<_>>());
+    match agent::open(g, ask_ssh) {
+        Ok(path) => {
+            log(&format!("an agent socket for {actor}, with {} key(s)", keys.len()));
+            let body = format!("{}\n", serde_json::json!({ "socket": path, "keys": keys, "seconds": 3600 }));
+            http::response(200, "OK", &[("Content-Type".into(), "application/json".into())], body.as_bytes())
+        }
+        Err(e) => http::refusal(503, &format!("{e:#}")),
     }
 }
 
@@ -143,6 +190,13 @@ fn one(stream: &TcpStream) -> Vec<u8> {
     if let Err(why) = http::not_a_browser(&req) {
         log(&format!("refused a browser's request: {why}"));
         return http::refusal(403, &why);
+    }
+    // An agent socket for SSH (agent.rs): asked as a use is, so that the broker reads who from the kernel.
+    if req.target == "/ssh-agent" {
+        if req.method != "POST" {
+            return http::refusal(400, "an agent socket is asked for with POST /ssh-agent");
+        }
+        return agent_socket(&req, peer.port());
     }
     let route = match http::route(&req.target) {
         Ok(r) => r,
@@ -227,6 +281,6 @@ fn whose(r: &http::Route) -> String {
 }
 
 /// Every use, to the journal (the daemon's log, ADR-052 3): who, which secret, what, and how it went. Never a value.
-fn log(line: &str) {
+pub(crate) fn log(line: &str) {
     eprintln!("{}", line.chars().filter(|c| !c.is_control()).collect::<String>());
 }

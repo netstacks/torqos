@@ -561,6 +561,8 @@ mod tests {
 
 /// How long a grant of an agent socket lasts (ADR-052, SSH).
 pub const GRANT_SECONDS: i64 = 3600;
+/// The most agent sockets one account holds at once.
+pub const GRANTS_EACH: usize = 8;
 
 /// A program's SSH agent socket, granted: who it is for, read from the kernel when it asked (over a loopback
 /// connection, as an HTTPS use is), and the session it named. The daemon names it in each use of a key through that
@@ -588,9 +590,9 @@ fn grant_id_ok(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Whether `value` is an OpenSSH private key, as `ssh-keygen` writes one.
+/// Whether `value` is meant as an SSH private key (any form: one not OpenSSH's is refused, saying why).
 fn is_ssh_key(value: &str) -> bool {
-    value.trim_start().starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")
+    value.trim_start().starts_with("-----BEGIN ") && value.contains("PRIVATE KEY-----")
 }
 
 impl Broker {
@@ -621,6 +623,11 @@ impl Broker {
                 let _ = fs::remove_file(e.path());
             }
         }
+        // A few at once for each account: grants nobody uses cannot pile up.
+        let live = fs::read_dir(&dir)?.flatten().filter(|e| fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<Grant>(&b).ok()).is_some_and(|o| o.actor == actor)).count();
+        if live >= GRANTS_EACH {
+            bail!("refused: {actor} has {live} agent sockets already (at most {GRANTS_EACH} at once, each for an hour)");
+        }
         fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(dir.join(&id))?.write_all(&serde_json::to_vec(&g)?)?;
         Ok(id)
     }
@@ -643,6 +650,7 @@ impl Broker {
         use torq_wire::secrets::{Kind, AGENT};
         let mut out = Vec::new();
         let mut owners: Vec<Owner> = self.kept_secrets().into_iter().map(|k| k.owner).collect();
+        owners.sort();
         owners.dedup();
         for owner in owners {
             let Ok(rules) = self.rules_of(&owner) else { continue };
@@ -662,27 +670,22 @@ impl Broker {
         out
     }
 
-    /// The public half of an SSH key just kept (`ssh-keygen -y`), beside it: for listing the key without its value.
+    /// The public half of an SSH key just kept, beside it: for listing the key without its value.
     /// Not a key: nothing, and any public half of an earlier value goes.
     fn keep_public(&self, owner: &Owner, name: &str, value: &str) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
-        let dir = self.secret_dir(owner);
-        let public = dir.join(format!("{name}.pub"));
-        let _ = fs::remove_file(&public);
+        let public = self.secret_dir(owner).join(format!("{name}.pub"));
         if !is_ssh_key(value) {
+            let _ = fs::remove_file(&public);
             return Ok(());
         }
-        // ssh-keygen reads a file: one of root's, in the store's own folder, gone at once.
-        let tmp = dir.join(format!(".{name}.key"));
-        let _ = fs::remove_file(&tmp);
-        fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?.write_all(format!("{}\n", value.trim_end()).as_bytes())?;
-        let out = crate::config::command("ssh-keygen").args(["-y", "-P", "", "-f"]).arg(&tmp).stdin(Stdio::null()).output();
-        let _ = fs::remove_file(&tmp);
-        let out = out.context("running ssh-keygen")?;
-        if !out.status.success() {
-            bail!("an SSH key that ssh-keygen cannot read (one with a passphrase is not taken): {}", said(String::from_utf8_lossy(&out.stderr).trim()));
-        }
-        fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o644).open(&public)?.write_all(&out.stdout)?;
+        // From the key's own header, where it is in the clear: the private key is given to no program, and is in
+        // no file but its encrypted one. A key that cannot be read refuses the value, and the old one stays listed.
+        let line = torq_wire::secrets::openssh_public(value).map_err(|why| anyhow::anyhow!("not kept: {why}"))?;
+        let part = self.secret_dir(owner).join(format!(".{name}.pub.new"));
+        let _ = fs::remove_file(&part);
+        fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&part)?.write_all(format!("{line}\n").as_bytes())?;
+        fs::rename(&part, &public)?;
         Ok(())
     }
 }

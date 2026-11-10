@@ -2168,6 +2168,34 @@ off many times a day.
     `SESSIONS_AN_HOUR`, KNOWN-GAPS 6zq), so refusing a tainted session's use stops an honest agent that read
     something untrusted, not a hostile program running as the agent. Against that, the rule is the guarantee: the
     agent uses only what a rule names, only at its hosts.
+- **Step 3 built (2026-11-10): SSH, and its independent review's findings fixed.** A rule's SSH hosts carry their
+  keys (`known`, known_hosts lines), taken from the person's own known_hosts when they `allow … ssh <host>`; a host
+  they never connected to and checked is refused. A key is given from a file (`request system secret set <name>
+  file <path>`), and the broker keeps its public half beside it, read from the key's own header (no program is
+  given the private key for that, and no file holds it); a key under a passphrase, or in the older PEM form, is
+  refused, saying why. A program asks for an agent socket (`POST http://127.0.0.1:7800/ssh-agent`, its session
+  named as for HTTPS): the broker grants it to whoever is connected, read from the kernel (`secret-agent`, an hour,
+  at most 8 at once for one account), and the daemon opens a socket only that account is answered on
+  (`SO_PEERCRED`), at most 4 for one account. On it the daemon lists the keys the account may use and takes no
+  key, removal or lock. A signature is made this way: the daemon starts a private `ssh-agent` of its own; that
+  agent, holding nothing yet, takes the session's binding only if the host's signature of the session holds; the
+  request must be a login to that bound session; only then does the broker judge the use by the socket's grant
+  (recording the agent's first use) and give the value; it goes into the private agent restricted to the rule's
+  host (`ssh-add -h <host> -H <the rule's keys of it>`), on ssh-add's input; the request is signed there, and the
+  private agent is gone. Which host a session is with is by its key, never its name: DNS gains nothing.
+  `tests/secrets.nix` signs in to the rule's host as the agent and as its owner, and is refused at another host
+  that would let the key in. From the review:
+  - **A forwarded session is refused** (`ssh -A` through a host the rule does not name, then on to one it does):
+    the relay replays one binding, so a chain of hops is not one OpenSSH could check; a second binding on one
+    connection is refused too, as OpenSSH's own agent does.
+  - **Nothing is asked of the broker before the binding is checked**, so no use is recorded, and no value
+    decrypted, for a host the session was never with.
+  - The public half no longer passes through `ssh-keygen` and a key file (the review: a crash would have left the
+    key in the clear in the store).
+  - Threads and sockets are bounded (a thread that cannot be had turns a request away; the daemon does not stop).
+  - **Said plainly:** a key restricted to a host signs logins to it and nothing else. OpenSSH refuses such a key
+    for `ssh-keygen -Y sign`, so signing commits and artifacts is not this operation (Decision 3 said it would
+    be): it would be one of its own, by a later ADR. SSH hosts are on port 22 for now (`[host]:port` is refused).
 - **Later, not now:** a person's own secret typed into the focused window by a COSMIC shortcut, theirs and never
   the agent's (the owner's Alt+O, 2026-11-10; it needs a way to type into windows that COSMIC accepts, and it
   never serves `torq-agent`); a service's secret from the same store (systemd's `LoadCredential`, instead of a
