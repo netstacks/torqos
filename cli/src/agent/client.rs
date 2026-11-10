@@ -236,6 +236,7 @@ impl Lines {
             }
             let got = match self.r.fill_buf() {
                 Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(silent()),
                 Err(e) => return Err(Unreachable::Broken(format!("reading your agent's answer: {e}"))),
             };
@@ -373,7 +374,8 @@ mod tests {
         let t = Instant::now();
         assert!(matches!(c.status(), Err(Unreachable::Silent(_))));
         let mut a = c.ask("hello", None).unwrap();
-        assert!(matches!(a.next(), Some(Err(Unreachable::Silent(_)))));
+        let first = a.next();
+        assert!(matches!(first, Some(Err(Unreachable::Silent(_)))), "{first:?}");
         assert!(a.next().is_none(), "over at its error");
         assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
     }
