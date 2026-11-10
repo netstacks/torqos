@@ -40,7 +40,7 @@
       packages = lib.recursiveUpdate (forSystems allSystems (pkgs: {
         torq-broker = pkgs.callPackage ./broker/package.nix { };
         torq = pkgs.callPackage ./cli/package.nix { };
-        # The agent (ADR-042): doctor mode, run as torq-agent.
+        # The agent (ADR-042): doctor mode, run as a person's agent account (torq-agent-<person>).
         torq-agent = pkgs.callPackage ./agent/package.nix { };
         # The secrets daemon (ADR-052): a secret used, never read.
         torq-secrets = pkgs.callPackage ./secrets/package.nix { };
@@ -173,6 +173,7 @@
         commit-at = import ./tests/commit-at.nix { inherit pkgs self; };
         agent = import ./tests/agent.nix { inherit pkgs self; };
         agent-run = import ./tests/agent-run.nix { inherit pkgs self; };
+        agents-per-person = import ./tests/agents-per-person.nix { inherit pkgs self; };
         doctor = import ./tests/doctor.nix { inherit pkgs self; };
         agent-proposals = import ./tests/agent-proposals.nix { inherit pkgs self; };
         remote = import ./tests/remote.nix { inherit pkgs self; };

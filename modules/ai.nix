@@ -1,7 +1,7 @@
 # The agent's runtime (ADR-042): doctor mode, and the model it asks. Off by default; nothing is
 # downloaded and nothing runs until the owner turns it on, as a ledgered change like any other.
 #
-# The doctor (`torq-doctor`, agent/) runs as the agent's account (modules/agent.nix), started by a
+# The doctor (`torq-doctor`, agent/) runs as the person's agent account (modules/agent.nix), started by a
 # person with `torq doctor "<question>"` — through `torq agent run`, so in the launcher's sandbox and
 # for that one question; there is no agent service. It reads and explains; it proposes nothing. With
 # `torq agent propose "<ask>"` it may also propose one change (never apply it), its session's taint
@@ -65,11 +65,13 @@ in
     apiKeyFile = lib.mkOption {
       type = lib.types.nullOr (lib.types.strMatching "/[^[:space:]]+");
       default = null;
-      example = "/var/lib/torq-agent/model.key";
+      example = "/var/lib/torq-agent-alice/model.key";
       description = ''
-        A file holding the endpoint's API key, on one line, readable by `torq-agent` — never in the
+        A file holding the endpoint's API key, on one line, readable by the agent account that runs the
+        doctor (`torq-agent-<person>`) — one path for every person's agent, so with more than one, a
+        place each of them can read (KNOWN-GAPS: the key per person is ADR-051's Agent page) — never in the
         config repo (everyone on the machine reads it, and its history keeps every value): put it
-        there yourself, e.g. `sudo install -o torq-agent -g torq-agent -m 600 key /var/lib/torq-agent/model.key`.
+        there yourself, e.g. `sudo install -o torq-agent-alice -g torq-agent-alice -m 600 key /var/lib/torq-agent-alice/model.key`.
         A string, not a Nix path, so the key is never copied into the world-readable store.
       '';
     };
@@ -78,8 +80,9 @@ in
       type = lib.types.bool;
       default = false;
       description = ''
-        Whether the agent may read the system journal. Off by default, with any model. On, the whole
-        `torq-agent` account joins `systemd-journal` — not only the doctor: every program run as the
+        Whether the agents may read the system journal. Off by default, with any model. On, every
+        agent account (each person's, `torq-agent-<person>`) joins `systemd-journal` — not only the
+        doctor: every program run as the
         agent gains it, including any tool a person starts with `torq agent run` (Claude Code, which
         sends what it reads to its own remote service), and every later session of the agent. What it
         gains is read access to every service's and every account's log; the group writes, rotates and
@@ -172,7 +175,8 @@ in
         endpoint = if local then "unix:${socket}" else cfg.endpoint;
         inherit (cfg) model apiKeyFile journal maxSteps;
       };
-      users.users.torq-agent.extraGroups = lib.optional cfg.journal "systemd-journal";
+      # Every agent account (ADR-051 3): each person's agent runs the doctor for them.
+      users.users = lib.mapAttrs (_: _: { extraGroups = lib.optional cfg.journal "systemd-journal"; }) config.torq.agent.agents;
     })
 
     (lib.mkIf (cfg.enable && local) {

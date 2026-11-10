@@ -1,17 +1,44 @@
 # torq-agent-run [--share-fd <n> <dir>] [--] [<command> …] — started by `torq agent run`, through
-# sudo, as root: it does one thing as root, then is the agent for good.
+# sudo, as root: it does one thing as root, then is the caller's own agent for good (ADR-051 3).
 #
 # As root, in a mount namespace of its own: every home hidden, and the one directory shared with the
 # agent — the directory torqcli opened, as the person, handed over as descriptor <n> — bound where it
 # is — by its name, then checked against that descriptor, device and inode (its name could have been
 # pointed elsewhere; then nothing runs). Then it drops to
-# torq-agent (setpriv: its uid and group, no capabilities, no new privileges) and runs the program in
+# the caller's own agent, torq-agent-<person> (setpriv: its uid and group, no capabilities, no new privileges) and runs the program in
 # bubblewrap, in a process namespace of its own (nothing it starts outlives it): the people's runtime
 # directories (their sockets: ssh-agent, D-Bus) hidden, /tmp its own,
 # its home the agent's. Nothing the person asked for runs as root; the agent has no way into the home.
 set -euo pipefail
 if [ "$(id -u)" != 0 ]; then
   echo "torq-agent-run: is started by torq agent run (through sudo)" >&2
+  exit 2
+fi
+# Whose agent (ADR-051 3): the caller's own, torq-agent-<the person who ran sudo>, and no other — never
+# one the caller names. It must be the account the broker's map (/etc/torq/broker.json, written by
+# modules/agent.nix) names as that person's agent, and a system account, not a person's.
+person=${SUDO_USER-}
+case "$person" in
+  '' | [!a-z_]* | *[!a-z0-9_-]*) echo "torq-agent-run: is started by a person, through sudo (no person's name in SUDO_USER)" >&2; exit 2 ;;
+esac
+if [ "$(id -u -- "$person" 2>/dev/null)" != "${SUDO_UID-}" ]; then
+  echo "torq-agent-run: $person is not who ran sudo" >&2
+  exit 2
+fi
+agent=torq-agent-$person
+if ! jq -e --arg a "$agent" --arg p "$person" '.agent.agents[$a] == $p' /etc/torq/broker.json >/dev/null 2>&1; then
+  echo "torq agent run: $person has no agent account on this machine (torq.agent.people names who has one: set torq agent people …, a system change)" >&2
+  exit 2
+fi
+if ! entry=$(getent passwd -- "$agent"); then
+  echo "torq agent run: $agent is not an account on this machine yet" >&2
+  exit 2
+fi
+uid=$(printf '%s\n' "$entry" | cut -d: -f3)
+home=$(printf '%s\n' "$entry" | cut -d: -f6)
+# A system account (NixOS gives people 1000 and up; never root): an agent is never a person.
+if [ -z "$uid" ] || [ "$uid" -eq 0 ] || [ "$uid" -ge 1000 ] || [ "$home" != "/var/lib/$agent" ]; then
+  echo "torq agent run: $agent is not an agent account (uid $uid, home $home)" >&2
   exit 2
 fi
 share="" fd=""
@@ -26,13 +53,13 @@ if [ $# -eq 0 ]; then
   set -- bash
 fi
 if [ -n "$share" ]; then
-  person=${SUDO_UID:?torq-agent-run: shares only for the person who ran sudo}
+  person_uid=${SUDO_UID:?torq-agent-run: shares only for the person who ran sudo}
   case "$fd" in
     '' | *[!0-9]*) echo "torq-agent-run: --share-fd needs a descriptor number" >&2; exit 2 ;;
   esac
   link=/proc/self/fd/$fd
   # The open directory itself: a directory, the person's, and where it says it is.
-  if [ ! -d "$link" ] || [ "$(stat -L -c %u "$link")" != "$person" ] || [ "$(readlink "$link")" != "$share" ]; then
+  if [ ! -d "$link" ] || [ "$(stat -L -c %u "$link")" != "$person_uid" ] || [ "$(readlink "$link")" != "$share" ]; then
     echo "torq-agent-run: descriptor $fd is not $share, a directory of yours" >&2
     exit 2
   fi
@@ -46,8 +73,8 @@ fi
 # The shared directory bound, as root, and checked to be the one that was opened (a descriptor from
 # another mount namespace cannot itself be bound); every home hidden around it; then the agent.
 exec unshare --mount --propagation private -- bash -euo pipefail -c '
-  share=$1 fd=$2
-  shift 2
+  share=$1 fd=$2 agent=$3 home=$4
+  shift 4
   if [ -n "$share" ]; then
     # Bound by its name, on a staging point only root reaches; then checked to be the very directory
     # that was opened (device and inode): if a link on the way led elsewhere, nothing runs.
@@ -69,16 +96,16 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
     mount --move "$stage" "$share"
   fi
   rc=0
-  setpriv --reuid torq-agent --regid torq-agent --init-groups --no-new-privs \
+  setpriv --reuid "$agent" --regid "$agent" --init-groups --no-new-privs \
     --inh-caps=-all --bounding-set=-all -- \
     bwrap --die-with-parent --unshare-pid --dev-bind / / --proc /proc \
       --tmpfs /run/user --tmpfs /tmp --tmpfs /root \
       --clearenv \
-      --setenv HOME /var/lib/torq-agent --setenv USER torq-agent --setenv LOGNAME torq-agent \
+      --setenv HOME "$home" --setenv USER "$agent" --setenv LOGNAME "$agent" \
       --setenv SHELL /run/current-system/sw/bin/bash \
       --setenv PATH /run/wrappers/bin:/run/current-system/sw/bin \
       --setenv TERM "${TERM:-dumb}" \
-      --chdir "${share:-/var/lib/torq-agent}" \
+      --chdir "${share:-$home}" \
       -- "$@" || rc=$?
   # A set-id file the agent left in the folder would run as the agent outside the sandbox, later: its bits
   # are taken off. As the agent, not as root: the files are owned by the agent, and an owner may change
@@ -87,10 +114,10 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
   # take the bits off whatever the link led to (the wrapper of sudo, say). As the agent, a link can lead
   # it only to what the agent could change anyway (the review of 2026-11-11, KNOWN-GAPS 6zz).
   if [ -n "$share" ]; then
-    found=$(setpriv --reuid torq-agent --regid torq-agent --init-groups --no-new-privs \
+    found=$(setpriv --reuid "$agent" --regid "$agent" --init-groups --no-new-privs \
       --inh-caps=-all --bounding-set=-all -- \
-      find "$share" -xdev -user torq-agent -perm /6000 -type f -print -exec chmod ug-s {} + 2>/dev/null || true)
+      find "$share" -xdev -user "$agent" -perm /6000 -type f -print -exec chmod ug-s {} + 2>/dev/null || true)
     [ -z "$found" ] || echo "torq agent run: set-id bits taken off what the agent left: $found" >&2
   fi
   exit "$rc"
-' torq-agent-run "$share" "$fd" "$@"
+' torq-agent-run "$share" "$fd" "$agent" "$home" "$@"

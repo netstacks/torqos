@@ -329,8 +329,8 @@ in
         home = "/root";
         # The only accounts whose password the broker sets (modules/accounts.nix).
         people = config.torq.accounts.people;
-        # What the agent may propose (ADR-041, modules/agent.nix).
-        agent = { inherit (config.torq.agent.mayPropose) users settings; };
+        # Each agent account and the person it serves (ADR-051 3), and what every agent may propose.
+        agent = { inherit (config.torq.agent) agents; inherit (config.torq.agent.mayPropose) settings; };
         # The config repo's remote (ADR-036): none, or an SSH URL.
         remote = config.torq.remote.url;
         # The backups the configuration declares, each with its restic (ADR-038, modules/backup.nix).
