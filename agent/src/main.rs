@@ -1,4 +1,4 @@
-//! `torq-doctor [--propose] "<question>"` (ADR-042): TorqOS's agent, run as `torq-agent` (by `torq
+//! `torq-doctor [--propose] "<question>"` (ADR-042): TorqOS's agent, run as the person's agent account, `torq-agent-<person>` (by `torq
 //! doctor` and `torq agent propose`, through `torq agent run`). It reads — the journal, the hardware,
 //! the configuration, the ledger and alarms, NixOS's option docs — and explains; it starts its session
 //! at the broker and reports there each read of untrusted text. In propose mode it may also propose a

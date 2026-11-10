@@ -1967,7 +1967,7 @@ mod apps_remembered {
             reason: String::new(),
             data: serde_json::json!({ "caller": caller }),
         };
-        let e = [p(1, "me", "user"), p(2, "sam", "user"), p(3, "torq-agent", "agent")];
+        let e = [p(1, "me", "user"), p(2, "sam", "user"), p(3, "torq-agent-me", "agent")];
         let seqs: Vec<u64> = waiting_on_me(&e, "me").iter().map(|x| x.seq).collect();
         assert_eq!(seqs, [2, 3]);
     }

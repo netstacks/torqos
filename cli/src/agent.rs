@@ -1,8 +1,8 @@
 //! `torq agent run [--share <dir>] [--] [<command> …]` (ADR-041, 5): a program — Claude Code, or any
-//! other — run as the agent's account, not as the person who starts it.
+//! other — run as the person's own agent account (`torq-agent-<person>`, ADR-051 3), not as the person.
 //!
-//! It runs as `torq-agent` (through `sudo torq-agent-run`, which binds the shared directory as root and
-//! then drops to the agent for good), in
+//! It runs as the caller's agent (through `sudo torq-agent-run`, which binds the shared directory as root and
+//! then drops to `torq-agent-$SUDO_USER` for good — never an agent the caller names), in
 //! the launcher's sandbox (modules/agent-run.sh): every home hidden but the one directory shared with
 //! it, the people's runtime directories hidden, /tmp its own. Its home is the agent's, so a tool's
 //! settings and credentials are never the person's. What it changes in the system, it proposes —
@@ -17,7 +17,22 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const AGENT: &str = "torq-agent";
+/// What every agent account's name begins with: each person's is `torq-agent-<person>` (ADR-051 3).
+const AGENT_PREFIX: &str = "torq-agent-";
+
+/// The agent account of `person`: `torq-agent-<person>`.
+pub fn agent_of(person: &str) -> String {
+    format!("{AGENT_PREFIX}{person}")
+}
+
+/// Whether `name` is named as an agent account is (`torq-agent-<someone>`). Convenience only: torqcli
+/// runs unprivileged, as whoever runs it, and what it decides here is how it behaves (a commit that
+/// proposes and stops, no `torq agent run` from inside one) — never what is allowed. The broker is the
+/// authority: it knows an agent by its map (/etc/torq/broker.json) and the kernel's uid, not by a name.
+pub fn is_agent(name: &str) -> bool {
+    name.strip_prefix(AGENT_PREFIX).is_some_and(|p| !p.is_empty())
+}
+
 const SUDO: &str = "/run/wrappers/bin/sudo";
 const LAUNCHER: &str = "/run/current-system/sw/bin/torq-agent-run";
 const SETFACL: &str = "/run/current-system/sw/bin/setfacl";
@@ -95,17 +110,23 @@ pub fn owned(dir: &Path, uid: u32) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
 }
 
 
-/// A process of the agent's account running now, if there is one (its pid): /proc's entries are
-/// owned by each process's user.
-fn agent_running() -> Result<Option<u32>> {
-    use std::os::unix::fs::MetadataExt;
+/// The uid of agent account `agent`, from /etc/passwd: refused, plainly, if this machine has none (the
+/// person is not in `torq.agent.people`). The launcher checks it again, as root, against the broker's map.
+fn agent_uid(agent: &str) -> Result<u32> {
     let passwd = std::fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
     let Some(uid) = passwd.lines().find_map(|l| {
         let f: Vec<&str> = l.split(':').collect();
-        (f.first() == Some(&AGENT)).then(|| f.get(2)?.parse::<u32>().ok()).flatten()
+        (f.first() == Some(&agent)).then(|| f.get(2)?.parse::<u32>().ok()).flatten()
     }) else {
-        bail!("there is no {AGENT} account on this machine");
+        bail!("you have no agent account on this machine ({agent}): `torq agent people` names who has one (the owner, by default) — adding you is a system change, an administrator's");
     };
+    Ok(uid)
+}
+
+/// A process of agent account `uid` running now, if there is one (its pid): /proc's entries are
+/// owned by each process's user.
+fn agent_running(uid: u32) -> Result<Option<u32>> {
+    use std::os::unix::fs::MetadataExt;
     for e in std::fs::read_dir("/proc").context("reading /proc")?.flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
         if e.metadata().is_ok_and(|m| m.uid() == uid) {
@@ -130,9 +151,12 @@ pub fn run(args: &[String]) -> Result<i32> {
     use std::os::fd::AsRawFd;
     let r = parse(args)?;
     let me = crate::me()?;
-    if me == AGENT {
-        bail!("this is the agent already");
+    if is_agent(&me) {
+        bail!("this is an agent already");
     }
+    // Your own agent, and only yours: the launcher runs `torq-agent-<you>` (as sudo says who you are).
+    let agent = agent_of(&me);
+    let agent_uid = agent_uid(&agent)?;
     // The launcher by its own path in the store, as the sudo rule names it (sudo does not take a link
     // to it for it).
     let launcher = std::fs::canonicalize(LAUNCHER).with_context(|| format!("{LAUNCHER}: the agent's launcher is not installed"))?;
@@ -149,19 +173,19 @@ pub fn run(args: &[String]) -> Result<i32> {
         // agent's running now could swap a file it can write for a link, between the walk's look and its
         // ACL, and be granted wherever the link leads (the review of ADR-041, 5). With its own process
         // namespace (the launcher), nothing of a session outlives it.
-        if let Some(pid) = agent_running()? {
-            bail!("the agent is running already (process {pid}): one session at a time, and none while a directory is shared");
+        if let Some(pid) = agent_running(agent_uid)? {
+            bail!("your agent ({agent}) is running already (process {pid}): one session at a time, and none while a directory is shared");
         }
         // The agent may read and write what of it is the person's; what it makes there, the person may
         // rename and delete, and (default ACLs) read and write unless the agent narrows it — the agent
         // owns what it makes. What the agent made is not the person's to set ACLs on. No link is followed.
         let (dirs, files) = owned(&dir, uid)?;
         for chunk in files.chunks(200) {
-            acl_many(&["-m", &format!("u:{AGENT}:rwX")], chunk)?;
+            acl_many(&["-m", &format!("u:{agent}:rwX")], chunk)?;
         }
         for chunk in dirs.chunks(200) {
-            acl_many(&["-m", &format!("u:{AGENT}:rwx")], chunk)?;
-            acl_many(&["-d", "-m", &format!("u:{AGENT}:rwX,u:{me}:rwX")], chunk)?;
+            acl_many(&["-m", &format!("u:{agent}:rwx")], chunk)?;
+            acl_many(&["-d", "-m", &format!("u:{agent}:rwX,u:{me}:rwX")], chunk)?;
         }
         // Opened as the person, kept open across exec (no close-on-exec), and kept by sudo (`-C`,
         // which the launcher's rule allows): the agent is handed the directory, not a way to it.
@@ -171,7 +195,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         sudo.extend(["-C".into(), (fd + 1).to_string()]);
         launch.extend(["--share-fd".into(), fd.to_string(), dir.to_string_lossy().into_owned()]);
         _shared = Some(f);
-        eprintln!("Shared with the agent: {} (undo: setfacl -R -P -x u:{AGENT},d:u:{AGENT} -- {})", dir.display(), dir.display());
+        eprintln!("Shared with your agent ({agent}): {} (undo: setfacl -R -P -x u:{agent},d:u:{agent} -- {})", dir.display(), dir.display());
     }
     launch.push("--".into());
     launch.extend(r.command);
@@ -205,7 +229,7 @@ pub fn doctor_mode(args: &[String], propose: bool) -> Result<i32> {
         doctor.push("--propose".into());
     }
     doctor.extend(["--".into(), question]);
-    if crate::me()? == AGENT {
+    if is_agent(&crate::me()?) {
         use std::os::unix::process::CommandExt;
         let e = Command::new(&doctor[0]).args(&doctor[1..]).exec();
         return Err(anyhow::Error::from(e).context("starting the doctor"));
@@ -221,7 +245,7 @@ pub fn break_glass(args: &[String]) -> Result<i32> {
     if reason.trim().is_empty() {
         bail!("usage: torq break-glass \"<why>\" — the reason goes in the ledger, before the shell opens");
     }
-    if crate::me()? == AGENT {
+    if is_agent(&crate::me()?) {
         bail!("the agent has no root shell: it proposes, and a person applies");
     }
     let launcher = std::fs::canonicalize(LAUNCHER).with_context(|| format!("{LAUNCHER}: not on this machine"))?;
@@ -236,6 +260,17 @@ mod tests {
 
     fn a(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    /// ADR-051 3: each person's agent is `torq-agent-<person>`; the old single account, a bare prefix
+    /// and a person are not named as one (torqcli's convenience; the broker's map is the authority).
+    #[test]
+    fn whose_agent_by_name() {
+        assert_eq!(agent_of("alice"), "torq-agent-alice");
+        assert!(is_agent("torq-agent-alice") && is_agent(&agent_of("bob")));
+        for not in ["torq-agent", "torq-agent-", "alice", "xtorq-agent-alice"] {
+            assert!(!is_agent(not), "{not}");
+        }
     }
 
     #[test]

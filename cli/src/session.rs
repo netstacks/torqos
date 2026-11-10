@@ -9,9 +9,6 @@ use crate::tree::Schema;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-/// The agent's account (ADR-041, modules/agent.nix): its commit proposes and stops.
-const AGENT: &str = "torq-agent";
-
 /// What the session needs from the machine: evaluation and the broker.
 pub trait Machine {
     /// `commit check`: the configuration at commit `base`, with these tree files changed (None:
@@ -1936,7 +1933,9 @@ impl<'a> Session<'a> {
         };
         // The agent proposes, and a person applies (ADR-040, ADR-041): its commit stops at the
         // proposal — there is no one here to ask, and nothing it could approve.
-        if self.me == AGENT {
+        // By its name (`torq-agent-<someone>`), as convenience: the broker is the authority — it refuses an
+        // agent's apply whatever torqcli does here.
+        if crate::agent::is_agent(&self.me) {
             if o.confirm.is_some() {
                 bail!("not proposed: the agent proposes, and a commit confirmed is a person's to make");
             }
@@ -4754,13 +4753,13 @@ mod tests {
     #[test]
     fn the_agents_commit_proposes_and_stops() {
         let (d, m) = (repo(), Fake { answer: false, ..Fake::default() });
-        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, AGENT);
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, "torq-agent-dev");
         let out = run(&mut s, &["configure", "set system time-zone UTC", "commit"]);
         assert!(out.contains("proposed as #41: a person applies it (request system apply 41)"), "{out}");
         assert!(!out.contains("Commit?") && !out.contains("commit complete"), "{out}");
         assert_eq!(m.commits.borrow().len(), 1);
         assert_eq!(m.commits.borrow()[0].2, "proposed", "proposed, not committed");
-        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, AGENT);
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, "torq-agent-dev");
         run(&mut s, &["configure", "set system time-zone UTC"]);
         let e = format!("{:#}", s.exec("commit confirmed 5").unwrap_err());
         assert!(e.contains("a commit confirmed is a person's"), "{e}");
@@ -4870,7 +4869,7 @@ mod tests {
         let e = format!("{:#}", run_err(&mut s, &["configure"], "commit at 10:00"));
         assert!(e.contains("changes nothing"), "{e}");
         // The agent proposes; a time is a person's to approve.
-        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, AGENT);
+        let mut s = Session::new(Schema::parse(include_str!("schema-fixture.json")).unwrap(), nixos_tree(), Repo::new(d.path()), None, &m, "torq-agent-dev");
         let e = format!("{:#}", run_err(&mut s, &["configure", "set system time-zone UTC"], "commit at 10:00"));
         assert!(e.contains("a commit at is a person's"), "{e}");
         assert!(m.at_commits.borrow().is_empty() && m.commits.borrow().is_empty());
