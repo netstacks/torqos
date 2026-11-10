@@ -157,6 +157,13 @@ fn package_name_ok(name: &str) -> bool {
 
 /// User tier: exactly `users/<name>/<leaf>` with an allow-listed leaf. The broker also checks the
 /// content of such a file before accepting it (`Broker::check_user_data`).
+/// A file no module reads (a person's desktop, cli/src/desktop.rs): a change of only these leaves the system as
+/// it is, so it is committed and ledgered without a build and a switch. Saved every few minutes as a person
+/// changes their desktop, it must not rebuild the machine each time.
+pub fn builds_nothing(p: &str) -> bool {
+    p.strip_prefix("users/").and_then(|rest| rest.split_once('/')).is_some_and(|(name, leaf)| user_name_ok(name) && leaf == "desktop.json")
+}
+
 pub fn is_user_data(p: &str) -> bool {
     let Some((name, leaf)) = p.strip_prefix("users/").and_then(|rest| rest.split_once('/')) else {
         return false;

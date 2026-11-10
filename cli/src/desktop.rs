@@ -89,34 +89,74 @@ impl Paths {
     }
 }
 
-fn dirs(p: &Path) -> Vec<(String, PathBuf)> {
-    let Ok(entries) = std::fs::read_dir(p) else { return vec![] };
-    entries
-        .flatten()
-        // Never through a link: only what is really there.
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter_map(|e| Some((e.file_name().into_string().ok()?, e.path())))
-        .collect()
+/// A folder's entries: its folders, and the names of those that are links.
+fn dirs(p: &Path) -> (Vec<(String, PathBuf)>, Vec<String>) {
+    let (mut real, mut links) = (vec![], vec![]);
+    let Ok(entries) = std::fs::read_dir(p) else { return (real, links) };
+    for e in entries.flatten() {
+        let (Ok(t), Some(name)) = (e.file_type(), e.file_name().into_string().ok()) else { continue };
+        if t.is_symlink() {
+            links.push(name);
+        } else if t.is_dir() {
+            real.push((name, e.path()));
+        }
+    }
+    (real, links)
 }
 
-/// This desktop's settings, as COSMIC wrote them.
-pub fn local(cosmic: &Path) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    let mut total = 0;
-    for (component, c) in dirs(cosmic) {
-        for (version, v) in dirs(&c) {
+/// This desktop's settings, as COSMIC wrote them, and what of it TorqOS leaves alone.
+#[derive(Debug, Default, PartialEq)]
+pub struct Local {
+    pub values: BTreeMap<String, String>,
+    /// Settings there but not kept: a link (a dotfile manager's), too large, past the limits. Neither saved,
+    /// nor taken for a setting reset, nor written over.
+    unmanaged: BTreeSet<String>,
+    /// Folders that are links (`<component>/`, `<component>/v<n>/`): everything under them is someone else's.
+    linked: Vec<String>,
+}
+
+impl Local {
+    /// Whether TorqOS keeps setting `k` here: COSMIC's and the person's, in a real folder of theirs.
+    pub fn manages(&self, k: &str) -> bool {
+        !machine_specific(k) && !self.unmanaged.contains(k) && !self.linked.iter().any(|l| k.starts_with(l.as_str()))
+    }
+}
+
+pub fn local(cosmic: &Path) -> Local {
+    let mut out = Local::default();
+    let mut found: Vec<(String, PathBuf)> = vec![];
+    let (components, linked) = dirs(cosmic);
+    out.linked.extend(linked.into_iter().map(|c| format!("{c}/")));
+    for (component, c) in components {
+        let (versions, linked) = dirs(&c);
+        out.linked.extend(linked.into_iter().map(|v| format!("{component}/{v}/")));
+        for (version, v) in versions {
             let Ok(files) = std::fs::read_dir(&v) else { continue };
             for f in files.flatten() {
                 let Some(name) = f.file_name().into_string().ok() else { continue };
                 let key = format!("{component}/{version}/{name}");
-                if !key_ok(&key) || machine_specific(&key) || !f.file_type().is_ok_and(|t| t.is_file()) {
+                if !key_ok(&key) || machine_specific(&key) {
                     continue;
                 }
-                let Ok(text) = std::fs::read_to_string(f.path()) else { continue };
-                if value_ok(&text) && out.len() < MAX_KEYS && total + text.len() <= MAX_TOTAL {
-                    total += text.len();
-                    out.insert(key, text);
+                if f.file_type().is_ok_and(|t| t.is_file()) {
+                    found.push((key, f.path()));
+                } else {
+                    out.unmanaged.insert(key);
                 }
+            }
+        }
+    }
+    // In order of name, so that the same settings are kept each time, whatever order the folder lists them in.
+    found.sort();
+    let mut total = 0;
+    for (key, path) in found {
+        match std::fs::read_to_string(&path) {
+            Ok(text) if value_ok(&text) && out.values.len() < MAX_KEYS && total + text.len() <= MAX_TOTAL => {
+                total += text.len();
+                out.values.insert(key, text);
+            }
+            _ => {
+                out.unmanaged.insert(key);
             }
         }
     }
@@ -132,9 +172,11 @@ pub struct Plan {
     pub apply: BTreeMap<String, Option<String>>,
 }
 
-pub fn plan(saved: &BTreeMap<String, String>, applied: &BTreeMap<String, String>, local: &BTreeMap<String, String>) -> Plan {
+/// `manages`: the settings TorqOS keeps here (`Local::manages`); the rest it neither saves nor writes, whatever
+/// the configuration says (a pulled one's panel output, a value behind a dotfile manager's link).
+pub fn plan(saved: &BTreeMap<String, String>, applied: &BTreeMap<String, String>, local: &BTreeMap<String, String>, manages: impl Fn(&str) -> bool) -> Plan {
     let mut p = Plan::default();
-    let keys: BTreeSet<&String> = saved.keys().chain(applied.keys()).chain(local.keys()).collect();
+    let keys: BTreeSet<&String> = saved.keys().chain(applied.keys()).chain(local.keys()).filter(|k| manages(k)).collect();
     for k in keys {
         let (s, a, l) = (saved.get(k), applied.get(k), local.get(k));
         if l == a {
@@ -188,6 +230,12 @@ fn apply(cosmic: &Path, changes: &BTreeMap<String, Option<String>>) -> Vec<Strin
             continue;
         }
         let path = cosmic.join(k);
+        // Never through a link: not the component's folder, its version's, or the file (a dotfile manager's).
+        let (component, version) = (cosmic.join(k.split('/').next().unwrap_or_default()), path.parent().map(Path::to_path_buf).unwrap_or_default());
+        if [&component, &version, &path].iter().any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())) {
+            failed.push(k.clone());
+            continue;
+        }
         let done = match v {
             Some(text) => write_atomically(&path, text.as_bytes()),
             None => match std::fs::remove_file(&path) {
@@ -206,12 +254,13 @@ fn path_of(me: &str) -> String {
     format!("users/{me}/{FILE}")
 }
 
-/// The configuration's `desktop.json` of `me` at HEAD: its bytes, and what it says.
-fn saved_of(repo: &Repo, me: &str) -> Result<(Option<Vec<u8>>, Saved)> {
+/// The configuration's `desktop.json` of `me` at HEAD: its bytes, and what it says (an error, if it cannot be
+/// read: written by hand, or by a newer TorqOS).
+fn saved_of(repo: &Repo, me: &str) -> Result<(Option<Vec<u8>>, Result<Saved, String>)> {
     let bytes = repo.file_at("HEAD", &path_of(me))?;
     let saved = match &bytes {
-        Some(b) => serde_json::from_slice(b).with_context(|| format!("reading {}", path_of(me)))?,
-        None => Saved::default(),
+        Some(b) => serde_json::from_slice(b).map_err(|e| format!("{} cannot be read ({e}): Save now replaces it with this desktop's settings", path_of(me))),
+        None => Ok(Saved::default()),
     };
     Ok((bytes, saved))
 }
@@ -247,6 +296,9 @@ fn commit(machine: &dyn Machine, repo: &Repo, me: &str, old: Option<&[u8]>, new:
     check(new)?;
     let scratch = crate::scratch_dir()?;
     let text = new.render()?;
+    if text.len() > 4 * 1024 * 1024 {
+        bail!("too much to save: {} bytes", text.len());
+    }
     let diff = crate::candidate::unified_diff_bytes(scratch.path(), &[(path_of(me), old, Some(text.as_bytes()))])?;
     machine.commit(&diff, &repo.head()?, "user", reason, None)
 }
@@ -267,42 +319,51 @@ pub struct Synced {
 /// Bring the desktop and the configuration together: the configuration's newer values onto the desktop,
 /// and the person's saved when saving is automatic or `save_now`.
 pub fn sync(machine: &dyn Machine, repo: &Repo, me: &str, paths: &Paths, save_now: bool) -> Result<Synced> {
-    let (bytes, saved) = saved_of(repo, me)?;
-    let before = read_applied(&paths.state);
-    let mut here = local(&paths.cosmic);
-    let p = plan(&saved.cosmic, &before, &here);
+    let (bytes, read) = saved_of(repo, me)?;
+    // A file that cannot be read is replaced only when the person asks (Save now), by this desktop's settings.
+    let (saved, before, repairing) = match read {
+        Ok(s) => (s, read_applied(&paths.state), false),
+        Err(_) if save_now => {
+            (Saved::default(), BTreeMap::new(), true)
+        }
+        Err(why) => bail!("{why}"),
+    };
+    let here = local(&paths.cosmic);
+    let p = plan(&saved.cosmic, &before, &here.values, |k| here.manages(k));
     let mut out = Synced { failed: apply(&paths.cosmic, &p.apply), ..Synced::default() };
     out.applied = p.apply.len() - out.failed.len();
+    let mut values = here.values.clone();
     for (k, v) in &p.apply {
         if out.failed.contains(k) {
             continue;
         }
         match v {
-            Some(v) => here.insert(k.clone(), v.clone()),
-            None => here.remove(k),
+            Some(v) => values.insert(k.clone(), v.clone()),
+            None => values.remove(k),
         };
     }
     let mut now = saved.clone();
-    if !p.save.is_empty() && (save_now || saved.save == Saving::Automatic) {
+    if (!p.save.is_empty() || repairing) && (save_now || saved.save == Saving::Automatic) {
         for (k, v) in &p.save {
             match v {
                 Some(v) => now.cosmic.insert(k.clone(), v.clone()),
                 None => now.cosmic.remove(k),
             };
         }
-        let reason = format!("Desktop: {}", what(p.save.keys().cloned()));
+        let reason = if repairing { "Desktop: saved again (the saved file could not be read)".to_string() } else { format!("Desktop: {}", what(p.save.keys().cloned())) };
         out.saved = Some(commit(machine, repo, me, bytes.as_deref(), &now, &reason)?);
     } else {
         out.unsaved = p.save.len();
     }
-    let state = agreed(&now.cosmic, &here, &before);
+    let state = agreed(&now.cosmic, &values, &before);
     write_atomically(&paths.state, &serde_json::to_vec(&state)?)?;
     Ok(out)
 }
 
 /// Save automatically, or only when asked.
 pub fn set_saving(machine: &dyn Machine, repo: &Repo, me: &str, how: Saving) -> Result<String> {
-    let (bytes, mut saved) = saved_of(repo, me)?;
+    let (bytes, read) = saved_of(repo, me)?;
+    let mut saved = read.map_err(anyhow::Error::msg)?;
     if saved.save == how {
         return Ok(format!("Your desktop is already saved {}.\n", words(how)));
     }
@@ -330,8 +391,10 @@ pub struct Status {
 }
 
 pub fn status(repo: &Repo, me: &str, paths: &Paths) -> Result<Status> {
-    let (_, saved) = saved_of(repo, me)?;
-    let p = plan(&saved.cosmic, &read_applied(&paths.state), &local(&paths.cosmic));
+    let (_, read) = saved_of(repo, me)?;
+    let saved = read.map_err(anyhow::Error::msg)?;
+    let here = local(&paths.cosmic);
+    let p = plan(&saved.cosmic, &read_applied(&paths.state), &here.values, |k| here.manages(k));
     Ok(Status { saving: saved.save, saved: saved.cosmic.len(), unsaved: p.save.keys().cloned().collect(), to_apply: p.apply.len() })
 }
 
@@ -368,6 +431,9 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
     const K: &str = "com.system76.CosmicPanel.Panel/v1/size";
+    fn plan3(s: &BTreeMap<String, String>, a: &BTreeMap<String, String>, l: &BTreeMap<String, String>) -> Plan {
+        plan(s, a, l, |_| true)
+    }
 
     #[test]
     fn a_settings_name_is_cosmics_layout_and_never_a_path() {
@@ -386,26 +452,26 @@ mod tests {
     fn the_newer_side_wins() {
         let none = map(&[]);
         // The person changed it: saved.
-        let p = plan(&map(&[(K, "S")]), &map(&[(K, "S")]), &map(&[(K, "L")]));
+        let p = plan3(&map(&[(K, "S")]), &map(&[(K, "S")]), &map(&[(K, "L")]));
         assert_eq!(p.save, [(K.to_string(), Some("L".to_string()))].into());
         assert!(p.apply.is_empty());
         // The configuration changed (an undo, a pull): onto the desktop.
-        let p = plan(&map(&[(K, "S2")]), &map(&[(K, "S")]), &map(&[(K, "S")]));
+        let p = plan3(&map(&[(K, "S2")]), &map(&[(K, "S")]), &map(&[(K, "S")]));
         assert_eq!(p.apply, [(K.to_string(), Some("S2".to_string()))].into());
         // An undo of a first save: back to COSMIC's default.
-        let p = plan(&none, &map(&[(K, "L")]), &map(&[(K, "L")]));
+        let p = plan3(&none, &map(&[(K, "L")]), &map(&[(K, "L")]));
         assert_eq!(p.apply, [(K.to_string(), None)].into());
         // Reset to default here: no longer kept.
-        let p = plan(&map(&[(K, "S")]), &map(&[(K, "S")]), &none);
+        let p = plan3(&map(&[(K, "S")]), &map(&[(K, "S")]), &none);
         assert_eq!(p.save, [(K.to_string(), None)].into());
         // A rebuilt machine: COSMIC's defaults there give way to the configuration.
-        let p = plan(&map(&[(K, "S")]), &none, &map(&[(K, "default")]));
+        let p = plan3(&map(&[(K, "S")]), &none, &map(&[(K, "default")]));
         assert_eq!(p.apply, [(K.to_string(), Some("S".to_string()))].into());
         // The first save on a machine: everything here.
-        let p = plan(&none, &none, &map(&[(K, "L")]));
+        let p = plan3(&none, &none, &map(&[(K, "L")]));
         assert_eq!(p.save, [(K.to_string(), Some("L".to_string()))].into());
         // In step: nothing.
-        assert_eq!(plan(&map(&[(K, "S")]), &map(&[(K, "S")]), &map(&[(K, "S")])), Plan::default());
+        assert_eq!(plan3(&map(&[(K, "S")]), &map(&[(K, "S")]), &map(&[(K, "S")])), Plan::default());
     }
 
     #[test]
@@ -413,7 +479,7 @@ mod tests {
         // Manual: the person's L is not saved; what they agreed stays S, so L is still to save next time.
         let state = agreed(&map(&[(K, "S")]), &map(&[(K, "L")]), &map(&[(K, "S")]));
         assert_eq!(state, map(&[(K, "S")]));
-        assert_eq!(plan(&map(&[(K, "S")]), &state, &map(&[(K, "L")])).save.len(), 1);
+        assert_eq!(plan3(&map(&[(K, "S")]), &state, &map(&[(K, "L")])).save.len(), 1);
         // Saved: they agree on L.
         assert_eq!(agreed(&map(&[(K, "L")]), &map(&[(K, "L")]), &map(&[(K, "S")])), map(&[(K, "L")]));
     }
@@ -427,7 +493,7 @@ mod tests {
         w("com.system76.CosmicPanel.Panel/v1/output", "\"eDP-1\"");
         w("com.system76.CosmicPanel./v1/x", "odd");
         std::os::unix::fs::symlink("/etc/passwd", c.join("com.system76.CosmicPanel.Panel/v1/link")).unwrap();
-        assert_eq!(local(&c), map(&[(K, "M")]), "machine-specific, odd names and links left out");
+        assert_eq!(local(&c).values, map(&[(K, "M")]), "machine-specific, odd names and links left out");
         let failed = apply(&c, &[(K.to_string(), Some("L".to_string())), ("../../evil/v1/x".to_string(), Some("x".to_string()))].into());
         assert_eq!(failed, ["../../evil/v1/x"]);
         assert_eq!(std::fs::read_to_string(c.join(K)).unwrap(), "L");
@@ -436,6 +502,30 @@ mod tests {
         assert!(!c.join(K).exists());
     }
 
+
+    #[test]
+    fn what_is_behind_a_link_is_left_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let (c, elsewhere) = (d.path().join("cosmic"), d.path().join("dotfiles"));
+        std::fs::create_dir_all(elsewhere.join("v1")).unwrap();
+        std::fs::write(elsewhere.join("v1/accent"), "red").unwrap();
+        std::fs::create_dir_all(&c).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, c.join("com.system76.CosmicTheme.Dark")).unwrap();
+        write_atomically(&c.join("com.system76.CosmicTk/v1/x"), b"real").unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("v1/accent"), c.join("com.system76.CosmicTk/v1/linked")).unwrap();
+        let here = local(&c);
+        let dark = "com.system76.CosmicTheme.Dark/v1/accent";
+        assert!(!here.manages(dark) && !here.manages("com.system76.CosmicTk/v1/linked") && here.manages("com.system76.CosmicTk/v1/x"));
+        // Saved before, behind a link now: not taken for a reset, and not written through the link.
+        let saved = map(&[(dark, "blue")]);
+        let p = plan(&saved, &saved, &here.values, |k| here.manages(k));
+        assert!(!p.save.contains_key(dark) && p.apply.is_empty(), "{p:?}");
+        assert_eq!(apply(&c, &[(dark.to_string(), Some("blue".to_string()))].into()), [dark]);
+        assert_eq!(std::fs::read_to_string(elsewhere.join("v1/accent")).unwrap(), "red");
+        // A pulled configuration's panel output is this machine's to keep.
+        let out = "com.system76.CosmicPanel.Panel/v1/output";
+        assert!(plan(&map(&[(out, "\"HDMI-1\"")]), &map(&[]), &map(&[]), |k| here.manages(k)).apply.is_empty());
+    }
     #[test]
     fn the_saved_file_reads_back_and_says_what_changed() {
         let s = Saved { save: Saving::Manual, cosmic: map(&[(K, "M")]) };

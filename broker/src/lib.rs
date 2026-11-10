@@ -1309,6 +1309,14 @@ impl Broker {
         }
     }
 
+    /// Whether the change from `before` to `after` leaves the system as it is: only files no module reads,
+    /// each there before and after. A new one may make a person's folder, which the build checks names a
+    /// person on this machine: that one is built.
+    fn builds_nothing(&self, files: &[String], before: &str, after: &str) -> bool {
+        !files.is_empty()
+            && files.iter().all(|f| policy::builds_nothing(f) && self.repo.size_at(before, f).is_some() && self.repo.size_at(after, f).is_some())
+    }
+
     fn with_system(&self, mut data: serde_json::Value) -> serde_json::Value {
         data["system"] = self.running_system().into();
         data
@@ -2699,6 +2707,8 @@ impl Broker {
                     "boot_id": self.boot_id(),
                 })))
                 .map_err(|e| (e, Some(anchor))),
+            // Nothing to build: the system running is the one this commit describes (its other files unchanged).
+            (None, _) if self.builds_nothing(&files, &before, &commit) => Ok(None),
             _ => self.rebuild(&lock, &commit).map(|()| None).map_err(|e| (e, None)),
         };
         let confirm_record = match activated {
@@ -3036,7 +3046,9 @@ impl Broker {
         pending.commit = Some(new_commit.clone());
         let snapshot = self.take_snapshot(&lock, &a.body.tier);
         self.write_pending(&pending)?;
-        if let Err(e) = self.rebuild(&lock, &new_commit) {
+        let files: Vec<String> = a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
+        let rebuilt = if self.builds_nothing(&files, &before, &new_commit) { Ok(()) } else { self.rebuild(&lock, &new_commit) };
+        if let Err(e) = rebuilt {
             let restored = self.restore(&before, &lock)?;
             self.ledger.append(NewEntry {
                 actor: "broker".into(),

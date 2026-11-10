@@ -3240,3 +3240,37 @@ fn a_schedules_refusal_does_not_hide_applys_own() {
     let own: Vec<_> = t.m.b.ledger.read_all().unwrap().into_iter().filter(|e| e.body.kind == "apply_refused" && e.body.data["proposal"] == p && e.body.data.get("scheduled").is_none()).collect();
     assert_eq!(own.len(), 1, "apply's own refusal is on the record");
 }
+
+/// A person's desktop, saved every few minutes, does not build and switch the machine: only the first save
+/// (which may make their folder, checked by the build) and anything else does.
+#[test]
+fn a_saved_desktop_builds_nothing_after_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = dir.path().join("builds");
+    let script = dir.path().join("rebuild");
+    fs::write(&script, format!("#!/bin/sh\necho built >> {}\n", count.display())).unwrap();
+    Command::new("chmod").arg("+x").arg(&script).status().unwrap();
+    let (cfg, b) = setup(script.to_str().unwrap());
+    let builds = || fs::read_to_string(&count).map(|t| t.lines().count()).unwrap_or(0);
+    let commit = |name: &str, body: &str| {
+        let d = write_diff(cfg.path(), name, body);
+        let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Desktop: panel", Actor::User, false).unwrap();
+        assert_eq!(p.body.tier, "user");
+        b.apply(p.body.seq, "casey", false).unwrap()
+    };
+    commit("1.diff", "--- /dev/null\n+++ b/users/casey/desktop.json\n@@ -0,0 +1 @@\n+{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"M\"}}\n");
+    let first = builds();
+    assert!(first >= 1, "the first save is built");
+    let a = commit(
+        "2.diff",
+        "--- a/users/casey/desktop.json\n+++ b/users/casey/desktop.json\n@@ -1 +1 @@\n-{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"M\"}}\n+{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"L\"}}\n",
+    );
+    assert_eq!(builds(), first, "a later save builds nothing");
+    b.revert(a.body.seq, "casey").unwrap();
+    assert_eq!(builds(), first, "nor does its undo");
+    assert!(fs::read_to_string(b.repo.root().join("users/casey/desktop.json")).unwrap().contains("\"M\""));
+    let d = write_diff(cfg.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Night light", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    assert!(builds() > first, "anything else is built");
+}

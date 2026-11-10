@@ -335,6 +335,8 @@ impl cosmic::Application for Applet {
                     app::restart_parts(&app::stale_parts(&old, &new));
                 }
             }
+            // Not while a commit confirmed waits: the broker takes no change until it is confirmed or rolled back.
+            Message::SyncDesktop if matches!(self.state(), State::Confirm(_)) => {}
             Message::SyncDesktop => {
                 std::thread::spawn(|| {
                     let _ = app::sync_desktop(false);
@@ -355,7 +357,7 @@ impl cosmic::Application for Applet {
                 let failed = g.is_err();
                 // A change since the last look may be to the person's desktop (an undo of one): put it on the desktop.
                 if let Ok(now) = &g {
-                    if self.last_change.is_some() && self.last_change != now.last {
+                    if self.last_change.is_some() && self.last_change != now.last && now.confirm.is_none() {
                         std::thread::spawn(|| {
                             let _ = app::sync_desktop(false);
                         });
