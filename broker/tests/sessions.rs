@@ -430,11 +430,17 @@ fn a_commit_at_refuses_what_could_cut_the_machine_off() {
 #[test]
 fn trust_never_applies_a_declined_proposal() {
     let (dir, b) = setup(&[]);
-    let s = session::start(&b).unwrap();
-    let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
-    torq_broker::at::Scheduler::new(&b, "true", "true").decline(p.body.seq, "casey").unwrap();
     session::grant(&b, "casey", 30).unwrap();
+    let s = session::start(&b).unwrap();
+    // Such a proposal is covered by the trust: this one applies at once.
+    let covered = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    assert!(session::apply_trusted(&b, &covered).unwrap().is_some(), "covered by casey's trust");
+    // The same kind of proposal, declined before trust's apply reaches it: not applied.
+    let jq = dir.path().join("jq.diff");
+    fs::write(&jq, "--- a/users/casey/packages.json\n+++ b/users/casey/packages.json\n@@ -1 +1 @@\n-[\"htop\"]\n+[\"htop\", \"jq\"]\n").unwrap();
+    let p = propose(&b, &jq, Actor::Agent, false, Some(&s.id)).unwrap();
+    torq_broker::at::Scheduler::new(&b, "true", "true").decline(p.body.seq, "casey").unwrap();
     let r = session::apply_trusted(&b, &p);
     assert!(r.as_ref().map_or_else(|e| format!("{e:#}").contains("declined"), |a| a.is_none()), "{r:?}");
-    assert_eq!(kinds(&b, "applied"), 0);
+    assert_eq!(kinds(&b, "applied"), 1, "only the one before");
 }

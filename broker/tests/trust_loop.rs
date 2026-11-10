@@ -3791,9 +3791,11 @@ fn declining_a_scheduled_proposal_cancels_its_commit_at() {
     let p = t.propose("theme", THEME);
     let s = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
     let timer = s.body.data["timer"].as_u64().unwrap();
-    let d = t.s().decline(p, "casey").unwrap();
+    // Declined by viper, not by casey who scheduled it: the decline cancels it all the same (ADR-051, amended).
+    let d = t.s().decline(p, "viper").unwrap();
     let cancelled = t.m.b.ledger.read_all().unwrap().into_iter().find(|e| e.body.kind == "apply_cancelled").expect("cancelled, ledgered");
     assert_eq!((cancelled.body.data["scheduled"].as_u64(), cancelled.body.data["proposal"].as_u64()), (Some(s.body.seq), Some(p)));
+    assert_eq!((cancelled.body.approved_by.as_deref(), d.body.approved_by.as_deref()), (Some("viper"), Some("viper")));
     assert!(cancelled.body.seq < d.body.seq && d.body.data["cancelled"].as_u64() == Some(cancelled.body.seq));
     assert!(t.m.log().contains(&format!("cancel {timer}")), "its timer stopped");
     assert!(t.s().scheduled().unwrap().is_empty());
@@ -3833,5 +3835,100 @@ fn declining_frees_the_agents_slot() {
     }
     assert!(format!("{:#}", b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).unwrap_err()).contains("waiting"));
     torq_broker::at::Scheduler::new(&b, "true", "true").decline(first.body.seq, "casey").unwrap();
+    b.propose_on(Some(&head), &d, "one more, now", Actor::Agent, false).unwrap();
+}
+
+/// An agent's proposal written straight into the ledger, as `agent`'s, with no diff kept: it can never land.
+fn dead_proposal(b: &Broker, agent: &str, n: usize) {
+    for i in 0..n {
+        b.ledger.append(NewEntry {
+            actor: "agent".into(),
+            approved_by: None,
+            kind: "proposal".into(),
+            tier: "user".into(),
+            tainted: true,
+            reason: format!("dead {i}"),
+            data: serde_json::json!({ "agent": agent, "files": ["users/casey/packages.json"], "diff_sha256": "0".repeat(64), "base": b.repo.head().unwrap() }),
+        }).unwrap();
+    }
+}
+
+/// The review of Decline: the waiting count looks at an agent's newest AGENT_WAITING_LOOK not done, so
+/// dying proposals newer than its live ones would push those out of sight, and it could pass the cap.
+/// It cannot: an agent has at most AGENT_WAITING_LOOK proposals not done at all, live or not.
+#[test]
+fn dying_proposals_cannot_hide_the_live_ones() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    for i in 0..torq_broker::AGENT_WAITING_MAX - 1 {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    dead_proposal(&b, "torq-agent-casey", torq_broker::AGENT_WAITING_LOOK);
+    // Without the limit: the window holds only the dead ones, none counts, and a twentieth and more pass.
+    let e = format!("{:#}", b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).unwrap_err());
+    assert!(e.contains("neither applied nor declined"), "{e}");
+}
+
+/// The limit is each agent's own: another agent's not-done proposals, however many, block no one else.
+#[test]
+fn the_not_done_limit_is_each_agents_own() {
+    let (dir, b) = setup("true");
+    dead_proposal(&b, "torq-agent-sam", torq_broker::AGENT_WAITING_LOOK + 5);
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    assert_eq!(b.propose_on(Some(&b.repo.head().unwrap()), &d, "htop", Actor::Agent, false).unwrap().body.kind, "proposal");
+}
+
+/// A commit at whose proposal was declined without its schedule being cancelled (a ledger from
+/// elsewhere, say): apply's own check stops its run, on the record.
+#[test]
+fn a_timer_run_of_a_declined_proposal_applies_nothing() {
+    let t = At::new();
+    let p = t.propose("theme", THEME);
+    let s = t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap();
+    let timer = s.body.data["timer"].as_u64().unwrap();
+    t.m.b.ledger.append(NewEntry {
+        actor: "user".into(),
+        approved_by: Some("casey".into()),
+        kind: "declined".into(),
+        tier: "system".into(),
+        tainted: false,
+        reason: "declined, its schedule left".into(),
+        data: serde_json::json!({ "proposal": p }),
+    }).unwrap();
+    assert_eq!(t.s().scheduled().unwrap().len(), 1, "still scheduled");
+    let r = t.s().run(timer).unwrap().expect("settled");
+    assert!(r.body.kind == "apply_refused" && r.body.reason.contains("declined"), "{r:?}");
+    assert!(t.theme().contains("dark"));
+}
+
+/// A declined proposal leaves the machine as the ledger says: nothing for `status` to report.
+#[test]
+fn status_after_a_decline_is_clean() {
+    let (dir, b, _) = setup_with_system();
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "Night light", Actor::User, false).unwrap();
+    torq_broker::at::Scheduler::new(&b, "true", "true").decline(p.body.seq, "casey").unwrap();
+    let s = b.status().unwrap();
+    assert!(s.problems().is_empty(), "{:?}", s.problems());
+    b.ledger.verify().unwrap();
+}
+
+/// A proposal whose apply failed waits again (ADR-008: a person may apply it again): it counts against
+/// the agent's cap, and it may be declined.
+#[test]
+fn a_failed_apply_still_waits() {
+    let (dir, b) = setup("false");
+    let head = b.repo.head().unwrap();
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let first = b.propose_on(Some(&head), &d, "htop 0", Actor::Agent, false).unwrap();
+    assert!(b.apply(first.body.seq, "casey", true).is_err());
+    assert_eq!(b.ledger.read_all().unwrap().pop().unwrap().body.kind, "apply_failed");
+    for i in 1..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    assert!(format!("{:#}", b.propose_on(Some(&head), &d, "one more", Actor::Agent, false).unwrap_err()).contains("waiting"), "the failed one counts");
+    let s = torq_broker::at::Scheduler::new(&b, "true", "true");
+    assert_eq!(s.decline(first.body.seq, "casey").unwrap().body.kind, "declined");
     b.propose_on(Some(&head), &d, "one more, now", Actor::Agent, false).unwrap();
 }

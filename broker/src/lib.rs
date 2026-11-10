@@ -2257,18 +2257,26 @@ impl Broker {
             // applied: each one judged costs git runs under the lock, and the dead ones of a machine's
             // whole life are not judged again on every proposal. Older ones pass out of the count only
             // as newer ones stop being able to land, which takes a person's commits (the review).
+            // Done is applied or declined. A failed apply is not: a person may apply it again (ADR-008), so
+            // it waits like any other (the review of Decline).
             let done: std::collections::HashSet<u64> = entries
                 .iter()
-                .filter(|e| matches!(e.body.kind.as_str(), "applied" | "apply_failed" | "declined"))
+                .filter(|e| matches!(e.body.kind.as_str(), "applied" | "declined"))
                 .filter_map(|e| e.body.data["proposal"].as_u64())
                 .collect();
-            let mut waiting = 0;
-            for p in entries
+            let mine: Vec<&Entry> = entries
                 .iter()
                 .rev()
                 .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent" && p.body.data["agent"].as_str() == Some(account) && !done.contains(&p.body.seq))
-                .take(AGENT_WAITING_LOOK)
-            {
+                .collect();
+            // However many of them could land: at most AGENT_WAITING_LOOK not done, so that the window below
+            // always holds every one of them — dying proposals (a file the desktop saves, say) can never push
+            // the live ones out of it (the review of Decline). A person declines the dead ones to go on.
+            if mine.len() >= AGENT_WAITING_LOOK {
+                bail!("refused: {} of the agent's proposals are neither applied nor declined (at most {AGENT_WAITING_LOOK}): decline those that will not be applied", mine.len());
+            }
+            let mut waiting = 0;
+            for p in mine.into_iter().take(AGENT_WAITING_LOOK) {
                 if self.could_still_land(p)? {
                     waiting += 1;
                     if waiting >= AGENT_WAITING_MAX {
