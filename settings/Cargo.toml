@@ -2,7 +2,7 @@
 name = "torq-settings"
 version = "0.3.2"
 edition = "2024"
-description = "TorqOS Settings: torqcli in a COSMIC window, TorqOS in its panel, and SSH tunnels (ADR-045 2, ADR-049, ADR-050)"
+description = "TorqOS Settings: torqcli in a COSMIC window, TorqOS in its panel, SSH tunnels, and the person's agent (ADR-045 2, ADR-049, ADR-050, ADR-051 4)"
 license = "Apache-2.0"
 publish = false
 
@@ -18,7 +18,8 @@ zbus = "5"
 git = "https://github.com/pop-os/libcosmic"
 rev = "430f3d48a97d8779f9c1985473912e594ccca1ae"
 default-features = false
-features = ["winit", "tokio", "dbus-config", "multi-window", "applet"]
+# applet-token: the agent's applet raises its window (an activation token); single-instance: one agent window a person.
+features = ["winit", "tokio", "dbus-config", "multi-window", "applet", "applet-token", "single-instance"]
 
 # The window, and TorqOS in COSMIC's panel (ADR-049).
 [[bin]]
@@ -37,3 +38,12 @@ path = "src/tunnel.rs"
 [[bin]]
 name = "torq-tunnels"
 path = "src/tunnels.rs"
+
+# The person's agent (ADR-051 4): its panel applet, beside TorqOS's, and its window.
+[[bin]]
+name = "torq-agent-applet"
+path = "src/agent_applet.rs"
+
+[[bin]]
+name = "torq-agent-ui"
+path = "src/agent_ui.rs"

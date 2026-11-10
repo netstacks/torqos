@@ -12,6 +12,8 @@ use cosmic::iced::futures::SinkExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use torq::app::{self, Action, App, At, Choice, Console, DeviceCode, GitHubToken, Glance, How, Machine, Mode, Needs, Proposal, Tool, Typed, View, VIEWS};
+use torq::agent::client::{Client, Status};
+use torq::agent::setup::Setup;
 use torq::history::Row;
 
 mod secrets;
@@ -38,6 +40,7 @@ enum Page {
     Apps,
     Desktop,
     Secrets,
+    Agent,
     System,
     Commands,
 }
@@ -174,6 +177,10 @@ pub struct Settings {
     restart_after: bool,
     /// What running commands are asking, one at a time.
     questions: VecDeque<(String, Reply)>,
+    // Agent:
+    agent: Loaded<AgentLook>,
+    /// Forget, asked first.
+    forgetting: bool,
 }
 
 /// The way back to a command waiting for a person's yes or no.
@@ -303,6 +310,12 @@ pub enum Message {
     Offer(String),
     RunLine,
     Typed(String, Typed),
+    // Agent:
+    AgentLoaded(Result<AgentLook, String>),
+    OpenAgent,
+    Forget,
+    ForgetAnswer(bool),
+    Forgot(Result<(), String>),
 }
 
 impl cosmic::Application for Settings {
@@ -330,6 +343,7 @@ impl cosmic::Application for Settings {
             "desktop" => Page::Desktop,
             "secrets" => Page::Secrets,
             "backup" => Page::System,
+            "agent" => Page::Agent,
             s if VIEWS.iter().any(|v| v.id == s) => Page::System,
             _ => Page::Overview,
         };
@@ -342,6 +356,7 @@ impl cosmic::Application for Settings {
             ("Secrets", Page::Secrets, "dialog-password-symbolic"),
             ("History", Page::History, "document-open-recent-symbolic"),
             ("Proposals", Page::Proposals, "mail-message-new-symbolic"),
+            ("Agent", Page::Agent, "system-users-symbolic"),
             ("System", Page::System, "computer-symbolic"),
             ("Command Line", Page::Commands, "utilities-terminal-symbolic"),
         ] {
@@ -429,6 +444,8 @@ impl cosmic::Application for Settings {
             log: vec![],
             restart_after: false,
             questions: VecDeque::new(),
+            agent: Loaded::Waiting,
+            forgetting: false,
         };
         let title = match app.core.main_window_id() {
             Some(id) => app.set_window_title("TorqOS Settings".into(), id),
@@ -459,7 +476,17 @@ impl cosmic::Application for Settings {
     /// What a running command asks a person (commit's review, an undo, a delete): the yes or no a terminal
     /// would ask. An approval the system needs comes after it, in COSMIC's own dialog.
     fn dialog(&self) -> Option<Element<'_, Message>> {
-        let (question, _) = self.questions.front()?;
+        let Some((question, _)) = self.questions.front() else {
+            // The agent's memory erased: asked first, as a terminal would.
+            return self.forgetting.then(|| {
+                widget::dialog()
+                    .title("Forget the conversation?")
+                    .body("Your agent forgets what it remembers of your conversation: later questions start afresh.")
+                    .primary_action(widget::button::destructive("Forget").on_press(Message::ForgetAnswer(true)))
+                    .secondary_action(widget::button::standard("Cancel").on_press(Message::ForgetAnswer(false)))
+                    .into()
+            });
+        };
         let body = widget::container(widget::scrollable(widget::text::monotext(question.trim_end().to_string()).width(Length::Fill))).max_height(360.0);
         Some(
             widget::dialog()
@@ -995,6 +1022,28 @@ impl cosmic::Application for Settings {
                 }))
                 .map(cosmic::Action::App);
             }
+            Message::AgentLoaded(r) => self.agent = r.into(),
+            Message::OpenAgent => app::open_agent(),
+            Message::Forget => self.forgetting = true,
+            Message::ForgetAnswer(yes) => {
+                self.forgetting = false;
+                if yes {
+                    self.busy = Some("Forgetting the conversation".into());
+                    self.note = None;
+                    return cosmic::task::future(async {
+                        let got = off(|| Client::mine().and_then(|c| c.forget()).map_err(|e| e.to_string())).await.and_then(|r| r);
+                        Message::Forgot(got)
+                    });
+                }
+            }
+            Message::Forgot(r) => {
+                self.busy = None;
+                self.note = Some(match r {
+                    Ok(()) => ("Your agent has forgotten the conversation.".into(), false),
+                    Err(e) => (e, true),
+                });
+                return self.load();
+            }
             Message::Typed(line, t) => {
                 self.busy = None;
                 self.typed_cf = t.configuration;
@@ -1026,6 +1075,7 @@ impl cosmic::Application for Settings {
             },
             Page::System => self.system(),
             Page::Commands => self.commands(),
+            Page::Agent => self.agent_page(),
         };
         let mut content = widget::column::with_capacity(3).spacing(spacing.space_m).max_width(960);
         if let Some(what) = &self.busy {
@@ -1120,6 +1170,7 @@ impl Settings {
                 }
             }
             Page::Commands => tasks.push(self.offer()),
+            Page::Agent => tasks.push(cosmic::task::future(async { Message::AgentLoaded(off(agent_look).await.and_then(|r| r)) })),
         }
         Task::batch(tasks)
     }
@@ -1928,6 +1979,80 @@ impl Settings {
         page.into()
     }
 
+    /// The Agent page (ADR-051 2): what the agent is for this person, the model it asks, whether a key is
+    /// configured, its memory; the agent's window and the proposals. What changes the system is a line of the
+    /// tree into the draft, committed as every change is.
+    fn agent_page(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let mut page = widget::column::with_capacity(6).spacing(spacing.space_m);
+        page = page.push(widget::text::body(
+            "Your agent: an account of its own, not yours, that reads, explains and proposes. What it proposes waits for you; nothing it does changes the system by itself.",
+        ));
+        let look = match &self.agent {
+            Loaded::Got(l) => l,
+            Loaded::Failed(why) => return failed(why),
+            Loaded::Waiting => return waiting(),
+        };
+        let s = &look.setup;
+        let account = match &s.agent {
+            Some(a) => a.clone(),
+            None => "None: the agent is not set up for you".to_string(),
+        };
+        let service = match (&s.agent, s.service, &look.status) {
+            (None, _, _) => "Not set up for you: `torq agent people` names who has one (an administrator's change)".to_string(),
+            (_, false, _) => "Not on this machine: it runs where doctor mode is on".to_string(),
+            (_, true, Some(Ok(st))) if st.running => "Working on a question".to_string(),
+            (_, true, Some(Ok(_))) => "Set up, and idle".to_string(),
+            (_, true, Some(Err(e))) => format!("Set up, but it did not answer: {e}"),
+            (_, true, None) => "Set up".to_string(),
+        };
+        page = page.push(
+            settings::section()
+                .title("For you")
+                .add(settings::item::builder("Your agent account").description(format!("{}'s agent, unprivileged; it sees only folders you share", s.me)).control(widget::text::body(account)))
+                .add(settings::item_row(vec![widget::column::with_capacity(2).push(widget::text::body("Its service")).push(widget::text::caption(service)).width(Length::Fill).into()])),
+        );
+        let (model, endpoint, key) = match &s.brain {
+            None => ("None: doctor mode is off".to_string(), String::new(), "No".to_string()),
+            Some(b) => (b.line(), b.endpoint.clone(), if b.key { "Yes".to_string() } else { "No".to_string() }),
+        };
+        let mut brain = settings::section().title("Its model").add(settings::item::builder("Model").description(endpoint).control(widget::text::body(model)));
+        brain = brain.add(
+            settings::item::builder("An API key is configured")
+                .description("Only whether: never its value. Entering a key comes with TorqOS's secrets (ADR-052), not this page; until then an administrator puts its file in place.")
+                .control(widget::text::body(key)),
+        );
+        page = page.push(brain);
+        if let Some(Ok(st)) = &look.status {
+            let kept = match st.turns {
+                0 => "It remembers nothing of your conversation".to_string(),
+                1 => "It remembers 1 turn of your conversation".to_string(),
+                n => format!("It remembers {n} turns of your conversation"),
+            };
+            let forget = widget::button::destructive("Forget…").on_press_maybe((self.busy.is_none() && !st.running).then_some(Message::Forget));
+            page = page.push(
+                settings::section()
+                    .title("Its memory")
+                    .add(settings::item::builder(kept).description("Its last turns, kept by its service; an answer from a session that read untrusted text is never kept").control(forget)),
+            );
+        }
+        page = page.push(
+            settings::section()
+                .title("Open")
+                .add(settings::item::builder("The agent's window").description("Ask it, see what it called, stop it").control(widget::button::standard("Open").on_press(Message::OpenAgent)))
+                .add(settings::item::builder("What it proposed").description("Each change waiting for you, with what it does").control(widget::button::standard("Proposals").on_press(Message::Approve))),
+        );
+        page = page.push(actions(app::AGENT_SETTINGS));
+        page.push(
+            settings::section().add(
+                settings::item::builder("Commit what you changed")
+                    .description("These go into your draft; committing goes through the broker, recorded in the history, with your approval")
+                    .control(widget::button::suggested("Your Changes").on_press(Message::Review)),
+            ),
+        )
+        .into()
+    }
+
     fn commands(&self) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let prompt = match (self.typed_cf, self.edit.is_empty()) {
@@ -1967,6 +2092,20 @@ impl Settings {
         }
         page.into()
     }
+}
+
+/// What the Agent page shows: the person's setup, and their agent's status where it is set up.
+#[derive(Debug, Clone)]
+pub struct AgentLook {
+    setup: Setup,
+    status: Option<Result<Status, String>>,
+}
+
+/// The Agent page's look: its status asked only where the person has an agent and its service is here.
+fn agent_look() -> Result<AgentLook, String> {
+    let setup = torq::agent::setup::setup().map_err(|e| app::said(&e))?;
+    let status = (setup.agent.is_some() && setup.service).then(|| Client::mine().and_then(|c| c.status()).map_err(|e| e.to_string()));
+    Ok(AgentLook { setup, status })
 }
 
 /// A diff, coloured and a card per file (a unified diff) or per place (`show | compare`).
@@ -2044,6 +2183,7 @@ fn actions(list: &'static [Action]) -> Element<'static, Message> {
     for a in list {
         let (button, command) = match a.how {
             How::Run => (widget::button::standard("Run").on_press(Message::Act(At::Read, a.command.to_string())), a.command.to_string()),
+            How::Draft => (widget::button::standard("Run").on_press(Message::Act(At::Draft, a.command.to_string())), a.command.to_string()),
             how => (widget::button::standard("Open").on_press(Message::Fill(how, a.command.to_string())), format!("{}…", a.command.trim_end())),
         };
         section = section.add(settings::item::builder(a.label).description(command).control(button));

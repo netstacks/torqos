@@ -25,7 +25,7 @@ rustPlatform.buildRustPackage {
   doCheck = false;
 
   # TorqOS in COSMIC's panel by default (ADR-049 2). The panel reads its whole default configuration or none,
-  # so all of it, COSMIC's own at this version, with our applet first among the status ones. A default: a
+  # so all of it, COSMIC's own at this version, with our applets first among the status ones. A default: a
   # person's own panel settings come before it. The build stops if COSMIC's list no longer reads as expected.
   postInstall = ''
     install -Dm644 ${./org.torqos.policy} $out/share/polkit-1/actions/org.torqos.policy
@@ -35,6 +35,10 @@ rustPlatform.buildRustPackage {
     grep -q '"com.system76.CosmicAppletInputSources"' $wings
     sed -i 's/"com.system76.CosmicAppletInputSources"/"org.torqos.Applet", &/' $wings
     grep -q org.torqos.Applet $wings
+    # The person's agent beside it (ADR-051 4, settled by the owner): right after TorqOS's own, or no build.
+    grep -q '"org.torqos.Applet", "com.system76.CosmicAppletInputSources"' $wings
+    sed -i 's/"org.torqos.Applet", /&"org.torqos.Agent", /' $wings
+    grep -q '"org.torqos.Applet", "org.torqos.Agent", "com.system76.CosmicAppletInputSources"' $wings
 
     # A person's SSH tunnel (ADR-050 2), kept up by their own user manager while they are logged in. Started
     # from the tunnels applet; "Start at login" is `systemctl --user enable`, in the person's own home. A wrong
@@ -68,6 +72,27 @@ rustPlatform.buildRustPackage {
       icon = "torqos";
       noDisplay = true;
       extraConfig = { X-CosmicApplet = "true"; X-CosmicHoverPopup = "Auto"; X-OverflowPriority = "10"; };
+    })
+    # The person's agent (ADR-051 4): in the default panel, beside TorqOS's own.
+    (makeDesktopItem {
+      name = "org.torqos.Agent";
+      desktopName = "TorqOS Agent";
+      comment = "Your agent: ask it, see what it is doing, stop it, review what it proposed";
+      exec = "torq-agent-applet";
+      icon = "torqos";
+      noDisplay = true;
+      extraConfig = { X-CosmicApplet = "true"; X-CosmicHoverPopup = "Auto"; X-OverflowPriority = "10"; };
+    })
+    # Its window, in the menu: one a person (started again, it raises the one open).
+    (makeDesktopItem {
+      name = "org.torqos.AgentWindow";
+      desktopName = "TorqOS Agent";
+      comment = "Ask your agent about this machine: it explains, and proposes changes you approve";
+      exec = "torq-agent-ui";
+      icon = "torqos";
+      categories = [ "System" "Utility" ];
+      keywords = [ "torq" "agent" "assistant" "ai" "ask" ];
+      startupWMClass = "org.torqos.AgentWindow";
     })
     # The person's SSH tunnels (ADR-050 4): in COSMIC's applet list, not in the default panel.
     (makeDesktopItem {

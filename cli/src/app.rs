@@ -1036,7 +1036,12 @@ impl Told {
     }
 }
 
-/// TorqOS Settings, at a page (`VIEWS`' ids, or overview, configuration, changes, history, proposals, secrets, commands).
+/// The person's agent's window (ADR-051 4): one a person, so this raises it if it is open.
+pub fn open_agent() {
+    spawn("torq-agent-ui", &[]);
+}
+
+/// TorqOS Settings, at a page (`VIEWS`' ids, or overview, configuration, changes, history, proposals, secrets, agent, commands).
 pub fn open_settings(page: &str) {
     spawn("torq-settings", &[page]);
 }
