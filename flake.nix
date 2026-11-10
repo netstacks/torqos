@@ -42,6 +42,8 @@
         torq = pkgs.callPackage ./cli/package.nix { };
         # The agent (ADR-042): doctor mode, run as torq-agent.
         torq-agent = pkgs.callPackage ./agent/package.nix { };
+        # The secrets daemon (ADR-052): a secret used, never read.
+        torq-secrets = pkgs.callPackage ./secrets/package.nix { };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
       })) (forSystems linuxSystems (pkgs: {
         # The TorqOS image (docs/INSTALL.md): a disk to download and boot; first-boot setup on its
@@ -70,6 +72,7 @@
           lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-broker;
         torq.cli.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq;
         torq.agent.doctor.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-agent;
+        torq.secrets.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.torq-secrets;
       };
 
       # Helper used by per-machine config repos (see templates/config).
@@ -185,6 +188,7 @@
         ssh = import ./tests/ssh.nix { inherit pkgs self; };
         desktop = import ./tests/desktop.nix { inherit pkgs self; };
         tunnels = import ./tests/tunnels.nix { inherit pkgs self; };
+        secrets = import ./tests/secrets.nix { inherit pkgs self; };
         image = import ./tests/image.nix { inherit pkgs self; };
         # Nothing nixpkgs marks unfree in what TorqOS distributes (ADR-039), for every platform it
         # releases (evaluation only, so x86_64's CI checks aarch64's too). nixpkgs refuses to

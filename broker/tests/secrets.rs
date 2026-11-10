@@ -186,7 +186,10 @@ fn a_use_is_judged_by_its_rule_and_the_agents_first_is_recorded() {
         assert!(m.b.use_secret(&agent("gh", "evil.example.com", Some(&session))).is_err());
         assert!(m.b.use_secret(&agent("own", "api.github.com", Some(&session))).is_err());
     }
-    assert_eq!(count("secret_use_refused"), 2, "each refusal once, not each time");
+    for i in 0..5 {
+        assert!(m.b.use_secret(&agent(&format!("made-up-{i}"), "api.github.com", Some(&session))).is_err());
+    }
+    assert_eq!(count("secret_use_refused"), 2, "each refusal once, not each time; a name with no rule, never: the daemon's log has it");
     torq_broker::session::taint(&m.b, &session, "web").unwrap();
     assert!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).is_err(), "tainted: a person approves, not built yet");
     assert!(m.b.use_secret(&agent("gh", "api.github.com", None)).is_err(), "no session is a tainted one");

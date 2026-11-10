@@ -23,6 +23,7 @@
     ./setup.nix
     ./accounts.nix
     ./backup.nix
+    ./secrets.nix
     ./host.nix
     ./shell.nix
     ./schema.nix

@@ -3342,7 +3342,7 @@ mod tests {
         let shown = s.exec("show system secrets").unwrap();
         assert_eq!(
             shown,
-            "The system's secrets:\n  ci                   token, has a value; https to api.github.com; the agent too, approved first-use\ndev's secrets:\n  deploy               SSH key, no value yet; ssh to github.com; not the agent\n"
+            "The system's secrets:\n  ci                   token, has a value; https to api.github.com; the agent too, approved first-use\n                       use: http://127.0.0.1:7800/system/ci/api.github.com/\ndev's secrets:\n  deploy               SSH key, no value yet; ssh to github.com; not the agent\n"
         );
         // A change starts from what is there.
         s.exec("request system secret allow deploy ssh gitlab.com user dev").unwrap();

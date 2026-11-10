@@ -380,13 +380,8 @@ impl Broker {
             Some(_) => bail!("refused: a session is the agent's; a person's use names none"),
             None => None,
         };
-        let judged = self.rules_of(&u.owner).and_then(|rules| may_use(&rules, u, tainted).map(|r| r.https.clone().unwrap_or_else(|| torq_wire::secrets::Https { hosts: vec![], header: "Authorization".into(), prefix: "Bearer ".into() })));
-        let entries = || self.ledger.read_all();
-        let said_before = |kind: &str, extra: &dyn Fn(&serde_json::Value) -> bool| -> Result<bool> {
-            Ok(entries()?.iter().any(|e| {
-                e.body.kind == kind && e.body.data["secret"] == json!(u.name) && e.body.data["owner"] == u.owner.data(&u.name)["owner"] && e.body.data["user"] == u.owner.data(&u.name)["user"] && e.body.data["session"] == json!(u.session) && extra(&e.body.data)
-            }))
-        };
+        let rules = self.rules_of(&u.owner)?;
+        let judged = may_use(&rules, u, tainted).map(|r| r.https.clone().unwrap_or_else(|| torq_wire::secrets::Https { hosts: vec![], header: "Authorization".into(), prefix: "Bearer ".into() }));
         let note = |kind: &str, reason: String, extra: serde_json::Value| -> Result<Entry> {
             let mut data = u.owner.data(&u.name);
             data["session"] = json!(u.session);
@@ -398,20 +393,87 @@ impl Broker {
             }
             self.ledger.append(NewEntry { actor: if agent { "agent".into() } else { "user".into() }, approved_by: None, kind: kind.into(), tier: u.owner.tier().to_string(), tainted: tainted.unwrap_or(agent), reason, data })
         };
+        let whose = match &u.owner {
+            Owner::System => "system".to_string(),
+            Owner::Person(p) => format!("user/{p}"),
+        };
+        let key = format!("{whose}/{}|{}", u.name, u.session.as_deref().unwrap_or("-"));
+        let mut seen = Seen::read(&self.state_dir);
         let https = match judged {
             Ok(h) => h,
             Err(e) => {
+                // On the record: the agent's first refusal in a session for a secret that has a rule, and no more
+                // than REFUSALS_AN_HOUR of them: names it made up, or a refusal it repeats, are the daemon's log's.
                 let why: String = said(&format!("{e:#}"));
-                if agent && !said_before("secret_use_refused", &|d| d["error"] == json!(why))? {
+                if agent && rules.contains_key(&u.name) && seen.first(&format!("refused|{key}")) && seen.refusal_allowed() {
                     note("secret_use_refused", format!("The agent's use of {} refused", u.owner.whose(&u.name)), json!({ "error": why }))?;
                 }
+                seen.write(&self.state_dir)?;
                 return Err(e);
             }
         };
-        if agent && !said_before("secret_first_use", &|_| true)? {
+        if agent && seen.first(&format!("first|{key}")) {
             note("secret_first_use", format!("The agent used {} for the first time in its session", u.owner.whose(&u.name)), json!({}))?;
+            seen.write(&self.state_dir)?;
         }
         Ok(Granted { value: self.decrypt(&u.owner, &u.name)?, header: https.header, prefix: https.prefix })
+    }
+}
+
+/// The most of the agent's refusals that go on the record in an hour; past them, its daemon's log has them.
+pub const REFUSALS_AN_HOUR: u32 = 60;
+/// How many of what was recorded are remembered, so as not to record them again: the oldest go first.
+const SEEN_KEPT: usize = 20_000;
+
+/// What of the agent's uses is on the record already (first uses, refusals, each by secret and session), so that
+/// a use does not read the whole ledger to know: the broker's state, `secret-uses.json`. Lost, it costs only an
+/// entry said twice.
+#[derive(Debug, Default, Serialize, serde::Deserialize)]
+struct Seen {
+    keys: std::collections::VecDeque<String>,
+    hour: String,
+    refused_in_hour: u32,
+}
+
+impl Seen {
+    fn path(dir: &std::path::Path) -> PathBuf {
+        dir.join("secret-uses.json")
+    }
+
+    fn read(dir: &std::path::Path) -> Seen {
+        fs::read(Self::path(dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    fn write(&self, dir: &std::path::Path) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let part = dir.join(".secret-uses.json.new");
+        let _ = fs::remove_file(&part);
+        fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?.write_all(&serde_json::to_vec(self)?)?;
+        fs::rename(&part, Self::path(dir))?;
+        Ok(())
+    }
+
+    /// Whether `key` is new (and now remembered).
+    fn first(&mut self, key: &str) -> bool {
+        if self.keys.iter().any(|k| k == key) {
+            return false;
+        }
+        self.keys.push_back(key.into());
+        while self.keys.len() > SEEN_KEPT {
+            self.keys.pop_front();
+        }
+        true
+    }
+
+    /// Whether another refusal may go on the record this hour (and now counts).
+    fn refusal_allowed(&mut self) -> bool {
+        let hour = chrono::Utc::now().format("%Y-%m-%dT%H").to_string();
+        if self.hour != hour {
+            self.hour = hour;
+            self.refused_in_hour = 0;
+        }
+        self.refused_in_hour += 1;
+        self.refused_in_hour <= REFUSALS_AN_HOUR
     }
 }
 

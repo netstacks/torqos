@@ -267,6 +267,11 @@ pub fn shown(repo: &Repo, kept: &[Kept]) -> Result<String> {
             let who = if r.actors.iter().any(|a| a == w::AGENT) { format!("the agent too, approved {}", r.approve.word()) } else { "not the agent".to_string() };
             let uses = if uses.is_empty() { "used for nothing".to_string() } else { uses.join("; ") };
             out.push_str(&format!("  {n:<20} {kind}, {value}; {uses}; {who}\n"));
+            // Where a program sends its request for each host (ADR-052): the daemon puts the secret in.
+            for h in r.https.iter().flat_map(|x| x.hosts.iter()) {
+                let whose = owner.as_ref().map_or_else(|| "system".to_string(), |u| format!("user/{u}"));
+                out.push_str(&format!("  {:<20} use: http://127.0.0.1:{}/{whose}/{n}/{h}/\n", "", w::PORT));
+            }
         }
     }
     if out.is_empty() {

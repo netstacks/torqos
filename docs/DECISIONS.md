@@ -2136,6 +2136,38 @@ off many times a day.
   - **`delete` removes the rule first, then the value:** a declined commit leaves both as they were.
   - **For the steps to come:** a token holding a line break must never reach a header (the daemon refuses it,
     step 2); an SSH key is several lines, so it is given from a file, not typed (step 3).
+- **Step 2 built (2026-11-10): the daemon, and its independent review's findings fixed.** The owner chose the
+  loopback port over a Unix socket or a command ("Loopback port"): `torq-secrets` (its own crate, `secrets/`) is its
+  own account in a tight unit, listening on 127.0.0.1:7800. A request to `/system/<secret>/<host>/<path>` (a
+  person's own: `/user/<person>/<secret>/<host>/<path>`; `show system secrets` prints each) is a use, which the
+  daemon asks of the broker (`secret-use`, open to that account alone, which may ask nothing else). The broker reads
+  who is connected from the kernel's own table itself, both ends of the connection (the client's is the actor, the
+  other must be the daemon's), judges the use by the rule at HEAD, records the agent's first use in each session,
+  and gives the value, header and prefix for this request. Until approving is built (step 4) the agent's use is
+  only from an untainted session (`X-Torq-Session`) of a rule that asks no approval; anything else is refused. The
+  daemon sends with curl (its configuration, and the value, on its input; `--disable`, HTTPS, the certificate
+  checked, no redirect followed, no proxy, no URL globbing), asks for no compression and refuses an answer it cannot
+  check, drops a program's own header of the secret's name, and replaces the value in what comes back: as it is,
+  in base64 (padded or not, URL-safe, at any offset), percent-encoded in either case, JSON-escaped. Every use is in
+  its journal, never the value. `tests/secrets.nix` has a second machine as the HTTPS host and checks both ends.
+  From the review:
+  - **A web page the person has open runs as them** (the serious one): its script could send a request to
+    127.0.0.1:7800 and the broker would rightly see the person's own account; GitHub's API lets any page read its
+    answers. The daemon now takes only what a program sends: `Host` must be the daemon's own (a page that rebinds its
+    name to 127.0.0.1 still sends its name), and a request with `Origin`, `Referer` or any `Sec-Fetch-*` header
+    (which every current browser adds) is refused; `OPTIONS` (a browser's preflight) is not taken; no
+    `Access-Control-*` header of an answer is passed on, so no page could read one. What is left: a browser so old
+    it sends no Fetch Metadata, with its referrer turned off, could still send a blind GET it cannot read.
+  - **The record stays bounded**: a refusal goes on it only for a secret that has a rule, once per session and
+    secret, and at most 60 an hour; what was recorded is remembered in the broker's `secret-uses.json` rather than
+    found by reading the whole ledger at every use.
+  - The status reason and the headers of an answer are scrubbed too, and a header with a control character is
+    dropped; curl's error is scrubbed before it is cut; a request's head has one deadline (15 s), not one between
+    bytes; the unit has `MemoryMax=1G`; a HEAD's length is the host's; an answer whose lines end in a bare LF is read.
+  - **Said plainly: taint is the agent's own word.** It can start a new, untainted session when it likes (at most
+    `SESSIONS_AN_HOUR`, KNOWN-GAPS 6zq), so refusing a tainted session's use stops an honest agent that read
+    something untrusted, not a hostile program running as the agent. Against that, the rule is the guarantee: the
+    agent uses only what a rule names, only at its hosts.
 - **Later, not now:** a person's own secret typed into the focused window by a COSMIC shortcut, theirs and never
   the agent's (the owner's Alt+O, 2026-11-10; it needs a way to type into windows that COSMIC accepts, and it
   never serves `torq-agent`); a service's secret from the same store (systemd's `LoadCredential`, instead of a
