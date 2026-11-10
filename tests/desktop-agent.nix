@@ -124,8 +124,8 @@ pkgs.testers.runNixOSTest {
     with subtest("step 4: a crash is offered, and nothing reaches the agent until the person asks"):
         machine.wait_until_succeeds("systemctl --user --machine=alice@ is-active torq-crash-watch.service", timeout=60)
         before = in_session("torq-agent-ui --check").splitlines()[0]
-        # (Its exit status as systemd-run reports it is not what is checked: the watcher's word is.)
-        machine.execute("systemd-run --user --machine=alice@ --pipe --wait --quiet /bin/sh -c 'ulimit -c unlimited; kill -SEGV $$'")
+        # ($$$$: systemd makes $$ of it, the shell's own pid. Its exit status is not what is checked: the watcher's word is.)
+        machine.execute("systemd-run --user --machine=alice@ --pipe --wait --quiet /bin/sh -c 'ulimit -c unlimited; kill -SEGV $$$$'")
         machine.wait_until_succeeds("journalctl --no-pager _SYSTEMD_USER_UNIT=torq-crash-watch.service | grep -q 'torq-crash-watch: offered: '", timeout=90)
         machine.sleep(5)
         watched = machine.succeed("journalctl --no-pager _SYSTEMD_USER_UNIT=torq-crash-watch.service")
