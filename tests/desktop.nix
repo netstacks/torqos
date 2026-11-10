@@ -126,13 +126,22 @@ pkgs.testers.runNixOSTest {
         machine.fail("su -s /bin/sh torq-agent -c '${pkgs.socat}/bin/socat -u OPEN:/dev/null UNIX-CONNECT:/run/polkit/agent-helper.socket'")
         # A wrong password in the dialog counts toward the same lockout as one at a terminal.
         ask = on_the_desktop({"args": ["--json", "apply", seq]})
-        machine.succeed(f"(setsid {ask} > /tmp/refused.out 2>&1 < /dev/null &)")
-        try:
-            machine.wait_until_succeeds("pgrep -x pkcheck", timeout=30)
-        except Exception:
-            # Why no dialog was asked for: the broker's own answer (on .52, 2026-11-10, it answered in 3 s).
-            print(machine.execute("cat /tmp/refused.out; pgrep -u alice -fa cosmic-osd")[1])
-            raise
+        def ask_in_the_dialog(out):
+            # Asked until COSMIC's dialog has registered with polkit: on a slow, software-rendered desktop (.52)
+            # it was still starting 25 s after login, and the broker said so ("no authentication agent is
+            # running"), as it would to a person; torqcli asks again the same way. A dialog that never registers
+            # (one left on a polkit that has gone) fails it, after about two minutes.
+            for attempt in range(8):
+                machine.succeed(f"(setsid {ask} > {out} 2>&1 < /dev/null &)")
+                # A dialog is a pkcheck still waiting a second later: without one, pkcheck ends at once.
+                asked, _ = machine.execute(f"timeout 30 sh -c 'until pgrep -x pkcheck >/dev/null && sleep 1 && pgrep -x pkcheck >/dev/null; do grep -q \"no authentication agent\" {out} && exit 1; sleep 0.2; done'")
+                if asked == 0:
+                    return
+                print(machine.execute(f"cat {out}; pgrep -u alice -fa cosmic-osd")[1])
+                assert "no authentication agent" in machine.succeed(f"cat {out}"), "no dialog, and not for want of one"
+                machine.sleep(10)
+            raise AssertionError("COSMIC's dialog never registered with polkit")
+        ask_in_the_dialog("/tmp/refused.out")
         machine.sleep(8)
         machine.screenshot("approval")
         machine.send_chars("wrong-password\n", delay=0.1)
@@ -157,7 +166,7 @@ pkgs.testers.runNixOSTest {
         # applet end it (the agent could otherwise end the person's dialog every few seconds).
         osd = machine.succeed("pgrep -u alice -fx cosmic-osd").strip()
         machine.succeed("cp ${pkgs.bash}/bin/bash /tmp/polkitd && chmod 755 /tmp/polkitd")
-        machine.succeed("systemd-run --uid=nobody --unit=fake-polkitd /tmp/polkitd -c 'sleep 120; true'")
+        machine.succeed("systemd-run --uid=nobody --unit=fake-polkitd /tmp/polkitd -c '${pkgs.coreutils}/bin/sleep 120; true'")
         machine.wait_until_succeeds("pgrep -u nobody -x polkitd", timeout=10)
         machine.sleep(12)
         machine.succeed(f"pgrep -u alice -fx cosmic-osd | grep -qx {osd}")
@@ -171,8 +180,7 @@ pkgs.testers.runNixOSTest {
         assert moved != head, moved
 
         # The right one, in the dialog: the change is made.
-        machine.succeed(f"(setsid {ask} > /tmp/approved.out 2>&1 < /dev/null &)")
-        machine.wait_until_succeeds("pgrep -x pkcheck", timeout=30)
+        ask_in_the_dialog("/tmp/approved.out")
         machine.sleep(8)
         machine.send_chars("torq-desktop\n", delay=0.1)
         try:
