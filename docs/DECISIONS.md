@@ -2087,8 +2087,10 @@ vouches for, that only proposes, every change ledgered and undone in one command
      bundled, offered or packaged by TorqOS; a person may install them as any other software, as themselves or
      under `torq agent run`, and TorqOS treats them as any program run as the agent (always tainted, 6).
   2. **Its brain is the owner's choice.** TorqOS Settings gains an **Agent** page (and setup a step, skippable):
-     the model — local (llama-server, ADR-042 3–4; the default, ADR-005), Claude (Anthropic's API, or the person's
-     subscription), OpenAI, or any OpenAI-compatible endpoint — and sign-in. It is a tree setting
+     the model — local (llama-server, ADR-042 3–4; the default, ADR-005), Claude (an Anthropic API key; never a
+     Claude subscription's login: Anthropic allows that only in Claude Code and Claude.ai, 2026-02), OpenAI, or any
+     OpenAI-compatible endpoint — and its key. A Claude subscriber uses the subscription through Claude Code (5),
+     signed in by the person in their own browser. It is a tree setting
      (`torq agent model`, `endpoint`), so it is ledgered, reverted and carried to a rebuilt machine like any other;
      the key or token is a file outside the repository in the agent's home (ADR-042 3). A remote model is marked
      REMOTE wherever the agent shows (3), and choosing one is a ledgered change.
@@ -2122,7 +2124,8 @@ vouches for, that only proposes, every change ledgered and undone in one command
      `torq agent run` (ADR-041 5), in a folder the person shares: the Omarchy way of talking to a coding tool, but
      its shell writes only its own home and the shared folder, and what it changes in the system it can only
      propose. Its own "skip permissions" mode is allowed for that reason: there is nothing it can apply. TorqOS's
-     agent may also hand a coding job to the person's chosen tool. A tool never becomes the machine's agent: the
+     agent may suggest a job for the person's tool, which the person starts (never run on a subscription in the
+     background on their behalf: Anthropic forbids routing requests on a subscriber's behalf). A tool never becomes the machine's agent: the
      resident agent alone holds screen grants, the crash hook and the panel, and is the one whose reads the
      broker sees.
   6. **The screen, by grant, through the person's own session.** No agent account can reach the person's
