@@ -113,6 +113,9 @@ pkgs.testers.runNixOSTest {
     with subtest("step 4: the terminal's ask, in the login shell"):
         out = machine.succeed("su - alice -c \"zsh -i -c 'alias ask'\" 2>/dev/null")
         assert "noglob torq ask" in out, out
+        # Alone, it reads one line as the question: nothing in it is the shell's.
+        out = machine.succeed("echo 'why is $HOME * here?' | su - alice -c 'torq ask'")
+        assert out.strip() == "Hello alice.", out
 
     with subtest("step 4: the launcher's plugin is where pop-launcher looks, and offers the question"):
         ron = machine.succeed("cat /etc/pop-launcher/plugins/torq-agent/plugin.ron")
@@ -124,12 +127,20 @@ pkgs.testers.runNixOSTest {
     with subtest("step 4: a crash is offered, and nothing reaches the agent until the person asks"):
         machine.wait_until_succeeds("systemctl --user --machine=alice@ is-active torq-crash-watch.service", timeout=60)
         before = in_session("torq-agent-ui --check").splitlines()[0]
+        # A crash anyone can write to the journal (its COREDUMP_ fields are the sender's words): never offered.
+        # (echo, not printf: systemd would read a % in a unit's command line as its own.)
+        fields = ["MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1", "COREDUMP_UID=1000", "COREDUMP_PID=1", "COREDUMP_EXE=/forged/exe", "COREDUMP_SIGNAL_NAME=SIGSEGV", "MESSAGE=forged"]
+        forge = "{ " + "; ".join(f"echo {f}" for f in fields) + "; } | logger --journald"
+        in_session(forge)
+        machine.sleep(5)
+        machine.succeed("journalctl --no-pager COREDUMP_EXE=/forged/exe | grep -q forged")
         # ($$$$: systemd makes $$ of it, the shell's own pid. Its exit status is not what is checked: the watcher's word is.)
         machine.execute("systemd-run --user --machine=alice@ --pipe --wait --quiet /bin/sh -c 'ulimit -c unlimited; kill -SEGV $$$$'")
         machine.wait_until_succeeds("journalctl --no-pager _SYSTEMD_USER_UNIT=torq-crash-watch.service | grep -q 'torq-crash-watch: offered: '", timeout=90)
         machine.sleep(5)
         watched = machine.succeed("journalctl --no-pager _SYSTEMD_USER_UNIT=torq-crash-watch.service")
         assert "asked about pid" not in watched, watched
+        assert "/forged/exe" not in watched, watched
         # Nothing handed to the window, and the agent asked nothing.
         machine.fail("ls /run/user/$(id -u alice)/torq-agent/ask-* 2>/dev/null")
         assert in_session("torq-agent-ui --check").splitlines()[0] == before
