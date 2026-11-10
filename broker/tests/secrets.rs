@@ -174,7 +174,7 @@ fn a_use_is_judged_by_its_rule_and_the_agents_first_is_recorded() {
     m.b.set_secret(&alice(), "gh", VALUE, "alice").unwrap();
     m.b.set_secret(&alice(), "own", "alice's own", "alice").unwrap();
     let session = torq_broker::session::start(&m.b).unwrap().id;
-    let agent = |name: &str, host: &str, session: Option<&str>| Use { owner: alice(), name: name.into(), host: host.into(), actor: "torq-agent".into(), session: session.map(String::from) };
+    let agent = |name: &str, host: &str, session: Option<&str>| Use { owner: alice(), name: name.into(), host: host.into(), actor: "torq-agent".into(), session: session.map(String::from), ssh: false };
     let count = |kind: &str| m.ledger().matches(&format!("\"kind\":\"{kind}\"")).count();
     assert_eq!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).unwrap().value, VALUE);
     assert_eq!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).unwrap().value, VALUE);
@@ -195,10 +195,29 @@ fn a_use_is_judged_by_its_rule_and_the_agents_first_is_recorded() {
     assert!(m.b.use_secret(&agent("gh", "api.github.com", None)).is_err(), "no session is a tainted one");
     assert!(m.b.use_secret(&agent("gh", "api.github.com", Some("0123456789abcdef0123456789abcdef"))).is_err(), "no such session");
     let before = m.ledger();
-    let own = Use { owner: alice(), name: "own".into(), host: "api.github.com".into(), actor: "alice".into(), session: None };
+    let own = Use { owner: alice(), name: "own".into(), host: "api.github.com".into(), actor: "alice".into(), session: None, ssh: false };
     let g = m.b.use_secret(&own).unwrap();
     assert_eq!((g.value.as_str(), g.header.as_str(), g.prefix.as_str()), ("alice's own", "Authorization", "Bearer "));
     assert_eq!(m.ledger(), before, "a person's own use: the daemon's log, not the ledger");
     assert!(m.b.use_secret(&Use { session: Some(session.clone()), ..own }).is_err(), "a person names no session");
     assert!(!m.ledger().contains(VALUE));
+}
+
+/// An agent socket's grant (ADR-052, SSH): who it is for, for an hour; a session only the agent's, and one the
+/// broker holds.
+#[test]
+fn an_agent_sockets_grant_is_who_asked() {
+    let m = Machine::new();
+    let g = m.b.grant_agent("alice", 1000, None).unwrap();
+    let read = m.b.grant(&g).unwrap();
+    assert_eq!((read.actor.as_str(), read.uid, read.session), ("alice", 1000, None));
+    assert!(m.b.grant_agent("alice", 1000, Some("0123456789abcdef0123456789abcdef")).is_err(), "a person names no session");
+    assert!(m.b.grant_agent("torq-agent", 990, Some("0123456789abcdef0123456789abcdef")).is_err(), "no such session");
+    let s = torq_broker::session::start(&m.b).unwrap().id;
+    let a = m.b.grant_agent("torq-agent", 990, Some(&s)).unwrap();
+    assert_eq!(m.b.grant(&a).unwrap().session.as_deref(), Some(s.as_str()));
+    for bad in ["", "../x", "0123456789abcdef0123456789abcdeg", "00000000000000000000000000000000"] {
+        assert!(m.b.grant(bad).is_err(), "{bad:?}");
+    }
+    assert!(m.b.ssh_keys_for("alice").is_empty(), "no keys yet");
 }

@@ -90,6 +90,11 @@ fn bearer() -> String {
 #[serde(deny_unknown_fields)]
 pub struct Ssh {
     pub hosts: Vec<String>,
+    /// Each host's keys, as known_hosts writes them (`<host> <type> <base64>`): what OpenSSH's agent checks the
+    /// server against before it signs. Taken from a person's own known_hosts when they allow the host, never on
+    /// first sight of it.
+    #[serde(default)]
+    pub known: Vec<String>,
 }
 
 /// One secret's rule.
@@ -145,6 +150,15 @@ fn actor_ok(a: &str) -> bool {
     a == AGENT || (!a.is_empty() && a.len() <= 32 && a.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_') && a.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'))
 }
 
+/// A host's key, as known_hosts writes one for port 22: `<host> <type> <base64>`, the host one of `hosts`, no
+/// option, no comment, nothing hashed (a rule says which host in the clear: it is read by the person allowing it).
+pub fn known_ok(line: &str, hosts: &[String]) -> bool {
+    const TYPES: &[&str] = &["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"];
+    let f: Vec<&str> = line.split(' ').collect();
+    let [host, kind, key] = f.as_slice() else { return false };
+    hosts.iter().any(|h| h == host) && TYPES.contains(kind) && (16..=16384).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+}
+
 fn hosts_ok(hosts: &[String]) -> Result<(), String> {
     if hosts.is_empty() || hosts.len() > MAX_HOSTS {
         return Err(format!("a use names 1 to {MAX_HOSTS} hosts"));
@@ -184,6 +198,15 @@ pub fn check(rules: &Rules) -> Result<(), String> {
         }
         if let Some(s) = &r.ssh {
             hosts_ok(&s.hosts).map_err(at)?;
+            if s.known.len() > MAX_HOSTS * 8 {
+                return Err(at("too many host keys".into()));
+            }
+            if let Some(l) = s.known.iter().find(|l| !known_ok(l, &s.hosts)) {
+                return Err(at(format!("{l:?} is not a key of one of its hosts, as known_hosts writes it")));
+            }
+            if let Some(h) = s.hosts.iter().find(|h| !s.known.iter().any(|l| l.split(' ').next() == Some(h.as_str()))) {
+                return Err(at(format!("no key of {h} is known: ssh {h} once at a terminal, check its key, then allow it")));
+            }
         }
         if r.actors.len() > MAX_SECRETS {
             return Err(at("too many actors".into()));
@@ -283,7 +306,18 @@ mod tests {
     fn a_secret_is_used_only_as_what_it_is() {
         assert!(one(r#"{"t":{"kind":"token","ssh":{"hosts":["github.com"]}}}"#).is_err());
         assert!(one(r#"{"k":{"kind":"ssh-key","https":{"hosts":["api.github.com"]}}}"#).is_err());
-        assert!(one(r#"{"k":{"kind":"ssh-key","ssh":{"hosts":["github.com"]}}}"#).is_ok());
+        assert!(one(r#"{"k":{"kind":"ssh-key","ssh":{"hosts":["github.com"]}}}"#).is_err(), "no key of the host known");
+        assert!(one(r#"{"k":{"kind":"ssh-key","ssh":{"hosts":["github.com"],"known":["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"]}}}"#).is_ok());
+        for bad in [
+            "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMq",
+            "github.com ssh-dss AAAAB3NzaC1kc3MAAACBAOMqqnkV",
+            "github.com ssh-ed25519 AAAA C3Nz",
+            "|1|hashed= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMq",
+            "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMq comment",
+            "@revoked github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMq",
+        ] {
+            assert!(!known_ok(bad, &["github.com".into()]), "{bad}");
+        }
     }
 
     #[test]

@@ -399,6 +399,21 @@ impl Machine for Real<'_> {
         }
     }
 
+    fn known_host_keys(&self, host: &str) -> Result<Vec<String>> {
+        // ssh-keygen finds the host's lines in the person's own known_hosts, hashed or not; each is written back
+        // as the host in the clear, its type and key. A marked line (@revoked, @cert-authority) is not a key to trust.
+        let out = std::process::Command::new("ssh-keygen").args(["-F", host]).stderr(std::process::Stdio::null()).output().context("running ssh-keygen (OpenSSH)")?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with('@'))
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                (f.len() >= 3).then(|| format!("{host} {} {}", f[1], f[2]))
+            })
+            .filter(|l| torq_wire::secrets::known_ok(l, &[host.to_string()]))
+            .collect())
+    }
+
     fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
         let log = run::start_log()?;
         let v = done(run::broker_json(broker(self.cli, &["secrets"])?, &log)?, "show system secrets")?;

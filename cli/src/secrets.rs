@@ -83,11 +83,17 @@ pub fn read(repo: &Repo, rev: &str, user: Option<&str>) -> Result<Rules> {
 
 /// `act` done to `rules`: what it did, in a few words, for the change's reason. Refused, it changes nothing.
 pub fn edit(rules: &mut Rules, name: &str, act: &Act) -> Result<String> {
+    edit_with(rules, name, act, &[])
+}
+
+/// `edit`, with the keys `known` of the host an `allow … ssh <host>` names (known_hosts lines, from the person's
+/// own known_hosts): what OpenSSH's agent checks that host against before it signs.
+pub fn edit_with(rules: &mut Rules, name: &str, act: &Act, known: &[String]) -> Result<String> {
     if !w::name_ok(name) {
         bail!("'{name}' is not a secret's name (letters, digits, - and _)");
     }
     let before = rules.clone();
-    let what = edit_unchecked(rules, name, act);
+    let what = edit_unchecked(rules, name, act, known);
     let done = what.and_then(|what| w::check(rules).map(|()| what).map_err(|why| anyhow::anyhow!("{why}")));
     if done.is_err() {
         *rules = before;
@@ -95,7 +101,7 @@ pub fn edit(rules: &mut Rules, name: &str, act: &Act) -> Result<String> {
     done
 }
 
-fn edit_unchecked(rules: &mut Rules, name: &str, act: &Act) -> Result<String> {
+fn edit_unchecked(rules: &mut Rules, name: &str, act: &Act, known: &[String]) -> Result<String> {
     let first = || anyhow::anyhow!("secret {name} is not used for anything yet: say what it is for first (request system secret allow {name} https <host>, or ssh <host>)");
     match act {
         Act::Allow(Grant::Https(h)) | Act::Allow(Grant::Ssh(h)) if !w::host_ok(h) => {
@@ -119,11 +125,13 @@ fn edit_unchecked(rules: &mut Rules, name: &str, act: &Act) -> Result<String> {
             if r.kind != Kind::SshKey {
                 bail!("secret {name} is a token: it has no ssh use");
             }
-            let ssh = r.ssh.get_or_insert_with(|| Ssh { hosts: Vec::new() });
+            let ssh = r.ssh.get_or_insert_with(|| Ssh { hosts: Vec::new(), known: Vec::new() });
             if ssh.hosts.contains(h) {
                 bail!("secret {name} already signs for {h}");
             }
             ssh.hosts.push(h.clone());
+            // Its keys as the person knows them, for that host alone.
+            ssh.known.extend(known.iter().filter(|l| l.split(' ').next() == Some(h.as_str()) && !ssh.known.contains(l)).cloned().collect::<Vec<_>>());
             ssh.hosts.sort();
             Ok(format!("may sign for {h}"))
         }
@@ -147,6 +155,10 @@ fn edit_unchecked(rules: &mut Rules, name: &str, act: &Act) -> Result<String> {
                 bail!("{what} is not allowed it now");
             }
             list.retain(|x| x != &what);
+            // A host taken back takes its keys with it.
+            if let (Grant::Ssh(h), Some(s)) = (g, r.ssh.as_mut()) {
+                s.known.retain(|l| l.split(' ').next() != Some(h.as_str()));
+            }
             // A use with no host left is no use.
             if r.https.as_ref().is_some_and(|x| x.hosts.is_empty()) {
                 r.https = None;
@@ -184,7 +196,12 @@ pub fn change(machine: &dyn Machine, repo: &Repo, name: &str, user: Option<&str>
     let path = rules_path(user);
     let old = repo.file_at(&head, &path)?;
     let mut rules = read(repo, &head, user)?;
-    let what = edit(&mut rules, name, act)?;
+    // An SSH host's keys, as the person asking knows them (their own known_hosts): never taken on first sight.
+    let known = match act {
+        Act::Allow(Grant::Ssh(h)) => machine.known_host_keys(h)?,
+        _ => Vec::new(),
+    };
+    let what = edit_with(&mut rules, name, act, &known)?;
     let new = (!rules.is_empty()).then(|| w::render(&rules));
     let scratch = crate::scratch_dir()?;
     let diff = crate::candidate::unified_diff_bytes(scratch.path(), &[(path, old.as_deref(), new.as_deref().map(str::as_bytes))])?;
@@ -302,7 +319,7 @@ mod tests {
     #[test]
     fn what_is_refused_changes_nothing() {
         let mut r = Rules::new();
-        edit(&mut r, "k", &Act::Allow(Grant::Ssh("github.com".into()))).unwrap();
+        edit_with(&mut r, "k", &Act::Allow(Grant::Ssh("github.com".into())), &["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl".into()]).unwrap();
         let before = r.clone();
         for (name, act) in [
             ("k", Act::Allow(Grant::Https("api.github.com".into()))),

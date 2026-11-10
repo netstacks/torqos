@@ -115,9 +115,9 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
     // A use of a secret is the secrets daemon's to ask, and it asks nothing else (ADR-052): who the use is for,
     // the broker reads from the kernel itself.
     if who.name == torq_wire::secrets::DAEMON {
-        return if cmd == "secret-use" { Gate::Open } else { Gate::Refused("the secrets daemon asks for uses of secrets, and nothing else".into()) };
+        return if matches!(cmd, "secret-use" | "secret-agent") { Gate::Open } else { Gate::Refused("the secrets daemon asks for uses of secrets, and nothing else".into()) };
     }
-    if cmd == "secret-use" {
+    if matches!(cmd, "secret-use" | "secret-agent") {
         return Gate::Refused("a use of a secret is asked by the secrets daemon, for the one connected to it".into());
     }
     if OBSERVE.contains(&cmd) {
@@ -414,11 +414,13 @@ mod tests {
         assert_eq!(gate(&who(1000), "apply", Some(&change(Tier::User, &["users/viper/secrets.json"])), None), Gate::Open, "their own, as any of theirs");
         // A use is the daemon's to ask, and it asks nothing else; no one else asks one, a person nor the agent.
         assert_eq!(gate(&who(989), "secret-use", None, None), Gate::Open);
+        assert_eq!(gate(&who(989), "secret-agent", None, None), Gate::Open);
         for cmd in ["log", "secret-show", "secret-set", "propose", "apply"] {
             assert!(matches!(gate(&who(989), cmd, None, Some("sam")), Gate::Refused(_)), "{cmd}");
         }
         for uid in [1000, 1001, 990, 65534] {
             assert!(matches!(gate(&who(uid), "secret-use", None, None), Gate::Refused(_)), "{uid}");
+            assert!(matches!(gate(&who(uid), "secret-agent", None, None), Gate::Refused(_)), "{uid}");
         }
         let s = with_identity(&["secret-set".into(), "--name=t".into(), "--user=sam".into()], "secret-set", &who(1001), None, None, Some("/run/v")).unwrap();
         assert_eq!(s, ["secret-set", "--name=t", "--user=sam", "--value-file", "/run/v", "--approved-by", "sam"]);

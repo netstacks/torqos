@@ -101,6 +101,9 @@ pub trait Machine {
     fn secret_value(&self, name: &str, user: Option<&str>, act: &crate::secrets::Act, me: &str) -> Result<String>;
     /// The secrets that have a value, as the broker lists them: never a value.
     fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>>;
+    /// `host`'s keys as the person running this knows them (their known_hosts, port 22), as `<host> <type> <key>`
+    /// lines; none: they have not connected to it and checked it.
+    fn known_host_keys(&self, host: &str) -> Result<Vec<String>>;
     /// `request system restore`: put a path back from a backup (as `me`, with their password).
     fn restore_backup(&self, name: &str, snapshot: Option<&str>, path: &str, me: &str) -> Result<String>;
     /// `request system remote clear`: clear the remote's alarm (as `me`, with their password).
@@ -2754,6 +2757,8 @@ mod tests {
         /// The secrets that have a value (ADR-052), and what was asked of their values.
         kept: Vec<crate::secrets::Kept>,
         secret_calls: RefCell<Vec<String>>,
+        /// The person's known_hosts lines.
+        known_hosts: Vec<String>,
     }
     impl Machine for Fake {
         /// One evaluation: the warnings a test gives, and SSH after the change — as the evaluator would:
@@ -2919,6 +2924,9 @@ mod tests {
         }
         fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
             Ok(self.kept.clone())
+        }
+        fn known_host_keys(&self, host: &str) -> Result<Vec<String>> {
+            Ok(self.known_hosts.iter().filter(|l| l.split(' ').next() == Some(host)).cloned().collect())
         }
         fn backup_key(&self, name: &str, me: &str) -> Result<String> {
             Ok(format!("key of {name} for {me}\n"))
@@ -3336,18 +3344,22 @@ mod tests {
     fn the_secrets_rules_shown_as_the_repository_has_them() {
         let d = repo();
         sh(d.path(), "mkdir -p secrets users/dev && printf '%s' '{\"ci\":{\"kind\":\"token\",\"https\":{\"hosts\":[\"api.github.com\"]},\"actors\":[\"torq-agent\"]}}' > secrets/system.json \
-            && printf '%s' '{\"deploy\":{\"kind\":\"ssh-key\",\"ssh\":{\"hosts\":[\"github.com\"]},\"approve\":\"never\"}}' > users/dev/secrets.json && git add -A && git commit -qm rules");
-        let m = Fake { kept: vec![(None, "ci".into())], ..Default::default() };
+            && printf '%s' '{\"deploy\":{\"kind\":\"ssh-key\",\"ssh\":{\"hosts\":[\"github.com\"],\"known\":[\"github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\"]},\"approve\":\"never\"}}' > users/dev/secrets.json && git add -A && git commit -qm rules");
+        let gitlab = "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf".to_string();
+        let m = Fake { kept: vec![(None, "ci".into())], known_hosts: vec![gitlab.clone()], ..Default::default() };
         let mut s = session(d.path(), None, &m);
         let shown = s.exec("show system secrets").unwrap();
         assert_eq!(
             shown,
             "The system's secrets:\n  ci                   token, has a value; https to api.github.com; the agent too, approved first-use\n                       use: http://127.0.0.1:7800/system/ci/api.github.com/\ndev's secrets:\n  deploy               SSH key, no value yet; ssh to github.com; not the agent\n"
         );
-        // A change starts from what is there.
+        // A change starts from what is there; an SSH host comes with its key, as the person knows it.
         s.exec("request system secret allow deploy ssh gitlab.com user dev").unwrap();
         let (diff, ..) = m.commits.borrow().last().unwrap().clone();
-        assert!(diff.contains("\"github.com\"") && diff.contains("+        \"gitlab.com\""), "{diff}");
+        assert!(diff.contains("\"github.com\"") && diff.contains("+        \"gitlab.com\"") && diff.contains(&gitlab), "{diff}");
+        // A host the person never connected to and checked is not allowed.
+        let e = format!("{:#}", s.exec("request system secret allow deploy ssh bitbucket.org user dev").unwrap_err());
+        assert!(e.contains("no key of bitbucket.org is known"), "{e}");
         s.exec("request system secret delete ci").unwrap();
         let (diff, ..) = m.commits.borrow().last().unwrap().clone();
         assert!(diff.contains("+++ /dev/null") || diff.contains("deleted file"), "the last rule gone, the file with it: {diff}");

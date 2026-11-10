@@ -183,6 +183,8 @@ impl Broker {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&part, fs::Permissions::from_mode(0o600))?;
             fs::File::open(&part)?.sync_all()?;
+            // An SSH key's public half beside it (and a key it cannot read refused) before the value is in place.
+            self.keep_public(owner, name, value)?;
             fs::rename(&part, &file)?;
             fs::File::open(&dir)?.sync_all()?;
             Ok(())
@@ -215,6 +217,7 @@ impl Broker {
         }
         let entry = self.record(owner, name, by, "secret_deleted", format!("The value of {} deleted", owner.whose(name)), None)?;
         fs::remove_file(&file).context("deleting it")?;
+        let _ = fs::remove_file(self.secret_dir(owner).join(format!("{name}.pub")));
         fs::File::open(self.secret_dir(owner))?.sync_all()?;
         Ok(entry)
     }
@@ -321,6 +324,8 @@ pub struct Use {
     pub actor: String,
     /// The agent's session, if its request named one (`X-Torq-Session`).
     pub session: Option<String>,
+    /// An HTTPS request to `host` (a token), or a signature for SSH to it (a key).
+    pub ssh: bool,
 }
 
 /// Why `u` may not happen by these rules (Err), or the rule that lets it. `tainted`: whether the agent's session
@@ -331,11 +336,12 @@ pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, tainted: Optio
     use torq_wire::secrets::{Approve, Kind, AGENT};
     let whose = u.owner.whose(&u.name);
     let r = rules.get(&u.name).with_context(|| format!("{whose} has no rule: it is used for nothing"))?;
-    if r.kind != Kind::Token {
-        bail!("{whose} is an SSH key: it is never sent");
-    }
-    if !r.https.as_ref().is_some_and(|h| h.hosts.contains(&u.host)) {
-        bail!("{whose} is not sent to {}", u.host);
+    match (u.ssh, r.kind) {
+        (false, Kind::SshKey) => bail!("{whose} is an SSH key: it is never sent"),
+        (true, Kind::Token) => bail!("{whose} is a token: it signs for nothing"),
+        (false, _) if !r.https.as_ref().is_some_and(|h| h.hosts.contains(&u.host)) => bail!("{whose} is not sent to {}", u.host),
+        (true, _) if !r.ssh.as_ref().is_some_and(|s| s.hosts.contains(&u.host)) => bail!("{whose} does not sign for {}", u.host),
+        _ => {}
     }
     let named = r.actors.iter().any(|a| *a == u.actor);
     let allowed = match &u.owner {
@@ -381,7 +387,7 @@ impl Broker {
             None => None,
         };
         let rules = self.rules_of(&u.owner)?;
-        let judged = may_use(&rules, u, tainted).map(|r| r.https.clone().unwrap_or_else(|| torq_wire::secrets::Https { hosts: vec![], header: "Authorization".into(), prefix: "Bearer ".into() }));
+        let judged = may_use(&rules, u, tainted).cloned();
         let note = |kind: &str, reason: String, extra: serde_json::Value| -> Result<Entry> {
             let mut data = u.owner.data(&u.name);
             data["session"] = json!(u.session);
@@ -399,7 +405,7 @@ impl Broker {
         };
         let key = format!("{whose}/{}|{}", u.name, u.session.as_deref().unwrap_or("-"));
         let mut seen = Seen::read(&self.state_dir);
-        let https = match judged {
+        let rule = match judged {
             Ok(h) => h,
             Err(e) => {
                 // On the record: the agent's first refusal in a session for a secret that has a rule, and no more
@@ -416,7 +422,9 @@ impl Broker {
             note("secret_first_use", format!("The agent used {} for the first time in its session", u.owner.whose(&u.name)), json!({}))?;
             seen.write(&self.state_dir)?;
         }
-        Ok(Granted { value: self.decrypt(&u.owner, &u.name)?, header: https.header, prefix: https.prefix })
+        let (header, prefix) = rule.https.map(|h| (h.header, h.prefix)).unwrap_or_default();
+        let known = rule.ssh.map(|s| s.known.into_iter().filter(|l| l.split(' ').next() == Some(u.host.as_str())).collect()).unwrap_or_default();
+        Ok(Granted { value: self.decrypt(&u.owner, &u.name)?, header, prefix, known })
     }
 }
 
@@ -483,6 +491,8 @@ pub struct Granted {
     pub value: String,
     pub header: String,
     pub prefix: String,
+    /// For SSH: the host's keys, which OpenSSH's agent checks the server against before it signs.
+    pub known: Vec<String>,
 }
 
 #[cfg(test)]
@@ -514,11 +524,11 @@ mod tests {
         parse(br#"{"gh":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"],"approve":"never"},
                    "asks":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"]},
                    "mine":{"kind":"token","https":{"hosts":["api.github.com"]}},
-                   "key":{"kind":"ssh-key","ssh":{"hosts":["github.com"]},"actors":["torq-agent"],"approve":"never"}}"#).unwrap()
+                   "key":{"kind":"ssh-key","ssh":{"hosts":["github.com"],"known":["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"]},"actors":["torq-agent"],"approve":"never"}}"#).unwrap()
     }
 
     fn u(owner: Owner, name: &str, host: &str, actor: &str, session: Option<&str>) -> Use {
-        Use { owner, name: name.into(), host: host.into(), actor: actor.into(), session: session.map(String::from) }
+        Use { owner, name: name.into(), host: host.into(), actor: actor.into(), session: session.map(String::from), ssh: false }
     }
 
     #[test]
@@ -541,5 +551,138 @@ mod tests {
             assert!(may_use(&r, &use_, tainted).is_err(), "{why}");
         }
         assert!(may_use(&r, &u(Owner::System, "gh", "api.github.com", "torq-agent", Some("s")), Some(false)).is_ok());
+        // SSH: a key, for the hosts its rule names; a token signs for nothing.
+        let ssh = |name: &str, host: &str| Use { ssh: true, ..u(sam(), name, host, "torq-agent", Some("s")) };
+        assert!(may_use(&r, &ssh("key", "github.com"), Some(false)).is_ok());
+        assert!(may_use(&r, &ssh("key", "gitlab.com"), Some(false)).is_err());
+        assert!(may_use(&r, &ssh("gh", "api.github.com"), Some(false)).is_err());
+    }
+}
+
+/// How long a grant of an agent socket lasts (ADR-052, SSH).
+pub const GRANT_SECONDS: i64 = 3600;
+
+/// A program's SSH agent socket, granted: who it is for, read from the kernel when it asked (over a loopback
+/// connection, as an HTTPS use is), and the session it named. The daemon names it in each use of a key through that
+/// socket: a Unix socket's caller is not in the kernel's table of TCP connections, so this is how the broker still
+/// knows who, and not by the daemon's word.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct Grant {
+    pub actor: String,
+    pub uid: u32,
+    pub session: Option<String>,
+    pub until: String,
+}
+
+/// An SSH key an account may use: whose, its name, its public half, and the hosts it signs for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SshKey {
+    pub owner: Owner,
+    pub name: String,
+    pub public: String,
+    pub hosts: Vec<String>,
+    pub known: Vec<String>,
+}
+
+fn grant_id_ok(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Whether `value` is an OpenSSH private key, as `ssh-keygen` writes one.
+fn is_ssh_key(value: &str) -> bool {
+    value.trim_start().starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")
+}
+
+impl Broker {
+    fn grants_dir(&self) -> PathBuf {
+        self.state_dir.join("secret-grants")
+    }
+
+    /// An agent socket granted to `actor` (`uid`), for `session` (the agent's: it must be one the broker holds).
+    pub fn grant_agent(&self, actor: &str, uid: u32, session: Option<&str>) -> Result<String> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        if let Some(id) = session {
+            if actor != torq_wire::secrets::AGENT {
+                bail!("refused: a session is the agent's; a person's names none");
+            }
+            crate::session::read(self, id)?.context("refused: the request names no session the broker holds")?;
+        }
+        let mut bytes = [0u8; 16];
+        fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).context("reading /dev/urandom")?;
+        let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let until = (chrono::Utc::now() + chrono::Duration::seconds(GRANT_SECONDS)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let g = Grant { actor: actor.into(), uid, session: session.map(String::from), until };
+        let dir = self.grants_dir();
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        // The old ones go: a grant past its time is no grant.
+        for e in fs::read_dir(&dir)?.flatten() {
+            let old = fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<Grant>(&b).ok());
+            if old.is_none_or(|o| chrono::DateTime::parse_from_rfc3339(&o.until).is_ok_and(|t| t < chrono::Utc::now())) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+        fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(dir.join(&id))?.write_all(&serde_json::to_vec(&g)?)?;
+        Ok(id)
+    }
+
+    /// The grant `id`, if it is one and its time is not over.
+    pub fn grant(&self, id: &str) -> Result<Grant> {
+        if !grant_id_ok(id) {
+            bail!("refused: {id:?} is not a grant");
+        }
+        let g: Grant = fs::read(self.grants_dir().join(id)).ok().and_then(|b| serde_json::from_slice(&b).ok()).context("refused: no such grant")?;
+        if chrono::DateTime::parse_from_rfc3339(&g.until).map_or(true, |t| t < chrono::Utc::now()) {
+            bail!("refused: the grant is over: ask for another agent socket");
+        }
+        Ok(g)
+    }
+
+    /// The SSH keys `actor` may use, by their rules: their public halves (no value, nothing on the record). Which of
+    /// them a use may sign with, and for which host, is judged at each use.
+    pub fn ssh_keys_for(&self, actor: &str) -> Vec<SshKey> {
+        use torq_wire::secrets::{Kind, AGENT};
+        let mut out = Vec::new();
+        let mut owners: Vec<Owner> = self.kept_secrets().into_iter().map(|k| k.owner).collect();
+        owners.dedup();
+        for owner in owners {
+            let Ok(rules) = self.rules_of(&owner) else { continue };
+            for (name, r) in rules {
+                let Some(ssh) = r.ssh.clone() else { continue };
+                let named = r.actors.iter().any(|a| a == actor);
+                let theirs = match &owner {
+                    Owner::Person(p) => p == actor || (actor == AGENT && named),
+                    Owner::System => named,
+                };
+                let Ok(public) = fs::read_to_string(self.secret_dir(&owner).join(format!("{name}.pub"))) else { continue };
+                if r.kind == Kind::SshKey && theirs {
+                    out.push(SshKey { owner: owner.clone(), name, public: public.trim().to_string(), hosts: ssh.hosts, known: ssh.known });
+                }
+            }
+        }
+        out
+    }
+
+    /// The public half of an SSH key just kept (`ssh-keygen -y`), beside it: for listing the key without its value.
+    /// Not a key: nothing, and any public half of an earlier value goes.
+    fn keep_public(&self, owner: &Owner, name: &str, value: &str) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = self.secret_dir(owner);
+        let public = dir.join(format!("{name}.pub"));
+        let _ = fs::remove_file(&public);
+        if !is_ssh_key(value) {
+            return Ok(());
+        }
+        // ssh-keygen reads a file: one of root's, in the store's own folder, gone at once.
+        let tmp = dir.join(format!(".{name}.key"));
+        let _ = fs::remove_file(&tmp);
+        fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?.write_all(format!("{}\n", value.trim_end()).as_bytes())?;
+        let out = crate::config::command("ssh-keygen").args(["-y", "-P", "", "-f"]).arg(&tmp).stdin(Stdio::null()).output();
+        let _ = fs::remove_file(&tmp);
+        let out = out.context("running ssh-keygen")?;
+        if !out.status.success() {
+            bail!("an SSH key that ssh-keygen cannot read (one with a passphrase is not taken): {}", said(String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o644).open(&public)?.write_all(&out.stdout)?;
+        Ok(())
     }
 }
