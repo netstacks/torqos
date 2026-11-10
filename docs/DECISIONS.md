@@ -2073,3 +2073,10 @@ content at the next), and a proposal must be judged on what it does, not on what
   22 GB) its final crate with every core froze the desktop until a reboot (2026-11-10). A desktop machine's own builds want such a limit (`nix settings cores`), open. Offered upstream (cosmic-comp #1799 is a step
   towards four-finger overview gestures). The gestures fire when recognised; they do not follow the fingers.
   Not tested in a VM: QEMU has no multi-finger touchpad to drive; checked by hand on the laptop.
+- **Known (the independent review, 2026-11-10):** a swipe's direction is its first movement's, as upstream's
+  four-finger one: a three-finger swipe that starts sideways does nothing. A swipe and a pinch share the
+  compositor's one gesture state, as two swipes do upstream: two touchpads at once can confuse it. The overview
+  counts as open on the active output once drawn: on another output, or while it starts, three fingers down
+  opens the window switcher instead of closing it. The window switcher (`cosmic-launcher alt-tab`) picks a
+  window when Super is let go; started from a gesture, with none held, how it behaves is to be seen on the laptop.
+  A pinch that is then cancelled has still opened the app library.
