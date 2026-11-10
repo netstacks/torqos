@@ -139,6 +139,88 @@ pkgs.testers.runNixOSTest {
         code, v = answer(ask("dev", {"args": ["--json", "propose", f"--base={head()}", "--reason=a path"], "diff": desk("dev", bad)}))
         assert code == 1, (code, v)
 
+    with subtest("a secret's value (ADR-052): encrypted, root's alone, its owner's, off the record, never the agent's"):
+        store = "/var/lib/torq/secrets/store"
+        def secret(user, cmd, name, owner=None, **extra):
+            args = ["--json", f"secret-{cmd}", "--name", name] + (["--user", owner] if owner else [])
+            return answer(ask(user, {"args": args, **extra}))
+        # A person's own: set with no password, by them alone.
+        code, v = secret("sam", "set", "gh", "sam", key="sam-token-1")
+        assert code == 0 and v["kind"] == "secret_set" and v["tier"] == "user" and v["approved_by"] == "sam", (code, v)
+        f = f"{store}/users/sam/gh"
+        mode = machine.succeed(f"stat -c %a:%U {f}").strip()
+        assert mode == "600:root", mode
+        mode = machine.succeed(f"stat -c %a:%U {store}/users/sam").strip()
+        assert mode == "700:root", mode
+        machine.fail(f"grep -q sam-token-1 {f}")
+        # Encrypted by systemd-creds itself, bound to its name: it decrypts as that and nothing else.
+        assert machine.succeed(f"systemd-creds decrypt --name=torq-secret.user.sam.gh {f} -").strip() == "sam-token-1"
+        machine.fail(f"systemd-creds decrypt --name=torq-secret.system.gh {f} -")
+        # Read back: with their password, and only theirs.
+        code, v = secret("sam", "show", "gh", "sam")
+        assert code == 77, (code, v)
+        code, v = secret("sam", "show", "gh", "sam", password="Sam-sock-7742")
+        assert code == 0 and v["value"] == "sam-token-1", (code, v)
+        for who, pw in [("dev", "Torq-sock-2210"), ("torq-agent", None)]:
+            for cmd in ["set", "show"]:
+                code, v = secret(who, cmd, "gh", "sam", key="other", password=pw)
+                assert code == 1, (who, cmd, code, v)
+        assert machine.succeed(f"systemd-creds decrypt --name=torq-secret.user.sam.gh {f} -").strip() == "sam-token-1", "unchanged"
+        # The system's: an administrator's, with their password; not a person's, nor the agent's.
+        code, v = secret("dev", "set", "ci", key="ci-token-2")
+        assert code == 77, (code, v)
+        code, v = secret("dev", "set", "ci", key="ci-token-2", password="Torq-sock-2210")
+        assert code == 0 and v["tier"] == "system", (code, v)
+        for who in ["sam", "torq-agent"]:
+            for cmd in ["set", "show", "delete"]:
+                code, v = secret(who, cmd, "ci", key="x")
+                assert code == 1, (who, cmd, code, v)
+        # The agent sees which secrets there are, never a value, nor the store.
+        code, v = answer(ask("torq-agent", {"args": ["--json", "secrets"]}))
+        assert code == 0 and {"owner": "system", "name": "ci"} in v and {"owner": {"person": "sam"}, "name": "gh"} in v, (code, v)
+        machine.fail(f"su -s /bin/sh torq-agent -c 'ls {store}'")
+        machine.fail(f"su -s /bin/sh torq-agent -c 'cat {f}'")
+        # Deleted: their own by them; anyone's by an administrator, with their password.
+        code, v = secret("sam", "set", "old", "sam", key="old-3")
+        assert code == 0, (code, v)
+        code, v = secret("dev", "delete", "old", "sam", password="Torq-sock-2210")
+        assert code == 0 and v["kind"] == "secret_deleted", (code, v)
+        code, v = secret("sam", "delete", "gh", "sam")
+        assert code == 0, (code, v)
+        machine.fail(f"test -e {f}")
+        # On the record, every time, without a value.
+        record = machine.succeed("torq-broker log")
+        for value in ["sam-token-1", "ci-token-2", "old-3"]:
+            assert value not in record, value
+        for kind in ["secret_set", "secret_shown", "secret_deleted"]:
+            assert kind in record, kind
+
+    with subtest("a secret's rules (ADR-052): the person's own, checked, never the agent's or an administrator's"):
+        def rules(name, body):
+            return f"--- /dev/null\n+++ b/users/{name}/secrets.json\n@@ -0,0 +1 @@\n+{body}\n"
+        good = '{"gh": {"kind": "token", "https": {"hosts": ["api.github.com"]}, "actors": ["torq-agent"]}}'
+        p = propose("sam", rules("sam", good), "the agent may use gh")
+        code, v = answer(ask("sam", {"args": ["--json", "apply", str(p["seq"])]}))
+        assert code == 0 and v["approved_by"] == "sam", (code, v)
+        def changed(path, new):
+            return f"--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{good}\n+{new}\n"
+        # An administrator's password does not change anyone else's.
+        p = propose("dev", changed("users/sam/secrets.json", good.replace('"torq-agent"', '"torq-agent", "dev"')), "dev's say over sam's")
+        code, v = answer(ask("dev", {"args": ["--json", "apply", str(p["seq"])], "password": "Torq-sock-2210"}))
+        assert code == 1 and "theirs alone" in v["error"], (code, v)
+        # Nothing but rules: an address is no host; a field nothing reads is refused.
+        for body in ['{"t": {"kind": "token", "https": {"hosts": ["10.0.0.1"]}}}', '{"t": {"kind": "token", "run": "sh"}}']:
+            code, v = answer(ask("dev", {"args": ["--json", "propose", f"--base={head()}", "--reason=bad"], "diff": rules("dev", body)}))
+            assert code == 1, (body, code, v)
+        sysrules = "--- /dev/null\n+++ b/secrets/system.json\n@@ -0,0 +1 @@\n+{\"ci\": {\"kind\": \"token\", \"https\": {\"hosts\": [\"localhost\"]}}}\n"
+        code, v = answer(ask("dev", {"args": ["--json", "propose", f"--base={head()}", "--reason=bad"], "diff": sysrules}))
+        assert code == 1 and "secrets/system.json" in v["error"], (code, v)
+        # The agent proposes neither file, even for a person whose packages it may propose.
+        for diff in [changed("users/sam/secrets.json", good.replace('"api.github.com"', '"api.github.com", "evil.example.com"')),
+                     sysrules.replace("localhost", "api.github.com")]:
+            code, v = answer(ask("torq-agent", {"args": ["--json", "propose", f"--base={head()}", "--reason=wider"], "diff": diff}))
+            assert code == 1, (code, v)
+
     with subtest("a refused or busy request is an answer, not a failed unit: a switch must not fail for one"):
         machine.succeed("test -z \"$(systemctl list-units --failed --no-legend 'torq-broker@*')\"")
 

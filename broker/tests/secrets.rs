@@ -21,7 +21,7 @@ name=""; files=""
 for a; do case $a in --name=*) name=${a#--name=};; --*) ;; *) files="$files $a";; esac; done
 set -- $files
 case $cmd in
-  encrypt) [ -n "$FAIL" ] && { echo "no TPM" >&2; exit 1; }; { printf 'FAKE %s\n' "$name"; base64; } > "$2" ;;
+  encrypt) [ -n "$FAIL" ] && { echo "no TPM" >&2; exit 1; }; rm -f "$2"; umask 022; { printf 'FAKE %s\n' "$name"; base64; } > "$2" ;;
   decrypt) [ "$(head -n 1 "$1")" = "FAKE $name" ] || { echo "name mismatch" >&2; exit 1; }; tail -n +2 "$1" | base64 -d ;;
   *) exit 2 ;;
 esac
