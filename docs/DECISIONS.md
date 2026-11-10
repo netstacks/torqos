@@ -2058,6 +2058,134 @@ off many times a day.
   a VPN; setting up a browser's proxy (the person's own, in their profile); accepting a host key from the
   applet.
 
+## ADR-051 — The machine's agent: one in every part of the desktop, its own account, the screen by grant
+
+**Status:** proposed, 2026-11-10 (the owner: "rethink the applets and integration with agents, think omarchy … a
+default agent for the machine … allows users to set up claude, openai or opencode … Hermes or openclaw type … the
+system has a full-on agent that has its own account and is there to help the users for anything … watch the
+screen for new app bugs or capture screens with permission … I want better than Omarchy"). Amends ADR-042 1 (a
+resident agent) and builds on ADR-005, ADR-034 (scenario c), ADR-035, ADR-041, ADR-042 6–7, ADR-045 6 and
+ADR-049. Five questions are the owner's (below); nothing is built until they are answered (DRIVING.md 1).
+**Context:** What exists is the agent's *substrate*, reached from a terminal: the account `torq-agent` (ADR-041),
+`torq doctor` and `torq agent propose` (one question, one process, ADR-042), `torq agent run -- claude` for a tool
+of the person's choosing, the broker's allow-list, taint and session trust. On the desktop nothing of it shows:
+no default agent, no way to pick or sign in to one, no place in the panel or in TorqOS Settings to ask, no way
+to see the screen. Omarchy (manual, `manual/17-ai.md`, 2026-11) shows what a desktop's agent can feel like: a
+default agent picked in its menu (`omarchy default agent <name>`, installed on first use), a key and a terminal
+alias to start it, a panel item with subscription limits, crash notifications handed to the agent, one system
+skill linked into every harness, the theme followed. **But every Omarchy agent runs as the person, in its
+"don't-stop-to-ask" mode, with the person's whole home, keys, browser sessions and sudo.** Nothing it does is
+recorded, nothing is undone but by hand (`omarchy reinstall configs`), and what it reads it can act on at once.
+TorqOS can match the convenience because it already has what Omarchy cannot add afterwards: an agent that is
+an account the kernel vouches for, that only proposes, every change ledgered and undone in one command.
+- **Decision:**
+  1. **One agent for the machine, chosen once, the same everywhere.** TorqOS Settings gains an **Agent** page
+     (and setup a step, skippable): pick the *harness* and the *model*, sign in, see what it may do. Harnesses:
+     - **TorqOS's own** (`torq-doctor`, ADR-042): the default, local model (ADR-005), the only one whose reads
+       the broker can see (its proposals are tainted only when it read untrusted text);
+     - **Claude Code, Codex, opencode** (nixpkgs; each has a headless mode and MCP): first-class;
+     - **OpenClaw, Hermes** ("gateway" agents: long-running, messaging channels, skill registries): offered
+       later and off by default (5), Hermes once it is packaged (it is not in nixpkgs; ADR-037 refuses
+       `curl | sh`).
+     The choice is a tree setting, `torq agent harness <name>` (and `model`, `endpoint`), so it is ledgered,
+     reverted and carried to a rebuilt machine like any other; installing the harness is that commit. A
+     harness nixpkgs marks unfree (Claude Code) needs `torq unfree` turned on first, said plainly on the page
+     (ADR-039: nothing unfree in an image; on a machine it is the owner's choice). A remote model is
+     indicated every time it is used and ledgered when chosen (ADR-005, ADR-042 3).
+  2. **It runs as the agent, always, and is resident.** `torq-agent.service`, a system service as
+     `torq-agent` in the launcher's sandbox (ADR-041 5: every home hidden, its own /tmp, no privilege), holds
+     the conversation and runs the chosen harness headless for each task (`claude -p`, `codex exec`,
+     `opencode run`, the doctor). ADR-042 1 ("no agent service") is amended: a desktop needs an agent that is
+     there between questions, can be interrupted, and answers a crash; it is still one account, and every task
+     is still one process with its own record. Sign-in (an API key, or a subscription's own login) lands in the
+     agent's home, never the person's; the person opens the login link in their own browser. **No harness
+     ever runs in a mode that skips TorqOS's gate**: a harness's own "skip permissions" mode is allowed only
+     because what it can do as `torq-agent` is nothing but propose — its shell writes only its own home.
+  3. **The agent in every part of the desktop, through one client.** A person's program, `torq-agent-ui`
+     (a libcosmic window and a panel applet, `org.torqos.Agent`), talks to the service over a socket the
+     broker's way (identity from `SO_PEERCRED`, the person's uid; one person never sees another's
+     conversation). Everything below opens it with a question and its context:
+     - **the panel**: the agent's applet — idle, working, waiting for you; the harness and model (REMOTE
+       marked); proposals it made, with **Review** (TorqOS Settings, ADR-049 3); the screen grant, if one is
+       live (4), with **Stop**; **Stop** for the running task;
+     - **a key** (`Super`+`A`, COSMIC's shortcuts) and the launcher: type a question;
+     - **TorqOS Settings**: **Ask the agent** on an alarm, a failed commit, a setting's page, a draft;
+     - **the other applets**: TorqOS's (an alarm), SSH tunnels' (a tunnel that will not come up);
+     - **crashes**: a program that dumps core (systemd-coredump) gives a notification, **Ask the agent about
+       this crash**; the agent gets the crash's summary (program, signal, backtrace) only when the person
+       says so, and that session is tainted;
+     - **the terminal**: `ask "<question>"` (and Omarchy's habit, an alias the person may set).
+     What the agent says is shown as its text — cleaned, as the doctor's answer is (ADR-042 5) — and what it
+     proposes is shown as the broker's diff, never as its description.
+  4. **The screen, by grant, through the person's own session.** The agent's account has no way into the
+     person's Wayland session, and none is made for it. The screen is reached through COSMIC's portal
+     (ADR-045 6) by the *person's* `torq-agent-ui`, which alone holds the portal's grant and hands the agent
+     what it allows:
+     - **a capture**: one screenshot (a window or the screen, the person picks in the portal's dialog), for
+       one question;
+     - **watching**: a window or the screen for a time the person sets (at most 60 minutes, as session
+       trust), frames at a low rate, sent only while the grant lives; a recording mark in the panel the whole
+       time, and **Stop** beside it; the grant, its start, end and what it covered ledgered (ADR-045 6);
+     - **"watch for bugs in this app"**: watching one window, the agent noting what it sees (an error dialog, a
+       frozen window, a crash) and saying so; never the whole screen unasked, never a second window it was
+       not given.
+     Every session that sees the screen is tainted: a screen is text anyone can put there. Input (moving the
+     pointer, typing) is not in this ADR: the portal's RemoteDesktop first, a decision of its own after.
+  5. **Gateway agents (OpenClaw, Hermes) as TorqOS can hold them.** Their gateway listens only on a unix
+     socket or 127.0.0.1 in the agent's sandbox, never beyond (OpenClaw's own advice; exposed gateways are its
+     main known attack). A messaging channel (Telegram, Signal, email) is a setting of its own, off by default:
+     every message from it is untrusted text, so every session it starts is tainted, and a channel can ask
+     only what a tainted session may (doctor, proposals a person approves). Skills from a registry (ClawHub,
+     Hermes's) are not installed by the agent: a skill is code the agent runs, so it is a tree setting
+     (`torq agent skills <name>`, pinned by hash), a person's commit.
+  6. **TorqOS's skill and tools, the same for every harness, enforced where the harness cannot reach.**
+     `torq-mcp`, an MCP server run as the agent, offers the doctor's read-only tools, `propose_change`, and
+     `screen_capture` / `screen_watch` (which ask `torq-agent-ui`, which asks the person). A "TorqOS skill"
+     (how to use torqcli and the tree, as Omarchy's skill does for its menus) is linked into each harness's
+     config in the agent's home. The skill and the MCP config are advice the agent could rewrite; the limits
+     are not in them: they are the broker's allow-list, the person's approval and `torq-agent-ui`'s grant.
+     A third-party harness's own reads (the web, files it fetched) are not seen by the broker, so **its
+     proposals are always tainted** (KNOWN-GAPS 6zq): never applied under session trust, each asked one by
+     one. TorqOS's own harness keeps the untainted path.
+  7. **"Help with anything" means the person's things only when shared.** The agent's home is its own; a
+     person's folder is reached only when they share it (ADR-041 5: an ACL, `torq agent share <dir>`, listed
+     on the Agent page and ended there). Building an application (ADR-034 b) is a shared folder plus a user-tier
+     install. The agent never gets the person's browser, keyring, mail or SSH keys; a task that needs one is
+     handed back to the person as a step.
+- **Better than Omarchy, point by point:** the agent is not the person (its own account, every home hidden);
+  it proposes, the person approves, the ledger records, one command undoes; its credentials are its own, not
+  in the person's home; what it read is known and shown (taint); the screen is a grant with a visible mark and
+  an end, not a permission the agent always has; a crash is offered, not sent; skills are pinned commits, not a
+  registry's latest; one choice of agent serves the panel, the key, the launcher, Settings, the applets and the
+  terminal alike; the model is local unless the owner says otherwise.
+- **Open, the owner's:**
+  1. *One agent account for the machine, or one per person?* The owner said "a default agent for the
+     machine". One account (`torq-agent`, as now) is simplest; but with two people its memory and sign-ins are
+     shared, and the uid cannot keep one person's conversation from the other's tasks. Recommended: one
+     account per person who uses the agent (`torq-agent-<name>`, made when the Agent page is first set up),
+     each as ADR-041 describes; on a one-person laptop that is one account, as now.
+  2. *The agent's applet in the default panel?* Recommended: yes, next to TorqOS's (the agent is TorqOS's
+     point; ADR-050's tunnels applet stays opt-in).
+  3. *Which harnesses first?* Recommended: TorqOS's own and Claude Code (the owner's), then Codex and opencode;
+     OpenClaw and Hermes (5) after the screen work, Hermes once packaged.
+  4. *Screen watching as frames to the model, or events only?* Frames to a remote model send the screen off
+     the machine. Recommended: frames to a local model when one is set; to a remote one only with that said in
+     the grant's own dialog, each time.
+  5. *A key for the agent?* Recommended: `Super`+`A`; the person may change it in COSMIC's shortcuts.
+- **Consequences:** New: `torq-agent.service` and its socket; `torq-agent-ui` (window and applet, a crate of
+  `settings/` or its own); `torq-mcp`; the Agent page; `torq agent harness|model|share|skills` in the tree
+  (CLI-DESIGN.md); the coredump hook; the portal client and its ledgered grants (broker: a `screen_granted`
+  entry kind, as `trust_granted`). Amends ADR-042 1 (resident). KNOWN-GAPS 6zg (a service as the agent blocks
+  `torq agent run --share`) must be solved first: the service *is* the share's host, or shares move to it. VM
+  tests, each failing if its claim broke: the agent cannot open the person's Wayland socket or session bus;
+  a screenshot reaches the agent only after the portal's grant, and none after **Stop** or the time; a
+  third-party harness's proposal is tainted; a gateway listens on nothing but its socket; a crash reaches the
+  agent only after the person's yes; two people's conversations are not each other's.
+- **Not:** an agent that runs as the person, or with the person's sudo; a harness's "auto-approve" applying
+  anything (it can only propose); the agent's own screen or input without the person's portal grant; a
+  continuous recording; a gateway on a network port; skills installed by the agent; the agent's credentials in
+  the person's home; Omarchy's menus copied (its *ideas* — a default, one key, crash help, one skill — are
+  taken; its look is not).
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
   2026-11-10 (the owner: "is it possible to allow the torqos-agent to access and use passwords from the secret

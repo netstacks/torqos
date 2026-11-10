@@ -287,6 +287,10 @@ acceptance tests, each a VM test.
       agent trust <minutes>` (at most 60, the person's password, their own folder) and `… revoke`;
       ledgered (grant, each apply under it, revoke, expiry), shown in `show system alarms`, never system
       tier, never tainted.
+- [ ] **The machine's agent on the desktop** (ADR-051, proposed: five questions the owner's): one agent chosen in
+      TorqOS Settings (TorqOS's own, Claude Code, Codex, opencode; OpenClaw and Hermes later), resident as its own
+      account, in the panel, a key, the launcher, Settings, the applets, crash notifications and the terminal; the
+      screen by the person's portal grant, marked and ended by them; `torq-mcp` for every harness.
 - [ ] **Build me an application**: the agent writes and builds in the person's home, installs via
       rung 3 (ADR-037), tests, undoes.
 - [ ] **Watch the desktop**: screenshot and input through COSMIC's portal (ADR-045 6), granted per
