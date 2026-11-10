@@ -125,6 +125,11 @@ impl Agent {
         *self.running.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Whether a task runs, and how many turns the conversation keeps.
+    fn status(&self) -> Event {
+        Event::Status { running: self.running().is_some(), turns: self.memory.recent().len() }
+    }
+
     /// Serve one connection: the person's, or no one's. Every request's answer ends with a last frame
     /// (`done`, `status` or `forgotten`), on every way it can go — a refusal and an error included.
     fn serve(self: &Arc<Self>, conn: UnixStream, id: u64) -> Result<()> {
@@ -173,9 +178,9 @@ impl Agent {
                 }
                 Ok(Request::Stop) => {
                     self.stop();
-                    out.send(&Event::Status { running: self.running().is_some() });
+                    out.send(&self.status());
                 }
-                Ok(Request::Status) => out.send(&Event::Status { running: self.running().is_some() }),
+                Ok(Request::Status) => out.send(&self.status()),
                 Ok(Request::Forget) => {
                     // Under the task slot's lock: a task starting now reads the memory after this.
                     let slot = self.running.lock().unwrap_or_else(|p| p.into_inner());
@@ -471,6 +476,7 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
         talk(&sock, &[ask("and then?")], done);
         let tasks: Vec<Task> = std::fs::read_to_string(d.path().join("tasks")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
         assert_eq!(tasks[1].memory, vec![Turn { question: "why?".into(), answer: Some("fine".into()) }], "the conversation's turns go with the next task");
+        assert_eq!(talk(&sock, &[Request::Status], |e| matches!(e, Event::Status { .. })), [Event::Status { running: false, turns: 2 }], "status says how much it remembers");
     }
 
     #[test]
@@ -494,9 +500,9 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
         }
         assert!(a.running().is_some());
         let busy = talk(&sock, &[ask("another"), Request::Status], |e| matches!(e, Event::Status { .. }));
-        assert_eq!(busy, vec![Event::Error { text: "a task is running already (one at a time): stop it, or wait".into() }, Event::Done { exit: 1 }, Event::Status { running: true }]);
+        assert_eq!(busy, vec![Event::Error { text: "a task is running already (one at a time): stop it, or wait".into() }, Event::Done { exit: 1 }, Event::Status { running: true, turns: 0 }]);
         let stopped = talk(&sock, &[Request::Stop], |e| matches!(e, Event::Status { .. }));
-        assert_eq!(stopped, vec![Event::Status { running: false }]);
+        assert_eq!(stopped, vec![Event::Status { running: false, turns: 0 }]);
         let child = std::fs::read_to_string(d.path().join("child")).unwrap();
         assert!(!Path::new(&format!("/proc/{}", child.trim())).exists(), "the task's child is gone with it");
         let mut r = BufReader::new(c);
@@ -645,7 +651,7 @@ echo ready > "$HOME/ready"; wait"#,
             assert!(t.elapsed() < Duration::from_secs(10), "the helper never made itself undumpable");
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(talk(&sock, &[Request::Stop], |e| matches!(e, Event::Status { .. })), [Event::Status { running: false }]);
+        assert_eq!(talk(&sock, &[Request::Stop], |e| matches!(e, Event::Status { .. })), [Event::Status { running: false, turns: 0 }]);
         assert!(gone(own), "the process in a group of its own is gone");
         assert!(gone(undumpable), "the undumpable process is gone");
         let mut r = BufReader::new(c);

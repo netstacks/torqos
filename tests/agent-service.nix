@@ -177,6 +177,8 @@ pkgs.testers.runNixOSTest {
         # A program run as the agent (torq agent run) does not see it.
         as_user("alice", f"torq agent run -- cat {mem}/conversation.json", ok=False)
         assert as_user("alice", "torq agent run -- ls -A /var/lib/torq-agent-memory").strip() == ""
+        # How much it remembers, which the Agent page shows: the service's word, not the file's.
+        assert raw("alice", {"type": "status"}) == [{"type": "status", "running": False, "turns": 2}]
         out = as_user("alice", "torq ask --forget")
         assert "forgotten" in out, out
         machine.fail(f"test -e {mem}/conversation.json")
@@ -213,7 +215,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"su - alice -c 'chmod 666 {sock}'")
         assert raw("bob", {"type": "ask", "text": "hello"}) == said
         machine.succeed(f"chmod 600 {sock}")
-        assert raw("alice", {"type": "status"}) == [{"type": "status", "running": False}]
+        assert raw("alice", {"type": "status"}) == [{"type": "status", "running": False, "turns": 3}]
         # bob's own agent is his, and runs as his agent account.
         assert as_user("bob", "torq ask hello").strip() == "Hello alice."
         assert machine.succeed("ps -o user= -p $(systemctl show -P MainPID torq-agent@bob.service)").strip() == "torq-agent-bob"
@@ -233,14 +235,14 @@ pkgs.testers.runNixOSTest {
     with subtest("Ctrl-C stops a task: all of it, the model's request included; the service stays"):
         machine.succeed("su - alice -c \"tmux new-session -d -s a -x 200 -y 50 'torq ask slow; echo exit=\\$?; sleep 600'\"")
         machine.wait_until_succeeds("pgrep -u torq-agent-alice -x torq-doctor && pgrep -u torq-agent-alice -x curl", timeout=60)
-        assert raw("alice", {"type": "status"}) == [{"type": "status", "running": True}]
+        assert raw("alice", {"type": "status"}) == [{"type": "status", "running": True, "turns": 3}]
         machine.succeed("su - alice -c 'tmux send-keys -t a C-c'")
         machine.wait_until_succeeds("su - alice -c 'tmux capture-pane -p -t a' | grep -q 'exit=1'", timeout=30)
         assert "agent: stopping" in machine.succeed("su - alice -c 'tmux capture-pane -p -t a'")
         machine.fail("pgrep -u torq-agent-alice -x torq-doctor")
         machine.fail("pgrep -u torq-agent-alice -x curl")
         assert prop("ActiveState") == "active"
-        assert raw("alice", {"type": "status"}) == [{"type": "status", "running": False}]
+        assert raw("alice", {"type": "status"}) == [{"type": "status", "running": False, "turns": 3}]
 
     with subtest("stop ends all of a task: a program in a session of its own, and one out of sight"):
         machine.succeed("su - alice -c \"tmux new-session -d -s p -x 200 -y 50 'torq ask \\\"install slowly\\\"; echo exit=\\$?; sleep 600'\"")

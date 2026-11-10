@@ -60,7 +60,12 @@ pub enum Event {
     /// started (refused: the error before it says why). Every ask ends with it.
     Done { exit: i32 },
     /// The answer to `status` (and to `stop`, after it): whether a task is running.
-    Status { running: bool },
+    Status {
+        running: bool,
+        /// How many turns of the conversation it remembers (ADR-051 9: shown on the Agent page).
+        #[serde(default)]
+        turns: usize,
+    },
     /// The conversation is forgotten.
     Forgotten,
 }
@@ -116,7 +121,7 @@ mod tests {
             (Event::Tainted { why: "context".into() }, r#"{"type":"tainted","why":"context"}"#),
             (Event::Error { text: "no".into() }, r#"{"type":"error","text":"no"}"#),
             (Event::Done { exit: 137 }, r#"{"type":"done","exit":137}"#),
-            (Event::Status { running: false }, r#"{"type":"status","running":false}"#),
+            (Event::Status { running: false, turns: 3 }, r#"{"type":"status","running":false,"turns":3}"#),
             (Event::Forgotten, r#"{"type":"forgotten"}"#),
         ] {
             assert_eq!(serde_json::to_string(&e).unwrap(), line);
@@ -139,7 +144,7 @@ mod tests {
     #[test]
     fn what_a_task_may_say() {
         assert!(Event::Say { text: String::new() }.from_task() && Event::Proposed { seq: 1 }.from_task());
-        for e in [Event::Done { exit: 0 }, Event::Status { running: false }, Event::Forgotten] {
+        for e in [Event::Done { exit: 0 }, Event::Status { running: false, turns: 0 }, Event::Forgotten] {
             assert!(!e.from_task(), "{e:?}");
         }
     }
