@@ -1897,3 +1897,64 @@ A server's person reads torqcli's output; a desktop's person looks at the screen
 - **Not:** restarting or logging out on the person's behalf; a second status daemon (the applet asks the broker
   as torqcli does); the applet as a way to change the system (it confirms, opens TorqOS Settings, or asks the
   session to log out or restart).
+
+## ADR-050 — SSH tunnels on the desktop: the person's own, kept up, and in the panel
+
+**Status:** proposed, 2026-11-10 (the owner: "an applet in the top panel that starts a persistent autossh to that
+ip, a simple ssh tunnels applet I can setup is best"). Builds on ADR-045 and ADR-049. Three questions are the
+owner's (below); nothing is built until they are answered (DRIVING.md 1).
+**Context:** The owner sends one Firefox profile's web traffic and DNS through another machine, with
+`ssh -N -D 127.0.0.1:1080` and SOCKS5 with remote DNS. That works, but the tunnel is started by hand, dies with
+its terminal or the network, and nothing on the screen says whether it is up; when it is down, the profile's
+pages fail (as they should: no direct fallback). No COSMIC applet manages SSH tunnels (searched 2026-11-10: the
+Tailscale applets toggle Tailscale's own SSH, not forwards). A server already has one: NixOS's
+`services.autossh.sessions`, a tree setting like every other (ADR-025), ledgered and system-wide. A person's
+tunnel is not that: it uses the person's keys from their keyring, goes where they choose, and is turned on and
+off many times a day.
+- **Decision:**
+  1. **A tunnel is the person's, as a Wi-Fi network is** (desktop.nix: NetworkManager's state, never the
+     repository's). Defined in their home, `~/.config/torq/tunnels.toml`; turning it on or off is no commit and
+     asks no password. Each tunnel: a name, a destination (`user@host`, or a `Host` of the person's
+     `~/.ssh/config`, which ssh still reads for keys and `ProxyJump`), and its forwards: `socks <port>`,
+     `local <port> <host>:<port>`, `remote <port> <host>:<port>`. Nothing else: no free ssh options, so the file
+     cannot be made to run a command (`ProxyCommand`, `LocalCommand`, `PermitLocalCommand`), and a destination
+     starting with `-` is refused.
+  2. **Kept up by systemd, the person's own manager.** The desktop module ships one user unit template,
+     `torq-tunnel@<name>.service`: `torq-tunnel run <name>` reads that tunnel and execs ssh with fixed
+     options — `-N`, `ExitOnForwardFailure=yes`, `ServerAliveInterval=15`, `ServerAliveCountMax=3`,
+     `BatchMode=yes`, `StrictHostKeyChecking=yes` — and `Restart=always` with a growing delay. A dropped link,
+     a sleep, a network change: ssh notices within 45 s and systemd starts it again. Keys come from the
+     session's agent (COSMIC's keyring, `SSH_AUTH_SOCK` in the user manager), never a key file the unit names.
+  3. **Fails closed, never trusts on first use.** A host whose key is not already in the person's
+     `known_hosts` does not connect; the applet says to run `ssh <destination>` once at a terminal and check
+     the key there (secure over back doors: no `accept-new`). Forwards listen on 127.0.0.1 only; nothing in the
+     file can open one to the network (`GatewayPorts`, a bind address).
+  4. **The applet, `torq-tunnels`**: a third binary of `settings/`, a COSMIC panel applet as `torq-applet` is
+     (ADR-049; not folded into it: its popup holds the machine's state and nothing more). Its icon is quiet
+     with no tunnel up, marked in the accent colour while one is up, in the warning colour while one meant to
+     be up is not. The popup: each tunnel with a switch (start or stop), its state in a line ("Up · SOCKS on
+     127.0.0.1:1080", "Reconnecting: the host's key is not known…", from the unit's state and its last
+     journal line), and "Start at login" (`systemctl --user enable`); then **Add tunnel…** (name, destination,
+     forwards: written to the file) and **Edit tunnels…** (the file in COSMIC Edit). It talks to the user
+     manager over D-Bus, as the person; it runs nothing as root and changes nothing of the system.
+  5. **The agent cannot reach it.** `torq-agent` is another account (ADR-035): it can read neither the person's
+     home nor their user manager, so it can neither start a tunnel nor point one somewhere. A tunnel is a way
+     out of the machine; it stays the person's.
+- **Open, the owner's:**
+  1. *autossh or ssh?* The owner asked for autossh. autossh 1.4g adds a monitor port (off with `-M 0`, as its own
+     docs advise with `ServerAlive`) and a restart loop systemd already does. Recommended: plain ssh under
+     systemd, one program fewer; autossh if the owner prefers its name or behaviour.
+  2. *In the panel by default?* Recommended: in COSMIC's applet list on TorqOS Desktop, added by the person
+     (COSMIC Settings → Desktop → Panel → Applets); most people have no tunnel. Or in the default panel, next to
+     `torq-applet`.
+  3. *Up while logged out?* A user manager runs only during a login unless the account lingers, a system
+     setting (`users <name> linger`, through the broker). Recommended: login only now; linger later, as its
+     own tree setting.
+- **Consequences:** New code: `torq-tunnel` (the file, its checks, the ssh command line; unit-tested), the
+  applet, the unit template and `openssh` in the desktop module. VM tests (`tests/desktop.nix` or its own):
+  a tunnel started from the file reaches a second VM and comes back after the link drops; an unknown host key
+  does not connect; `ProxyCommand` or a leading `-` in the file is refused; a forward never listens beyond
+  127.0.0.1; `torq-agent` cannot start or stop the person's tunnel.
+- **Not:** tunnels in the configuration tree for a person (a server's are `services autossh`, already there);
+  a VPN; setting up a browser's proxy (the person's own, in their profile); accepting a host key from the
+  applet.
