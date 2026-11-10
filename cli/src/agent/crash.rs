@@ -117,6 +117,48 @@ impl Crash {
 /// The question a crash opens the window with: the same for every crash.
 pub const CRASH_QUESTION: &str = "Why did this program crash, and what can I do about it?";
 
+/// How long one program's crashes are one offer: a program crashing over and over gives one notification.
+pub const SAME_PROGRAM: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// At most this many crash notifications open at once.
+pub const MAX_OPEN: usize = 3;
+/// At most this many offered in a minute, whatever crashes.
+pub const PER_MINUTE: usize = 5;
+/// How long a crash notification stays: then it expires, and nothing of it is left waiting.
+pub const EXPIRES: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Which crashes are offered: bounded, so a crashing loop never floods the person with notifications (nor
+/// the watcher with threads waiting on them).
+#[derive(Debug, Default)]
+pub struct Offers {
+    /// Each program's last offer.
+    last: std::collections::HashMap<String, std::time::Instant>,
+    /// The offers of the last minute.
+    recent: std::collections::VecDeque<std::time::Instant>,
+    open: usize,
+}
+
+impl Offers {
+    /// Whether to offer `c` now; if so, it is counted open until `closed`.
+    pub fn admit(&mut self, c: &Crash, now: std::time::Instant) -> bool {
+        while self.recent.front().is_some_and(|t| now.duration_since(*t) >= std::time::Duration::from_secs(60)) {
+            self.recent.pop_front();
+        }
+        self.last.retain(|_, t| now.duration_since(*t) < SAME_PROGRAM);
+        if self.open >= MAX_OPEN || self.recent.len() >= PER_MINUTE || self.last.contains_key(&c.program) {
+            return false;
+        }
+        self.last.insert(c.program.clone(), now);
+        self.recent.push_back(now);
+        self.open += 1;
+        true
+    }
+
+    /// An offer's notification is gone (clicked, closed or expired).
+    pub fn closed(&mut self) {
+        self.open = self.open.saturating_sub(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +245,27 @@ mod tests {
         assert!(h.context.as_deref().unwrap().chars().count() <= super::super::handoff::MAX_CONTEXT);
         assert!(c.handoff(None).context.unwrap().contains("could not be read"));
         assert_eq!(watch_command().get_program(), "/run/current-system/sw/bin/journalctl");
+    }
+
+    /// One program crashing over and over is one offer; at most MAX_OPEN open, PER_MINUTE a minute.
+    #[test]
+    fn offers_are_bounded() {
+        let crash = |exe: &str| crash_of(&entry(1000, "1", UNIT, json!({ "COREDUMP_EXE": exe })), 1000).unwrap();
+        let t = std::time::Instant::now();
+        let mut o = Offers::default();
+        assert!(o.admit(&crash("/bin/a"), t));
+        assert!(!o.admit(&crash("/bin/a"), t + std::time::Duration::from_secs(5)), "the same program again: merged");
+        assert!(o.admit(&crash("/bin/b"), t) && o.admit(&crash("/bin/c"), t));
+        assert!(!o.admit(&crash("/bin/d"), t), "MAX_OPEN open already");
+        o.closed();
+        assert!(o.admit(&crash("/bin/d"), t), "one closed: room again");
+        o.closed();
+        o.closed();
+        o.closed();
+        assert!(o.admit(&crash("/bin/e"), t));
+        o.closed();
+        assert!(!o.admit(&crash("/bin/f"), t), "PER_MINUTE in a minute");
+        assert!(o.admit(&crash("/bin/f"), t + std::time::Duration::from_secs(61)), "a minute later");
+        assert!(o.admit(&crash("/bin/a"), t + SAME_PROGRAM + std::time::Duration::from_secs(1)), "the same program, much later: offered again");
     }
 }
