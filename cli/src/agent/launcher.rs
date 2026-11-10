@@ -1,7 +1,7 @@
 //! The agent in COSMIC's launcher (ADR-051 4, step 4): a pop-launcher plugin, `torq-agent-launcher`,
 //! installed where pop-launcher looks for the system's plugins (`/etc/pop-launcher/plugins/torq-agent`). Typing
 //! `ask <question>` offers one result, "Ask your agent: <question>"; choosing it opens the agent's window with
-//! the question, asked at once (`handoff::Handoff::typed`). pop-launcher runs it as the person, speaking JSON
+//! the question in its box, for the person to ask (nothing is sent by itself). pop-launcher runs it as the person, speaking JSON
 //! lines on its standard input and output; it is the person's own program and hands the text only to their
 //! own window.
 
@@ -35,7 +35,7 @@ impl Plugin {
                 self.offered = None;
                 return Reply { say: vec![finished()], ..Reply::default() };
             }
-            let h = Handoff::typed(q);
+            let h = Handoff::new(q, None);
             let shown = crate::history::one_line(&h.question, 120);
             self.offered = Some(h.question);
             let item = json!({ "Append": {
@@ -48,7 +48,7 @@ impl Plugin {
         }
         if request.get("Activate").is_some() {
             return match self.offered.take() {
-                Some(q) => Reply { say: vec![json!("Close").to_string()], open: Some(Handoff::typed(&q)), end: false },
+                Some(q) => Reply { say: vec![json!("Close").to_string()], open: Some(Handoff::new(&q, None)), end: false },
                 None => Reply::default(),
             };
         }
@@ -100,8 +100,8 @@ mod tests {
         assert_eq!(r.say[1], r#""Finished""#);
         assert_eq!(r.open, None, "a search opens nothing");
         let r = p.handle(r#"{"Activate":0}"#);
-        assert_eq!(r.open, Some(Handoff::typed("why is my wifi slow?")));
-        assert!(r.open.as_ref().unwrap().ask_now && !r.open.as_ref().unwrap().taints(), "asked at once, nothing attached");
+        assert_eq!(r.open, Some(Handoff::new("why is my wifi slow?", None)));
+        assert!(!r.open.as_ref().unwrap().taints(), "nothing attached");
         assert_eq!(r.say, [r#""Close""#]);
         assert_eq!(p.handle(r#"{"Activate":0}"#), Reply::default(), "offered once");
     }

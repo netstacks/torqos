@@ -18,16 +18,16 @@ pub const MAX_CONTEXT: usize = 16_000;
 /// The largest handoff file read.
 const MAX_FILE: u64 = 64 * 1024;
 
-/// A question for the agent, what it is about, and whether to ask at once (the launcher: the person typed
-/// it and pressed Enter) or let the person read and ask (everything with something attached).
+/// A question for the agent and what it is about. It is never sent by itself: the window puts it in its box,
+/// with what is attached shown above, and the person asks (a handoff file is the person's own, but any of
+/// their programs could write one).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Handoff {
+    /// One line: the window's box shows all of it.
     pub question: String,
     #[serde(default)]
     pub context: Option<String>,
-    #[serde(default)]
-    pub ask_now: bool,
 }
 
 /// `s` cut to at most `max` characters, said so where it was.
@@ -41,18 +41,12 @@ fn bounded(s: &str, max: usize) -> String {
 }
 
 impl Handoff {
-    /// A question, with what it is about: both bounded. An empty context is none.
+    /// A question (made one line), with what it is about: both bounded. An empty context is none.
     pub fn new(question: &str, context: Option<&str>) -> Handoff {
         Handoff {
-            question: bounded(question.trim(), MAX_QUESTION),
+            question: crate::history::one_line(question, MAX_QUESTION),
             context: context.map(str::trim).filter(|c| !c.is_empty()).map(|c| bounded(c, MAX_CONTEXT)),
-            ask_now: false,
         }
-    }
-
-    /// A question the person typed and sent (the launcher): asked at once, nothing attached.
-    pub fn typed(question: &str) -> Handoff {
-        Handoff { ask_now: true, ..Handoff::new(question, None) }
     }
 
     /// Whether asking with it taints the session: anything attached is untrusted text.
@@ -126,7 +120,9 @@ pub fn take_from(dir: &Path, path: &Path, uid: u32) -> Result<Handoff> {
     }
     let mut f = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        // Never through a link; never waiting (a FIFO left there would hold the window: opened without
+        // blocking, its type is then checked on the open descriptor, before anything is read).
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     let m = f.metadata()?;
@@ -138,7 +134,7 @@ pub fn take_from(dir: &Path, path: &Path, uid: u32) -> Result<Handoff> {
     let _ = std::fs::remove_file(path);
     let h: Handoff = serde_json::from_str(&text).context("not a handoff TorqOS wrote")?;
     // Bounded again: whoever wrote it.
-    Ok(Handoff { ask_now: h.ask_now, ..Handoff::new(&h.question, h.context.as_deref()) })
+    Ok(Handoff::new(&h.question, h.context.as_deref()))
 }
 
 /// Read the handoff at `path` in the person's own directory.
@@ -146,18 +142,27 @@ pub fn take(path: &Path) -> Result<Handoff> {
     take_from(&dir()?, path, rustix::process::getuid().as_raw())
 }
 
-/// The window's command line for a handoff: `torq-agent-ui --ask <file>`, by absolute path.
+/// The window's command line for a handoff: `torq-agent-ui --ask <file>`, started as a unit of the person's
+/// own user manager (`systemd-run --user`, both by absolute path) — so it lives in a unit of its own, with the
+/// session's environment, not in whatever started it (the crash watcher's service, the launcher's plugin),
+/// and what started it waits only for systemd-run, which returns at once.
 pub fn window_command(file: &Path) -> std::process::Command {
-    let mut c = std::process::Command::new(crate::app::system_program("torq-agent-ui"));
-    c.arg("--ask").arg(file);
+    let mut c = std::process::Command::new(crate::app::system_program("systemd-run"));
+    c.args(["--user", "--collect", "--quiet", "--"]).arg(crate::app::system_program("torq-agent-ui")).arg("--ask").arg(file);
     c
 }
 
 /// Open the agent's window with `h` (raising it, with the question in, if it is open).
 pub fn open_window(h: &Handoff) -> Result<()> {
     let file = write_in(&dir()?, h)?;
-    window_command(&file).spawn().context("starting torq-agent-ui")?;
-    Ok(())
+    // Waited for (bounded): nothing of it is left behind.
+    match super::setup::output_within(window_command(&file), std::time::Duration::from_secs(10)) {
+        Some(_) => Ok(()),
+        None => {
+            let _ = std::fs::remove_file(&file);
+            bail!("could not start torq-agent-ui (systemd-run --user)")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,9 +179,10 @@ mod tests {
         assert_eq!(h.question, "why did it fail?");
         let c = h.context.as_deref().unwrap();
         assert!(c.chars().count() <= MAX_CONTEXT && c.ends_with("longer than TorqOS attaches]"), "{}", c.len());
-        assert!(h.taints() && !h.ask_now, "attached: tainting, and the person asks");
+        assert!(h.taints(), "attached: tainting");
         assert_eq!(Handoff::new("q", Some("   ")).context, None, "nothing attached is none");
-        assert!(!Handoff::typed("hello").taints() && Handoff::typed("hello").ask_now);
+        assert!(!Handoff::new("hello", None).taints());
+        assert_eq!(Handoff::new("why\nis it\r\n  slow?", None).question, "why is it slow?", "one line: the box shows it all");
         assert!(Handoff::new(&"q".repeat(MAX_QUESTION + 10), None).question.chars().count() <= MAX_QUESTION);
     }
 
@@ -205,18 +211,24 @@ mod tests {
         let big = dir.join("ask-big.json");
         std::fs::write(&big, "x".repeat(MAX_FILE as usize + 1)).unwrap();
         assert!(take_from(&dir, &big, me()).is_err(), "too large");
+        // A FIFO left there: refused at once, never waited on (the window would hang on it).
+        let fifo = dir.join("ask-fifo.json");
+        rustix::fs::mknodat(rustix::fs::CWD, &fifo, rustix::fs::FileType::Fifo, rustix::fs::Mode::from_raw_mode(0o600), 0).unwrap();
+        let t = std::time::Instant::now();
+        assert!(take_from(&dir, &fifo, me()).is_err(), "not a file");
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "never waited on");
         // Bounded again when read, whoever wrote it.
         let long = dir.join("ask-long.json");
-        std::fs::write(&long, serde_json::to_string(&Handoff { question: "q".into(), context: Some("y".repeat(MAX_CONTEXT + 500)), ask_now: false }).unwrap()).unwrap();
+        std::fs::write(&long, serde_json::to_string(&Handoff { question: "q".into(), context: Some("y".repeat(MAX_CONTEXT + 500)) }).unwrap()).unwrap();
         assert!(take_from(&dir, &long, me()).unwrap().context.unwrap().chars().count() <= MAX_CONTEXT);
     }
 
-    /// The window by absolute path, given the file, never the text.
+    /// The window by absolute path, in a unit of its own, given the file, never the text.
     #[test]
     fn the_window_is_given_a_file() {
         let c = window_command(Path::new("/run/user/1000/torq-agent/ask-1.json"));
-        assert_eq!(c.get_program(), "/run/current-system/sw/bin/torq-agent-ui");
-        assert_eq!(c.get_args().collect::<Vec<_>>(), ["--ask", "/run/user/1000/torq-agent/ask-1.json"]);
+        assert_eq!(c.get_program(), "/run/current-system/sw/bin/systemd-run");
+        assert_eq!(c.get_args().collect::<Vec<_>>(), ["--user", "--collect", "--quiet", "--", "/run/current-system/sw/bin/torq-agent-ui", "--ask", "/run/user/1000/torq-agent/ask-1.json"]);
     }
 
     /// Each button's question, and the thing attached: tainting, the person asks, bounded.
@@ -233,7 +245,7 @@ mod tests {
             let h = about.handoff();
             assert!(h.question.contains(in_question), "{h:?}");
             assert!(h.context.as_deref().unwrap().contains(in_context), "{h:?}");
-            assert!(h.taints() && !h.ask_now, "{h:?}");
+            assert!(h.taints(), "{h:?}");
         }
         let long = "x".repeat(MAX_CONTEXT * 2);
         assert!(About::Draft(&long).handoff().context.unwrap().chars().count() <= MAX_CONTEXT);
