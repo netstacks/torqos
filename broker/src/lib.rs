@@ -2154,7 +2154,7 @@ impl Broker {
         Ok(())
     }
 
-    /// A waiting proposal approved on a configuration that has moved on from its base (ADR-052): its
+    /// A waiting proposal approved on a configuration that has moved on from its base (ADR-053): its
     /// diff (at `diff_path`) applied to the current head as `propose` applies it, by the same function,
     /// must do byte for byte what was recorded and shown — its `effect`, by the hash its entry holds.
     /// Otherwise refused, never judged again. None: the head is its base (or it names none: H1's
@@ -2634,7 +2634,7 @@ impl Broker {
         let tmp = &tmp.0;
         fs::write(tmp, &diff)?;
         // Moved on from its base (a desktop saved meanwhile, say): applied only if it does exactly what
-        // was shown (ADR-052); then its files, tier and the agent's list are judged again below, as always.
+        // was shown (ADR-053); then its files, tier and the agent's list are judged again below, as always.
         let rechecked_on = self.recheck_on_head(&p, tmp)?;
         let files = self.repo.diff_files(&tmp)?;
         self.check_user_data(&tmp, &files)?;
@@ -2768,7 +2768,7 @@ impl Broker {
         if let Some(c) = confirm_record {
             data["confirm"] = c;
         }
-        // The history says it landed on a configuration other than the one it was prepared on (ADR-052).
+        // The history says it landed on a configuration other than the one it was prepared on (ADR-053).
         if let Some(head) = rechecked_on {
             data["rechecked_on"] = head.into();
         }

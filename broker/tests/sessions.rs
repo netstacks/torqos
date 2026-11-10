@@ -142,7 +142,7 @@ fn under_trust_a_clean_proposal_in_the_persons_folder_applies() {
     b.revert(a.body.seq, "casey").unwrap();
 }
 
-/// ADR-052 (f): trust's automatic apply takes the same re-check as a person's. The configuration moved on
+/// ADR-053 (f): trust's automatic apply takes the same re-check as a person's. The configuration moved on
 /// in another file: applied, re-checked; the same file made since, so the diff would do something else:
 /// refused, nothing applied.
 #[test]

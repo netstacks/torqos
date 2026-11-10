@@ -1,7 +1,7 @@
 //! `commit at` (ROADMAP M1.5): a proposal approved now and applied at a time, by a transient timer.
 //!
 //! `schedule` takes a proposal with a base — on a configuration moved on since, only one that still does
-//! exactly what was shown (ADR-052) — approved by the
+//! exactly what was shown (ADR-053) — approved by the
 //! person now (over the socket, gated as `apply` is: their password for a system change), arms a
 //! timer of its own (`{broker} run-scheduled {id}`), and ledgers `apply_scheduled`: the proposal, the
 //! time, who, the timer, the base and the hash of the diff approved. At the time, `run-scheduled`
@@ -206,7 +206,7 @@ impl<'a> Scheduler<'a> {
         let base = p.body.data["base"].as_str().context("refused: a scheduled change says the commit it was prepared against (its base)")?.to_string();
         let diff = b.proposal_text(&p, "diff")?;
         // On a configuration moved on from its base, only if it still does exactly what was shown
-        // (ADR-052), as apply checks again at its time.
+        // (ADR-053), as apply checks again at its time.
         let tmp = crate::DropFile(b.state_dir.join(format!("schedule-{proposal_seq}.diff")));
         std::fs::write(&tmp.0, &diff)?;
         let rechecked_on = b.recheck_on_head(&p, &tmp.0)?;
@@ -289,7 +289,7 @@ impl<'a> Scheduler<'a> {
         if let Some(pc) = pending_confirm(&b.ledger.read_all()?) {
             return Ok(Some(format!("change #{} (commit confirmed) was waiting for confirmation", pc.applied)));
         }
-        // A configuration moved on since is apply's to judge, as for any apply (ADR-052): applied only if
+        // A configuration moved on since is apply's to judge, as for any apply (ADR-053): applied only if
         // the change does exactly what was shown, refused on the record otherwise.
         if b.find_child("applied", "proposal", s.proposal)?.is_some() {
             return Ok(Some(format!("proposal #{} was already applied", s.proposal)));

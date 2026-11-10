@@ -455,14 +455,14 @@ viper@torq-utm# commit
   - is asked over the socket exactly as `apply` is (`schedule` is gated as `apply`: a person's own
     folder theirs, anything else an administrator's with their password), and refuses a tainted
     proposal, one without a base, one already applied, or — its base no longer HEAD — one that would now
-    do something different from what was shown (ADR-052: re-checked on the current head; its entry then
+    do something different from what was shown (ADR-053: re-checked on the current head; its entry then
     says `rechecked_on`);
   - arms a transient timer of its own (`commitAt` in broker.json: `systemd-run … --unit=torq-commit-at-<id>
     --on-calendar=<at> {broker} run-scheduled <id>`), then ledgers `apply_scheduled`: the proposal,
     the time, who, the timer's id, the base, and the hash of the diff approved;
   - at the time applies that proposal as that person: `applied` / `apply_failed` with `scheduled: <n>`.
     It is refused, `apply_refused` with `scheduled: <n>`, if apply refuses it (on a configuration moved on
-    from the base, a change that would now do something different from what was shown, ADR-052), if
+    from the base, a change that would now do something different from what was shown, ADR-053), if
     a commit confirmed is waiting, the proposal was applied meanwhile, or the diff kept beside
     the ledger is not the one whose hash was approved; or if it is more than 15 minutes past its time
     (asleep then, a clock stepped since, a broker busy all along), or its approver may no longer (no

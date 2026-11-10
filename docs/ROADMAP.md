@@ -69,7 +69,7 @@ Target and acceptance criteria: `docs/CLI-DESIGN.md`. torqcli is the agent's int
       `show interfaces`, `show system storage` (CLI-DESIGN.md).
 - [ ] Human polish, below M3–M5: the walk of every `?`; a usability check by someone new to TorqOS
       (installs, removes, undoes and reads the log unaided). Done: `configure exclusive` (2026-11-07, cli/src/exclusive.rs).
-- [x] `commit at <time>` (approved now, applied then as that person; one at a time; on a moved configuration only if it does exactly what was shown, ADR-052;
+- [x] `commit at <time>` (approved now, applied then as that person; one at a time; on a moved configuration only if it does exactly what was shown, ADR-053;
       `clear system commit`; `tests/commit-at.nix`, CLI-DESIGN.md).
 
 **First round** (done with the earlier command names; carried over):
@@ -232,7 +232,7 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, 
 - [x] **SSH tunnels in the panel** (2026-11-10, ADR-050; `tests/tunnels.nix`): the person's tunnels in
       their home, kept up by their own systemd, failing closed on an unknown host key; `torq-tunnels`, a
       panel applet to start, stop and add them.
-- [x] **A change waiting for a person survives a desktop save** (2026-11-10, ADR-052; `tests/desktop.nix`): approved on
+- [x] **A change waiting for a person survives a desktop save** (2026-11-10, ADR-053; `tests/desktop.nix`): approved on
       a moved configuration, it is re-checked there and applied only if it does exactly what was shown.
 - [ ] **COSMIC Settings wrapped** (ADR-045 3): the pages that change what the tree owns (time zone,
       host name, users, …) hand the change to TorqOS Settings as a proposal; a patch in the overlay.

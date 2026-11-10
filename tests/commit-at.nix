@@ -128,7 +128,7 @@ pkgs.testers.runNixOSTest {
         assert head() == before and "c = 0" in setting(), setting()
         assert not [e for e in ledger() if e["kind"] == "applied" and e["data"].get("proposal") == p]
 
-    with subtest("a commit at whose change would now do something else is refused, on the record (ADR-052)"):
+    with subtest("a commit at whose change would now do something else is refused, on the record (ADR-053)"):
         p = propose("{ a = 1; b = 0; c = 0; }", "{ a = 1; b = 1; c = 0; }", "b, gone stale")
         s = schedule(p, 50)
         # Something else lands first, in the same setting: the scheduled change would now do something else.

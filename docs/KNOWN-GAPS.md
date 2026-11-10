@@ -97,7 +97,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    requires it for `--actor agent` (second audit, M2), and nothing builds on a commit that is not
    the last ledgered one (audit of 2026-10-31). The base must be a 40-hex SHA-1 id: a config repo created with git's SHA-256 object
    format could not use it. With a base, a proposal applied after HEAD moved on is re-checked there and
-   applied only if its effect is byte for byte the one shown (ADR-052); any commit to a file it touches, even
+   applied only if its effect is byte for byte the one shown (ADR-053); any commit to a file it touches, even
    far from its lines, makes it refused (the `index` line names the file's blob), as can git writing a longer
    abbreviation of blob ids in a much larger repository: refusals the safe way, the change prepared again.
 6j. **torqcli and a malformed tree file.** torqcli refuses to load a tree file it cannot show
@@ -474,7 +474,7 @@ Its §5 lists claims without a test.
    - **The agent's own `commit`** (it proposes and stops) is tested in torqcli's unit tests, not in a
      VM: the VM tests' configurations are stubs torqcli cannot evaluate.
    - **Stale proposals stay listed.** A proposal prepared against an older configuration that would now do
-     something different from what was shown (ADR-052; one that still does exactly that is applied) is refused
+     something different from what was shown (ADR-053; one that still does exactly that is applied) is refused
      at `request system apply` (the configuration has moved on), but `show system proposals` still
      lists it; there is no way to withdraw or expire one.
    - **The list is by setting, not by what a setting does.** `services.openssh` allows every option

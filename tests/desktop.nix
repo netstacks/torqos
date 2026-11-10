@@ -139,7 +139,7 @@ pkgs.testers.runNixOSTest {
 
         # Meanwhile the applet saved alice's desktop (it saves when the ledger changes, and every 15
         # minutes): the configuration has moved on from the change's base, by a commit to her own folder.
-        # The regression of ADR-052: it was refused as stale, so no change waiting for a person could land.
+        # The regression of ADR-053: it was refused as stale, so no change waiting for a person could land.
         machine.wait_until_succeeds(f"git -C {repo} cat-file -e HEAD:users/alice/desktop.json", timeout=150)
         moved = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
         assert moved != head, moved

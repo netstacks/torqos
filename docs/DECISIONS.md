@@ -1425,7 +1425,7 @@ configuration it was not prepared for.
   or is no longer an administrator, unless the change is wholly their own folder (as the socket reads
   a caller). Its approver may cancel their own; anyone else's is an administrator's to cancel.
 - **One at a time**, refused rather than queued: of two schedules prepared on one configuration, the second
-  could land only if, on the HEAD the first made, it still did exactly what was shown (ADR-052: amended; it
+  could land only if, on the HEAD the first made, it still did exactly what was shown (ADR-053: amended; it
   was "stale by construction" before), which one of the same setting never does; refusing the second when
   it is made tells the person while they are there, instead of at night in the ledger.
 - **Not with `commit confirmed`:** nobody would be there to confirm it.
@@ -1992,7 +1992,7 @@ off many times a day.
   a VPN; setting up a browser's proxy (the person's own, in their profile); accepting a host key from the
   applet.
 
-## ADR-052 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
+## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 
 **Status:** accepted and built, 2026-11-10 (the owner chose it: re-check at approval). ADR-051's proposals
 from TorqOS's own agent will rely on it: an agent's proposal waits for a person, and the configuration moves

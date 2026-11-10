@@ -1263,7 +1263,7 @@ fn proposal_based_on_a_stale_config_is_refused_at_propose() {
     assert!(err.contains("changed since"), "{err}");
 }
 
-/// ADR-052 (a): another change lands between my propose and my apply, in another file (a desktop saved
+/// ADR-053 (a): another change lands between my propose and my apply, in another file (a desktop saved
 /// meanwhile). Re-checked on the new head, the change does exactly what was shown: applied there, and
 /// the history says it was re-checked on a moved configuration.
 #[test]
@@ -1286,7 +1286,7 @@ fn proposal_whose_base_moved_by_another_file_applies_rechecked() {
     b.ledger.verify().unwrap();
 }
 
-/// ADR-052 (c): the commit in between changed the same file. The diff still applies, to the same file
+/// ADR-053 (c): the commit in between changed the same file. The diff still applies, to the same file
 /// and tier, but what it does there is no longer what was shown: refused, nothing applied.
 #[test]
 fn proposal_whose_file_changed_since_is_refused() {
@@ -1305,7 +1305,7 @@ fn proposal_whose_file_changed_since_is_refused() {
     assert_eq!(kinds(&b).iter().filter(|k| *k == "applied").count(), 1, "only the note");
 }
 
-/// ADR-052 (d): re-checked and doing what its effect says, a proposal whose tier is not the one it was
+/// ADR-053 (d): re-checked and doing what its effect says, a proposal whose tier is not the one it was
 /// gated on (a ledger from elsewhere) is still refused: the re-check adds to H1's check, never replaces it.
 #[test]
 fn a_rechecked_proposal_is_still_held_to_its_tier_and_files() {
@@ -1337,7 +1337,7 @@ fn a_rechecked_proposal_is_still_held_to_its_tier_and_files() {
     assert!(b.apply(real.body.seq, "casey", false).unwrap().body.data["rechecked_on"].is_string());
 }
 
-/// ADR-052 (e): an agent's proposal, re-checked on a moved configuration, is judged by its list as the
+/// ADR-053 (e): an agent's proposal, re-checked on a moved configuration, is judged by its list as the
 /// list is now — narrowed since, refused; as it was, applied.
 #[test]
 fn an_agents_rechecked_proposal_is_judged_by_its_list_on_the_new_head() {
@@ -2873,7 +2873,7 @@ fn a_proposal_that_now_does_more_than_was_judged_is_refused() {
     b.ledger.verify().unwrap();
 }
 
-/// ADR-052 (b): the same diff, proposed with its base, as the socket requires. On the moved head its
+/// ADR-053 (b): the same diff, proposed with its base, as the socket requires. On the moved head its
 /// effect is not the one recorded (nothing to the other list then, its whole content now): refused by
 /// the re-check, before files and tier are even compared.
 #[test]
@@ -3093,7 +3093,7 @@ fn a_cancelled_commit_at_never_lands() {
     assert!(t.theme().contains("dark"));
 }
 
-/// ADR-052 (f): a commit at takes apply's re-check. The configuration moved on in another file: it lands,
+/// ADR-053 (f): a commit at takes apply's re-check. The configuration moved on in another file: it lands,
 /// re-checked; in the same file, so that it would do something else: refused on the record.
 #[test]
 fn a_commit_at_on_a_moved_configuration_is_rechecked() {
@@ -3193,7 +3193,7 @@ fn a_commit_at_is_a_fresh_untainted_proposal_with_a_base() {
     let p = t.propose("theme2", THEME);
     let applied = t.m.b.apply(p, "casey", false).unwrap().body.seq;
     assert!(format!("{:#}", t.s().schedule(p, "casey", &At::in_seconds(60)).unwrap_err()).contains("already applied"));
-    // Made on the theme as applied, which the revert takes back: it would now do something else (ADR-052).
+    // Made on the theme as applied, which the revert takes back: it would now do something else (ADR-053).
     let stale = t.propose("blue", "--- a/users/casey.nix\n+++ b/users/casey.nix\n@@ -1 +1 @@\n-{ theme = \"light\"; }\n+{ theme = \"blue\"; }\n");
     t.m.b.revert(applied, "casey").unwrap();
     assert!(format!("{:#}", t.s().schedule(stale, "casey", &At::in_seconds(60)).unwrap_err()).contains("would now do something different"));
