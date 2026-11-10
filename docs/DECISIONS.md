@@ -2093,6 +2093,27 @@ off many times a day.
   echoes headers; an SSH key granted for one host signs for it and is refused for another; a proposal from the
   agent touching `secrets` is refused; a tainted session's use waits for the dialog; a rebuilt machine has its
   rules and no values. Mutation-checked: the host check, the redirect check and the deny-list entry.
+- **How it is built (2026-11-10), in five steps, each reviewed:**
+  - **Who holds what.** The broker keeps the values, as it keeps passwords and backup keys: it checks who
+    asks and their password, writes the ledger entry first, encrypts with `systemd-creds` (`--with-key=auto`:
+    the TPM and the host key where there is a TPM), and writes `/var/lib/torq/secrets/store/system/<name>` or
+    `…/store/users/<person>/<name>`, root's alone. The broker reads a value back only for `show`. The daemon
+    reads values only to use them, and holds no value longer than one use.
+  - **The rules are two files of the configuration,** in one format: `secrets/system.json` (system tier, an
+    administrator's) and `users/<person>/secrets.json` (a new user leaf, the person's own). The daemon reads
+    them from the repository, so a change to a rule is a commit that builds nothing (as `desktop.json`,
+    ADR-045). They are not nodes of the tree: torqcli's own tree has one level of names (`users <name>`),
+    and a person's secret is a second. They change through commands instead, which TorqOS Settings shares:
+    `request system secret set|delete|show <name>`, `allow <name> https <host>` or `ssh <host>`, `disallow …`,
+    `approve <name> each-use|first-use|never`, each ending `user <person>` for a person's own (theirs alone:
+    another person's is refused, an administrator's included, except `delete`). `show system secrets` lists
+    both kinds. The agent cannot propose either file: the default-deny list (ADR-041 2) admits only a
+    person's `packages.json` and listed settings, and both files are neither; a test pins it.
+  - **Steps:** 1, the values and the rules (broker, torqcli, the files, a VM test); 2, the daemon with HTTPS
+    and the first-use records; 3, SSH; 4, approvals and taint; 5, the Secrets page in TorqOS Settings. A
+    person approves an agent's use as they apply a proposal (ADR-045): the daemon holds the request, the
+    panel and Settings show it, and the person's yes goes through the usual dialog. The agent's own process
+    is in no person's session, so COSMIC's dialog cannot be asked for it directly.
 - **Later, not now:** a person's own secret typed into the focused window by a COSMIC shortcut, theirs and never
   the agent's (the owner's Alt+O, 2026-11-10; it needs a way to type into windows that COSMIC accepts, and it
   never serves `torq-agent`); a service's secret from the same store (systemd's `LoadCredential`, instead of a
