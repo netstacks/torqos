@@ -53,7 +53,12 @@ pkgs.testers.runNixOSTest {
         machine.screenshot("greeter")
 
     with subtest("the owner logs in to COSMIC"):
-        machine.send_chars("torq-desktop\n", delay=0.2)
+        # Typed again if the greeter had not yet drawn its password field (on a slower host it may not have).
+        for attempt in range(4):
+            machine.send_chars("torq-desktop\n", delay=0.2)
+            if machine.execute("timeout 60 sh -c 'until pgrep -u alice -fx cosmic-panel; do sleep 2; done'")[0] == 0:
+                break
+            machine.sleep(5)
         # COSMIC's programs run wrapped: their names are the wrapper's, their command lines their own.
         machine.wait_until_succeeds("pgrep -u alice -fx cosmic-comp", timeout=120)
         machine.wait_until_succeeds("pgrep -u alice -fx cosmic-panel", timeout=120)
