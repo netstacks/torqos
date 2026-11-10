@@ -229,7 +229,7 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, 
       history, rollback, pending proposals, alarms, backups — a client of the broker's socket only,
       its words the broker's. A VM test that each action it offers is the torqcli request it names.
 - [x] **TorqOS in COSMIC's panel** (2026-11-09, ADR-049): `torq-applet`, what a switch needs, notifications, the menu refreshed.
-- [ ] **SSH tunnels in the panel** (ADR-050, proposed: three questions the owner's): the person's tunnels in
+- [ ] **SSH tunnels in the panel** (ADR-050, accepted 2026-11-10): the person's tunnels in
       their home, kept up by their own systemd, failing closed on an unknown host key; `torq-tunnels`, a
       panel applet to start, stop and add them.
 - [ ] **COSMIC Settings wrapped** (ADR-045 3): the pages that change what the tree owns (time zone,

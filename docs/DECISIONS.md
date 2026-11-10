@@ -1900,9 +1900,9 @@ A server's person reads torqcli's output; a desktop's person looks at the screen
 
 ## ADR-050 — SSH tunnels on the desktop: the person's own, kept up, and in the panel
 
-**Status:** proposed, 2026-11-10 (the owner: "an applet in the top panel that starts a persistent autossh to that
-ip, a simple ssh tunnels applet I can setup is best"). Builds on ADR-045 and ADR-049. Three questions are the
-owner's (below); nothing is built until they are answered (DRIVING.md 1).
+**Status:** accepted 2026-11-10, to be built (the owner: "an applet in the top panel that starts a persistent autossh to that
+ip, a simple ssh tunnels applet I can setup is best"). Builds on ADR-045 and ADR-049. Its three questions are
+settled by the owner (below).
 **Context:** The owner sends one Firefox profile's web traffic and DNS through another machine, with
 `ssh -N -D 127.0.0.1:1080` and SOCKS5 with remote DNS. That works, but the tunnel is started by hand, dies with
 its terminal or the network, and nothing on the screen says whether it is up; when it is down, the profile's
@@ -1940,16 +1940,13 @@ off many times a day.
   5. **The agent cannot reach it.** `torq-agent` is another account (ADR-035): it can read neither the person's
      home nor their user manager, so it can neither start a tunnel nor point one somewhere. A tunnel is a way
      out of the machine; it stays the person's.
-- **Open, the owner's:**
-  1. *autossh or ssh?* The owner asked for autossh. autossh 1.4g adds a monitor port (off with `-M 0`, as its own
-     docs advise with `ServerAlive`) and a restart loop systemd already does. Recommended: plain ssh under
-     systemd, one program fewer; autossh if the owner prefers its name or behaviour.
-  2. *In the panel by default?* Recommended: in COSMIC's applet list on TorqOS Desktop, added by the person
-     (COSMIC Settings → Desktop → Panel → Applets); most people have no tunnel. Or in the default panel, next to
-     `torq-applet`.
-  3. *Up while logged out?* A user manager runs only during a login unless the account lingers, a system
-     setting (`users <name> linger`, through the broker). Recommended: login only now; linger later, as its
-     own tree setting.
+- **Settled by the owner (2026-11-10):**
+  1. **Plain ssh under systemd, not autossh** ("plain is fine if it works"): systemd's restart is the loop, ssh's
+     `ServerAlive` the check. It must work: the VM test of a dropped link coming back is what says so, and a
+     failure there reopens this question.
+  2. **Not in the default panel**: in COSMIC's applet list on TorqOS Desktop, added by the person (COSMIC
+     Settings → Desktop → Panel → Applets).
+  3. **Up while logged in only**: no linger. Up while logged out would be its own tree setting, later.
 - **Consequences:** New code: `torq-tunnel` (the file, its checks, the ssh command line; unit-tested), the
   applet, the unit template and `openssh` in the desktop module. VM tests (`tests/desktop.nix` or its own):
   a tunnel started from the file reaches a second VM and comes back after the link drops; an unknown host key
