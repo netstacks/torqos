@@ -149,6 +149,8 @@ pub struct Settings {
     remote_url: String,
     machine_key: Option<Result<String, String>>,
     gh_code: Option<DeviceCode>,
+    /// Which sign-in is current: what an earlier or cancelled one reports is ignored.
+    gh_attempt: u64,
     /// The GitHub sign-in, for this setup only: in memory, gone when the window closes.
     github: Option<(GitHubToken, String)>,
     repo_name: String,
@@ -274,8 +276,9 @@ pub enum Message {
     CopyKey(String),
     OpenUrl(String),
     GhStart,
-    GhCode(Result<DeviceCode, String>),
-    GhSigned(Result<(GitHubToken, String), String>),
+    GhCode(u64, Result<DeviceCode, String>),
+    GhSigned(u64, Result<(GitHubToken, String), String>),
+    GhCancel,
     RepoName(String),
     GhCreate,
     GhCreated(Result<String, String>),
@@ -395,6 +398,7 @@ impl cosmic::Application for Settings {
             remote_url: String::new(),
             machine_key: None,
             gh_code: None,
+            gh_attempt: 0,
             github: None,
             repo_name: format!("torqos-{}", app::host()),
             gh_repo: None,
@@ -831,18 +835,25 @@ impl cosmic::Application for Settings {
             Message::OpenUrl(url) => app::open_url(&url),
 
             Message::GhStart => {
+                self.gh_attempt += 1;
+                let attempt = self.gh_attempt;
                 self.note = None;
-                return cosmic::task::future(async { Message::GhCode(blocking(app::github_start).await) });
+                return cosmic::task::future(async move { Message::GhCode(attempt, blocking(app::github_start).await) });
             }
-            Message::GhCode(r) => match r {
+            Message::GhCancel => {
+                self.gh_attempt += 1;
+                self.gh_code = None;
+            }
+            Message::GhCode(attempt, _) | Message::GhSigned(attempt, _) if attempt != self.gh_attempt => {}
+            Message::GhCode(attempt, r) => match r {
                 Ok(code) => {
                     let waiting_on = code.clone();
                     self.gh_code = Some(code);
-                    return cosmic::task::future(async move { Message::GhSigned(blocking(move || app::github_wait(&waiting_on)).await) });
+                    return cosmic::task::future(async move { Message::GhSigned(attempt, blocking(move || app::github_wait(&waiting_on)).await) });
                 }
                 Err(e) => self.note = Some((e, true)),
             },
-            Message::GhSigned(r) => {
+            Message::GhSigned(_, r) => {
                 self.gh_code = None;
                 match r {
                     Ok(signed) => self.github = Some(signed),
@@ -884,7 +895,7 @@ impl cosmic::Application for Settings {
                         // Done with the sign-in: only the machine's own key, for this one repository, stays.
                         self.github = None;
                         self.gh_repo = None;
-                        self.note = Some(("Connected. The first copy goes up within 15 minutes, and after every change from now on.".into(), false));
+                        self.note = Some(("Connected. The first copy goes up within 15 minutes, and after every change from now on. TorqOS has let go of your sign-in; GitHub lists it under Settings, Applications, where you can revoke it.".into(), false));
                     }
                     Err(e) => self.note = Some((e, true)),
                 }
@@ -1746,13 +1757,13 @@ impl Settings {
             let mut github = settings::section().title("GitHub");
             match (&self.gh_code, &self.github) {
                 (Some(code), _) => {
-                    github = github.add(settings::item_row(vec![widget::column::with_capacity(2).spacing(spacing.space_xxs).push(widget::text::title3(code.user_code.clone())).push(widget::text::caption("Enter this code at GitHub. This page moves on when you approve it.")).width(Length::Fill).into(), widget::button::standard("Copy").on_press(Message::CopyKey(code.user_code.clone())).into(), widget::button::suggested("Open GitHub").on_press(Message::OpenUrl(code.verification_uri.clone())).into()]).spacing(spacing.space_xs).align_y(Alignment::Center));
+                    github = github.add(settings::item_row(vec![widget::column::with_capacity(2).spacing(spacing.space_xxs).push(widget::text::title3(code.user_code.clone())).push(widget::text::caption("Enter this code at GitHub. This page moves on when you approve it.")).width(Length::Fill).into(), widget::button::standard("Copy").on_press(Message::CopyKey(code.user_code.clone())).into(), widget::button::suggested("Open GitHub").on_press(Message::OpenUrl(code.verification_uri.clone())).into(), widget::button::standard("Cancel").on_press(Message::GhCancel).into()]).spacing(spacing.space_xs).align_y(Alignment::Center));
                 }
                 (None, Some((_, login))) => {
                     github = github.add(settings::item::builder(format!("Signed in as {login}")).description("A private repository, for this machine alone").control(widget::row::with_capacity(2).spacing(spacing.space_xs).align_y(Alignment::Center).width(Length::FillPortion(2)).push(widget::text_input("Repository name", &self.repo_name).on_input(Message::RepoName).width(Length::Fill)).push(widget::button::suggested("Create and connect").on_press(Message::GhCreate))));
                 }
                 (None, None) => {
-                    github = github.add(settings::item::builder("Sign in with GitHub").description("In your browser: your GitHub password never touches TorqOS, and the sign-in is forgotten when setup is done").control(widget::button::suggested("Sign in").on_press(Message::GhStart)));
+                    github = github.add(settings::item::builder("Sign in with GitHub").description("In your browser: your GitHub password never touches TorqOS, and TorqOS keeps only a key for the one repository").control(widget::button::suggested("Sign in").on_press(Message::GhStart)));
                 }
             }
             page = page.push(github);
@@ -1775,7 +1786,9 @@ impl Settings {
             );
             return page.push(widget::text::caption("Connecting is a change like any other: you review it and commit it, then give the repository this machine's key.")).into();
         }
-        if self.gh_repo.is_some() && self.github.is_some() {
+        // Only the repository this machine is really connected to gets its key.
+        let connected = status.lines().next().and_then(|l| l.strip_prefix("Remote: ")).and_then(|u| app::github_repo(u.trim()));
+        if self.github.is_some() && self.gh_repo.is_some() && self.gh_repo == connected {
             page = page.push(settings::section().title("One step left").add(settings::item::builder("Give the repository this machine's key").description("TorqOS Settings adds it for you: only this machine, and only this repository").control(widget::button::suggested("Finish").on_press(Message::GhFinish))));
         }
         page = page.push(settings::section().title("This machine's repository").add(settings::item_row(vec![widget::text::monotext(status.trim_end().to_string()).width(Length::Fill).into()])));

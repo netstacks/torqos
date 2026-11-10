@@ -344,7 +344,8 @@ fn exec(call: Call, err: &mut dyn Write, err_stdio: impl Fn() -> Result<Stdio>, 
             let mut answer = over_socket(&r, err)?;
             // The desktop's dialog could not appear (its agent gone, or registered with a polkit since replaced):
             // it is started again, and asked once more. Nothing was done: the broker stopped before the change.
-            if answer.0 == Some(REFUSED) && String::from_utf8_lossy(&answer.1).contains(NO_APPROVAL_AGENT) {
+            let said: Option<serde_json::Value> = serde_json::from_slice(&answer.1).ok();
+            if answer.0 == Some(REFUSED) && said.as_ref().and_then(|v| v["error"].as_str()).is_some_and(|e| e.contains(NO_APPROVAL_AGENT)) {
                 crate::app::restart_approval_agent();
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 answer = over_socket(&r, err)?;

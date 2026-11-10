@@ -14,7 +14,7 @@ let
         for b in "$backlights"/*; do
           name=''${b##*/}
           # Closed twice: what it was before the first, not the dark one.
-          [ -e "$kept/$name" ] || cp "$b/brightness" "$kept/$name"
+          [ -e "$kept/$name" ] || cp "$b/brightness" "$kept/$name" || continue
           echo 0 > "$b/brightness"
         done
         ${config.systemd.package}/bin/loginctl lock-sessions

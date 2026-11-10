@@ -237,8 +237,7 @@ pub fn glance(session: Option<&std::path::Path>, draft: bool) -> Result<Glance> 
         Confirm { seq, deadline: history::one_line(&history::local_stamp(ts, &clock), 40), at: history::parse_ts(ts) }
     });
     let entries = crate::read_ledger(&cli)?;
-    // A person's own commit that did not go through leaves a proposal too: not something waiting on them.
-    let agents: Vec<_> = history::waiting_proposals(&entries).into_iter().filter(|e| e.actor == "agent").collect();
+    let waiting = waiting_on_me(&entries, &crate::me().unwrap_or_default());
     let needs = needs(std::path::Path::new("/run/booted-system"), std::path::Path::new("/run/current-system"), session);
     Ok(Glance {
         version: version(),
@@ -247,7 +246,7 @@ pub fn glance(session: Option<&std::path::Path>, draft: bool) -> Result<Glance> 
         confirm,
         draft,
         needs,
-        waiting: (agents.len(), agents.iter().filter(|e| e.tainted).count()),
+        waiting: (waiting.len(), waiting.iter().filter(|e| e.tainted).count()),
         last: history::last_change(&entries),
     })
 }
@@ -779,12 +778,17 @@ pub struct Proposal {
     pub tainted: bool,
 }
 
-/// The agent's proposals waiting for a person.
+/// Proposals waiting for a person: the agent's and other people's. One's own commit that did not go through leaves
+/// a proposal too, and that is not something waiting on them.
+fn waiting_on_me<'a>(entries: &'a [history::Entry], me: &str) -> Vec<&'a history::Entry> {
+    history::waiting_proposals(entries).into_iter().filter(|e| e.data["caller"].as_str().unwrap_or(&e.actor) != me).collect()
+}
+
+/// The proposals waiting for a person.
 pub fn proposals() -> Result<Vec<Proposal>> {
     let entries = crate::read_ledger(&cli())?;
-    Ok(history::waiting_proposals(&entries)
+    Ok(waiting_on_me(&entries, &crate::me()?)
         .into_iter()
-        .filter(|e| e.actor == "agent")
         .map(|e| Proposal { seq: e.seq, reason: history::one_line(&e.reason, 300), by: history::one_line(&e.actor, 40), tainted: e.tainted })
         .collect())
 }
@@ -1256,6 +1260,16 @@ fn app_lines(verb: &str, ids: &[String]) -> Result<Vec<String>> {
     Ok(ids.iter().map(|id| line(&[verb, "users", "users", &me, "flatpaks", id])).collect())
 }
 
+/// Remove these applications: those that would not go, still to be removed.
+fn removing(ids: &[String]) -> Vec<String> {
+    ids.iter().filter(|id| remove_app(id).is_err()).cloned().collect()
+}
+
+/// What TorqOS knows of afterwards: what the configuration names and is here, and `also`.
+fn managed_after(declared: &BTreeSet<String>, installed: &BTreeSet<String>, also: impl IntoIterator<Item = String>) -> BTreeSet<String> {
+    declared.intersection(installed).cloned().chain(also).collect()
+}
+
 /// Remember what this person has installed and forget what they removed, in their own configuration: no
 /// password, a line in the history. Whether anything changed.
 pub fn sync_apps() -> Result<bool> {
@@ -1273,9 +1287,10 @@ pub fn sync_apps() -> Result<bool> {
         let comment = [words("Apps: keep", &plan.keep), words("Apps: forget", &plan.forget)].into_iter().flatten().collect::<Vec<_>>().join("; ");
         commit_mine(&lines, &comment)?;
     }
-    let now: BTreeSet<String> = declared.iter().filter(|d| !plan.forget.contains(d)).cloned().chain(plan.keep.iter().cloned()).filter(|x| installed.contains(x)).collect();
-    set_managed(&now)?;
-    Ok(changes)
+    // What the configuration no longer names (an undo) goes now: left here, the next look would keep it again.
+    let unremoved = removing(&plan.remove);
+    set_managed(&managed_after(&declared, &installed, plan.keep.iter().cloned().chain(unremoved)))?;
+    Ok(changes || !plan.remove.is_empty())
 }
 
 /// Bring what is installed in line with the configuration: a rebuilt machine's apps come back, an undone install
@@ -1287,16 +1302,12 @@ pub fn reconcile_apps() -> Result<()> {
     let (declared, managed) = (my_list(&mut s, "flatpaks")?, managed_apps());
     let installed: BTreeSet<String> = installed_apps()?.into_iter().map(|a| a.id).collect();
     let plan = plan_apps(&declared, &managed, &installed);
-    let mut done: BTreeSet<String> = declared.iter().filter(|d| installed.contains(*d)).cloned().collect();
-    for id in &plan.install {
-        if install_app(id).is_ok() {
-            done.insert(id.clone());
-        }
-    }
-    for id in &plan.remove {
-        let _ = remove_app(id);
-    }
-    set_managed(&done)
+    // A person's removal stays known, for `sync_apps` to take out of the configuration: dropped here, it would be
+    // taken for a machine that has yet to install, and come back.
+    let mut also = plan.forget.clone();
+    also.extend(plan.install.iter().filter(|id| install_app(id).is_ok()).cloned());
+    also.extend(removing(&plan.remove));
+    set_managed(&managed_after(&declared, &installed, also))
 }
 
 // ── Tools: command-line software, a person's own ─────────────────────────────────────────────────
@@ -1470,7 +1481,7 @@ fn github(url: &str, token: Option<&GitHubToken>, body: Option<&str>) -> Result<
     use anyhow::Context as _;
     use std::io::Write as _;
     let mut child = std::process::Command::new("curl")
-        .args(["--silent", "--show-error", "--proto", "=https", "--max-time", "30", "--write-out", "\n%{http_code}", "--config", "-", url])
+        .args(["--disable", "--silent", "--show-error", "--proto", "=https", "--max-time", "30", "--write-out", "\n%{http_code}", "--config", "-", url])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1535,7 +1546,10 @@ pub fn github_wait(code: &DeviceCode) -> Result<(GitHubToken, String)> {
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_secs(interval));
         // A dropped connection is not the end of a sign-in: ask again.
-        let Ok((_, v)) = github("https://github.com/login/oauth/access_token", None, Some(&body)) else { continue };
+        let Ok((status, v)) = github("https://github.com/login/oauth/access_token", None, Some(&body)) else { continue };
+        if status >= 500 || v.is_null() {
+            continue;
+        }
         match poll_of(&v) {
             Poll::Signed(t) => {
                 let token = GitHubToken(t);
@@ -1651,5 +1665,52 @@ mod github_tests {
     #[test]
     fn a_sign_in_is_never_printed() {
         assert_eq!(format!("{:?}", GitHubToken("secret".into())), "GitHubToken(hidden)");
+    }
+}
+
+#[cfg(test)]
+mod apps_remembered {
+    use super::*;
+
+    fn set(a: &[&str]) -> BTreeSet<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_undo_that_could_not_finish_is_not_kept_again() {
+        let (none, x) = (set(&[]), set(&["x"]));
+        let p = plan_apps(&none, &x, &x);
+        assert_eq!(p.remove, ["x"]);
+        let after = managed_after(&none, &x, p.remove.clone());
+        assert!(plan_apps(&none, &after, &x).keep.is_empty(), "the undo must hold");
+    }
+
+    #[test]
+    fn a_removal_seen_at_login_is_not_installed_back() {
+        let (none, x) = (set(&[]), set(&["x"]));
+        let p = plan_apps(&x, &x, &none);
+        assert_eq!(p.forget, ["x"]);
+        let after = managed_after(&x, &none, p.forget.clone());
+        let next = plan_apps(&x, &after, &none);
+        assert!(next.install.is_empty(), "the person removed it");
+        assert_eq!(next.forget, ["x"]);
+    }
+
+    #[test]
+    fn only_ones_own_unfinished_commit_is_not_waiting() {
+        let p = |seq, caller: &str, actor: &str| history::Entry {
+            seq,
+            ts: String::new(),
+            kind: "proposal".into(),
+            tier: "system".into(),
+            actor: actor.into(),
+            approved_by: None,
+            tainted: false,
+            reason: String::new(),
+            data: serde_json::json!({ "caller": caller }),
+        };
+        let e = [p(1, "me", "user"), p(2, "sam", "user"), p(3, "torq-agent", "agent")];
+        let seqs: Vec<u64> = waiting_on_me(&e, "me").iter().map(|x| x.seq).collect();
+        assert_eq!(seqs, [2, 3]);
     }
 }
