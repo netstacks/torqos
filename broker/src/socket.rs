@@ -61,7 +61,7 @@ pub struct Change {
 /// asking and who approves (the kernel's), and files (they come in the request).
 const NOT_FROM_CALLERS: &[&str] = &[
     "--repo", "--state-dir", "--rebuild-cmd", "--build-cmd", "--activate-cmd", "--boot-cmd", "--schedule-cmd",
-    "--commit-at-cmd", "--commit-at-cancel-cmd", "--current-system", "--system-profile", "--actor", "--approved-by", "--diff", "--hash-file", "--key-file",
+    "--commit-at-cmd", "--commit-at-cancel-cmd", "--current-system", "--system-profile", "--actor", "--approved-by", "--diff", "--hash-file", "--key-file", "--value-file",
 ];
 
 /// Refuse arguments that name the caller, a file, or the broker's settings.
@@ -99,7 +99,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups", "scheduled", "session", "trust"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups", "scheduled", "session", "trust", "secrets"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
@@ -155,6 +155,13 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         // A commit at, by the one who approved it (`user`: theirs); anyone else's, an administrator's.
         "cancel-scheduled" if user == Some(who.name.as_str()) => Gate::Open,
         "cancel-scheduled" => admins_only(),
+        // A secret's value (ADR-052): a person's own is theirs, as their own settings are; reading it back
+        // takes their password, so no program of their session reads it unseen. No one else sets or reads
+        // it, an administrator included, who may only delete it. The system's are an administrator's.
+        "secret-set" | "secret-delete" if user == Some(who.name.as_str()) => Gate::Open,
+        "secret-show" if user == Some(who.name.as_str()) => Gate::Password,
+        "secret-set" | "secret-show" if user.is_some() => Gate::Refused("a person's secret is theirs alone: no one else sets or reads it, an administrator included".into()),
+        "secret-set" | "secret-delete" | "secret-show" => admins_only(),
         "password" | "confirm" | "reconcile" | "repair" | "remote-key" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-key" | "backup-restore" => admins_only(),
         other => Gate::Refused(format!("`{other}` is not run over the socket (it is the machine's own, as root)")),
     }
@@ -208,6 +215,12 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--key-file".into(), key.context("a backup's key comes in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
         }
+        // A secret's value comes as a backup's key does: in the request's `key`.
+        "secret-set" => {
+            a.extend(["--value-file".into(), key.context("a secret's value comes in the request")?.into()]);
+            a.extend(["--approved-by".into(), who.name.clone()]);
+        }
+        "secret-delete" | "secret-show" => a.extend(["--approved-by".into(), who.name.clone()]),
         "apply" | "revert" | "schedule" | "cancel-scheduled" | "trust-grant" | "trust-revoke" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
         _ => {}
     }
@@ -347,6 +360,33 @@ mod tests {
         }
         assert!(matches!(gate(&who(1000), "apply", Some(&change(Tier::Forbidden, &[".git/config"])), None), Gate::Refused(_)));
         assert!(matches!(gate(&who(1000), "apply", None, None), Gate::Refused(_)), "no such change");
+    }
+
+    /// ADR-052: a person's own secret is theirs alone; the system's an administrator's; none of it the agent's.
+    #[test]
+    fn a_secret_is_its_owners() {
+        assert_eq!(gate(&who(1001), "secret-set", None, Some("sam")), Gate::Open);
+        assert_eq!(gate(&who(1001), "secret-delete", None, Some("sam")), Gate::Open);
+        assert_eq!(gate(&who(1001), "secret-show", None, Some("sam")), Gate::Password, "read back with their password");
+        // No one else sets or reads it, an administrator included, who may only delete it.
+        for cmd in ["secret-set", "secret-show"] {
+            assert!(matches!(gate(&who(1000), cmd, None, Some("sam")), Gate::Refused(_)), "{cmd}");
+            assert!(matches!(gate(&who(1001), cmd, None, Some("viper")), Gate::Refused(_)), "{cmd}");
+        }
+        assert_eq!(gate(&who(1000), "secret-delete", None, Some("sam")), Gate::Password);
+        assert!(matches!(gate(&who(1001), "secret-delete", None, Some("viper")), Gate::Refused(_)));
+        for cmd in ["secret-set", "secret-delete", "secret-show"] {
+            assert_eq!(gate(&who(1000), cmd, None, None), Gate::Password, "{cmd}: the system's");
+            assert!(matches!(gate(&who(1001), cmd, None, None), Gate::Refused(_)), "{cmd}");
+            for user in [None, Some("torq-agent"), Some("sam")] {
+                assert!(matches!(gate(&who(990), cmd, None, user), Gate::Refused(_)), "{cmd} {user:?}: never the agent's");
+            }
+            assert!(matches!(gate(&who(65534), cmd, None, Some("nobody")), Gate::Refused(_)), "{cmd}: a service's account has none");
+        }
+        let s = with_identity(&["secret-set".into(), "--name=t".into(), "--user=sam".into()], "secret-set", &who(1001), None, None, Some("/run/v")).unwrap();
+        assert_eq!(s, ["secret-set", "--name=t", "--user=sam", "--value-file", "/run/v", "--approved-by", "sam"]);
+        assert!(with_identity(&["secret-set".into()], "secret-set", &who(1001), None, None, None).is_err(), "a value comes in the request");
+        assert!(check_args(&["secret-set".into(), "--value-file=/etc/shadow".into()]).is_err());
     }
 
     #[test]

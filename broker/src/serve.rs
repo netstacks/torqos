@@ -223,7 +223,8 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
             if req.password.is_some() {
                 return Err(refused(anyhow::anyhow!("from the desktop a system change is approved in its dialog, not by a password in the request")));
             }
-            approve_in_dialog(pid, uid, &approval_text(name, &settings.state_dir, seq)).map_err(&refused)?;
+            let secret = sub.try_get_one::<String>("name").ok().flatten().map(|n| (n.as_str(), user.as_deref()));
+            approve_in_dialog(pid, uid, &approval_text(name, &settings.state_dir, seq, secret)).map_err(&refused)?;
         }
         Gate::Password => match req.password.as_deref() {
             None => return Err(Refusal { json, code: socket::NEED_PASSWORD, why: format!("this needs {}'s password", who.name) }),
@@ -267,13 +268,24 @@ fn desktop_caller(pid: i32, uid: u32) -> Result<bool> {
 
 /// What the dialog says is being approved. The broker's facts first: what is being done, and to what, by whom.
 /// The reason is the proposer's own words, and is shown as theirs.
-fn approval_text(cmd: &str, state_dir: &Path, seq: Option<u64>) -> String {
+/// `secret`: the secret a `secret-*` command names, and whose it is (None: the system's).
+fn approval_text(cmd: &str, state_dir: &Path, seq: Option<u64>, secret: Option<(&str, Option<&str>)>) -> String {
     let entry = seq.and_then(|s| Ledger::open(state_dir.join("ledger.jsonl")).get(s).ok());
     let verb = match cmd {
         "apply" => "Apply",
         "schedule" => "Schedule",
         "revert" => "Undo",
         "remote-key" => return "Show this machine's key for its configuration repository".to_string(),
+        "secret-set" | "secret-delete" | "secret-show" => {
+            let (name, user) = secret.unwrap_or_default();
+            let whose = user.map_or_else(|| format!("the system's secret {name}"), |u| format!("{u}'s secret {name}"));
+            let what = match cmd {
+                "secret-set" => format!("Keep a new value for {whose}"),
+                "secret-delete" => format!("Delete the value of {whose}"),
+                _ => format!("Show the value of {whose}"),
+            };
+            return crate::printable(&what);
+        }
         other => return crate::printable(&format!("Approve `{other}` on this machine")),
     };
     let Some(e) = entry else { return format!("{verb} a change to this machine") };

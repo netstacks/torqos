@@ -74,7 +74,7 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
 /// added only together with the typed module that reads it, and with its shape in `user_leaf_ok`:
 /// `packages.json` (modules/packages.nix). `desktop.json` is read by no module: it is the person's COSMIC
 /// settings, put on their desktop by their own session (cli/src/desktop.rs), never by root.
-pub const USER_LEAVES: &[&str] = &["packages.json", "flatpaks.json", "desktop.json"];
+pub const USER_LEAVES: &[&str] = &["packages.json", "flatpaks.json", "desktop.json", "secrets.json"];
 
 /// The most packages one user's list may hold: a lightly-approved change must not be able to start
 /// hours of downloads and builds while holding the broker lock.
@@ -93,6 +93,8 @@ pub fn user_leaf_ok(leaf: &str, value: &serde_json::Value) -> bool {
         "flatpaks.json" => value.as_array().is_some_and(|ids| ids.len() <= MAX_USER_PACKAGES && ids.iter().all(|i| i.as_str().is_some_and(flatpak_id_ok))),
         // A person's COSMIC settings (cli/src/desktop.rs mirrors this): when to save, and each setting's text.
         "desktop.json" => desktop_ok(value),
+        // What the person's own secrets may be used for (ADR-052): the daemon reads it, no module does.
+        "secrets.json" => serde_json::from_value::<torq_wire::secrets::Rules>(value.clone()).is_ok_and(|r| torq_wire::secrets::check(&r).is_ok()),
         _ => false,
     }
 }
@@ -159,9 +161,11 @@ fn package_name_ok(name: &str) -> bool {
 /// content of such a file before accepting it (`Broker::check_user_data`).
 /// A file no module reads (a person's desktop, cli/src/desktop.rs): a change of only these leaves the system as
 /// it is, so it is committed and ledgered without a build and a switch. Saved every few minutes as a person
-/// changes their desktop, it must not rebuild the machine each time.
+/// changes their desktop, it must not rebuild the machine each time. The rules of the secrets (ADR-052) are
+/// read by their daemon, from the repository, at each use: no module reads them either.
 pub fn builds_nothing(p: &str) -> bool {
-    p.strip_prefix("users/").and_then(|rest| rest.split_once('/')).is_some_and(|(name, leaf)| user_name_ok(name) && leaf == "desktop.json")
+    p == torq_wire::secrets::SYSTEM_RULES
+        || p.strip_prefix("users/").and_then(|rest| rest.split_once('/')).is_some_and(|(name, leaf)| user_name_ok(name) && (leaf == "desktop.json" || leaf == torq_wire::secrets::PERSON_RULES))
 }
 
 pub fn is_user_data(p: &str) -> bool {
@@ -288,7 +292,7 @@ mod tests {
         for p in ["users/casey/packages.json", "users/_svc/packages.json", "users/a-b_9/packages.json"] {
             assert_eq!(tier_for_path(p), Tier::User, "{p}");
         }
-        assert_eq!(USER_LEAVES, ["packages.json", "flatpaks.json", "desktop.json"]);
+        assert_eq!(USER_LEAVES, ["packages.json", "flatpaks.json", "desktop.json", "secrets.json"]);
         // The modules read the same list (modules/packages.nix): the two cannot drift apart.
         let shared: Vec<String> = serde_json::from_str(include_str!("../user-leaves.json")).unwrap();
         assert_eq!(USER_LEAVES, shared, "broker/user-leaves.json");
@@ -316,6 +320,26 @@ mod tests {
         }
         assert_eq!(tier_for_path("users/casey/desktop.json"), Tier::User);
         assert!(user_leaf_max("desktop.json") > user_leaf_max("packages.json"));
+    }
+
+    /// ADR-052: a person's secrets' rules are theirs, in the shape torq_wire reads; changing them, or the
+    /// system's, builds nothing.
+    #[test]
+    fn a_persons_secrets_rules_are_theirs_and_build_nothing() {
+        let ok = |json: &str| user_leaf_ok("secrets.json", &serde_json::from_str(json).unwrap());
+        assert!(ok(r#"{"github":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"],"approve":"each-use"}}"#));
+        assert!(ok("{}"));
+        for bad in ["[]", r#"{"t":{"kind":"token","https":{"hosts":["10.0.0.1"]}}}"#, r#"{"t":{"kind":"token","run":"sh"}}"#, r#"{"../t":{"kind":"token"}}"#] {
+            assert!(!ok(bad), "{bad}");
+        }
+        assert_eq!(tier_for_path("users/casey/secrets.json"), Tier::User);
+        assert_eq!(tier_for_path("secrets/system.json"), Tier::System);
+        for p in ["users/casey/secrets.json", "secrets/system.json", "users/casey/desktop.json"] {
+            assert!(builds_nothing(p), "{p}");
+        }
+        for p in ["users/casey/packages.json", "secrets/other.json", "users/../secrets.json", "users/Casey/secrets.json"] {
+            assert!(!builds_nothing(p), "{p}");
+        }
     }
 
     #[test]

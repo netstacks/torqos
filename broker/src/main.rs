@@ -80,6 +80,10 @@ enum Cmd {
     Backups,
     BackupKey { name: String, key_file: PathBuf, approved_by: String },
     BackupRestore { name: String, snapshot: Option<String>, path: String, approved_by: String },
+    SecretSet { name: String, user: Option<String>, value_file: PathBuf, approved_by: String },
+    SecretDelete { name: String, user: Option<String>, approved_by: String },
+    SecretShow { name: String, user: Option<String>, approved_by: String },
+    Secrets,
     AdoptKey { url: String },
     AdoptInspect { url: String },
     Adopt { url: String, own: PathBuf, head: String, tip: String, user: String },
@@ -229,6 +233,10 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("backups").about("The backups the configuration declares (ADR-038): whether each has its key, the snapshots its repository holds, and how it last ran. Read only."))
         .subcommand(Command::new("backup-key").about("Keep a declared backup's key (its passphrase, read from a file) root's alone, outside the config repo, where its passwordFile points; ledgered without the key.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("key-file").long("key-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
         .subcommand(Command::new("backup-restore").about("Put a path back from a declared backup (ADR-038): restic restores it where only root can reach it, then its owner writes it, what is there set aside; ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("snapshot").long("snapshot").help("A snapshot's id [default: latest].")).arg(Arg::new("path").long("path").required(true)).arg(by()))
+        .subcommand(Command::new("secrets").about("The secrets that have a value (ADR-052): whose, and their names. Never a value."))
+        .subcommand(Command::new("secret-set").about("Keep a secret's value (read from a file) encrypted, root's alone, outside the config repo: the system's, or with --user a person's own; ledgered without the value.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("value-file").long("value-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
+        .subcommand(Command::new("secret-delete").about("Delete a secret's value (its rule stays the configuration's): ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(by()))
+        .subcommand(Command::new("secret-show").about("Print a secret's value, to the one who asked: on the record first.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(by()))
         .subcommand(Command::new("fetch-incoming").about("Fetch the remote's `incoming` branch into the config repo (refs/torq/incoming), for torqcli's `request system pull` to load into a candidate: nothing is applied."))
         .subcommand(Command::new("ledger-acknowledge").about("A person has looked into where the ledger and the repository disagree: said no more, and on the record.").arg(by()))
         .subcommand(Command::new("remote-clear").about("Clear the remote's alarm, having looked into it (ledgered): the next push checks the remote's whole history again, and raises it again if it is still true.").arg(by()))
@@ -291,6 +299,10 @@ fn parse_cli() -> Cli {
         "ledger-acknowledge" => Cmd::Acknowledge { approved_by: by(sub) },
         "fetch-incoming" => Cmd::FetchIncoming,
         "backups" => Cmd::Backups,
+        "secrets" => Cmd::Secrets,
+        "secret-set" => Cmd::SecretSet { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), value_file: p(sub, "value-file").unwrap_or_default(), approved_by: by(sub) },
+        "secret-delete" => Cmd::SecretDelete { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), approved_by: by(sub) },
+        "secret-show" => Cmd::SecretShow { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), approved_by: by(sub) },
         "backup-key" => Cmd::BackupKey { name: s(sub, "name").unwrap_or_default(), key_file: p(sub, "key-file").unwrap_or_default(), approved_by: by(sub) },
         "backup-restore" => Cmd::BackupRestore { name: s(sub, "name").unwrap_or_default(), snapshot: s(sub, "snapshot"), path: s(sub, "path").unwrap_or_default(), approved_by: by(sub) },
         "snapshots" => Cmd::Snapshots,
@@ -416,7 +428,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     let writes = matches!(
         cli.cmd,
         Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. } | Cmd::SessionStart | Cmd::SessionTaint { .. } | Cmd::TrustGrant { .. } | Cmd::TrustRevoke { .. }
-            | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. }
+            | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. } | Cmd::SecretSet { .. } | Cmd::SecretDelete { .. } | Cmd::SecretShow { .. }
     );
     let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
     let sched = torq_broker::at::Scheduler::new(&b, &s.commit_at, &s.commit_at_cancel);
@@ -529,6 +541,28 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 return print_entry(&e);
             }
             println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::Secrets => println!("{}", serde_json::to_string(&b.kept_secrets())?),
+        Cmd::SecretSet { name, user, value_file, approved_by } => {
+            let owner = torq_broker::secrets::Owner::of(user.as_deref())?;
+            let value = plain_file(&value_file, torq_broker::secrets::VALUE_MAX as u64 + 1, "the value")?;
+            let e = b.set_secret(&owner, &name, value.strip_suffix('\n').unwrap_or(&value), &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        Cmd::SecretDelete { name, user, approved_by } => {
+            let e = b.delete_secret(&torq_broker::secrets::Owner::of(user.as_deref())?, &name, &approved_by)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
+        // Always JSON: a value is printed for a program to hand on, never mixed with words.
+        Cmd::SecretShow { name, user, approved_by } => {
+            let (e, value) = b.show_secret(&torq_broker::secrets::Owner::of(user.as_deref())?, &name, &approved_by)?;
+            println!("{}", json!({ "seq": e.body.seq, "value": value }));
         }
         Cmd::BackupRestore { name, snapshot, path, approved_by } => println!("{}", serde_json::to_string(&b.restore_backup(&name, snapshot.as_deref(), &path, &approved_by)?)?),
         Cmd::Password { user, hash_file, approved_by } => {

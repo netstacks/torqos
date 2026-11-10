@@ -20,6 +20,7 @@ pub mod inputs;
 pub mod ledger;
 pub mod policy;
 pub mod repo;
+pub mod secrets;
 pub mod session;
 pub mod socket;
 
@@ -74,6 +75,8 @@ pub struct Broker {
     agent_limits: agent::Limits,
     /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
     backup: backup::Backups,
+    /// Where the values of the secrets are, and what encrypts them (ADR-052, secrets.rs).
+    secrets: secrets::Store,
     /// The config repo's remote, if the owner named one (ADR-036).
     remote: Option<String>,
 }
@@ -617,6 +620,7 @@ impl Broker {
             people: Vec::new(),
             agent_limits: agent::Limits::default(),
             backup: backup::Backups::default(),
+            secrets: secrets::Store::default(),
             remote: None,
         }
     }
@@ -1753,6 +1757,17 @@ impl Broker {
     /// NixOS module reading the file is still the authority on what the data means; this makes sure
     /// it is the right kind of data, refused now rather than failing the rebuild.
     fn check_user_data(&self, diff_path: &Path, files: &[String]) -> Result<()> {
+        // The system's secrets' rules (ADR-052): their daemon reads them, so they are checked as a person's are.
+        let rules = torq_wire::secrets::SYSTEM_RULES.to_string();
+        if files.contains(&rules) {
+            for (path, file) in self.repo.proposed_files(diff_path, std::slice::from_ref(&rules), torq_wire::secrets::MAX_FILE)? {
+                let Some(f) = file else { continue };
+                if f.mode != "100644" {
+                    bail!("refused: {path} must be a regular file");
+                }
+                torq_wire::secrets::parse(&f.content).map_err(|why| anyhow::anyhow!("refused: {path}: {why}"))?;
+            }
+        }
         let user: Vec<String> = files.iter().filter(|f| policy::is_user_data(f)).cloned().collect();
         if user.is_empty() {
             return Ok(());

@@ -1,1 +1,1 @@
-[ "packages.json", "flatpaks.json", "desktop.json" ]
+[ "packages.json", "flatpaks.json", "desktop.json", "secrets.json" ]
