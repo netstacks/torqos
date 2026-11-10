@@ -136,6 +136,22 @@ fn sessions_are_bounded() {
     assert_eq!(fs::read_dir(&sessions).unwrap().count(), before + 1);
 }
 
+/// The review of ADR-051 step 1: a record from before agents had names is no one's (none may report
+/// into it or cite it), so it is not kept: the next session started removes it.
+#[test]
+fn a_record_of_no_agents_goes() {
+    let (dir, b) = setup(&[]);
+    let sessions = dir.path().join("state/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let old = format!("{:032x}", 7);
+    fs::write(sessions.join(format!("{old}.json")), json!({"id": old, "started": "2026-11-01T00:00:00Z", "tainted": false, "tainted_by": []}).to_string()).unwrap();
+    assert_eq!(session::read(&b, &old).unwrap().unwrap().agent, "");
+    assert!(session::taint(&b, &old, "read_journal").is_err(), "no one's to report into");
+    let s = session::start(&b).unwrap();
+    assert!(session::read(&b, &old).unwrap().is_none(), "removed by the next start");
+    assert!(session::read(&b, &s.id).unwrap().is_some());
+}
+
 #[test]
 fn under_trust_a_clean_proposal_in_the_persons_folder_applies() {
     let (dir, b) = setup(&[]);

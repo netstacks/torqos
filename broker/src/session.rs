@@ -58,6 +58,7 @@ pub struct Record {
     /// What tainted it, as reported: a tool's name.
     pub tainted_by: Vec<String>,
     /// The agent account whose session it is (ADR-051 3). Empty (a record from before): no agent's,
+    /// removed by the next session started,
     /// so no agent reports into it or cites it.
     #[serde(default)]
     pub agent: String,
@@ -160,7 +161,11 @@ pub fn start(b: &Broker) -> Result<Record> {
     if recent >= SESSIONS_AN_HOUR {
         bail!("refused: {recent} of {agent}'s sessions were started in the last hour (at most {SESSIONS_AN_HOUR})");
     }
-    // Its own oldest go, never another agent's (ADR-051 3).
+    // A record of no agent's (from before ADR-051 3) is no one's to report into or cite: it goes. Then its
+    // own oldest go, never another agent's.
+    for (_, id, _) in kept.iter().filter(|(_, _, a)| a.is_empty()) {
+        std::fs::remove_file(dir(b).join(format!("{id}.json")))?;
+    }
     let mine: Vec<&(String, String, String)> = kept.iter().filter(|(_, _, a)| a == agent).collect();
     for (_, id, _) in mine.iter().take((mine.len() + 1).saturating_sub(SESSIONS_KEPT)) {
         std::fs::remove_file(dir(b).join(format!("{id}.json")))?;
