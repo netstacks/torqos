@@ -2375,6 +2375,62 @@ fn the_agents_list_is_checked_again_at_apply() {
     assert!(err.contains("no longer allow"), "{err}");
 }
 
+/// ADR-051 3, at apply: a person's plain apply judges an agent's proposal by the map as it is then —
+/// an agent no longer mapped, or mapped to another person, is refused; as mapped, applied.
+#[test]
+fn an_agents_proposal_is_judged_at_apply_by_the_map_as_it_is_then() {
+    let (dir, b) = setup("true");
+    let head = b.repo.head().unwrap();
+    let ok = write_diff(dir.path(), "ok.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let p = b.propose_on(Some(&head), &ok, "htop", Actor::Agent, false).unwrap();
+    let limits = |a: &str, p: &str| torq_broker::agent::Limits { agents: [(a.to_string(), p.to_string())].into_iter().collect(), settings: vec![] };
+    let gone = b.with_agent_limits(&limits("torq-agent-sam", "sam"));
+    let err = format!("{:#}", gone.apply(p.body.seq, "casey", true).unwrap_err());
+    assert!(err.contains("no longer allow") && err.contains("not an agent this machine names"), "{err}");
+    let remapped = gone.with_agent_limits(&limits("torq-agent-casey", "sam"));
+    let err = format!("{:#}", remapped.apply(p.body.seq, "casey", true).unwrap_err());
+    assert!(err.contains("no longer allow") && err.contains("only for sam"), "{err}");
+    let mapped = remapped.with_agent_limits(&limits("torq-agent-casey", "casey"));
+    assert_eq!(mapped.apply(p.body.seq, "casey", true).unwrap().body.kind, "applied");
+}
+
+/// ADR-051 3: proposals waiting and refusals ledgered are counted for each agent: one person's agent
+/// at its limit leaves another's as it was.
+#[test]
+fn the_agents_limits_are_each_their_own() {
+    let (dir, b) = setup("true");
+    let two = torq_broker::agent::Limits { agents: [("torq-agent-casey".to_string(), "casey".to_string()), ("torq-agent-sam".to_string(), "sam".to_string())].into_iter().collect(), settings: vec![] };
+    let b = b.with_agent_limits(&two);
+    let sam = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&two).as_agent(Some("torq-agent-sam"));
+    let head = b.repo.head().unwrap();
+    let casey = write_diff(dir.path(), "c.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let sams = write_diff(dir.path(), "s.diff", "--- /dev/null\n+++ b/users/sam/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let policy = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/policy/new.toml\n@@ -0,0 +1 @@\n+x = 1\n");
+    for i in 0..torq_broker::AGENT_WAITING_MAX {
+        b.propose_on(Some(&head), &casey, &format!("htop {i}"), Actor::Agent, false).unwrap();
+    }
+    assert!(format!("{:#}", b.propose_on(Some(&head), &casey, "one more", Actor::Agent, false).unwrap_err()).contains("waiting"));
+    assert_eq!(sam.propose_on(Some(&head), &sams, "sam's, still", Actor::Agent, false).unwrap().body.kind, "proposal");
+    let refused = |who: &str| b.ledger.read_all().unwrap().iter().filter(|e| e.body.kind == "refused" && e.body.data["agent"] == who).count();
+    for _ in 0..torq_broker::AGENT_REFUSALS_AN_HOUR + 3 {
+        let _ = b.propose_on(Some(&head), &policy, "again", Actor::Agent, false);
+    }
+    assert_eq!(refused("torq-agent-casey"), torq_broker::AGENT_REFUSALS_AN_HOUR);
+    assert!(sam.propose_on(Some(&head), &policy, "sam's try", Actor::Agent, false).is_err());
+    assert_eq!(refused("torq-agent-sam"), 1, "sam's agent's refusal is still on the record");
+}
+
+/// `--agent` is the socket's, for an agent's request: with `--actor user` it is refused (main.rs).
+#[test]
+fn an_agent_named_on_a_persons_proposal_is_refused() {
+    let (dir, b) = setup("true");
+    let d = write_diff(dir.path(), "u.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    let head = b.repo.head().unwrap();
+    let out = run_cli(dir.path(), "true", &["propose", "--diff", d.to_str().unwrap(), "--reason", "x", "--base", &head, "--actor", "user", "--agent", "torq-agent-casey"]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("--agent goes with --actor agent"), "{out:?}");
+    assert!(!b.ledger.read_all().unwrap().iter().any(|e| e.body.kind == "proposal"));
+}
+
 /// The second review of ADR-041: a refusal before the ledger has begun is not entry #1 (setup
 /// would take it for a machine already set up); and the agent's waiting proposals are only those
 /// that can still land — once a person's change means they cannot, they no longer count.
