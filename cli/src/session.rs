@@ -96,6 +96,11 @@ pub trait Machine {
     fn backups(&self) -> Result<String>;
     /// `request system backup key <name>`: the key typed at the terminal, kept outside the configuration.
     fn backup_key(&self, name: &str, me: &str) -> Result<String>;
+    /// `request system secret set|delete|show <name> [user <user>]` (ADR-052): the value, at the broker. `set`
+    /// has it typed at the terminal; `show` gives it back. What happened, said.
+    fn secret_value(&self, name: &str, user: Option<&str>, act: &crate::secrets::Act, me: &str) -> Result<String>;
+    /// The secrets that have a value, as the broker lists them: never a value.
+    fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>>;
     /// `request system restore`: put a path back from a backup (as `me`, with their password).
     fn restore_backup(&self, name: &str, snapshot: Option<&str>, path: &str, me: &str) -> Result<String>;
     /// `request system remote clear`: clear the remote's alarm (as `me`, with their password).
@@ -672,7 +677,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowRemote | Op::ShowDesktop => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowSecrets | Op::ShowRemote | Op::ShowDesktop => {
                 self.show_operational(op)
             }
             Op::ClearCommit => self.clear_commit(),
@@ -1078,6 +1083,7 @@ impl<'a> Session<'a> {
             Op::ShowProposals => self.machine.proposals(self.fit),
             Op::ShowSnapshots => self.machine.snapshots(),
             Op::ShowBackups => self.machine.backups(),
+            Op::ShowSecrets => crate::secrets::shown(&self.repo, &self.machine.secrets_kept()?),
             Op::ShowRemote => self.machine.remote(),
             Op::ShowDesktop => Ok(crate::desktop::shown(&crate::desktop::status(&self.repo, &self.me, &crate::desktop::Paths::of_home()?)?)),
             Op::ShowServices => {
@@ -1292,6 +1298,37 @@ impl<'a> Session<'a> {
         out
     }
 
+    /// `request system secret …` (ADR-052). A person's own secret is theirs alone: no one else sets, reads or
+    /// changes the rule of it; an administrator may delete its value (the broker asks their password).
+    fn secret(&mut self, name: &str, user: Option<&str>, act: &crate::secrets::Act) -> Result<String> {
+        use crate::secrets::Act;
+        let theirs = user.is_some_and(|u| u != self.me);
+        if theirs && *act != Act::Delete {
+            bail!("{}'s secrets are theirs alone: no one else sets, reads or changes them", user.unwrap_or_default());
+        }
+        match act {
+            Act::Set | Act::Show => self.machine.secret_value(name, user, act, &self.me),
+            Act::Delete => {
+                let kept = self.machine.secrets_kept()?.contains(&(user.map(String::from), name.to_string()));
+                let ruled = crate::secrets::read(&self.repo, &self.repo.head()?, user)?.contains_key(name);
+                if !kept && !ruled {
+                    bail!("there is no secret {name}{}", user.map(|u| format!(" of {u}'s")).unwrap_or_default());
+                }
+                let mut out = String::new();
+                if kept {
+                    out.push_str(&self.machine.secret_value(name, user, act, &self.me)?);
+                }
+                if ruled && theirs {
+                    out.push_str(&format!("Its rule stays: {}'s to change.\n", user.unwrap_or_default()));
+                } else if ruled {
+                    out.push_str(&crate::secrets::changed(self.machine, &self.repo, name, user, act)?);
+                }
+                Ok(out)
+            }
+            _ => crate::secrets::changed(self.machine, &self.repo, name, user, act),
+        }
+    }
+
     fn request(&mut self, r: syntax::Request) -> Result<String> {
         match r {
             syntax::Request::Repair => self.machine.repair(),
@@ -1324,6 +1361,7 @@ impl<'a> Session<'a> {
             syntax::Request::RestoreData { change, path } => self.machine.restore_data(change, &path, &self.me),
             syntax::Request::SnapshotTake => self.machine.snapshot_take(&self.me),
             syntax::Request::BackupKey { name } => self.machine.backup_key(&name, &self.me),
+            syntax::Request::Secret { name, user, act } => self.secret(&name, user.as_deref(), &act),
             syntax::Request::Restore { name, snapshot, path } => self.machine.restore_backup(&name, snapshot.as_deref(), &path, &self.me),
             syntax::Request::SnapshotDelete { change } => self.machine.snapshot_delete(change, &self.me),
             syntax::Request::Pull => self.pull(),
@@ -2708,6 +2746,9 @@ mod tests {
         lands_in: Option<PathBuf>,
         /// What happens in that repo once it has landed (another commit, the change amended).
         then_sh: Option<String>,
+        /// The secrets that have a value (ADR-052), and what was asked of their values.
+        kept: Vec<crate::secrets::Kept>,
+        secret_calls: RefCell<Vec<String>>,
     }
     impl Machine for Fake {
         /// One evaluation: the warnings a test gives, and SSH after the change — as the evaluator would:
@@ -2866,6 +2907,13 @@ mod tests {
         }
         fn backups(&self) -> Result<String> {
             Ok("no backups\n".into())
+        }
+        fn secret_value(&self, name: &str, user: Option<&str>, act: &crate::secrets::Act, me: &str) -> Result<String> {
+            self.secret_calls.borrow_mut().push(format!("{} {name} {user:?} by {me}", act.verb()));
+            Ok(format!("{} {name}\n", act.verb()))
+        }
+        fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
+            Ok(self.kept.clone())
         }
         fn backup_key(&self, name: &str, me: &str) -> Result<String> {
             Ok(format!("key of {name} for {me}\n"))
@@ -3246,6 +3294,60 @@ mod tests {
     /// The test repo, then two commits of software: `OLD` (rollback 1), then `NOW` (rollback 0).
     const OLD: u64 = 1_790_000_000;
     const NOW: u64 = 1_793_000_000;
+    /// ADR-052: a person's own secret is theirs; its rules are commits of their own file, the system's of the
+    /// system's; no one else's is set, read or changed from here, and an administrator may delete only its value.
+    #[test]
+    fn a_secret_is_its_owners_and_its_rules_are_commits() {
+        let d = repo();
+        let m = Fake { kept: vec![(Some("dev".into()), "gh".into()), (Some("sam".into()), "x".into())], ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("request system secret set gh user dev").unwrap(), "set gh\n");
+        assert_eq!(s.exec("request system secret show gh user dev").unwrap(), "show gh\n");
+        for line in ["request system secret set x user sam", "request system secret show x user sam", "request system secret allow x agent user sam"] {
+            let e = format!("{:#}", s.exec(line).unwrap_err());
+            assert!(e.contains("sam's secrets are theirs alone"), "{line}: {e}");
+        }
+        let out = s.exec("request system secret allow gh https api.github.com user dev").unwrap();
+        assert_eq!(out, "Changed what dev's secret gh may be used for (change #42).\n");
+        let (diff, _, tier, reason, _) = m.commits.borrow().last().unwrap().clone();
+        assert_eq!((tier.as_str(), reason.as_str()), ("user", "Secret gh: may be sent to api.github.com"));
+        assert!(diff.contains("+++ b/users/dev/secrets.json") && diff.contains("\"api.github.com\""), "{diff}");
+        // What a secret is for comes first; then who.
+        let e = format!("{:#}", s.exec("request system secret allow ci agent").unwrap_err());
+        assert!(e.contains("not used for anything yet"), "{e}");
+        s.exec("request system secret allow ci https api.github.com").unwrap();
+        let (diff, _, tier, _, _) = m.commits.borrow().last().unwrap().clone();
+        assert_eq!(tier, "system");
+        assert!(diff.contains("+++ b/secrets/system.json"), "{diff}");
+        // Deleting: its value, and for someone else's, only that.
+        assert_eq!(s.exec("request system secret delete x user sam").unwrap(), "delete x\n");
+        assert!(s.exec("request system secret delete none").is_err(), "nothing to delete");
+        assert_eq!(*m.secret_calls.borrow(), ["set gh Some(\"dev\") by dev", "show gh Some(\"dev\") by dev", "delete x Some(\"sam\") by dev"]);
+        let shown = s.exec("show system secrets").unwrap();
+        assert_eq!(shown, "dev's secrets:\n  gh                   has a value; used for nothing\nsam's secrets:\n  x                    has a value; used for nothing\n");
+    }
+
+    #[test]
+    fn the_secrets_rules_shown_as_the_repository_has_them() {
+        let d = repo();
+        sh(d.path(), "mkdir -p secrets users/dev && printf '%s' '{\"ci\":{\"kind\":\"token\",\"https\":{\"hosts\":[\"api.github.com\"]},\"actors\":[\"torq-agent\"]}}' > secrets/system.json \
+            && printf '%s' '{\"deploy\":{\"kind\":\"ssh-key\",\"ssh\":{\"hosts\":[\"github.com\"]},\"approve\":\"never\"}}' > users/dev/secrets.json && git add -A && git commit -qm rules");
+        let m = Fake { kept: vec![(None, "ci".into())], ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        let shown = s.exec("show system secrets").unwrap();
+        assert_eq!(
+            shown,
+            "The system's secrets:\n  ci                   token, has a value; https to api.github.com; the agent too, approved first-use\ndev's secrets:\n  deploy               SSH key, no value yet; ssh to github.com; not the agent\n"
+        );
+        // A change starts from what is there.
+        s.exec("request system secret allow deploy ssh gitlab.com user dev").unwrap();
+        let (diff, ..) = m.commits.borrow().last().unwrap().clone();
+        assert!(diff.contains("\"github.com\"") && diff.contains("+        \"gitlab.com\""), "{diff}");
+        s.exec("request system secret delete ci").unwrap();
+        let (diff, ..) = m.commits.borrow().last().unwrap().clone();
+        assert!(diff.contains("+++ /dev/null") || diff.contains("deleted file"), "the last rule gone, the file with it: {diff}");
+    }
+
     fn repo_with_software() -> tempfile::TempDir {
         let d = repo();
         sh(d.path(), &format!("printf '%s' '{}' > flake.lock && git add -A && git commit -qm old-software", lock(OLD)));

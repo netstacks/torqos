@@ -69,6 +69,8 @@ pub enum Op {
     ShowSnapshots,
     /// The declared backups: their keys, snapshots and last runs (ADR-038).
     ShowBackups,
+    /// The secrets: whose, whether each has a value, what each may be used for (ADR-052).
+    ShowSecrets,
     ShowServices,
     /// `show system ledger [<count>]`: the ledger itself — every change, refused and failed ones too.
     ShowLedger { count: Option<usize> },
@@ -142,6 +144,8 @@ pub enum Request {
     RestoreData { change: u64, path: String },
     /// A declared backup's key, typed at the terminal and kept outside the configuration (ADR-038).
     BackupKey { name: String },
+    /// A secret (ADR-052): its value set, deleted or shown, or its rule changed; `user`: a person's own, not the system's.
+    Secret { name: String, user: Option<String>, act: crate::secrets::Act },
     /// Put a path back from a declared backup (`None`: its newest snapshot).
     Restore { name: String, snapshot: Option<String>, path: String },
     /// This machine's key for the remote (ADR-036), made the first time.
@@ -267,6 +271,7 @@ pub fn render(op: &Op) -> String {
         Op::ShowDesktop => "show system desktop".into(),
         Op::ShowSnapshots => "show system snapshots".into(),
         Op::ShowBackups => "show system backups".into(),
+        Op::ShowSecrets => "show system secrets".into(),
         Op::ShowServices => "show services".into(),
         Op::ShowLedger { count: None } => "show system ledger".into(),
         Op::ShowLedger { count: Some(n) } => format!("show system ledger {n}"),
@@ -288,6 +293,7 @@ pub fn render(op: &Op) -> String {
             Request::RestoreData { change, path } => format!("request system snapshot restore {change} {path}"),
             Request::SnapshotTake => "request system snapshot take".into(),
             Request::BackupKey { name } => format!("request system backup key {}", quote(name)),
+            Request::Secret { name, user, act } => format!("request system secret {} {name}{}{}", act.verb(), act.rest(), user.as_ref().map(|u| format!(" user {}", quote(u))).unwrap_or_default()),
             Request::Restore { name, snapshot: None, path } => format!("request system restore {} {path}", quote(name)),
             Request::Restore { name, snapshot: Some(s), path } => format!("request system restore {} {s} {path}", quote(name)),
             Request::SnapshotDelete { change } => format!("request system snapshot delete {change}"),
@@ -395,6 +401,14 @@ mod tests {
             (Mode::Operational, Op::Request(Request::RestoreData { change: 12, path: "/home/alice/a".into() })),
             (Mode::Operational, Op::Request(Request::SnapshotTake)),
             (Mode::Operational, Op::Request(Request::BackupKey { name: "nas".into() })),
+            (Mode::Operational, Op::ShowSecrets),
+            (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: None, act: crate::secrets::Act::Set })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: Some("dev".into()), act: crate::secrets::Act::Show })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: Some("sam".into()), act: crate::secrets::Act::Delete })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: None, act: crate::secrets::Act::Allow(crate::secrets::Grant::Https("api.github.com".into())) })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "k".into(), user: Some("dev".into()), act: crate::secrets::Act::Disallow(crate::secrets::Grant::Ssh("github.com".into())) })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: None, act: crate::secrets::Act::Allow(crate::secrets::Grant::Agent) })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: Some("dev".into()), act: crate::secrets::Act::Approve(torq_wire::secrets::Approve::Never) })),
             (Mode::Operational, Op::Request(Request::Restore { name: "nas".into(), snapshot: None, path: "/home/alice/a".into() })),
             (Mode::Operational, Op::Request(Request::Restore { name: "nas".into(), snapshot: Some("4bd1d0c5".into()), path: "/var/lib/pg".into() })),
             (Mode::Operational, Op::Request(Request::SnapshotDelete { change: 12 })),
@@ -487,7 +501,7 @@ mod tests {
             (Mode::Configuration, "top top show", "'top' is not a word here (after `top`) (one of: commit, delete, edit"),
             (Mode::Operational, "exit now", "'now' is not a word here: nothing may follow `exit`"),
             (Mode::Operational, "show packages", "needs <word> (words to search for, in names and descriptions)"),
-            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, backups, commit, desktop, ledger, proposals, remote, rollback, snapshots, storage, uptime"),
+            (Mode::Operational, "show system", "not a whole command: one of these may follow: alarms, backups, commit, desktop, ledger, proposals, remote, rollback, secrets, snapshots, storage, uptime"),
             (Mode::Operational, "request system revert x", "'x' is not a number (change numbers: 1, 2, …)"),
             (Mode::Configuration, "up 0", "'0' is out of range: levels go from 1 to 10000"),
             (Mode::Configuration, "commit check comment x", "'comment' is not a word here: nothing may follow `commit check`"),

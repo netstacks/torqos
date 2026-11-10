@@ -471,9 +471,9 @@ mod tests {
         let s = schema();
         assert_eq!(words_of(&choices(&s, Mode::Operational, &[], "")), ["clear", "configure", "exit", "file", "help", "quit", "request", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show"), "")), ["configuration", "interfaces", "packages", "services", "system", "users", "version"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "backups", "commit", "desktop", "ledger", "proposals", "remote", "rollback", "snapshots", "storage", "uptime"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system"), "")), ["alarms", "backups", "commit", "desktop", "ledger", "proposals", "remote", "rollback", "secrets", "snapshots", "storage", "uptime"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("show system rollback 2"), "")), ["<[Enter]>", "compare", "|"]);
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["agent", "apply", "backup", "desktop", "ledger", "password", "pull", "remote", "repair", "restore", "revert", "snapshot", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["agent", "apply", "backup", "desktop", "ledger", "password", "pull", "remote", "repair", "restore", "revert", "secret", "snapshot", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &[], "s")), ["save", "set", "show"]);
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("run"), "")), ["clear", "file", "help", "request", "show"], "not configure or exit: already here");
         assert_eq!(words_of(&choices(&s, Mode::Configuration, &w("commit"), "c")), ["check", "comment", "confirmed"]);
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn requests_for_the_software() {
         let s = schema();
-        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["agent", "apply", "backup", "desktop", "ledger", "password", "pull", "remote", "repair", "restore", "revert", "snapshot", "software", "update"]);
+        assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system"), "")), ["agent", "apply", "backup", "desktop", "ledger", "password", "pull", "remote", "repair", "restore", "revert", "secret", "snapshot", "software", "update"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update"), "")), ["<[Enter]>", "all", "|"]);
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update |"), "")), ["display"], "its steps shown, nothing to filter");
         assert_eq!(words_of(&choices(&s, Mode::Operational, &w("request system update | display"), "")), ["detail"]);
@@ -651,7 +651,7 @@ mod tests {
         assert!(e.contains("'foo' is not a word here (after `show system`)") && e.contains("alarms, backups, commit, desktop, ledger, proposals, remote, rollback"), "{e}");
         assert!(x(o, "show configuraton").unwrap_err().contains("did you mean configuration?"));
         // A line that is not whole says what may follow, what value it needs, or that nothing may.
-        assert_eq!(x(o, "show system").unwrap_err(), "not a whole command: one of these may follow: alarms, backups, commit, desktop, ledger, proposals, remote, rollback, snapshots, storage, uptime");
+        assert_eq!(x(o, "show system").unwrap_err(), "not a whole command: one of these may follow: alarms, backups, commit, desktop, ledger, proposals, remote, rollback, secrets, snapshots, storage, uptime");
         // A restore from a backup: the snapshot may be left out, and then the one word is the path.
         assert!(x(o, "request system restore nas 4bd1d0c5").unwrap_err().contains("after the snapshot"));
         assert!(x(o, "request system restore nas /home/a /home/b").unwrap_err().contains("the snapshot comes before it"));
@@ -678,6 +678,7 @@ mod tests {
             "<user>" => "dev".into(),
             "<time>" => "10:00".into(),
             "<file>" => "services/x.nix".into(),
+            "<host>" => "api.github.com".into(),
             _ => "x".into(),
         };
         let mut checked = 0;

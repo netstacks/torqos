@@ -128,6 +128,13 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
     if !who.person {
         return Gate::Refused(format!("{} is not a person's account: only people, and the agent, propose changes", who.name));
     }
+    // A person's secrets' rules are theirs alone (ADR-052): an administrator's password applies, schedules or
+    // undoes no change to anyone else's. What the agent may do with a secret is its owner's to say.
+    if let (Some(c), "apply" | "apply-confirmed" | "revert" | "schedule") = (change, cmd) {
+        if let Some(f) = c.files.iter().find(|f| others_secret_rules(&who.name, f)) {
+            return Gate::Refused(format!("{f}: a person's secrets are theirs alone to change"));
+        }
+    }
     match cmd {
         "propose" => Gate::Open,
         // A session is the agent's: its record is its reports, and no one else's.
@@ -186,6 +193,11 @@ pub fn account(name: &str, passwd: &str, group: &str) -> Result<Caller> {
         bail!("{name:?} shares its uid with {:?}: not one account", c.name);
     }
     Ok(c)
+}
+
+/// Whether `file` is someone other than `name`'s secrets' rules (`users/<other>/secrets.json`).
+fn others_secret_rules(name: &str, file: &str) -> bool {
+    file.strip_prefix("users/").and_then(|r| r.split_once('/')).is_some_and(|(n, leaf)| leaf == torq_wire::secrets::PERSON_RULES && n != name)
 }
 
 /// Whether `file` is in `name`'s own folder of the configuration.
@@ -383,6 +395,15 @@ mod tests {
             }
             assert!(matches!(gate(&who(65534), cmd, None, Some("nobody")), Gate::Refused(_)), "{cmd}: a service's account has none");
         }
+        // Their rules too: an administrator's password changes no one else's, whatever else the change holds.
+        let sams = change(Tier::User, &["users/sam/secrets.json"]);
+        assert_eq!(gate(&who(1001), "apply", Some(&sams), None), Gate::Open);
+        for cmd in ["apply", "apply-confirmed", "revert", "schedule"] {
+            assert!(matches!(gate(&who(1000), cmd, Some(&sams), None), Gate::Refused(_)), "{cmd}");
+        }
+        let mixed = change(Tier::System, &["nixos/services.json", "users/sam/secrets.json"]);
+        assert!(matches!(gate(&who(1000), "apply", Some(&mixed), None), Gate::Refused(_)));
+        assert_eq!(gate(&who(1000), "apply", Some(&change(Tier::User, &["users/viper/secrets.json"])), None), Gate::Open, "their own, as any of theirs");
         let s = with_identity(&["secret-set".into(), "--name=t".into(), "--user=sam".into()], "secret-set", &who(1001), None, None, Some("/run/v")).unwrap();
         assert_eq!(s, ["secret-set", "--name=t", "--user=sam", "--value-file", "/run/v", "--approved-by", "sam"]);
         assert!(with_identity(&["secret-set".into()], "secret-set", &who(1001), None, None, None).is_err(), "a value comes in the request");

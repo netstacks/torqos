@@ -335,6 +335,84 @@ impl Machine for Real<'_> {
         Ok(out)
     }
 
+    fn secret_value(&self, name: &str, user: Option<&str>, act: &crate::secrets::Act, me: &str) -> Result<String> {
+        use crate::secrets::Act;
+        let whose = user.map_or_else(|| format!("the system's secret {name}"), |u| format!("{u}'s secret {name}"));
+        let mut args: Vec<String> = vec![format!("secret-{}", act.verb()), "--name".into(), name.into()];
+        if let Some(u) = user {
+            args.extend(["--user".into(), u.into()]);
+        }
+        let log = run::start_log()?;
+        let command = format!("request system secret {} {name}", act.verb());
+        match act {
+            Act::Set => {
+                if !std::io::stdin().is_terminal() {
+                    bail!("a secret is typed at a terminal: `{command}` there");
+                }
+                // Non-dumpable while it is held, as a password is (ADR-040).
+                rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).context("protecting the value")?;
+                let typed = |q: &str| -> Result<String> {
+                    print!("{q}: ");
+                    std::io::stdout().flush()?;
+                    let _hidden = Echo::set(false);
+                    let mut s = String::new();
+                    std::io::stdin().lock().read_line(&mut s)?;
+                    println!();
+                    Ok(s.trim_end_matches(['\n', '\r']).to_string())
+                };
+                let value = typed(&format!("Value of {whose} (not shown as you type)"))?;
+                if value.is_empty() {
+                    bail!("not changed: no value");
+                }
+                if typed("Again")? != value {
+                    bail!("not changed: the two differ");
+                }
+                let scratch = crate::scratch_dir()?;
+                let file = scratch.path().join("value");
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?.write_all(value.as_bytes())?;
+                }
+                args.extend(["--key-file".into(), file.to_string_lossy().into_owned()]);
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                let v = done(run::broker_json(broker(self.cli, &a)?, &log)?, &command)?;
+                Ok(format!(
+                    "The value of {whose} is kept (ledger #{}): encrypted, root's alone, outside the configuration. What it may be used for: request system secret allow {name} ….\n",
+                    v["seq"].as_u64().unwrap_or(0)
+                ))
+            }
+            Act::Show => {
+                args.extend(["--approved-by".into(), me.into()]);
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                let v = done(run::broker_json(broker(self.cli, &a)?, &log)?, &command)?;
+                Ok(format!("{}\n", v["value"].as_str().unwrap_or_default()))
+            }
+            Act::Delete => {
+                args.extend(["--approved-by".into(), me.into()]);
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                let v = done(run::broker_json(broker(self.cli, &a)?, &log)?, &command)?;
+                Ok(format!("The value of {whose} is deleted (ledger #{}).\n", v["seq"].as_u64().unwrap_or(0)))
+            }
+            _ => bail!("not a value's request"),
+        }
+    }
+
+    fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
+        let log = run::start_log()?;
+        let v = done(run::broker_json(broker(self.cli, &["secrets"])?, &log)?, "show system secrets")?;
+        Ok(v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| {
+                let name = k["name"].as_str()?.to_string();
+                match &k["owner"] {
+                    serde_json::Value::String(s) if s == "system" => Some((None, name)),
+                    o => Some((Some(o["person"].as_str()?.to_string()), name)),
+                }
+            })
+            .collect())
+    }
+
     fn backup_key(&self, name: &str, me: &str) -> Result<String> {
         if !std::io::stdin().is_terminal() {
             bail!("a key is typed at a terminal: `request system backup key {name}` there");
