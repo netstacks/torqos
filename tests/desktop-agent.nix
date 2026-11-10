@@ -127,8 +127,8 @@ pkgs.testers.runNixOSTest {
         in_session("sh -c 'ulimit -c unlimited; kill -SEGV $$'", ok=False)
         machine.wait_until_succeeds("journalctl --no-pager _SYSTEMD_USER_UNIT=torq-crash-watch.service | grep -q 'torq-crash-watch: offered: '", timeout=90)
         machine.sleep(5)
-        log = machine.succeed("journalctl --no-pager _SYSTEMD_USER_UNIT=torq-crash-watch.service")
-        assert "asked about pid" not in log, log
+        watched = machine.succeed("journalctl --no-pager _SYSTEMD_USER_UNIT=torq-crash-watch.service")
+        assert "asked about pid" not in watched, watched
         # Nothing handed to the window, and the agent asked nothing.
         machine.fail("ls /run/user/$(id -u alice)/torq-agent/ask-* 2>/dev/null")
         assert in_session("torq-agent-ui --check").splitlines()[0] == before
