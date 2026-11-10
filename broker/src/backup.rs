@@ -256,10 +256,15 @@ impl Broker {
     }
 
     /// Who owns `tree`'s folder `first` on this machine, as the machine says, never the repository: the
-    /// account of that name for a home, the live folder's owner for a service's. Not root's, not the
-    /// any agent's (the review of the backup, H1; ADR-051 3).
+    /// account of that name for a home, the live folder's owner for a service's. Not root's, not
+    /// any agent's (the review of the backup, H1; ADR-051 3), and not one no account owns.
     fn owner_here(&self, tree: &str, first: &str) -> Result<u32> {
         use std::os::unix::fs::MetadataExt;
+        // An agent's folder by its name too (ADR-051 3): the old single account's, after the update that
+        // removed it, is owned by a uid no account is named for, and a name is all that is left of it.
+        if first.starts_with("torq-agent") {
+            bail!("{} is an agent's: not restored from a backup", snapshot::written_out(tree, &[first.to_string()]));
+        }
         let passwd = fs::read_to_string(&self.backup.passwd).context("reading the accounts")?;
         let uid = if tree == "home" {
             uid_of(&passwd, first).with_context(|| format!("/home/{first}: no account named {first} on this machine: make it first, then restore"))?
@@ -271,6 +276,10 @@ impl Broker {
             }
             m.uid()
         };
+        // A folder whose owner no account is: a uid left behind, which a later account could be given.
+        if !passwd.lines().any(|l| l.split(':').nth(2).and_then(|u| u.parse::<u32>().ok()) == Some(uid)) {
+            bail!("{} is owned by uid {uid}, which no account on this machine is: not restored from a backup", snapshot::written_out(tree, &[first.to_string()]));
+        }
         if uid == 0 || agents_uid(&passwd, uid, &self.agent_limits) {
             bail!("{} is root's or an agent's: not restored from a backup", snapshot::written_out(tree, &[first.to_string()]));
         }

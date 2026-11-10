@@ -220,13 +220,27 @@ fn whose_it_is_the_machine_says() {
     // The agent's: refused, whatever its uid is.
     let agent = Machine::with_accounts(&format!("{}\n[ \"$1\" = restore ] && mkdir -p \"$4$6\"\nexit 0", listing()), &format!("torq-agent:x:{}:1::/var/empty:/bin/false\n", me()));
     agent.b.set_backup_key("home", "k", "casey").unwrap();
-    assert!(agent.restore("/home/torq-agent").contains("root's or an agent's"));
+    assert!(agent.restore("/home/torq-agent").contains("an agent's"));
     // Any agent's (ADR-051 3): each person's, and one left behind by an older machine.
     for name in ["torq-agent-alice", "torq-agent-bob"] {
         let agent = Machine::with_accounts(&format!("{}\n[ \"$1\" = restore ] && mkdir -p \"$4$6\"\nexit 0", listing()), &format!("{name}:x:{}:1::/var/empty:/bin/false\n", me()));
         agent.b.set_backup_key("home", "k", "casey").unwrap();
-        assert!(agent.restore(&format!("/home/{name}")).contains("root's or an agent's"), "{name}");
+        assert!(agent.restore(&format!("/home/{name}")).contains("an agent's"), "{name}");
     }
+    // The old single account's folder, after the update took its account away: refused by its name.
+    assert!(m.restore("/var/lib/torq-agent").contains("is an agent's"));
+    assert!(m.restore("/var/lib/torq-agent/.claude").contains("is an agent's"));
+    // A folder whose owner no account is (a uid left behind): refused. (Root's folder, with no root here.)
+    if let Some(live) = ["/var/lib/systemd-coredump", "/var/lib/machines", "/var/lib/lastlog", "/var/lib/sudo"].into_iter().find(|p| fs::symlink_metadata(p).is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0)) {
+        let orphan = Machine::with_accounts(&format!("{}\n[ \"$1\" = restore ] && mkdir -p \"$4$6\"\nexit 0", listing()), &format!("alice:x:{}:100::/home/alice:/bin/sh\n", me()));
+        orphan.b.set_backup_key("home", "k", "casey").unwrap();
+        assert!(orphan.restore(live).contains("which no account on this machine is"), "{live}");
+    }
+    // An agent the broker's map names, whatever its account is called: refused by its uid.
+    let Machine { dir, b } = Machine::with_accounts(&format!("{}\n[ \"$1\" = restore ] && mkdir -p \"$4$6\"\nexit 0", listing()), &format!("helper:x:{}:1::/var/empty:/bin/false\n", me()));
+    let mapped = Machine { dir, b: b.with_agent_limits(&torq_broker::agent::Limits { agents: [("helper".to_string(), "alice".to_string())].into_iter().collect(), settings: vec![] }) };
+    mapped.b.set_backup_key("home", "k", "casey").unwrap();
+    assert!(mapped.restore("/home/helper").contains("root's or an agent's"));
     // None of it reached restic's restore for the account that is not here.
     assert!(m.rooms().is_empty());
 }
