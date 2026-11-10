@@ -331,7 +331,9 @@ Its §5 lists claims without a test.
    torqcli's own retry (cli/src/run.rs, `NO_APPROVAL_AGENT`) still starts the dialog again for a terminal's command.
 10. **Desktop VM tests on .52 (nested ESXi, software rendering).** COSMIC's launcher, app library and portal panic
    on wgpu validation errors there, and the desktop is slow enough that the first approval after login can come
-   before COSMIC's dialog has registered with polkit (answered in 3 s, no dialog). The same test passes on the laptop.
+   before COSMIC's dialog has registered with polkit (answered in 3 s, no dialog): once in three runs, the others
+   finding the dialog in under 4 s; the laptop always does. The dialog's restart after polkit took 52 s there (5 s
+   on the laptop), so the test waits up to 120 s.
 
 ## Dev host quirks (not TorqOS bugs)
 - **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test

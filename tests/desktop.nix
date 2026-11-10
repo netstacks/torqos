@@ -150,14 +150,14 @@ pkgs.testers.runNixOSTest {
         osd = machine.succeed("pgrep -u alice -fx cosmic-osd").strip()
         machine.succeed("systemctl restart polkit")
         machine.succeed("pkill -u alice -fx cosmic-panel")
-        machine.wait_until_succeeds(f"pgrep -u alice -fx torq-applet | grep -vx {applet}", timeout=60)
-        machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-osd | grep -vx {osd}", timeout=60)
+        machine.wait_until_succeeds(f"pgrep -u alice -fx torq-applet | grep -vx {applet}", timeout=120)
+        machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-osd | grep -vx {osd}", timeout=120)
         machine.sleep(3)
         # A process another account names polkitd is not polkit: newer than the dialog, it must not have the
         # applet end it (the agent could otherwise end the person's dialog every few seconds).
         osd = machine.succeed("pgrep -u alice -fx cosmic-osd").strip()
         machine.succeed("cp ${pkgs.bash}/bin/bash /tmp/polkitd && chmod 755 /tmp/polkitd")
-        machine.succeed("systemd-run --uid=nobody --unit=fake-polkitd /tmp/polkitd -c 'sleep 120'")
+        machine.succeed("systemd-run --uid=nobody --unit=fake-polkitd /tmp/polkitd -c 'sleep 120; true'")
         machine.wait_until_succeeds("pgrep -u nobody -x polkitd", timeout=10)
         machine.sleep(12)
         machine.succeed(f"pgrep -u alice -fx cosmic-osd | grep -qx {osd}")
