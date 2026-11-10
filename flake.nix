@@ -139,6 +139,23 @@
           cmp ${./modules/cosmic/cosmic-greeter.nix} ${nixpkgs-cosmic}/nixos/modules/services/display-managers/cosmic-greeter.nix
           touch $out
         '';
+        # A desktop compiles COSMIC itself only where its owner turned that on (ADR-054): off, cosmic-comp is the
+        # very derivation NixOS's cache has; a custom feature without the gate does not evaluate; with both, the
+        # compositor is TorqOS's patched one.
+        cosmic-prebuilt = let
+          system = pkgs.stdenv.hostPlatform.system;
+          # A whole system (the dev VM's), so the only assertion that can fail is the one under test.
+          desktop = settings: self.lib.mkSystem { inherit system; modules = [ ./hosts/dev-vm { torq.desktop = { enable = true; } // settings; } ]; };
+          upstream = nixpkgs-cosmic.legacyPackages.${system}.cosmic-comp.drvPath;
+          drv = settings: (desktop settings).pkgs.cosmic-comp.drvPath;
+          evaluates = settings: (builtins.tryEval (desktop settings).config.system.build.toplevel.drvPath).success;
+        in
+          assert drv { } == upstream;
+          assert drv { customCompile = true; } == upstream;
+          assert drv { customCompile = true; touchpadGestures = true; } != upstream;
+          assert evaluates { customCompile = true; touchpadGestures = true; };
+          assert !(evaluates { touchpadGestures = true; });
+          pkgs.runCommand "torq-cosmic-prebuilt" { } "touch $out";
         # torq-wire's own tests (ADR-044): the bytes on the socket, pinned. The ledger's fixtures are the broker's tests.
         wire = pkgs.rustPlatform.buildRustPackage {
           pname = "torq-wire";

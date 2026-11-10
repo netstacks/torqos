@@ -50,6 +50,16 @@ in
       default = false;
       description = "Never suspend: closing the lid locks the machine and turns the display fully down, and opening it brings the brightness back. For a laptop that cannot wake its display from suspend (some OLED panels).";
     };
+    customCompile = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Allow TorqOS's own changes to COSMIC (ADR-054). Each makes this machine compile a COSMIC package itself instead of taking it prebuilt from NixOS's cache, at almost every update: cosmic-comp takes a long time on a laptop. Off: COSMIC as NixOS builds it, and every custom feature below refused.";
+    };
+    touchpadGestures = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "More touchpad gestures (ADR-054): three fingers up for the workspace overview (down closes it), three fingers down for the window switcher, four fingers pinched in for the app library. A change to COSMIC's compositor: needs `torq desktop customCompile true`.";
+    };
     cosmicNixpkgs = lib.mkOption {
       type = lib.types.path;
       internal = true;
@@ -78,14 +88,25 @@ in
     assertions = lib.optional (lib.versionOlder lib.trivial.release "26.11") {
       assertion = config.security.polkit.enablePkexecWrapper;
       message = "security.polkit.enablePkexecWrapper = false has no effect on NixOS 26.05: pkexec is installed with polkit.";
-    };
-    nixpkgs.overlays = [ (_: _: lib.genAttrs fromCosmic (n: cosmicPkgs.${n}) // {
+    } ++ [{
+      # A custom COSMIC feature never turns on the machine's compiling COSMIC by itself (ADR-054).
+      assertion = cfg.touchpadGestures -> cfg.customCompile;
+      message = "torq desktop touchpadGestures changes COSMIC's compositor, which this machine then compiles itself at almost every update: turn that on first, `set torq desktop customCompile true`.";
+    }];
+    nixpkgs.overlays = [ (_: _: lib.genAttrs fromCosmic (n: cosmicPkgs.${n}) // lib.optionalAttrs (cfg.customCompile && cfg.touchpadGestures) {
       # Touchpad gestures COSMIC leaves to do: three fingers up for the workspace overview (down closes it),
       # down for the window switcher, four fingers pinched in for the app library. In the compositor, which
       # has the touchpad already, so no program needs the `input` group (it reads every keyboard too, the
       # owner's password with it). Built here, not taken from the cache; checked again at each COSMIC bump.
       cosmic-comp = cosmicPkgs.cosmic-comp.overrideAttrs (old: {
         patches = (old.patches or [ ]) ++ [ ./cosmic/cosmic-comp-gestures.patch ];
+        # Built on the machine itself, a laptop as often as not: upstream's whole-program optimisation (`lto =
+        # "fat"`, for its own build servers) with every core froze one with 22 GB until a reboot, twice. Thin
+        # LTO and at most 8 jobs (0, from Nix, means every core) instead.
+        env = (old.env or { }) // { CARGO_PROFILE_RELEASE_LTO = "thin"; };
+        preBuild = (old.preBuild or "") + ''
+          if [ "$NIX_BUILD_CORES" -eq 0 ] || [ "$NIX_BUILD_CORES" -gt 8 ]; then NIX_BUILD_CORES=8; fi
+        '';
       });
     }) ];
     # The graphics driver from the same nixpkgs: COSMIC's compositor and the driver it loads must be one Mesa.

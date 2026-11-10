@@ -2068,9 +2068,20 @@ content at the next), and a proposal must be judged on what it does, not on what
   3. **Four fingers pinched in** to three quarters of where they started: the app library (`AppLibrary`,
      toggles), once per pinch. Pinches of fewer fingers stay the app's (zoom).
   4. Three fingers left and right do nothing: four fingers switch workspaces, unchanged.
-- **Consequences:** cosmic-comp is built on the machine, not taken from NixOS's cache (a few minutes, at
-  each COSMIC bump), and the patch is checked again at each. That build is heavy: on the laptop (20 threads,
-  22 GB) its final crate with every core froze the desktop until a reboot (2026-11-10). A desktop machine's own builds want such a limit (`nix settings cores`), open. Offered upstream (cosmic-comp #1799 is a step
+  5. **Off by default, behind a gate** (the owner, 2026-11-10: "`desktop custom compile true` is required to
+     turn on anything custom in cosmic"). A patched package is not in NixOS's cache, so a machine with it
+     compiles it, at almost every update: the weekly bump moves `nixpkgs-cosmic`, and with it something
+     cosmic-comp is built from. That is against ADR-023 for everyone who did not ask for it. So
+     `torq desktop customCompile` (off) allows any of TorqOS's changes to COSMIC, and each is its own setting
+     besides, here `torq desktop touchpadGestures` (off); a feature without the gate is refused at commit,
+     with the setting to turn on. The gate alone changes nothing. Both off, cosmic-comp is upstream's, from
+     the cache. Not a TorqOS binary cache: that is ADR-039's, on its own merits, not this feature's.
+- **Consequences:** where both are on, cosmic-comp is built on the machine, not taken from NixOS's cache (at
+  almost every update), and the patch is checked again at each. Upstream builds it with whole-program
+  optimisation (`lto = "fat"`, Cargo.toml's release profile), for build servers: on the laptop (20 threads,
+  22 GB) its final crate froze the desktop until a reboot, twice (2026-11-10), once with every core and once
+  with six. So TorqOS's build of it is thin LTO (`CARGO_PROFILE_RELEASE_LTO=thin`) with at most 8 jobs. A
+  limit for every build of a desktop machine (`nix settings cores`) is open. Offered upstream (cosmic-comp #1799 is a step
   towards four-finger overview gestures). The gestures fire when recognised; they do not follow the fingers.
   Not tested in a VM: QEMU has no multi-finger touchpad to drive; checked by hand on the laptop.
 - **Known (the independent review, 2026-11-10):** a swipe's direction is its first movement's, as upstream's
