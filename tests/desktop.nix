@@ -146,6 +146,15 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("pgrep -u alice -fx torq-applet", timeout=60)
         machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-osd | grep -vx {osd}", timeout=60)
         machine.sleep(3)
+        # A process another account names polkitd is not polkit: newer than the dialog, it must not have the
+        # applet end it (the agent could otherwise end the person's dialog every few seconds).
+        osd = machine.succeed("pgrep -u alice -fx cosmic-osd").strip()
+        machine.succeed("cp ${pkgs.bash}/bin/bash /tmp/polkitd && chmod 755 /tmp/polkitd")
+        machine.succeed("systemd-run --uid=nobody --unit=fake-polkitd /tmp/polkitd -c 'sleep 120'")
+        machine.wait_until_succeeds("pgrep -u nobody -x polkitd", timeout=10)
+        machine.sleep(12)
+        machine.succeed(f"pgrep -u alice -fx cosmic-osd | grep -qx {osd}")
+        machine.succeed("systemctl stop fake-polkitd")
 
         # Meanwhile the applet saved alice's desktop (it saves when the ledger changes, and every 15
         # minutes): the configuration has moved on from the change's base, by a commit to her own folder.

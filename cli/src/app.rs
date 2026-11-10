@@ -1410,14 +1410,43 @@ fn started(pid: i32) -> Option<u64> {
 /// running: it registered with one that has gone (a switch that changes polkit restarts it), does not register
 /// again by itself, and no approval can be asked of the person until it starts again. Read afresh each time, from
 /// the processes themselves, so an applet that starts after polkit was replaced still sees it.
+///
+/// polkit is the `polkitd` that polkit's own account runs, never a process of that name another account could
+/// start (the agent's, say, to have the person's dialog ended every few seconds: the review of this fix). The
+/// dialogs are the person's in each of their sessions: with two logins, each applet starts both again, once.
 pub fn approval_agent_outlived() -> Option<u64> {
+    use std::os::unix::fs::MetadataExt as _;
+    let polkit_uid = polkit_account()?;
     let polkit = std::fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
         let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+        (e.metadata().ok()?.uid() == polkit_uid).then_some(())?;
         (std::fs::read_to_string(e.path().join("comm")).ok()?.trim() == "polkitd").then_some(pid)
     })?;
     let polkit = started(polkit)?;
     let agent = my_parts().into_iter().filter(|(_, c)| c == "cosmic-osd").filter_map(|(pid, _)| started(pid)).min()?;
     (agent < polkit).then_some(polkit)
+}
+
+/// The account polkit runs as on NixOS (`polkituser`), from /etc/passwd.
+fn polkit_account() -> Option<u32> {
+    passwd_uid(&std::fs::read_to_string("/etc/passwd").ok()?, "polkituser")
+}
+
+fn passwd_uid(passwd: &str, name: &str) -> Option<u32> {
+    passwd.lines().find_map(|l| {
+        let mut f = l.split(':');
+        (f.next()? == name).then_some(())?;
+        f.nth(1)?.parse().ok()
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn polkits_account_is_read_from_passwd() {
+    let passwd = "root:x:0:0::/root:/bin/sh\npolkituser:x:28:989:PolKit daemon:/var/empty:/bin/nologin\npolkituser2:x:5:5::/:/bin/sh\n";
+    assert_eq!(passwd_uid(passwd, "polkituser"), Some(28));
+    assert_eq!(passwd_uid(passwd, "polkit"), None);
+    assert_eq!(passwd_uid("polkituser:x:notanumber:1::/:/bin/sh", "polkituser"), None);
 }
 
 #[cfg(test)]
