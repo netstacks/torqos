@@ -29,7 +29,7 @@ use std::process::Command;
 const AGENT_PREFIX: &str = "torq-agent-";
 
 /// The agent account of `person`: `torq-agent-<person>`.
-pub fn agent_of(person: &str) -> String {
+pub(crate) fn agent_of(person: &str) -> String {
     format!("{AGENT_PREFIX}{person}")
 }
 
@@ -37,7 +37,7 @@ pub fn agent_of(person: &str) -> String {
 /// runs unprivileged, as whoever runs it, and what it decides here is how it behaves (a commit that
 /// proposes and stops, no `torq agent run` from inside one) — never what is allowed. The broker is the
 /// authority: it knows an agent by its map (/etc/torq/broker.json) and the kernel's uid, not by a name.
-pub fn is_agent(name: &str) -> bool {
+pub(crate) fn is_agent(name: &str) -> bool {
     name.strip_prefix(AGENT_PREFIX).is_some_and(|p| !p.is_empty())
 }
 
@@ -47,13 +47,13 @@ const SETFACL: &str = "/run/current-system/sw/bin/setfacl";
 
 /// What `torq agent run` was asked: the directory to share, and the program (none: a shell).
 #[derive(Debug, PartialEq)]
-pub struct Run {
+pub(crate) struct Run {
     pub share: Option<PathBuf>,
     pub command: Vec<String>,
 }
 
 /// `run [--share <dir>] [--] [<command> …]`, after `agent`.
-pub fn parse(args: &[String]) -> Result<Run> {
+pub(crate) fn parse(args: &[String]) -> Result<Run> {
     let usage = "usage: torq agent run [--share <dir>] [--] [<command> …]";
     let mut it = args.iter();
     if it.next().map(String::as_str) != Some("run") {
@@ -77,7 +77,7 @@ pub fn parse(args: &[String]) -> Result<Run> {
 
 /// The directory to share, checked: it exists, it is a directory, it is the person's own, and it is
 /// inside their home but not the home itself — named as it is, every link resolved.
-pub fn checked_share(dir: &Path, home: &Path, uid: u32) -> Result<PathBuf> {
+pub(crate) fn checked_share(dir: &Path, home: &Path, uid: u32) -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     let dir = std::fs::canonicalize(dir).with_context(|| format!("{}: no such directory", dir.display()))?;
     let home = std::fs::canonicalize(home).with_context(|| format!("{}: your home", home.display()))?;
@@ -97,7 +97,7 @@ pub fn checked_share(dir: &Path, home: &Path, uid: u32) -> Result<PathBuf> {
 
 /// Everything under `dir` (itself included) that `uid` owns — its directories, and its other files —
 /// walked without following a link (a link is not shared; what it points to is not walked).
-pub fn owned(dir: &Path, uid: u32) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+pub(crate) fn owned(dir: &Path, uid: u32) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     use std::os::unix::fs::MetadataExt;
     let (mut dirs, mut files, mut todo) = (Vec::new(), Vec::new(), vec![dir.to_path_buf()]);
     while let Some(p) = todo.pop() {
@@ -190,7 +190,7 @@ fn share_acls(dir: &Path, uid: u32, agent: &str, me: &str) -> Result<()> {
 
 /// Run it: share the directory (ACLs, and the directory itself, open), then become the agent,
 /// through the launcher. Does not return on success: the program takes this process's place.
-pub fn run(args: &[String]) -> Result<i32> {
+pub(crate) fn run(args: &[String]) -> Result<i32> {
     use std::os::fd::AsRawFd;
     let r = parse(args)?;
     let me = crate::me()?;
@@ -240,7 +240,7 @@ pub fn run(args: &[String]) -> Result<i32> {
 
 /// What `torq ask` was asked: a question for the person's agent, or to forget the conversation.
 #[derive(Debug, PartialEq)]
-pub enum Asked {
+pub(crate) enum Asked {
     Question(String),
     Forget,
 }
@@ -248,7 +248,7 @@ pub enum Asked {
 const ASK_USAGE: &str = "usage: torq ask \"<question>\" | torq ask --forget — e.g. torq ask \"why is my wifi flaky?\"";
 
 /// `ask "<question>"`, `ask -- <words…>`, `ask --forget` (after `ask`).
-pub fn parse_ask(args: &[String]) -> Result<Asked> {
+pub(crate) fn parse_ask(args: &[String]) -> Result<Asked> {
     let words = match args {
         [f] if f == "--forget" => return Ok(Asked::Forget),
         [d, rest @ ..] if d == "--" => rest,
@@ -393,7 +393,7 @@ fn show(e: torq_wire::agent::Event, error_ends: bool, failed: &mut bool, out: &m
 /// its service, `torq-agent@<you>.service`, on its socket — asked through the client every UI shares
 /// (`client::Client`), the answer streamed as it comes, with the number of anything it proposed; Ctrl-C
 /// stops it. `--forget`: the conversation it keeps is erased.
-pub fn ask(args: &[String]) -> Result<i32> {
+pub(crate) fn ask(args: &[String]) -> Result<i32> {
     use torq_wire::agent::Event;
     let asked = parse_ask(args)?;
     let agent = client::Client::mine()?;
@@ -431,7 +431,7 @@ pub fn ask(args: &[String]) -> Result<i32> {
 /// `torq agent propose "<ask>"` (`propose`; ADR-042, 6): the same, with one more tool — it may
 /// propose a change within what the agent may (torq.agent.mayPropose), never apply one: a person
 /// applies it with `request system apply <n>`.
-pub fn doctor_mode(args: &[String], propose: bool) -> Result<i32> {
+pub(crate) fn doctor_mode(args: &[String], propose: bool) -> Result<i32> {
     const DOCTOR: &str = "/run/current-system/sw/bin/torq-doctor";
     let question = args.join(" ");
     if question.trim().is_empty() {
@@ -459,7 +459,7 @@ pub fn doctor_mode(args: &[String], propose: bool) -> Result<i32> {
 
 /// `torq break-glass "<reason>"` (ADR-035): a root shell, after the record. The launcher, through
 /// sudo (the person's password), writes the ledger entry, pushes it, and only then opens the shell.
-pub fn break_glass(args: &[String]) -> Result<i32> {
+pub(crate) fn break_glass(args: &[String]) -> Result<i32> {
     const LAUNCHER: &str = "/run/current-system/sw/bin/torq-break-glass";
     let reason = args.join(" ");
     if reason.trim().is_empty() {

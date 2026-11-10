@@ -193,6 +193,71 @@ pub fn glance(reach: &Result<Option<Status>, Unreachable>, here: Option<&Turn>) 
     }
 }
 
+/// What became of a proposal, by the ledger.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Fate {
+    /// Waiting for a person (as TorqOS Settings' Proposals page lists it).
+    Waiting,
+    Applied,
+    /// Its apply failed.
+    Failed,
+    /// No proposal of this person's agent has that number: no Review for it.
+    NotYours,
+}
+
+/// Each of `seqs`' fate in the ledger's `entries`, where `agent` is the person's agent account: a number
+/// that is not a proposal of that agent's is `NotYours`, whatever the service said.
+pub fn fates(entries: &[crate::history::Entry], agent: &str, seqs: &[u64]) -> Vec<(u64, Fate)> {
+    let waiting = crate::history::waiting_proposals(entries);
+    seqs.iter()
+        .map(|&seq| {
+            let mine = entries.iter().any(|e| e.seq == seq && e.kind == "proposal" && e.data["agent"].as_str() == Some(agent));
+            let ended = |kind: &str| entries.iter().any(|e| e.kind == kind && e.data["proposal"].as_u64() == Some(seq));
+            let fate = if !mine {
+                Fate::NotYours
+            } else if waiting.iter().any(|e| e.seq == seq) {
+                Fate::Waiting
+            } else if ended("applied") {
+                Fate::Applied
+            } else {
+                Fate::Failed
+            };
+            (seq, fate)
+        })
+        .collect()
+}
+
+/// A proposal as a turn shows it: its words, and whether it has a Review (only one of the person's own
+/// agent's, waiting).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProposalRow {
+    pub seq: u64,
+    pub text: String,
+    pub review: bool,
+}
+
+impl Turn {
+    /// The proposals this turn made, each with its fate (not yet looked up: said so, no Review), and marked
+    /// tainted when the turn's session read untrusted text.
+    pub fn proposal_rows(&self, fates: &[(u64, Fate)]) -> Vec<ProposalRow> {
+        let mark = if self.tainted.is_empty() { "" } else { " (tainted)" };
+        self.proposed
+            .iter()
+            .map(|&seq| {
+                let fate = fates.iter().find(|(s, _)| *s == seq).map(|(_, f)| *f);
+                let said = match fate {
+                    None => "looking it up…",
+                    Some(Fate::Waiting) => "waiting for you to apply or refuse it",
+                    Some(Fate::Applied) => "applied",
+                    Some(Fate::Failed) => "did not apply",
+                    Some(Fate::NotYours) => "not your agent's proposal",
+                };
+                ProposalRow { seq, text: format!("Proposed #{seq}{mark}: {said}"), review: fate == Some(Fate::Waiting) }
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +342,39 @@ mod tests {
         assert_eq!(glance(&idle(0), c.last()), ("Working…".into(), Mood::Working), "its own question, before the service says so");
         c.lost("gone");
         assert_eq!(glance(&idle(0), c.last()).1, Mood::Trouble, "its last question failed");
+    }
+
+    fn entry(seq: u64, kind: &str, data: serde_json::Value) -> crate::history::Entry {
+        crate::history::Entry { seq, ts: String::new(), kind: kind.into(), tier: String::new(), actor: "agent".into(), approved_by: None, tainted: false, reason: String::new(), data }
+    }
+
+    /// A proposal's row: its fate from the ledger, Review only for one of the person's own agent's that
+    /// waits, and the taint mark wherever the turn's session read untrusted text.
+    #[test]
+    fn proposals_as_a_turn_shows_them() {
+        use serde_json::json;
+        let entries = vec![
+            entry(1, "proposal", json!({"agent": "torq-agent-me"})),
+            entry(2, "proposal", json!({"agent": "torq-agent-me"})),
+            entry(3, "applied", json!({"proposal": 2})),
+            entry(4, "proposal", json!({"agent": "torq-agent-bob"})),
+            entry(5, "proposal", json!({"agent": "torq-agent-me"})),
+            entry(6, "apply_failed", json!({"proposal": 5})),
+            entry(7, "applied", json!({})),
+        ];
+        let f = fates(&entries, "torq-agent-me", &[1, 2, 4, 5, 7, 99]);
+        assert_eq!(f, vec![(1, Fate::Waiting), (2, Fate::Applied), (4, Fate::NotYours), (5, Fate::Failed), (7, Fate::NotYours), (99, Fate::NotYours)]);
+        let mut c = Conversation::default();
+        c.asked("q");
+        for seq in [1, 2, 4, 8] {
+            c.heard(Event::Proposed { seq });
+        }
+        let rows = c.last().unwrap().proposal_rows(&f);
+        assert_eq!(rows.iter().map(|r| (r.seq, r.review)).collect::<Vec<_>>(), [(1, true), (2, false), (4, false), (8, false)]);
+        assert_eq!(rows[0].text, "Proposed #1: waiting for you to apply or refuse it");
+        assert_eq!(rows[3].text, "Proposed #8: looking it up…");
+        c.heard(Event::Tainted { why: "read_journal".into() });
+        let rows = c.last().unwrap().proposal_rows(&f);
+        assert!(rows.iter().all(|r| r.text.contains("(tainted)")), "{rows:?}");
     }
 }

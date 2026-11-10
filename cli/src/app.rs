@@ -983,6 +983,16 @@ pub struct Proposal {
     pub tainted: bool,
 }
 
+/// What became of each of these proposals (those the person's agent said it made), by the ledger: only
+/// one of their own agent's is theirs to review.
+pub fn agent_fates(seqs: &[u64]) -> Result<Vec<(u64, crate::agent::conversation::Fate)>> {
+    if seqs.is_empty() {
+        return Ok(vec![]);
+    }
+    let entries = crate::read_ledger(&cli())?;
+    Ok(crate::agent::conversation::fates(&entries, &crate::agent::agent_of(&crate::me()?), seqs))
+}
+
 /// Proposals waiting for a person: the agent's and other people's. One's own commit that did not go through leaves
 /// a proposal too, and that is not something waiting on them.
 fn waiting_on_me<'a>(entries: &'a [history::Entry], me: &str) -> Vec<&'a history::Entry> {
