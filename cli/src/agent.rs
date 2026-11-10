@@ -254,8 +254,46 @@ pub fn parse_ask(args: &[String]) -> Result<Asked> {
     Ok(Asked::Question(q))
 }
 
-/// Ctrl-C, while an answer comes, asks the agent to stop: the terminal's keys read as keys (no signal,
-/// no echo), each Ctrl-C a `stop` sent; the terminal as it was when this ends.
+/// What a key does while an answer comes.
+#[derive(Debug, PartialEq)]
+enum KeyDoes {
+    Nothing,
+    /// The first Ctrl-C: ask the agent to stop.
+    Stop,
+    /// A second: leave, whatever the agent does.
+    Leave,
+}
+
+/// How long after a Ctrl-C the agent has to end its task before `torq ask` leaves without it.
+const GIVE_UP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ctrl-C asks the agent to stop; a second Ctrl-C, or no end within `GIVE_UP` of the first, gets the
+/// person out (a hung or frozen service never holds the terminal).
+#[derive(Default)]
+struct Interrupt {
+    stopped_at: Option<std::time::Instant>,
+}
+
+impl Interrupt {
+    fn key(&mut self, b: u8, now: std::time::Instant) -> KeyDoes {
+        match (b, self.stopped_at) {
+            (0x03, None) => {
+                self.stopped_at = Some(now);
+                KeyDoes::Stop
+            }
+            (0x03, Some(_)) => KeyDoes::Leave,
+            _ => KeyDoes::Nothing,
+        }
+    }
+
+    fn given_up(&self, now: std::time::Instant) -> bool {
+        self.stopped_at.is_some_and(|t| now.duration_since(t) >= GIVE_UP)
+    }
+}
+
+/// Ctrl-C, while an answer comes: the terminal's keys read as keys (no signal, no echo), the first
+/// Ctrl-C a `stop` sent, a second — or no end within `GIVE_UP` — the terminal as it was and exit 130;
+/// the terminal as it was, too, when this ends.
 struct Keys(rustix::termios::Termios);
 
 impl Keys {
@@ -268,12 +306,33 @@ impl Keys {
         keys.special_codes[SpecialCodeIndex::VMIN] = 1;
         keys.special_codes[SpecialCodeIndex::VTIME] = 0;
         tcsetattr(&stdin, OptionalActions::Now, &keys).ok()?;
+        let restore = was.clone();
         std::thread::spawn(move || {
-            let mut b = [0u8; 1];
-            while rustix::io::read(std::io::stdin(), &mut b).is_ok_and(|n| n == 1) {
-                if b[0] == 0x03 {
-                    eprintln!("agent: stopping");
+            use rustix::event::{poll, PollFd, PollFlags, Timespec};
+            let (mut i, mut open) = (Interrupt::default(), true);
+            loop {
+                let stdin = std::io::stdin();
+                let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
+                let ready = open && poll(&mut fds, Some(&Timespec { tv_sec: 0, tv_nsec: 200_000_000 })).is_ok_and(|n| n > 0);
+                if !open {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                let mut does = KeyDoes::Nothing;
+                if ready {
+                    let mut b = [0u8; 1];
+                    match rustix::io::read(&stdin, &mut b) {
+                        Ok(1) => does = i.key(b[0], std::time::Instant::now()),
+                        _ => open = false,
+                    }
+                }
+                if does == KeyDoes::Stop {
+                    eprintln!("agent: stopping (Ctrl-C again to leave now)");
                     let _ = send(&conn, &torq_wire::agent::Request::Stop);
+                }
+                if does == KeyDoes::Leave || i.given_up(std::time::Instant::now()) {
+                    let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &restore);
+                    eprintln!("agent: left without its answer (it may still be stopping)");
+                    std::process::exit(130);
                 }
             }
         });
@@ -296,8 +355,8 @@ fn send(mut conn: &std::os::unix::net::UnixStream, r: &torq_wire::agent::Request
 
 /// How the person reads an event: the answer and the proposals on standard output, the steps on the
 /// way on standard error, every word of the agent's cleaned of what could fool a terminal. `Some`
-/// (the exit code) when it is the last.
-fn show(e: torq_wire::agent::Event, failed: &mut bool, out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> std::io::Result<Option<i32>> {
+/// (the exit code) when it is the last — an error is the last, too, when `error_ends` (for `forget`).
+fn show(e: torq_wire::agent::Event, error_ends: bool, failed: &mut bool, out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> std::io::Result<Option<i32>> {
     use crate::history::clean;
     use torq_wire::agent::Event;
     match e {
@@ -311,7 +370,10 @@ fn show(e: torq_wire::agent::Event, failed: &mut bool, out: &mut dyn std::io::Wr
         Event::Proposed { seq } => writeln!(out, "Proposed #{seq}: a person applies it — `show system proposals`, `request system apply {seq}`")?,
         Event::Error { text } => {
             *failed = true;
-            writeln!(err, "agent: {}", clean(&text))?
+            writeln!(err, "agent: {}", clean(&text))?;
+            if error_ends {
+                return Ok(Some(1));
+            }
         }
         Event::Done { exit } => return Ok(Some(if exit == 0 && !*failed { 0 } else { 1 })),
         Event::Forgotten => {
@@ -361,7 +423,7 @@ pub fn ask(args: &[String]) -> Result<i32> {
             bail!("your agent's service ended before it answered (journalctl -u torq-agent@{me}.service, an administrator's)");
         }
         let e: Event = serde_json::from_str(&line).context("your agent said something this torq does not know")?;
-        if let Some(code) = show(e, &mut failed, &mut std::io::stdout(), &mut std::io::stderr())? {
+        if let Some(code) = show(e, !question, &mut failed, &mut std::io::stdout(), &mut std::io::stderr())? {
             return Ok(code);
         }
     }
@@ -510,7 +572,7 @@ mod tests {
     fn how_the_answer_is_shown() {
         use torq_wire::agent::Event;
         let (mut out, mut err, mut failed) = (Vec::new(), Vec::new(), false);
-        let mut s = |e| show(e, &mut failed, &mut out, &mut err).unwrap();
+        let mut s = |e| show(e, false, &mut failed, &mut out, &mut err).unwrap();
         assert_eq!(s(Event::Called { tool: "read_journal".into() }), None);
         assert_eq!(s(Event::Tainted { why: "read_journal".into() }), None);
         assert_eq!(s(Event::Say { text: "line one\nrewrite\rd \u{1b}[2J\u{202e}".into() }), None);
@@ -522,8 +584,32 @@ mod tests {
         assert!(err.contains("agent: read_journal") && err.contains("untrusted text (read_journal)"), "{err}");
         // An error, then done: failed, whatever the code.
         let (mut failed, mut sink) = (false, Vec::new());
-        assert_eq!(show(Event::Error { text: "a task is running already".into() }, &mut failed, &mut Vec::new(), &mut sink).unwrap(), None);
-        assert_eq!(show(Event::Done { exit: 0 }, &mut failed, &mut Vec::new(), &mut Vec::new()).unwrap(), Some(1));
-        assert_eq!(show(Event::Done { exit: 137 }, &mut false, &mut Vec::new(), &mut Vec::new()).unwrap(), Some(1), "stopped");
+        assert_eq!(show(Event::Error { text: "a task is running already".into() }, false, &mut failed, &mut Vec::new(), &mut sink).unwrap(), None);
+        assert_eq!(show(Event::Done { exit: 0 }, false, &mut failed, &mut Vec::new(), &mut Vec::new()).unwrap(), Some(1));
+        assert_eq!(show(Event::Done { exit: 137 }, false, &mut false, &mut Vec::new(), &mut Vec::new()).unwrap(), Some(1), "stopped");
+    }
+
+    /// `forget` ends at its error: refused while a task runs, `torq ask --forget` never waits.
+    #[test]
+    fn forget_ends_at_an_error() {
+        use torq_wire::agent::Event;
+        let refused = || Event::Error { text: "a task is running: stop it first, or wait".into() };
+        assert_eq!(show(refused(), true, &mut false, &mut Vec::new(), &mut Vec::new()).unwrap(), Some(1));
+        assert_eq!(show(refused(), false, &mut false, &mut Vec::new(), &mut Vec::new()).unwrap(), None, "an ask goes on to its done");
+        assert_eq!(show(Event::Forgotten, true, &mut false, &mut Vec::new(), &mut Vec::new()).unwrap(), Some(0));
+    }
+
+    /// Ctrl-C asks the agent to stop; a second, or no end within GIVE_UP of the first, leaves.
+    #[test]
+    fn ctrl_c_stops_then_leaves() {
+        let t = std::time::Instant::now();
+        let mut i = Interrupt::default();
+        assert!(!i.given_up(t + GIVE_UP * 10), "nothing asked yet: never given up");
+        assert_eq!(i.key(b'x', t), KeyDoes::Nothing);
+        assert_eq!(i.key(0x03, t), KeyDoes::Stop);
+        assert!(!i.given_up(t + GIVE_UP / 2));
+        assert!(i.given_up(t + GIVE_UP), "no end in time: leave");
+        assert_eq!(i.key(b'y', t), KeyDoes::Nothing);
+        assert_eq!(i.key(0x03, t), KeyDoes::Leave, "the second Ctrl-C");
     }
 }
