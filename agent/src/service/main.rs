@@ -112,6 +112,11 @@ impl Agent {
         let out = Out(Arc::new(Mutex::new(conn.try_clone()?)));
         if !peer_is(&conn, self.uid)? {
             out.send(&Event::Error { text: format!("this is {}'s agent: it answers {} alone", self.person, self.person) });
+            // Closed only once what it sent is read (a little of it, for a little while): closed with it
+            // unread, the kernel could reset the connection before the refusal reached the other end.
+            let _ = conn.shutdown(std::net::Shutdown::Write);
+            let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = std::io::copy(&mut (&conn).take(64 * 1024), &mut std::io::sink());
             return Ok(());
         }
         let mut r = BufReader::new(conn);
