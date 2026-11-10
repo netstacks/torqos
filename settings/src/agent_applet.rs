@@ -57,6 +57,8 @@ struct Applet {
     note: Option<String>,
     /// The compositor's activation tokens, so the window opened is raised, not left behind.
     tokens: Option<TokenSender<TokenRequest>>,
+    /// torqcli's question about a Decline, waiting for the person's answer.
+    declining: Option<(String, agentkit::Reply)>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +73,11 @@ enum Message {
     Stopped(Result<Status, String>),
     Open,
     Review,
+    /// Decline a proposal: torqcli's line; its question, the person's answer, what it said.
+    Decline(u64),
+    DeclineAsked(String, agentkit::Reply),
+    Answer(bool),
+    Declined(Result<String, String>),
     Settings,
     Token(TokenUpdate),
     PopupClosed(Id),
@@ -123,9 +130,20 @@ impl Applet {
                 let mut line = widget::row::with_capacity(2).align_y(Alignment::Center).push(widget::text::body(row.text).width(Length::Fill));
                 if row.review {
                     line = line.push(widget::button::standard("Review").on_press(Message::Review));
+                    line = line.push(widget::button::destructive("Decline").on_press_maybe(self.declining.is_none().then_some(Message::Decline(row.seq))));
                 }
                 col = col.push(line);
             }
+        }
+        // A Decline's question, as torqcli asks it: the proposal, then yes or no.
+        if let Some((q, _)) = &self.declining {
+            col = col.push(widget::container(widget::scrollable(widget::text::monotext(q.trim_end().to_string()).width(Length::Fill))).max_height(200.0));
+            col = col.push(
+                widget::row::with_capacity(2)
+                    .spacing(spacing.space_xs)
+                    .push(widget::button::destructive("Decline it").on_press(Message::Answer(true)))
+                    .push(widget::button::standard("Keep it").on_press(Message::Answer(false))),
+            );
         }
         if let Some(n) = &self.note {
             col = col.push(widget::text::caption(n.clone()).width(Length::Fill));
@@ -179,7 +197,7 @@ impl cosmic::Application for Applet {
 
     fn init(core: cosmic::Core, _flags: ()) -> (Self, Task<cosmic::Action<Message>>) {
         let client = Client::mine();
-        let app = Applet { core, popup: None, client: client.clone(), reach: Ok(None), brain: None, fates: vec![], looking: true, talk: Conversation::default(), question: String::new(), note: None, tokens: None };
+        let app = Applet { core, popup: None, client: client.clone(), reach: Ok(None), brain: None, fates: vec![], looking: true, talk: Conversation::default(), question: String::new(), note: None, tokens: None, declining: None };
         (app, cosmic::task::future(async move { Message::Looked(agentkit::look(client, vec![]).await) }))
     }
 
@@ -221,7 +239,7 @@ impl cosmic::Application for Applet {
                 self.question.clear();
                 self.note = None;
                 self.talk.asked(&q);
-                return agentkit::ask(client, q, Message::Heard, Message::Lost);
+                return agentkit::ask(client, q, None, Message::Heard, Message::Lost);
             }
             Message::Heard(e) => {
                 let over = matches!(e, Event::Done { .. });
@@ -244,6 +262,25 @@ impl cosmic::Application for Applet {
                     Ok(_) => None,
                     Err(e) => Some(e),
                 };
+                return self.update(Message::Look);
+            }
+            Message::Decline(seq) => {
+                self.note = None;
+                return agentkit::decline(seq, Message::DeclineAsked, Message::Declined);
+            }
+            Message::DeclineAsked(q, reply) => self.declining = Some((q, reply)),
+            Message::Answer(yes) => {
+                if let Some((_, reply)) = self.declining.take() {
+                    reply.send(yes);
+                }
+            }
+            Message::Declined(r) => {
+                self.declining = None;
+                self.note = Some(match r {
+                    Ok(said) => conversation::shown(said.trim(), 300),
+                    Err(e) => e,
+                });
+                // Its row then says "declined", from the ledger.
                 return self.update(Message::Look);
             }
             Message::Open => self.launch(&torq::app::system_program(WINDOW)),

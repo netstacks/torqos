@@ -21,24 +21,45 @@ use cosmic::widget;
 use std::time::Duration;
 use torq::agent::client::{Client, Status, Unreachable};
 use torq::agent::conversation::{self, Conversation, Ended, Fate, Turn};
+use torq::agent::handoff;
 use torq::agent::setup::{self, Brain};
 use torq::agent::Event;
 
-/// No arguments but `--check`; activating the running window raises it.
+/// `--ask <file>`: open with a question and what it is about, handed over in a file of the person's own
+/// (`torq::agent::handoff`). Started again, the arguments go to the window that is open (an action of its).
 #[derive(Clone, Debug, Default)]
-struct Flags;
+struct Flags {
+    action: Option<String>,
+    args: Vec<String>,
+}
 
 impl cosmic::app::CosmicFlags for Flags {
     type SubCommand = String;
     type Args = Vec<String>;
+
+    fn action(&self) -> Option<&String> {
+        self.action.as_ref()
+    }
+
+    fn args(&self) -> Vec<&str> {
+        self.args.iter().map(String::as_str).collect()
+    }
 }
 
+/// The action a handoff is.
+const ASK: &str = "ask";
+
 fn main() -> std::process::ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("--check") {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--check") {
         return check();
     }
+    let flags = match args.as_slice() {
+        [flag, file] if flag == "--ask" => Flags { action: Some(ASK.into()), args: vec![file.clone()] },
+        _ => Flags::default(),
+    };
     let settings = cosmic::app::Settings::default().size_limits(cosmic::iced::Limits::NONE.min_width(420.0).min_height(360.0));
-    match cosmic::app::run_single_instance::<Window>(settings, Flags) {
+    match cosmic::app::run_single_instance::<Window>(settings, flags) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("torq-agent-ui: {e}");
@@ -85,6 +106,10 @@ struct Window {
     /// Forget, asked first.
     forgetting: bool,
     note: Option<(String, bool)>,
+    /// What an entry point attached (an alarm, a crash's summary…): sent with the next question, and then gone.
+    attached: Option<String>,
+    /// torqcli's question about a Decline, waiting for the person's answer.
+    declining: Option<(String, agentkit::Reply)>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,11 +127,35 @@ enum Message {
     Forgot(Result<(), String>),
     Review,
     Settings,
+    /// Drop what was attached, before asking.
+    Unattach,
+    Decline(u64),
+    DeclineAsked(String, agentkit::Reply),
+    Answer(bool),
+    Declined(Result<String, String>),
 }
 
 impl Window {
     fn working(&self) -> bool {
         self.talk.working() || matches!(self.reach, Ok(Some(Status { running: true, .. })))
+    }
+
+    /// A question handed over in a file (`--ask <file>`): put in the box with what it is about attached, for
+    /// the person to read and ask — or asked at once, when the person already did (the launcher).
+    fn handed(&mut self, files: &[String]) -> Task<cosmic::Action<Message>> {
+        let Some(file) = files.first() else { return Task::none() };
+        match handoff::take(std::path::Path::new(file)) {
+            Ok(h) => {
+                self.question = h.question;
+                self.attached = h.context;
+                self.note = None;
+                if h.ask_now {
+                    return cosmic::Application::update(self, Message::Ask);
+                }
+            }
+            Err(e) => self.note = Some((torq::app::said(&e), true)),
+        }
+        Task::none()
     }
 
     /// A turn: its question; then, said first, whether its session read untrusted text; its answer (only the
@@ -133,6 +182,7 @@ impl Window {
             let mut line = widget::row::with_capacity(2).align_y(Alignment::Center).spacing(spacing.space_xs).push(widget::text::body(row.text).width(Length::Fill));
             if row.review {
                 line = line.push(widget::button::standard("Review").on_press(Message::Review));
+                line = line.push(widget::button::destructive("Decline…").on_press_maybe(self.declining.is_none().then_some(Message::Decline(row.seq))));
             }
             col = col.push(line);
         }
@@ -155,25 +205,32 @@ impl cosmic::Application for Window {
         &mut self.core
     }
 
-    fn init(core: cosmic::Core, _flags: Flags) -> (Self, Task<cosmic::Action<Message>>) {
-        let mut app = Window { core, client: Client::mine(), reach: Ok(None), brain: None, fates: vec![], remembered: None, looking: false, talk: Conversation::default(), question: String::new(), forgetting: false, note: None };
+    fn init(core: cosmic::Core, flags: Flags) -> (Self, Task<cosmic::Action<Message>>) {
+        let mut app = Window { core, client: Client::mine(), reach: Ok(None), brain: None, fates: vec![], remembered: None, looking: false, talk: Conversation::default(), question: String::new(), forgetting: false, note: None, attached: None, declining: None };
         let title = match app.core.main_window_id() {
             Some(id) => app.set_window_title("TorqOS Agent".into(), id),
             None => Task::none(),
         };
         let look = app.update(Message::Look);
-        (app, Task::batch([title, look]))
+        let handed = app.handed(&flags.args);
+        (app, Task::batch([title, look, handed]))
     }
 
     /// Started again (the applet's Open, the menu): this window raised. With the compositor's token, COSMIC's
     /// toolkit activates it itself; without one, it is asked for focus.
-    fn dbus_activation(&mut self, _msg: cosmic::dbus_activation::Message) -> Task<cosmic::Action<Message>> {
+    fn dbus_activation(&mut self, msg: cosmic::dbus_activation::Message) -> Task<cosmic::Action<Message>> {
         // Said in its journal: started again, the window handed over here.
         eprintln!("torq-agent-ui: started again: this window raised");
-        match self.core.main_window_id() {
+        // With a question handed over (the key, the launcher, an Ask the agent): put in, or asked.
+        let handed = match msg.msg {
+            cosmic::dbus_activation::Details::ActivateAction { action, args } if action == ASK => self.handed(&args),
+            _ => Task::none(),
+        };
+        let focus = match self.core.main_window_id() {
             Some(id) => cosmic::iced::window::gain_focus(id),
             None => Task::none(),
-        }
+        };
+        Task::batch([focus, handed])
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -182,6 +239,18 @@ impl cosmic::Application for Window {
 
     /// Forget asks first: the agent's memory of the conversation is erased for good.
     fn dialog(&self) -> Option<Element<'_, Message>> {
+        // A Decline's question, as torqcli asks it: the proposal, then yes or no.
+        if let Some((q, _)) = &self.declining {
+            let body = widget::container(widget::scrollable(widget::text::monotext(q.trim_end().to_string()).width(Length::Fill))).max_height(360.0);
+            return Some(
+                widget::dialog()
+                    .title("Decline this proposal?")
+                    .control(body)
+                    .primary_action(widget::button::destructive("Decline").on_press(Message::Answer(true)))
+                    .secondary_action(widget::button::standard("Keep it").on_press(Message::Answer(false)))
+                    .into(),
+            );
+        }
         if !self.forgetting {
             return None;
         }
@@ -230,7 +299,8 @@ impl cosmic::Application for Window {
                 self.question.clear();
                 self.note = None;
                 self.talk.asked(&q);
-                return agentkit::ask(client, q, Message::Heard, Message::Lost);
+                // What was attached goes with it, once: untrusted text, it taints the session (the service says so).
+                return agentkit::ask(client, q, self.attached.take(), Message::Heard, Message::Lost);
             }
             Message::Heard(e) => {
                 let over = matches!(e, Event::Done { .. });
@@ -272,6 +342,26 @@ impl cosmic::Application for Window {
                 return self.update(Message::Look);
             }
             Message::Review => torq::app::open_settings("proposals"),
+            Message::Unattach => self.attached = None,
+            Message::Decline(seq) => {
+                self.note = None;
+                return agentkit::decline(seq, Message::DeclineAsked, Message::Declined);
+            }
+            Message::DeclineAsked(q, reply) => self.declining = Some((q, reply)),
+            Message::Answer(yes) => {
+                if let Some((_, reply)) = self.declining.take() {
+                    reply.send(yes);
+                }
+            }
+            Message::Declined(r) => {
+                self.declining = None;
+                self.note = Some(match r {
+                    Ok(said) => (conversation::shown(said.trim(), 600), false),
+                    Err(e) => (e, true),
+                });
+                // Its row then says "declined", from the ledger.
+                return self.update(Message::Look);
+            }
             Message::Settings => torq::app::open_settings("agent"),
         }
         Task::none()
@@ -331,6 +421,18 @@ impl cosmic::Application for Window {
                 list = list.push(widget::button::standard("Review").on_press(Message::Review));
             }
             page = page.push(list);
+        }
+        // What an entry point attached, shown before it is sent: untrusted text, and the person may drop it.
+        if let Some(a) = &self.attached {
+            let theme = cosmic::theme::active();
+            let warn: cosmic::iced::Color = theme.cosmic().warning_color().into();
+            page = page.push(
+                widget::column::with_capacity(3)
+                    .spacing(spacing.space_xxs)
+                    .push(widget::text::caption("Attached, sent with your question: untrusted text, so the agent's session is marked tainted when it reads it.").class(cosmic::theme::Text::Color(warn)).width(Length::Fill))
+                    .push(widget::container(widget::scrollable(widget::text::monotext(a.clone()).width(Length::Fill))).max_height(160.0))
+                    .push(widget::button::text("Remove it").on_press(Message::Unattach)),
+            );
         }
         let working = self.working();
         let mut ask = widget::row::with_capacity(4).spacing(spacing.space_xs).align_y(Alignment::Center);

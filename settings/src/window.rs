@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use torq::app::{self, Action, App, At, Choice, Console, DeviceCode, GitHubToken, Glance, How, Machine, Mode, Needs, Proposal, Tool, Typed, View, VIEWS};
 use torq::agent::client::{Client, Status};
+use torq::agent::handoff::{self, About, Handoff};
 use torq::agent::setup::Setup;
 use torq::history::Row;
 
@@ -181,6 +182,8 @@ pub struct Settings {
     agent: Loaded<AgentLook>,
     /// Forget, asked first.
     forgetting: bool,
+    /// The last command that failed, and what it said: for Ask the agent beside it.
+    failure: Option<(String, String)>,
 }
 
 /// The way back to a command waiting for a person's yes or no.
@@ -313,6 +316,8 @@ pub enum Message {
     // Agent:
     AgentLoaded(Result<AgentLook, String>),
     OpenAgent,
+    /// Open the agent's window about something (ADR-051 4): a question, that thing attached.
+    AskAgent(Handoff),
     Forget,
     ForgetAnswer(bool),
 }
@@ -445,6 +450,7 @@ impl cosmic::Application for Settings {
             questions: VecDeque::new(),
             agent: Loaded::Waiting,
             forgetting: false,
+            failure: None,
         };
         let title = match app.core.main_window_id() {
             Some(id) => app.set_window_title("TorqOS Settings".into(), id),
@@ -536,6 +542,8 @@ impl cosmic::Application for Settings {
             }
             Message::Act(at, line) => return self.act(at, line),
             Message::Did(what, r) => {
+                // What failed, kept for its Ask the agent.
+                self.failure = r.as_ref().err().map(|e| (what.clone(), e.clone()));
                 self.busy = None;
                 self.note = Some(match r {
                     Ok(out) => (if out.trim().is_empty() { format!("Done: {what}") } else { out.trim().to_string() }, false),
@@ -1023,6 +1031,11 @@ impl cosmic::Application for Settings {
             }
             Message::AgentLoaded(r) => self.agent = r.into(),
             Message::OpenAgent => app::open_agent(),
+            Message::AskAgent(h) => {
+                if let Err(e) = handoff::open_window(&h) {
+                    self.note = Some((app::said(&e), true));
+                }
+            }
             Message::Forget => self.forgetting = true,
             Message::ForgetAnswer(yes) => {
                 self.forgetting = false;
@@ -1070,6 +1083,11 @@ impl cosmic::Application for Settings {
         }
         if let Some((text, failed)) = &self.note {
             content = content.push(note(text, *failed));
+            // Something failed: the agent can look at it with the person (what failed and what it said, attached).
+            if let (true, Some((command, said))) = (*failed, &self.failure) {
+                let h = About::Failure { command, said }.handoff();
+                content = content.push(widget::button::text("Ask the agent about this").on_press(Message::AskAgent(h)));
+            }
         }
         content = content.push(body);
         widget::scrollable(widget::container(content).width(Length::Fill).center_x(Length::Fill).padding(spacing.space_m)).into()
@@ -1292,6 +1310,12 @@ impl Settings {
             col = col.push(widget::text::body(self.help.clone()));
         }
         let draft = self.draft.get(path);
+        if !path.is_empty() {
+            let place = path.join(" ");
+            let value = draft.map(|v| v.join(", ")).unwrap_or_else(|| "not set".into());
+            let h = About::Setting { place: &place, help: &self.help, value: &value }.handoff();
+            col = col.push(widget::button::text("Ask the agent about this setting").on_press(Message::AskAgent(h)));
+        }
         let active = self.active.get(path);
 
         // A switch, a box for a value, or the choices: as what may follow this setting says.
@@ -1435,7 +1459,12 @@ impl Settings {
             Loaded::Got(m) => {
                 let lines = m.alarms.lines().map(str::trim).filter(|l| !l.is_empty() && !(m.well && l.trim_start_matches("✓ ").trim_end_matches('.') == headline));
                 for l in lines {
-                    alarms = alarms.add(settings::item_row(vec![widget::text::body(l.to_string()).width(Length::Fill).into()]));
+                    let mut row = vec![widget::text::body(l.to_string()).width(Length::Fill).into()];
+                    // An alarm, not the all-well line: the agent can look at it.
+                    if !l.starts_with('✓') {
+                        row.push(widget::button::text("Ask the agent").on_press(Message::AskAgent(About::Alarm(l).handoff())).into());
+                    }
+                    alarms = alarms.add(settings::item_row(row).align_y(Alignment::Center));
                 }
             }
             Loaded::Failed(why) => alarms = alarms.add(failed(why)),
@@ -1562,6 +1591,9 @@ impl Settings {
             return page.push(widget::text::body("Your draft is the configuration in effect: nothing to commit.")).into();
         }
         page = page.push(self.diff(COMPARE));
+        if let Some(Loaded::Got(diff)) = self.outputs.get(COMPARE) {
+            page = page.push(widget::button::text("Ask the agent about these changes").on_press(Message::AskAgent(About::Draft(diff).handoff())));
+        }
         let mut commit = settings::section().title("Commit");
         commit = commit.add(settings::item::builder("Comment").description("What the change is for: it goes in the history").control(widget::text_input("Optional", &self.comment).on_input(Message::Comment).width(Length::FillPortion(2))));
         commit = commit.add(settings::item::builder("Roll back unless confirmed").description("If the change cuts you off, the machine undoes it by itself").control(widget::toggler(self.confirmed).on_toggle(Message::Confirmed)));
@@ -1695,7 +1727,9 @@ impl Settings {
                         icon::from_name("go-next-symbolic").size(16).icon().into(),
                     ])
                     .spacing(spacing.space_s);
-                    section = section.add(widget::mouse_area(row).on_press(Message::OpenProposal(p.seq)));
+                    // Decline beside it (torqcli shows the proposal and asks first); the row opens what it does.
+                    let decline = widget::button::destructive("Decline…").on_press(Message::Act(At::Read, app::decline_line(p.seq)));
+                    section = section.add(settings::item_row(vec![widget::mouse_area(row).on_press(Message::OpenProposal(p.seq)).into(), decline.into()]).spacing(spacing.space_s).align_y(Alignment::Center));
                 }
                 page = page.push(section);
             }
@@ -1718,7 +1752,13 @@ impl Settings {
                 page = page.push(widget::text::caption(who));
             }
         }
-        page = page.push(widget::button::suggested("Review and apply…").on_press(Message::Act(At::Read, format!("request system apply {seq}"))));
+        page = page.push(
+            widget::row::with_capacity(2)
+                .spacing(spacing.space_xs)
+                .push(widget::button::suggested("Review and apply…").on_press(Message::Act(At::Read, format!("request system apply {seq}"))))
+                // Turned down: never applied after. torqcli shows it and asks first.
+                .push(widget::button::destructive("Decline…").on_press(Message::Act(At::Read, app::decline_line(seq)))),
+        );
         page = page.push(widget::text::heading("What it does"));
         page.push(self.diff(&format!("proposal {seq}"))).into()
     }

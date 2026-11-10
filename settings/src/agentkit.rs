@@ -37,15 +37,16 @@ pub fn mark(mood: Mood) -> icon::Handle {
     icon::from_svg_bytes(svg.into_bytes())
 }
 
-/// Ask `question`: each event of the answer as `heard(e)`, or why there is none as `lost(why)`; on a thread
+/// Ask `question`, with what is attached (`context`: untrusted text, it taints the session): each event of
+/// the answer as `heard(e)`, or why there is none as `lost(why)`; on a thread
 /// of its own, which ends the ask (and so the task) if the program stops listening.
-pub fn ask<M: Send + 'static>(client: Client, question: String, heard: fn(Event) -> M, lost: fn(String) -> M) -> Task<cosmic::Action<M>> {
+pub fn ask<M: Send + 'static>(client: Client, question: String, context: Option<String>, heard: fn(Event) -> M, lost: fn(String) -> M) -> Task<cosmic::Action<M>> {
     Task::stream(cosmic::iced::stream::channel(16, async move |out: Sender<M>| {
         let (done, over) = cosmic::iced::futures::channel::oneshot::channel::<()>();
         std::thread::spawn(move || {
             let mut out = out;
             let mut tell = |m: M| cosmic::iced::futures::executor::block_on(out.send(m)).is_ok();
-            match client.ask(&question, None) {
+            match client.ask(&question, context) {
                 Err(e) => {
                     tell(lost(torq::app::said(&e.into())));
                 }
@@ -107,4 +108,41 @@ pub async fn look(client: Result<Client, Unreachable>, seqs: Vec<u64>) -> Look {
     })
     .await
     .unwrap_or_else(failed)
+}
+
+/// The way back to a torqcli line waiting for the person's yes or no.
+#[derive(Clone)]
+pub struct Reply(std::sync::Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<bool>>>>);
+
+impl std::fmt::Debug for Reply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Reply")
+    }
+}
+
+impl Reply {
+    pub fn send(&self, yes: bool) {
+        if let Some(back) = self.0.lock().ok().and_then(|mut b| b.take()) {
+            let _ = back.send(yes);
+        }
+    }
+}
+
+/// Decline proposal `seq`: `request system decline <n>`, run as TorqOS Settings runs its lines (torqcli's
+/// session). torqcli shows the proposal and asks first: its question goes to the program as `asked`, and the
+/// person's answer back through the `Reply`; what it said at the end as `done`.
+pub fn decline<M: Send + 'static>(seq: u64, asked: fn(String, Reply) -> M, done: fn(Result<String, String>) -> M) -> Task<cosmic::Action<M>> {
+    Task::stream(cosmic::iced::stream::channel(4, async move |mut out: Sender<M>| {
+        let ui = out.clone();
+        let ask = move |question: String| {
+            let mut ui = ui.clone();
+            let (back, answer) = std::sync::mpsc::channel();
+            let sent = cosmic::iced::futures::executor::block_on(ui.send(asked(question, Reply(std::sync::Arc::new(std::sync::Mutex::new(Some(back)))))));
+            sent.is_ok() && answer.recv().unwrap_or(false)
+        };
+        let line = torq::app::decline_line(seq);
+        let got = off(move || torq::app::Console::start().act(torq::app::At::Read, &line, ask)).await.and_then(|r| r);
+        let _ = out.send(done(got)).await;
+    }))
+    .map(cosmic::Action::App)
 }
