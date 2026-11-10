@@ -303,7 +303,7 @@ acceptance tests, each a VM test.
       (`torq::agent::client`, `torq ask` on it); the agent's applet `org.torqos.Agent` in the default panel beside
       TorqOS's, its window `torq-agent-ui` ("TorqOS Agent", one a person), and TorqOS Settings' Agent page (the model
       a tree line into the draft; the key's entry left to ADR-052). **Step 4 built** (2026-11-10): Decline beside Review
-      everywhere; the entry points — Super+A, `ask <question>` in the launcher and the terminal, Ask the agent in
+      everywhere; the entry points — Super+Shift+A, `ask <question>` in the launcher and the terminal, Ask the agent in
       Settings and the applets, a crash offered when the person clicks. Next: `torq-mcp` and Claude Code (5), the screen (6).
 - [ ] **The harness's tool catalogue** (ADR-051 9, phase 2; its own ADR first): apps and packages, settings
       explained and proposed, files written in shared folders, the web (tainting), a workbench, reminders and

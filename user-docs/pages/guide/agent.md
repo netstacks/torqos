@@ -92,8 +92,8 @@ declined proposal is never applied (`request system decline <n>` in torqcli does
 
 ### Ask from anywhere
 
-- **Super+A** opens the agent's window. (It takes Super+A from COSMIC's App Library, which stays on the dock
-  and in the launcher; change it in COSMIC Settings → Keyboard → Shortcuts.)
+- **Super+Shift+A** opens the agent's window (Super+A stays COSMIC's App Library; change either in COSMIC
+  Settings → Keyboard → Shortcuts).
 - **The launcher** (Super+/): type `ask why is my wifi slow?` and press Enter.
 - **The terminal**: `ask why is my wifi slow?` (the same as `torq ask …`).
 - **Ask the agent** beside an alarm, under a command that failed, in a setting's side panel and on your

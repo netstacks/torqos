@@ -1191,12 +1191,12 @@ Its §5 lists claims without a test.
    - **The memory is shown as a count**, not its turns: the service says how many; showing them is later.
 
 6zzn. **The agent's entry points and Decline buttons (ADR-051 4, step 4, built 2026-11-10, `tests/desktop-agent.nix`).** Open:
-   - **Super+A is taken from COSMIC's App Library**: TorqOS's custom-shortcut default wins over COSMIC's defaults
-     (cosmic-settings-daemon merges custom over them). The App Library stays on the dock and in the launcher; the
-     key is the ADR's until the owner chooses another.
+   - **The key is Super+Shift+A** (the owner): Super+A stays COSMIC's App Library. Super+Shift+A is bound to
+     nothing in cosmic-comp 1.11.0's defaults; a later COSMIC that takes it would lose to TorqOS's custom default
+     (custom wins), which the desktop test checks against the defaults it ships with.
    - **A person who already has custom shortcuts** (`~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom`,
-     written the first time they changed one) does not get Super+A: their file replaces the default, as with the
-     panel (6zzm). They add it in COSMIC Settings → Keyboard → Shortcuts.
+     written the first time they changed one) does not get Super+Shift+A: their file replaces the default, as with
+     the panel (6zzm). They add it in COSMIC Settings → Keyboard → Shortcuts.
    - **Not driven in a VM**: each Ask the agent and Decline button (the test checks what they hand over in
      torqcli's units and the window's handoff path end to end through the key and the launcher's program), a crash
      notification's click (the notification daemon's own signal; a test cannot click it, nor fake it from another

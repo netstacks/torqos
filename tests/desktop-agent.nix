@@ -5,7 +5,7 @@
 # reaches her own service from her session (`torq-agent-ui --check`) and says what it remembers; someone
 # with no agent is told so; and the window is one a person — started again, the one open stays the only one.
 # Step 4's entry points: `ask` in the login shell, the launcher's plugin where pop-launcher looks, a crash offered
-# with nothing sent until the person asks, Super+A opening the window. The model is scripted (as in
+# with nothing sent until the person asks, Super+Shift+A opening the window (Super+A still the App Library's). The model is scripted (as in
 # tests/agent-service.nix).
 { pkgs, self }:
 
@@ -134,10 +134,14 @@ pkgs.testers.runNixOSTest {
         machine.fail("ls /run/user/$(id -u alice)/torq-agent/ask-* 2>/dev/null")
         assert in_session("torq-agent-ui --check").splitlines()[0] == before
 
-    with subtest("step 4: Super+A opens the agent's window, a default of COSMIC's shortcuts"):
+    with subtest("step 4: Super+Shift+A opens the agent's window, a default of COSMIC's shortcuts; Super+A stays the App Library's"):
         custom = machine.succeed("cat /run/current-system/sw/share/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom")
-        assert '(modifiers: [Super], key: "a"): Spawn("/run/current-system/sw/bin/torq-agent-ui")' in custom, custom
-        machine.send_key("meta_l-a")
+        assert '(modifiers: [Super, Shift], key: "a"): Spawn("/run/current-system/sw/bin/torq-agent-ui")' in custom, custom
+        assert '[Super], key: "a"' not in custom, custom
+        defaults = machine.succeed("cat /run/current-system/sw/share/cosmic/com.system76.CosmicSettings.Shortcuts/v1/defaults")
+        assert '(modifiers: [Super], key: "a"): System(AppLibrary)' in defaults
+        assert '[Super, Shift], key: "a"' not in defaults, "Super+Shift+A must be free in COSMIC's own defaults"
+        machine.send_key("meta_l-shift-a")
         machine.wait_until_succeeds("pgrep -u alice -f 'bin/torq-agent-ui$'", timeout=60)
         machine.sleep(5)
         machine.screenshot("agent-key")

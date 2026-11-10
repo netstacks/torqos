@@ -2111,7 +2111,8 @@ vouches for, that only proposes, every change ledgered and undone in one command
      context:
      - **the panel**: idle, working, waiting for you; the model (REMOTE marked); proposals it made, with
        **Review** (TorqOS Settings, ADR-049 3); a live screen grant (6) with **Stop**; **Stop** for a task;
-     - **a key**, `Super`+`A` (COSMIC's shortcuts; the person may change it), and the launcher: type a question;
+     - **a key**, `Super`+`Shift`+`A` (as built; first written `Super`+`A`, which the owner kept for COSMIC's App
+       Library; COSMIC's shortcuts; the person may change it), and the launcher: type a question;
      - **TorqOS Settings**: **Ask the agent** on an alarm, a failed commit, a setting's page, a draft;
      - **the other applets**: TorqOS's (an alarm), SSH tunnels' (a tunnel that will not come up);
      - **crashes**: a program that dumps core (systemd-coredump) gives a notification, **Ask the agent about this
@@ -2428,11 +2429,12 @@ vouches for, that only proposes, every change ledgered and undone in one command
   is attached to 16 000. What is attached is shown above the box, marked untrusted, removable, and sent with the
   person's next question only — the person asks; it taints that session (the service reports `attached`). Only
   the launcher asks at once (the person typed and sent the question; nothing attached). The entry points:
-  1. **The key**: Super+A runs `/run/current-system/sw/bin/torq-agent-ui`, a default of COSMIC's own *custom*
-     shortcuts (`share/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom` in the settings package, read
-     where the panel's default is; cosmic-settings-daemon merges custom over defaults; the person changes it in
-     COSMIC Settings, which then writes their own). It takes Super+A from COSMIC's App Library (still on the
-     dock and in the launcher) — the ADR's key, kept until the owner says otherwise (KNOWN-GAPS 6zzn).
+  1. **The key**: Super+Shift+A runs `/run/current-system/sw/bin/torq-agent-ui` (the owner, 2026-11-10: Super+A
+     stays COSMIC's App Library; Super+Shift+A is bound to nothing in cosmic-comp 1.11.0's `data/keybindings.ron`,
+     the shortcuts' `defaults`), a default of COSMIC's own *custom* shortcuts
+     (`share/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom` in the settings package, read where the
+     panel's default is; cosmic-settings-daemon merges custom over defaults; the person changes it in COSMIC
+     Settings, which then writes their own). It opens the window without a handoff (nothing to hand over).
   2. **The launcher**: `torq-agent-launcher` (torqcli's crate; `torq::agent::launcher`), a pop-launcher plugin
      in `/etc/pop-launcher/plugins/torq-agent/plugin.ron` (pop-launcher's system plugin directory; it runs
      `bin.path` as written when absolute): `ask <question>` offers "Ask your agent: …"; choosing it opens the
@@ -2456,7 +2458,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
   read only when it is the person's, its notification without its contents, its handoff bounded and
   tainting); `everything_the_pages_offer_is_a_command` (`request system decline <n>`); `tests/desktop-agent.nix`
   (`ask` in alice's login shell; the plugin where pop-launcher looks, answering a search; a deliberate SIGSEGV of
-  alice's offered by the watcher while nothing is handed to the window and the agent asks nothing; Super+A in
+  alice's offered by the watcher while nothing is handed to the window and the agent asks nothing; Super+Shift+A in
   her session starting the window). Mutation-checked: the handoff's owner check and its no-link open, the crash
   filter's uid. Not driven in a VM: the buttons themselves (Decline, each Ask the agent), a crash notification's
   click, the plugin through pop-launcher (KNOWN-GAPS 6zzn).
