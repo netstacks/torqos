@@ -109,7 +109,7 @@ pub const MAX_TURN_CHARS: usize = 2_000;
 /// service's way (ADR-051 3). What the person attached is untrusted text: it taints the session,
 /// reported to the broker before the model is shown it. The remembered turns do not: each is the
 /// person's question and, only from a session that read nothing untrusted, the agent's answer — kept
-/// by the service where no other program of the agent's can write (modules/agent.nix).
+/// by the service where no program run by `torq agent run` can reach it (modules/agent.nix).
 pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: &mut dyn Write, err: &mut dyn Write, events: &mut dyn FnMut(Event) -> Result<()>) -> Result<Session> {
     let question = task.question.as_str();
     let offered = cfg.offered(propose);
