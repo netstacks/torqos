@@ -9,10 +9,17 @@ license = "Apache-2.0"
 name = "torq-doctor"
 path = "src/main.rs"
 
+# A person's agent, resident (ADR-051 3): their conversation, one task at a time, each the harness above.
+[[bin]]
+name = "torq-agent-service"
+path = "src/service/main.rs"
+
 [dependencies]
 anyhow = "1"
 serde_json = "1"
 # The API key's header, handed to curl as a private (0600) file: never on a command line.
 tempfile = "3"
 # A tool program's whole process group stopped at its bounds; a record never written through a link.
-rustix = { version = "1.1.6", features = ["fs", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "net", "process"] }
+# The words of the agent service's socket (ADR-044, ADR-051 3), shared with torqcli.
+torq-wire = { path = "../wire" }

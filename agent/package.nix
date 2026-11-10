@@ -15,7 +15,14 @@ rustPlatform.buildRustPackage {
   pname = "torq-agent";
   # One place: Cargo.toml (scripts/bump-version sets it).
   version = (lib.importTOML ./Cargo.toml).package.version;
-  src = lib.cleanSource ./.;
+  # This crate and torq-wire (ADR-044: the agent service's words), nothing else of the repository.
+  src = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.difference (lib.fileset.unions [ ./. ../wire ])
+      (lib.fileset.unions [ (lib.fileset.maybeMissing ./target) (lib.fileset.maybeMissing ../wire/target) ]);
+  };
+  cargoRoot = "agent";
+  buildAndTestSubdir = "agent";
   cargoLock.lockFile = ./Cargo.lock;
 
   env = doctorEnv;
@@ -23,7 +30,7 @@ rustPlatform.buildRustPackage {
   passthru = { inherit doctorEnv; };
 
   meta = {
-    description = "TorqOS agent (unprivileged, as a person's torq-agent-<person>): doctor mode, read-only tools, proposes nothing";
+    description = "TorqOS agent (unprivileged, as a person's torq-agent-<person>): doctor mode, read-only tools, proposes nothing; and the person's agent service";
     mainProgram = "torq-doctor";
     license = lib.licenses.asl20;
   };
