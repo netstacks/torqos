@@ -17,6 +17,8 @@
 /// conversation shows, and what the agent is here.
 pub mod client;
 pub mod conversation;
+pub mod handoff;
+pub mod launcher;
 pub mod setup;
 /// What the agent says, as its service streams it (torq-wire's, for the programs built on this library).
 pub use torq_wire::agent::Event;
