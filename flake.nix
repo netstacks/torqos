@@ -167,6 +167,7 @@
         accounts = import ./tests/accounts.nix { inherit pkgs self; };
         ssh = import ./tests/ssh.nix { inherit pkgs self; };
         desktop = import ./tests/desktop.nix { inherit pkgs self; };
+        tunnels = import ./tests/tunnels.nix { inherit pkgs self; };
         image = import ./tests/image.nix { inherit pkgs self; };
         # Nothing nixpkgs marks unfree in what TorqOS distributes (ADR-039), for every platform it
         # releases (evaluation only, so x86_64's CI checks aarch64's too). nixpkgs refuses to

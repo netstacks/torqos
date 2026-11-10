@@ -159,6 +159,11 @@ in
       sounds.enable = true;
     };
 
+    # A person's SSH tunnels (ADR-050): `torq-tunnel@<name>.service`, a user unit each person starts from the
+    # tunnels applet, kept up by their own systemd while they are logged in. The tunnels are theirs, in their
+    # home, as their Wi-Fi networks are: never the configuration's, and never the agent's to reach.
+    systemd.packages = [ cfg.settingsPackage ];
+
     environment.systemPackages = [
       # TorqOS's icons (branding/), for what shows the system's logo (os-release's LOGO).
       config.torq.branding.package

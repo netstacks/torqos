@@ -4,5 +4,6 @@ broker/target/
 cli/target/
 agent/target/
 wire/target/
+settings/target/
 *.qcow2
 .direnv/

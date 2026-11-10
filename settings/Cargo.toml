@@ -2,7 +2,7 @@
 name = "torq-settings"
 version = "0.3.2"
 edition = "2024"
-description = "TorqOS Settings: torqcli in a COSMIC window, and TorqOS in its panel (ADR-045 2, ADR-049)"
+description = "TorqOS Settings: torqcli in a COSMIC window, TorqOS in its panel, and SSH tunnels (ADR-045 2, ADR-049, ADR-050)"
 license = "Apache-2.0"
 publish = false
 
@@ -28,3 +28,12 @@ path = "src/main.rs"
 [[bin]]
 name = "torq-applet"
 path = "src/applet.rs"
+
+# The person's SSH tunnels (ADR-050): what their unit runs, and the panel applet.
+[[bin]]
+name = "torq-tunnel"
+path = "src/tunnel.rs"
+
+[[bin]]
+name = "torq-tunnels"
+path = "src/tunnels.rs"

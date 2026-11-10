@@ -11,6 +11,7 @@
 #![cfg_attr(test, deny(dead_code))]
 
 pub mod app;
+pub mod tunnels;
 mod agent;
 mod at;
 mod facts;

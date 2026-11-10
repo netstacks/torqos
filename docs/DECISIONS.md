@@ -1900,7 +1900,7 @@ A server's person reads torqcli's output; a desktop's person looks at the screen
 
 ## ADR-050 — SSH tunnels on the desktop: the person's own, kept up, and in the panel
 
-**Status:** accepted 2026-11-10, to be built (the owner: "an applet in the top panel that starts a persistent autossh to that
+**Status:** accepted and built, 2026-11-10 (the owner: "an applet in the top panel that starts a persistent autossh to that
 ip, a simple ssh tunnels applet I can setup is best"). Builds on ADR-045 and ADR-049. Its three questions are
 settled by the owner (below).
 **Context:** The owner sends one Firefox profile's web traffic and DNS through another machine, with
@@ -1952,6 +1952,24 @@ off many times a day.
   a tunnel started from the file reaches a second VM and comes back after the link drops; an unknown host key
   does not connect; `ProxyCommand` or a leading `-` in the file is refused; a forward never listens beyond
   127.0.0.1; `torq-agent` cannot start or stop the person's tunnel.
+- **As built (2026-11-10):** the file's checks, the ssh command line, the states and "Add tunnel" are
+  `torq::tunnels` in torqcli's library (unit-tested there: the Nix build of settings/ runs no tests); the file is
+  read with `toml`, unknown settings refused (`deny_unknown_fields`). `torq-tunnel run <name>` (and `check`)
+  and the applet `torq-tunnels` are binaries of `settings/`; the unit `torq-tunnel@.service` ships in that
+  package (`lib/systemd/user`, with `[Install] WantedBy=default.target`, so "Start at login" is
+  `systemctl --user enable`) and the desktop module adds it with `systemd.packages`; ssh is on the unit's own `PATH` (NixOS puts its client in every system already, for the person's first `ssh`). ssh also gets
+  `ConnectTimeout=15`, `GatewayPorts=no`, `PermitLocalCommand=no`, `ControlMaster=no`/`ControlPath=none` (its
+  own connection, never a share of a multiplexed one) and `ForwardAgent=no`/`ForwardX11=no`, on the command
+  line ahead of the person's ssh config; `-T`, `-p` from the file's optional `port`, then `--` and the
+  destination. Restarts: 5 s, growing to 60 s (`RestartSteps`, `RestartMaxDelaySec`), unlimited; a wrong file
+  exits 78 and is not tried again (`RestartPreventExitStatus`). The applet asks the user manager with
+  `systemctl --user` and the journal with `journalctl --user` (not D-Bus: one program each, the person's own);
+  "Up" is the unit running and every forward here listening on 127.0.0.1 (`/proc/net/tcp`). A remote forward
+  listens on the far end's loopback as asked, unless that server's own `GatewayPorts yes` overrides it: the
+  far end's to decide. `tests/tunnels.nix` (check `tunnels`, two machines) checks each claim; on the laptop with
+  KVM its script took 99 s, 61 of them the dropped link noticed (`Timeout, server far not responding.`, at
+  ~45 s), restarted and carrying traffic again. Mutation-checked: a destination allowed to start with `-`, and
+  `accept-new`, each fail a unit test.
 - **Not:** tunnels in the configuration tree for a person (a server's are `services autossh`, already there);
   a VPN; setting up a browser's proxy (the person's own, in their profile); accepting a host key from the
   applet.
