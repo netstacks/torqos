@@ -1993,10 +1993,10 @@ off many times a day.
   applet.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
-- **Status:** proposed, 2026-11-10 (the owner: "is it possible to allow the torqos-agent to access and use
-  passwords from the secret manager without exposing the secret to the AI? … store secrets and allow AI to use
-  them and limit which ones"). Builds on ADR-035, ADR-038, ADR-041 and AI-LAYER.md's taint. Four questions
-  for the owner, below.
+- **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
+  2026-11-10 (the owner: "is it possible to allow the torqos-agent to access and use passwords from the secret
+  manager without exposing the secret to the AI? … store secrets and allow AI to use them and limit which
+  ones"). Builds on ADR-035, ADR-038, ADR-041 and AI-LAYER.md's taint.
 - **Context:** ADR-038 keeps secrets out of the repository and leaves application credentials to a password
   manager. The agent (ADR-041) runs as `torq-agent`, which reads nothing of the person's, so today a task that
   needs a credential goes one of two ways. Either the person pastes it, and it is in the model's context: at
@@ -2069,15 +2069,21 @@ off many times a day.
   6. **Backups and remotes.** The store is not in the repository (the fence) and not in a backup unless its
      `paths` name it (ADR-038, amended 2026-11-07). A machine rebuilt from its URL comes back with every rule
      and no value: each says it is empty until a person sets it again.
-- **Questions for the owner:**
-  1. **First operations:** HTTPS and SSH together, or HTTPS first (the common case: APIs, git over HTTPS)?
-  2. **A person's own secrets** (`users <name> secrets`, set without an administrator's password, used by
-     them and by the agent as their rules allow). In the first version, or system secrets only?
-  3. **Uses in the ledger too, or only approvals?** The ledger is the tamper-evident record of changes. An
-     agent making a hundred API calls would fill it, so this ADR records approvals and refusals there and
-     each use in the daemon's log.
-  4. **Entering values in TorqOS Settings.** A masked field in the window instead of the terminal. Today
-     typing a new secret is one of the things that takes a terminal (`app::needs_terminal`, ADR-045).
+- **Settled by the owner (2026-11-10):**
+  1. **HTTPS and SSH together** in the first version ("both").
+  2. **A person's own secrets are in the first version** ("yes"). `users <name> secrets` is a leaf of the
+     person's own tier, as their packages are: they set, rotate and delete their own values and rules
+     without an administrator's password, and nobody else's. Reading a value of their own back takes their
+     password, so that no program of their session reads it silently. The agent uses one only when the
+     person's own rule names `torq-agent`, and the person approves those uses. An administrator's password
+     does not show a person's values: it can delete them, and the deletion is recorded.
+  3. **The ledger records approvals, refusals and first uses** ("approval and refusal only and first use?").
+     For each secret, its first use in each agent session goes to the ledger, so the record shows every
+     session that touched a secret even when its rule asks no approval. Every later use goes only to the
+     daemon's log.
+  4. **Values can be entered in TorqOS Settings** ("yes"), in a masked field. The value goes from the window
+     to the daemon over its socket and is held nowhere else. Entering one is then no longer a terminal-only
+     step (`app::needs_terminal`).
 - **Consequences:** New code: the `torq-secrets` daemon (store, rules, the proxy, the SSH agent, the log), the
   `secrets` tree in the schema, its entry on the agent's deny list, the commands above, and a Secrets page in
   TorqOS Settings. Reused: `systemd-creds`, curl, OpenSSH's agent and its destination constraints, the
