@@ -593,15 +593,18 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
         rustix::process::test_kill_process(p).is_err() || std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit_once(") ").is_some_and(|(_, r)| r.starts_with('Z')))
     }
 
-    /// Not part of the suite: run by the next test as a process of the task that has made itself
-    /// undumpable (so /proc shows it as root's, and hides it from the service's ProtectProc), then waits.
+    /// Not part of the suite: run by the tests below as a process of the task that goes where a tool's
+    /// program may — `TORQ_TEST_HELPER=own-session`: a session (and group) of its own; `undumpable`:
+    /// undumpable (its /proc files root's) — and then waits.
     #[test]
     #[ignore]
-    fn undumpable_helper() {
-        if std::env::var_os("TORQ_TEST_UNDUMPABLE").is_some() {
-            rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).unwrap();
-            std::thread::sleep(Duration::from_secs(300));
+    fn helper() {
+        match std::env::var("TORQ_TEST_HELPER").as_deref() {
+            Ok("own-session") => drop(rustix::process::setsid().unwrap()),
+            Ok("undumpable") => rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).unwrap(),
+            _ => return,
         }
+        std::thread::sleep(Duration::from_secs(300));
     }
 
     /// `stop` ends all of the task: its group, a process in a group of its own, and one that made itself
@@ -611,9 +614,9 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
     fn stop_ends_every_process_of_the_task() {
         let helper = std::env::current_exe().unwrap();
         let script = format!(
-            r#"read -r t; set -m
-sleep 300 & echo $! > "$HOME/own-group"
-TORQ_TEST_UNDUMPABLE=1 {} --exact tests::undumpable_helper --ignored --test-threads=1 >/dev/null 2>&1 & echo $! > "$HOME/undumpable"
+            r#"read -r t
+TORQ_TEST_HELPER=own-session {0} --exact tests::helper --ignored --test-threads=1 >/dev/null 2>&1 & echo $! > "$HOME/own-group"
+TORQ_TEST_HELPER=undumpable {0} --exact tests::helper --ignored --test-threads=1 >/dev/null 2>&1 & echo $! > "$HOME/undumpable"
 echo $$ $(cat "$HOME/own-group") $(cat "$HOME/undumpable") > "$HOME/procs"
 echo ready > "$HOME/ready"; wait"#,
             helper.display()
@@ -624,10 +627,14 @@ echo ready > "$HOME/ready"; wait"#,
         wait_for(&d.path().join("ready"));
         let pid = |f: &str| std::fs::read_to_string(d.path().join(f)).unwrap().trim().parse::<i32>().unwrap();
         let (own, undumpable) = (pid("own-group"), pid("undumpable"));
-        // Its own group: not the harness's, so the group's kill does not reach it.
+        // Its own session and group: not the harness's, so the group's kill does not reach it.
         let pgid = |p: i32| std::fs::read_to_string(format!("/proc/{p}/stat")).ok().and_then(|s| s.rsplit_once(") ").and_then(|(_, r)| r.split(' ').nth(2).map(String::from)));
         let harness: i32 = std::fs::read_to_string(d.path().join("procs")).unwrap().split_whitespace().next().unwrap().parse().unwrap();
-        assert!(pgid(own).is_some() && pgid(own) != pgid(harness), "a group of its own");
+        let t = Instant::now();
+        while !(pgid(own).is_some() && pgid(own) != pgid(harness)) {
+            assert!(t.elapsed() < Duration::from_secs(10), "never in a group of its own");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         // Undumpable: /proc shows its files as root's, not ours.
         let t = Instant::now();
         loop {
@@ -653,9 +660,9 @@ echo ready > "$HOME/ready"; wait"#,
     fn nothing_of_a_task_outlives_it() {
         let helper = std::env::current_exe().unwrap();
         let script = format!(
-            r#"read -r t; set -m
-sleep 300 & echo $! > "$HOME/own-group"
-TORQ_TEST_UNDUMPABLE=1 {} --exact tests::undumpable_helper --ignored --test-threads=1 >/dev/null 2>&1 </dev/null & echo $! > "$HOME/undumpable"
+            r#"read -r t
+TORQ_TEST_HELPER=own-session {0} --exact tests::helper --ignored --test-threads=1 >/dev/null 2>&1 & echo $! > "$HOME/own-group"
+TORQ_TEST_HELPER=undumpable {0} --exact tests::helper --ignored --test-threads=1 >/dev/null 2>&1 </dev/null & echo $! > "$HOME/undumpable"
 echo $$ $(cat "$HOME/own-group") $(cat "$HOME/undumpable") > "$HOME/procs"
 printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
             helper.display()

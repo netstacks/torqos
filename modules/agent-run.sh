@@ -60,13 +60,23 @@ fi
 if [ "${1-}" = --hold-frozen ]; then
   unit="torq-agent@$person.service"
   frozen="" cgroup=""
-  # (Run by the trap below.)
+  # Thawed on every way out: tried three times; failing that, stopped — it is started by its socket,
+  # so it comes back at the person's next ask, never left frozen for good. The exit code stays the
+  # first thing that went wrong. (Run by the trap below.)
   # shellcheck disable=SC2329
   thaw() {
-    if [ -n "$frozen" ] && ! systemctl thaw -- "$unit"; then
-      echo "torq agent run: could not thaw $unit: systemctl thaw $unit" >&2
-      exit 1
-    fi
+    rc=$?
+    [ -n "$frozen" ] || exit "$rc"
+    for _ in 1 2 3; do
+      if systemctl thaw -- "$unit"; then
+        exit "$rc"
+      fi
+      sleep 1
+    done
+    echo "torq agent run: could not thaw $unit: stopping it (it starts again when next asked)" >&2
+    systemctl stop -- "$unit" || echo "torq agent run: could not stop $unit either: systemctl stop $unit" >&2
+    [ "$rc" -ne 0 ] || rc=1
+    exit "$rc"
   }
   trap thaw EXIT
   trap 'exit 130' INT TERM HUP PIPE
@@ -81,8 +91,16 @@ if [ "${1-}" = --hold-frozen ]; then
       cgroup=$(systemctl show -P ControlGroup -- "$unit")
       ;;
   esac
+  # A process is the agent's if any of its uids (real, effective, saved, filesystem: the `Uid:` line of
+  # its status) is the agent's — not by who owns its /proc entries: a process that makes itself
+  # undumpable has them shown as root's.
   for p in /proc/[0-9]*; do
-    [ "$(stat -c %u -- "$p" 2>/dev/null)" = "$uid" ] || continue
+    uids=$(sed -n 's/^Uid:[[:space:]]*//p' -- "$p/status" 2>/dev/null) || continue
+    mine=""
+    for u in $uids; do
+      [ "$u" != "$uid" ] || mine=1
+    done
+    [ -n "$mine" ] || continue
     cg=$(sed -n 's/^0:://p' -- "$p/cgroup" 2>/dev/null) || continue
     [ -n "$cg" ] || continue
     if [ -n "$cgroup" ] && { [ "$cg" = "$cgroup" ] || [ "${cg#"$cgroup"/}" != "$cg" ]; }; then

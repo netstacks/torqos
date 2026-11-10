@@ -35,6 +35,8 @@ let
             return call("read_journal", {})
         if q == "install htop":
             return call("propose_change", {"reason": "htop for alice", "set": [{"path": "users alice packages", "value": "htop"}]})
+        if q == "install slowly":
+            return call("propose_change", {"reason": "slowly htop", "set": [{"path": "users alice packages", "value": "htop"}]})
         if q == "slow":
             time.sleep(300)
             return answer("late")
@@ -53,10 +55,24 @@ let
             self.wfile.write(out)
     ThreadingHTTPServer(("127.0.0.1", 8099), H).serve_forever()
   '';
+  # A program that makes itself undumpable (prctl PR_SET_DUMPABLE 0: its /proc files then root's), then
+  # waits <seconds>.
+  undumpable = pkgs.writeScript "undumpable" ''
+    #!${pkgs.python3}/bin/python3
+    import ctypes, sys, time
+    assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0
+    time.sleep(int(sys.argv[1]))
+  '';
   # torqcli's commit as the agent, standing in (see above): the proposal it would make — htop in alice's
   # packages — over the broker's socket, as the agent, naming its session. Anything else: the real torqcli.
   torqcli = pkgs.writeShellScriptBin "torqcli" ''
     case "''${1-}:''${2-}" in
+      -c:*"commit comment \"slowly"*)
+        # A slow proposal, whose programs go where a task's may: a session of their own, out of sight.
+        ${pkgs.util-linux}/bin/setsid ${pkgs.coreutils}/bin/sleep 601 &
+        ${undumpable} 602 &
+        exec ${pkgs.coreutils}/bin/sleep 603
+        ;;
       -c:*"commit comment"*)
         base=$(${pkgs.git}/bin/git -c safe.directory='*' -C /var/lib/torq/config rev-parse HEAD)
         diff=$(printf -- '--- /dev/null\n+++ b/users/alice/packages.json\n@@ -0,0 +1 @@\n+["htop"]\n')
@@ -71,6 +87,7 @@ let
   setfacl = pkgs.writeShellScriptBin "setfacl" ''
     systemctl show -P FreezerState torq-agent@alice.service >> /tmp/freezer-seen
     if [ -e /tmp/fail-setfacl ]; then exit 1; fi
+    if [ -e /tmp/hang-setfacl ]; then sleep 600; fi
     exec ${pkgs.acl}/bin/setfacl "$@"
   '';
 in
@@ -191,7 +208,7 @@ pkgs.testers.runNixOSTest {
         # Root may connect (the kernel lets it): the service itself refuses it, by SO_PEERCRED.
         cmd = "printf '%s\\n' '{\"type\":\"status\"}' | socat -t 5 - UNIX-CONNECT:" + sock
         said = [json.loads(l) for l in machine.execute(cmd)[1].splitlines()]
-        assert said == [{"type": "error", "text": "this is alice's agent: it answers alice alone"}], said
+        assert said == [{"type": "error", "text": "this is alice's agent: it answers alice alone"}, {"type": "done", "exit": 1}], said
         # And so bob, through a socket alice opened to everyone (she owns it): refused all the same.
         machine.succeed(f"su - alice -c 'chmod 666 {sock}'")
         assert raw("bob", {"type": "ask", "text": "hello"}) == said
@@ -225,6 +242,37 @@ pkgs.testers.runNixOSTest {
         assert prop("ActiveState") == "active"
         assert raw("alice", {"type": "status"}) == [{"type": "status", "running": False}]
 
+    with subtest("stop ends all of a task: a program in a session of its own, and one out of sight"):
+        machine.succeed("su - alice -c \"tmux new-session -d -s p -x 200 -y 50 'torq ask \\\"install slowly\\\"; echo exit=\\$?; sleep 600'\"")
+        machine.wait_until_succeeds("pgrep -u torq-agent-alice -f 'sleep 601' && pgrep -u torq-agent-alice -f 'undumpable 602' && pgrep -u torq-agent-alice -f 'sleep 603'", timeout=60)
+        hidden = machine.succeed("pgrep -n -u torq-agent-alice -f 'undumpable 602'").strip()
+        assert machine.succeed(f"stat -c %u /proc/{hidden}/status").strip() == "0", "undumpable: its /proc files are root's"
+        own = machine.succeed("pgrep -n -u torq-agent-alice -f 'sleep 601'").strip()
+        doctor = machine.succeed("pgrep -u torq-agent-alice -x torq-doctor").strip()
+        assert machine.succeed(f"ps -o sid= -p {own}").strip() != machine.succeed(f"ps -o sid= -p {doctor}").strip(), "a session of its own"
+        machine.succeed("su - alice -c 'tmux send-keys -t p C-c'")
+        machine.wait_until_succeeds("su - alice -c 'tmux capture-pane -p -t p' | grep -q 'exit=1'", timeout=30)
+        for p in ["sleep 601", "undumpable 602", "sleep 603"]:
+            machine.fail(f"pgrep -u torq-agent-alice -f '{p}'")
+        assert machine.succeed(f"cat '/sys/fs/cgroup{prop('ControlGroup')}/cgroup.procs'").split() == [prop("MainPID")], "nothing but the service left in its unit"
+
+    with subtest("a frozen service cannot hold the terminal: Ctrl-C twice, or once and 5 s, gets alice out"):
+        machine.succeed(f"systemctl freeze {unit}")
+        machine.succeed("su - alice -c \"tmux new-session -d -s f -x 200 -y 50 'torq ask hello; echo exit=\\$?; sleep 600'\"")
+        machine.sleep(1)
+        machine.succeed("su - alice -c 'tmux send-keys -t f C-c'")
+        machine.sleep(1)
+        machine.succeed("su - alice -c 'tmux send-keys -t f C-c'")
+        machine.wait_until_succeeds("su - alice -c 'tmux capture-pane -p -t f' | grep -q 'exit=130'", timeout=10)
+        machine.succeed("su - alice -c \"tmux new-session -d -s g -x 200 -y 50 'torq ask hello; echo exit=\\$?; sleep 600'\"")
+        machine.sleep(1)
+        machine.succeed("su - alice -c 'tmux send-keys -t g C-c'")
+        machine.sleep(3)
+        machine.fail("su - alice -c 'tmux capture-pane -p -t g' | grep -q 'exit='")
+        machine.wait_until_succeeds("su - alice -c 'tmux capture-pane -p -t g' | grep -q 'exit=130'", timeout=15)
+        machine.succeed(f"systemctl thaw {unit}")
+        machine.wait_until_succeeds("test \"$(su - alice -c 'torq ask hello')\" = 'Hello alice.'", timeout=60)
+
     with subtest("sharing while the service runs: frozen through the walk, thawed after"):
         assert prop("ActiveState") == "active" and prop("FreezerState") == "running"
         as_user("alice", "mkdir -p ~/project/sub && echo hi > ~/project/a && echo there > ~/project/sub/b")
@@ -242,6 +290,26 @@ pkgs.testers.runNixOSTest {
         machine.succeed("rm /tmp/fail-setfacl")
         # The service answers after it.
         assert as_user("alice", "torq ask hello").strip() == "Hello alice."
+
+    with subtest("torqcli killed in the middle of the walk: the agent is thawed all the same"):
+        machine.succeed("touch /tmp/hang-setfacl")
+        machine.succeed("su - alice -c \"tmux new-session -d -s k 'torq agent run --share ~/project -- true'\"")
+        machine.wait_until_succeeds(f"test \"$(systemctl show -P FreezerState {unit})\" = frozen", timeout=30)
+        machine.succeed("pkill -KILL -u alice -x torq")
+        machine.wait_until_succeeds(f"test \"$(systemctl show -P FreezerState {unit})\" = running", timeout=30)
+        machine.succeed("rm /tmp/hang-setfacl")
+        machine.execute("su - alice -c 'tmux kill-session -t k'; pkill -u alice -f 'sleep 600'")
+
+    with subtest("an agent program out of sight (undumpable) still makes a share refuse"):
+        machine.succeed("su - alice -c \"tmux new-session -d -s u 'torq agent run -- ${undumpable} 604'\"")
+        machine.wait_until_succeeds("pgrep -u torq-agent-alice -f 'undumpable 604'", timeout=30)
+        hidden = machine.succeed("pgrep -n -u torq-agent-alice -f 'undumpable 604'").strip()
+        assert machine.succeed(f"stat -c %u /proc/{hidden}/status").strip() == "0", "its /proc files are root's"
+        out = machine.fail("su - alice -c 'torq agent run --share ~/project -- true' 2>&1")
+        assert "is running already" in out, out
+        assert prop("FreezerState") == "running"
+        machine.succeed("su - alice -c 'tmux kill-session -t u'")
+        machine.wait_until_fails("pgrep -u torq-agent-alice -f 'undumpable 604'", timeout=30)
 
     with subtest("a torq agent run session running already: the share refuses, and nothing is left frozen"):
         machine.succeed("su - alice -c \"tmux new-session -d -s s 'torq agent run -- sleep 600'\"")
