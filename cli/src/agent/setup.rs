@@ -117,14 +117,36 @@ pub fn setup() -> anyhow::Result<Setup> {
     Ok(Setup { me, agent, service, brain: brain()? })
 }
 
-/// Whether `me`'s agent service runs now — asked of systemd, not of the service, so that looking never
-/// starts it (its socket starts it when the person first asks).
+/// How long systemd has to say whether the service runs: a look is never held longer.
+const SYSTEMD_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether `me`'s agent service runs now — asked of systemd (`systemctl`, by absolute path), not of the
+/// service, so that looking never starts it (its socket starts it when the person first asks).
 pub fn service_running(me: &str) -> bool {
-    std::process::Command::new("systemctl")
-        .args(["show", "-P", "ActiveState", &format!("torq-agent@{me}.service")])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "active")
+    let mut c = std::process::Command::new(crate::app::system_program("systemctl"));
+    c.args(["show", "-P", "ActiveState", &format!("torq-agent@{me}.service")]);
+    output_within(c, SYSTEMD_WAIT).is_some_and(|o| o.trim() == "active")
+}
+
+/// What `c` prints, if it ends well within `limit`; killed, and nothing, if not.
+fn output_within(mut c: std::process::Command, limit: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    let mut child = c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let mut out = String::new();
+    child.stdout.take()?.take(64 * 1024).read_to_string(&mut out).ok()?;
+    status.success().then_some(out)
 }
 
 #[cfg(test)]
@@ -150,5 +172,21 @@ mod tests {
         assert_eq!(here.place, Place::ThisMachine("127.0.0.1:8099".into()));
         assert!(!here.remote());
         assert!(brain_of("{}").is_err());
+    }
+
+    /// A systemd that does not answer never holds a look: killed at the limit.
+    #[test]
+    fn systemd_asked_within_a_limit() {
+        let mut quick = std::process::Command::new("sh");
+        quick.args(["-c", "echo active"]);
+        assert_eq!(output_within(quick, std::time::Duration::from_secs(5)).as_deref(), Some("active\n"));
+        let mut slow = std::process::Command::new("sh");
+        slow.args(["-c", "sleep 30; echo active"]);
+        let t = std::time::Instant::now();
+        assert_eq!(output_within(slow, std::time::Duration::from_millis(300)), None);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+        let mut failed = std::process::Command::new("sh");
+        failed.args(["-c", "echo active; exit 1"]);
+        assert_eq!(output_within(failed, std::time::Duration::from_secs(5)), None);
     }
 }

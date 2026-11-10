@@ -90,14 +90,6 @@ pub struct Client {
     quiet: Duration,
 }
 
-/// The name of `uid`, from /etc/passwd (the caller's own: never a name it was given).
-fn name_of(passwd: &str, uid: u32) -> Option<String> {
-    passwd.lines().find_map(|l| {
-        let f: Vec<&str> = l.split(':').collect();
-        (f.len() > 2 && f[2].parse() == Ok(uid)).then(|| f[0].to_string())
-    })
-}
-
 fn has_account(passwd: &str, name: &str) -> bool {
     passwd.lines().any(|l| l.split(':').next() == Some(name))
 }
@@ -108,7 +100,7 @@ impl Client {
     pub fn mine() -> Result<Client, Unreachable> {
         let uid = rustix::process::getuid().as_raw();
         let passwd = std::fs::read_to_string("/etc/passwd").map_err(|e| Unreachable::Broken(format!("reading /etc/passwd: {e}")))?;
-        let me = name_of(&passwd, uid).ok_or_else(|| Unreachable::Broken(format!("uid {uid} has no name in /etc/passwd")))?;
+        let me = crate::name_of(&passwd, uid).ok_or_else(|| Unreachable::Broken(format!("uid {uid} has no name in /etc/passwd")))?;
         if is_agent(&me) {
             return Err(Unreachable::IsAgent);
         }
@@ -419,8 +411,8 @@ mod tests {
     #[test]
     fn whose_name_is_this_uid() {
         let passwd = "root:x:0:0::/root:/bin/sh\nalice:x:1000:100::/home/alice:/bin/sh\ntorq-agent-alice:x:990:990::/var/lib/torq-agent-alice:/sbin/nologin\n";
-        assert_eq!(name_of(passwd, 1000).as_deref(), Some("alice"));
-        assert_eq!(name_of(passwd, 1001), None);
+        assert_eq!(crate::name_of(passwd, 1000).as_deref(), Some("alice"));
+        assert_eq!(crate::name_of(passwd, 1001), None);
         assert!(has_account(passwd, "torq-agent-alice") && !has_account(passwd, "torq-agent-bob"));
     }
 

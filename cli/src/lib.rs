@@ -116,13 +116,20 @@ pub fn main() {
     std::process::exit(shell::main(&args[1..]));
 }
 
+/// Who runs this: the name of the uid the kernel gives the process, from /etc/passwd (TorqOS declares every
+/// account there) — not `id`, found on PATH.
 fn me() -> Result<String> {
-    let out = Command::new("id").arg("-un").output().context("running id -un")?;
-    let user = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() || user.is_empty() {
-        bail!("cannot tell who you are (id -un failed)");
-    }
-    Ok(user)
+    let uid = rustix::process::getuid().as_raw();
+    let passwd = fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
+    name_of(&passwd, uid).with_context(|| format!("cannot tell who you are: uid {uid} is not in /etc/passwd"))
+}
+
+/// The name of `uid` in a passwd file's text.
+pub(crate) fn name_of(passwd: &str, uid: u32) -> Option<String> {
+    passwd.lines().find_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        (f.len() > 2 && f[2].parse() == Ok(uid)).then(|| f[0].to_string())
+    })
 }
 
 /// Search this machine's nixpkgs (`show packages available`): what matches, as (name, version,

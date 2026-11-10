@@ -1050,8 +1050,34 @@ pub fn open_settings(page: &str) {
     spawn("torq-settings", &[page]);
 }
 
+/// Where the system's programs are. The desktop's programs start TorqOS's own and COSMIC's from here, by
+/// absolute path: never whatever a person's PATH (or anything that wrote to it) finds first.
+pub const SYSTEM_BIN: &str = "/run/current-system/sw/bin";
+
+/// A system program, by absolute path.
+pub fn system_program(program: &str) -> String {
+    format!("{SYSTEM_BIN}/{program}")
+}
+
+/// The command that starts a system program: by absolute path, whatever PATH says.
+fn command(program: &str, args: &[&str]) -> std::process::Command {
+    let mut c = std::process::Command::new(system_program(program));
+    c.args(args);
+    c
+}
+
 fn spawn(program: &str, args: &[&str]) {
-    let _ = std::process::Command::new(program).args(args).spawn();
+    let _ = command(program, args).spawn();
+}
+
+/// A `torq-settings` planted earlier on PATH is not what starts.
+#[cfg(test)]
+#[test]
+fn programs_by_absolute_path() {
+    let c = command("torq-settings", &["proposals"]);
+    assert_eq!(c.get_program(), "/run/current-system/sw/bin/torq-settings");
+    assert_eq!(c.get_args().collect::<Vec<_>>(), ["proposals"]);
+    assert_eq!(system_program("torq-agent-ui"), "/run/current-system/sw/bin/torq-agent-ui");
 }
 
 #[cfg(test)]
