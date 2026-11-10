@@ -58,7 +58,13 @@ forwards = ["local 8080 intranet:80", "remote 2222 localhost:22"]
 
 Nothing else goes in the file. ssh options such as `ProxyCommand` are refused, so the file cannot run a
 command. Forwards listen on `127.0.0.1` only, so other machines on your network cannot use them. To check
-the file, run `torq-tunnel check`.
+the file, run `torq-tunnel check`; `torq-tunnel status` shows what each tunnel is doing. A mistake in one
+tunnel stops only that one.
+
+!!! note
+    These guarantees cover `tunnels.toml`. Your own `~/.ssh/config` is still read, so what you put there
+    still applies to a tunnel: a `ProxyCommand` of yours runs, and a `DynamicForward 0.0.0.0:…` of yours
+    listens on the network.
 
 ## When a tunnel drops
 

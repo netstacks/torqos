@@ -26,6 +26,8 @@ pub const SSH_OPTIONS: &[&str] = &[
     "BatchMode=yes",
     // A host key not already in known_hosts does not connect, and is not added (no `accept-new`).
     "StrictHostKeyChecking=yes",
+    // Nor are a known server's other keys added behind the person's back (OpenSSH's default otherwise).
+    "UpdateHostKeys=no",
     // A forward that cannot listen ends the connection, so systemd tries again and the panel says why.
     "ExitOnForwardFailure=yes",
     // A dead link is noticed within 45 s: ssh exits, systemd starts it again.
@@ -214,25 +216,51 @@ pub fn unit(name: &str) -> String {
     format!("torq-tunnel@{name}.service")
 }
 
-/// Every tunnel of a file's text, in the file's order of names (sorted), each checked. One wrong tunnel
-/// refuses the file: the person sees what to fix, not a tunnel that half works.
-pub fn parse(text: &str) -> Result<Vec<Tunnel>> {
-    let raw: BTreeMap<String, Raw> = toml::from_str(text).map_err(|e| anyhow::anyhow!("{}", e.message()))?;
-    let mut all = Vec::new();
-    for (n, r) in raw {
-        let t = check(&n, r).with_context(|| format!("tunnel `{n}`"))?;
-        all.push(t);
+/// A file read tunnel by tunnel: one wrong tunnel is said, and the others still work (a typo in one must not
+/// stop the rest, which would otherwise each refuse at their next restart).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct File {
+    /// The tunnels that are right, by name.
+    pub tunnels: Vec<Tunnel>,
+    /// Each wrong tunnel's name and why.
+    pub wrong: Vec<(String, String)>,
+    /// Two tunnels that listen on one port here: both are kept (only one can be up at a time), and it is said.
+    pub clashes: Vec<String>,
+}
+
+/// A file's tunnels, each checked on its own. Only a file that is not TOML at all is an error: then no
+/// tunnel of it can be read.
+pub fn read(text: &str) -> Result<File> {
+    let raw: BTreeMap<String, toml::Value> = toml::from_str(text).map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+    let mut f = File::default();
+    for (n, v) in raw {
+        match v.try_into::<Raw>().map_err(|e| anyhow::anyhow!("{}", e.message())).and_then(|r| check(&n, r)) {
+            Ok(t) => f.tunnels.push(t),
+            Err(e) => f.wrong.push((n, format!("{e:#}"))),
+        }
     }
-    // Two tunnels cannot listen on one port here: the second would fail every time it starts.
     let mut seen: BTreeMap<u16, &str> = BTreeMap::new();
-    for t in &all {
+    for t in &f.tunnels {
         for p in t.forwards.iter().filter_map(Forward::listens_here) {
             if let Some(other) = seen.insert(p, &t.name) {
-                bail!("tunnels `{other}` and `{}` both listen on 127.0.0.1:{p}", t.name);
+                f.clashes.push(format!("tunnels `{other}` and `{}` both listen on 127.0.0.1:{p}", t.name));
             }
         }
     }
-    Ok(all)
+    Ok(f)
+}
+
+/// Every tunnel of a file's text, sorted by name, the file refused whole if any of it is wrong: what
+/// `torq-tunnel check` and "Add tunnel" hold a file to, so the person sees what to fix.
+pub fn parse(text: &str) -> Result<Vec<Tunnel>> {
+    let f = read(text)?;
+    if let Some((n, why)) = f.wrong.first() {
+        bail!("tunnel `{n}`: {why}");
+    }
+    if let Some(c) = f.clashes.first() {
+        bail!("{c}");
+    }
+    Ok(f.tunnels)
 }
 
 fn check(n: &str, r: Raw) -> Result<Tunnel> {
@@ -267,8 +295,18 @@ pub const TEMPLATE: &str = "# Your SSH tunnels (TorqOS, ADR-050). Each is kept u
 # forwards = [\"socks 1080\"]           # socks <port> | local <port> <host>:<port> | remote <port> <host>:<port>
 ";
 
-/// The person's tunnels; none if there is no file yet.
-pub fn load() -> Result<Vec<Tunnel>> {
+/// The person's tunnels, each checked on its own; none if there is no file yet.
+pub fn load() -> Result<File> {
+    let path = file()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => read(&text).with_context(|| format!("{}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(File::default()),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// The file whole, refused if any of it is wrong (`torq-tunnel check`).
+pub fn load_strict() -> Result<Vec<Tunnel>> {
     let path = file()?;
     match std::fs::read_to_string(&path) {
         Ok(text) => parse(&text).with_context(|| format!("{}", path.display())),
@@ -309,12 +347,16 @@ pub fn add_to_file(n: &str, dest: &str, forwards: &[String]) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
     };
     let new = add(&text, n, dest, forwards)?;
+    // A file that is a link (a dotfiles manager's) is written where it points, and stays a link.
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
     let dir = path.parent().context("the file has no folder")?;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(".tunnels.toml.new");
+    // A leftover from an interrupted save would keep its own mode: made new, readable by the person alone.
+    let _ = std::fs::remove_file(&tmp);
     {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
         f.write_all(new.as_bytes())?;
         f.sync_all()?;
     }
@@ -430,9 +472,10 @@ pub fn status(all: &[Tunnel]) -> Vec<(State, bool)> {
         .collect()
 }
 
-/// The unit's last line in the person's journal.
+/// The last thing the tunnel itself said (ssh, or torq-tunnel before it), from the person's journal: only
+/// its own process's lines (`_SYSTEMD_USER_UNIT`), not the user manager's about it ("Failed with result…").
 fn last_line(unit: &str) -> Option<String> {
-    let o = Command::new("journalctl").args(["--user", "--unit", unit, "--lines=1", "--output=cat", "--no-pager", "--quiet"]).output().ok()?;
+    let o = Command::new("journalctl").args(["--user", &format!("_SYSTEMD_USER_UNIT={unit}"), "--lines=1", "--output=cat", "--no-pager", "--quiet"]).output().ok()?;
     String::from_utf8_lossy(&o.stdout).lines().last().map(str::to_string)
 }
 
@@ -484,9 +527,15 @@ mod tests {
         let t = one("[a]\ndestination = \"me@host\"\nport = 2200\nforwards = [\"socks 1080\", \"local 8080 [::1]:80\", \"remote 9000 localhost:22\"]\n");
         let a = t.ssh_args();
         assert_eq!(&a[..2], ["-N", "-T"]);
-        for o in ["BatchMode=yes", "StrictHostKeyChecking=yes", "ExitOnForwardFailure=yes", "GatewayPorts=no", "PermitLocalCommand=no", "ControlPath=none"] {
-            assert!(a.windows(2).any(|w| w[0] == "-o" && w[1] == o), "{o}");
-        }
+        // Every option, by name: one dropped or weakened fails here.
+        let want = [
+            "BatchMode=yes", "StrictHostKeyChecking=yes", "UpdateHostKeys=no", "ExitOnForwardFailure=yes",
+            "ServerAliveInterval=15", "ServerAliveCountMax=3", "ConnectTimeout=15", "GatewayPorts=no",
+            "PermitLocalCommand=no", "ControlMaster=no", "ControlPath=none", "ForwardAgent=no", "ForwardX11=no",
+        ];
+        assert_eq!(SSH_OPTIONS, want);
+        let given: Vec<&str> = a[2..2 + 2 * want.len()].chunks(2).map(|w| { assert_eq!(w[0], "-o"); w[1].as_str() }).collect();
+        assert_eq!(given, want);
         assert!(!a.iter().any(|x| x.contains("accept-new") || x.starts_with("ProxyCommand") || x.starts_with("LocalCommand")));
         let tail: Vec<&str> = a[2 + 2 * SSH_OPTIONS.len()..].iter().map(String::as_str).collect();
         assert_eq!(tail, ["-p", "2200", "-D", "127.0.0.1:1080", "-L", "127.0.0.1:8080:[::1]:80", "-R", "127.0.0.1:9000:localhost:22", "--", "me@host"]);
@@ -529,6 +578,20 @@ mod tests {
         assert!(both.unwrap_err().to_string().contains("both listen on 127.0.0.1:1080"));
         assert_eq!(parse("").unwrap(), vec![]);
         assert_eq!(parse(TEMPLATE).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn one_wrong_tunnel_does_not_stop_the_others() {
+        let f = read("[good]\ndestination = \"h\"\nforwards = [\"socks 1080\"]\n[bad]\ndestination = \"-oX\"\nforwards = [\"socks 1\"]\n[odd]\ndestination = \"h\"\nforwards = [\"socks 1\"]\nproxycommand = \"x\"\n[two]\ndestination = \"h\"\nforwards = [\"socks 1080\"]\n").unwrap();
+        assert_eq!(f.tunnels.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["good", "two"]);
+        let wrong: Vec<&str> = f.wrong.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(wrong, ["bad", "odd"]);
+        assert!(f.wrong[1].1.contains("unknown field `proxycommand`"), "{}", f.wrong[1].1);
+        assert_eq!(f.clashes, ["tunnels `good` and `two` both listen on 127.0.0.1:1080"]);
+        // Not TOML at all: nothing of it can be read.
+        assert!(read("[good\n").is_err());
+        // A tunnel that is not a table is a wrong tunnel, not a crash.
+        assert_eq!(read("x = 1\n").unwrap().wrong.len(), 1);
     }
 
     #[test]

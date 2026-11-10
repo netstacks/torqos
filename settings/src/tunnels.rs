@@ -16,7 +16,7 @@ use cosmic::prelude::*;
 use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget::{self, icon};
 use std::time::Duration;
-use torq::tunnels::{self, State, Tunnel};
+use torq::tunnels::{self, State};
 
 fn main() -> cosmic::iced::Result {
     cosmic::applet::run::<Applet>(())
@@ -28,10 +28,12 @@ const EVERY: Duration = Duration::from_secs(3);
 struct Applet {
     core: cosmic::Core,
     popup: Option<Id>,
-    /// The file's tunnels, or why it cannot be read.
-    tunnels: Result<Vec<Tunnel>, String>,
+    /// The file's tunnels (and its wrong ones), or why it cannot be read.
+    tunnels: Result<tunnels::File, String>,
     /// Each tunnel's state and whether it starts at login, in the file's order.
     states: Vec<(State, bool)>,
+    /// A look under way: no second one while it is (a user manager slow to answer must not pile them up).
+    looking: bool,
     /// The last thing that went wrong, said until the next action.
     error: Option<String>,
     /// The add form, while open.
@@ -49,7 +51,7 @@ struct Form {
 #[derive(Debug, Clone)]
 enum Message {
     Look,
-    Looked(Result<Vec<Tunnel>, String>, Vec<(State, bool)>),
+    Looked(Result<tunnels::File, String>, Vec<(State, bool)>),
     Switch(String, bool),
     AtLogin(String, bool),
     Done(Result<(), String>),
@@ -91,7 +93,7 @@ async fn look() -> Message {
     let (tx, rx) = cosmic::iced::futures::channel::oneshot::channel();
     std::thread::spawn(move || {
         let all = tunnels::load().map_err(|e| format!("{e:#}"));
-        let states = all.as_ref().map(|t| tunnels::status(t)).unwrap_or_default();
+        let states = all.as_ref().map(|f| tunnels::status(&f.tunnels)).unwrap_or_default();
         let _ = tx.send(Message::Looked(all, states));
     });
     rx.await.unwrap_or(Message::Looked(Err("the look stopped before it answered".into()), Vec::new()))
@@ -114,7 +116,7 @@ impl Applet {
     fn icon(&self) -> icon::Handle {
         let theme = cosmic::theme::active();
         let c = theme.cosmic();
-        let failing = self.tunnels.is_err() || self.states.iter().any(|(s, _)| matches!(s, State::Retrying(_) | State::Failed(_)));
+        let failing = self.tunnels.as_ref().map_or(true, |f| !f.wrong.is_empty()) || self.states.iter().any(|(s, _)| matches!(s, State::Retrying(_) | State::Failed(_)));
         let up = self.states.iter().any(|(s, _)| *s == State::Up);
         glyph(if failing { Some(c.warning_color()) } else if up { Some(c.accent_color()) } else { None })
     }
@@ -134,11 +136,18 @@ impl Applet {
         col = col.push(widget::text::heading("SSH tunnels"));
         match &self.tunnels {
             Err(e) => col = col.push(widget::text::body(format!("The tunnels file is not right: {e}")).width(Length::Fill)),
-            Ok(all) if all.is_empty() && self.adding.is_none() => {
+            Ok(file) if file.tunnels.is_empty() && file.wrong.is_empty() && self.adding.is_none() => {
                 col = col.push(widget::text::body("No tunnels yet. Add one, or edit the file.").width(Length::Fill));
             }
-            Ok(all) => {
-                for (t, (state, login)) in all.iter().zip(self.states.iter()) {
+            Ok(file) => {
+                // What is wrong in the file first: the rest still works.
+                for (n, why) in &file.wrong {
+                    col = col.push(widget::text::body(format!("{n}: not right, so not started. {why}")).width(Length::Fill));
+                }
+                for c in &file.clashes {
+                    col = col.push(widget::text::caption(format!("Only one can be up at a time: {c}.")).width(Length::Fill));
+                }
+                for (t, (state, login)) in file.tunnels.iter().zip(self.states.iter()) {
                     let line = match state {
                         State::Off => t.describe(),
                         State::Connecting => format!("Connecting to {}…", t.destination),
@@ -217,7 +226,7 @@ impl cosmic::Application for Applet {
     }
 
     fn init(core: cosmic::Core, _flags: ()) -> (Self, Task<cosmic::Action<Message>>) {
-        let app = Applet { core, popup: None, tunnels: Ok(Vec::new()), states: Vec::new(), error: None, adding: None };
+        let app = Applet { core, popup: None, tunnels: Ok(tunnels::File::default()), states: Vec::new(), looking: true, error: None, adding: None };
         (app, cosmic::task::future(look()))
     }
 
@@ -231,8 +240,15 @@ impl cosmic::Application for Applet {
 
     fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
         match message {
-            Message::Look => return cosmic::task::future(look()),
+            Message::Look => {
+                if self.looking {
+                    return Task::none();
+                }
+                self.looking = true;
+                return cosmic::task::future(look());
+            }
             Message::Looked(all, states) => {
+                self.looking = false;
                 self.tunnels = all;
                 self.states = states;
             }
@@ -246,7 +262,7 @@ impl cosmic::Application for Applet {
             }
             Message::Done(r) => {
                 self.error = r.err();
-                return cosmic::task::future(look());
+                return self.update(Message::Look);
             }
             Message::Add => {
                 self.error = None;
@@ -267,7 +283,7 @@ impl cosmic::Application for Applet {
                         Ok(()) => {
                             self.error = None;
                             self.adding = None;
-                            return cosmic::task::future(look());
+                            return self.update(Message::Look);
                         }
                         Err(e) => self.error = Some(format!("{e:#}")),
                     }

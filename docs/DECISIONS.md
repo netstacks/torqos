@@ -1936,7 +1936,7 @@ off many times a day.
      127.0.0.1:1080", "Reconnecting: the host's key is not known…", from the unit's state and its last
      journal line), and "Start at login" (`systemctl --user enable`); then **Add tunnel…** (name, destination,
      forwards: written to the file) and **Edit tunnels…** (the file in COSMIC Edit). It talks to the user
-     manager over D-Bus, as the person; it runs nothing as root and changes nothing of the system.
+     manager as the person (`systemctl --user`, as built); it runs nothing as root and changes nothing of the system.
   5. **The agent cannot reach it.** `torq-agent` is another account (ADR-035): it can read neither the person's
      home nor their user manager, so it can neither start a tunnel nor point one somewhere. A tunnel is a way
      out of the machine; it stays the person's.
@@ -1967,9 +1967,26 @@ off many times a day.
   "Up" is the unit running and every forward here listening on 127.0.0.1 (`/proc/net/tcp`). A remote forward
   listens on the far end's loopback as asked, unless that server's own `GatewayPorts yes` overrides it: the
   far end's to decide. `tests/tunnels.nix` (check `tunnels`, two machines) checks each claim; on the laptop with
-  KVM its script took 99 s, 61 of them the dropped link noticed (`Timeout, server far not responding.`, at
+  KVM its script took 99 s (112 s after the review's checks were added), about 60 of them the dropped link noticed (`Timeout, server far not responding.`, at
   ~45 s), restarted and carrying traffic again. Mutation-checked: a destination allowed to start with `-`, and
   `accept-new`, each fail a unit test.
+- **Amended (2026-11-10, the independent review):** what the guarantees are of. Points 1 and 3 hold for
+  `tunnels.toml`: nothing in it runs a command, opens a forward beyond 127.0.0.1 or accepts a key. The person's
+  own `~/.ssh/config` is still theirs and still read (that is what lets a destination be a `Host` with
+  `ProxyJump`), so it can do what ssh lets it: a `ProxyCommand` or `Match exec` of theirs runs, a
+  `DynamicForward 0.0.0.0:…` of theirs is added and listens wide (`GatewayPorts=no` does not override an
+  explicit bind address), and a jump host's own connection takes their settings for it, not the tunnel's
+  options. Overriding it (`-F` with a file of our own) would lose `ProxyJump`; not done. Fixed from the review:
+  ssh no longer adds a known server's other host keys to `known_hosts` (`UpdateHostKeys=no`; OpenSSH's default
+  did, and the test's snapshot is now taken before any tunnel runs); one wrong tunnel stops only itself (the file
+  read tunnel by tunnel, `torq::tunnels::read`; exit 78 only when the tunnel's own entry is wrong or gone, and a
+  file that is not TOML at all is tried again, so fixing it brings every tunnel back); the panel's line is ssh's
+  own last word, not the user manager's about the unit (the journal read by `_SYSTEMD_USER_UNIT`), checked in the
+  VM through `torq-tunnel status`; the agent's account checked unable to start a tunnel, not only to stop one,
+  with a check that the account itself works; the applet never starts a look while one is under way; "Add
+  tunnel" writes through a symlinked file and always makes its temporary file 0600. Not tested: keys from the
+  session's agent (the VM test uses a key file; the laptop's user manager has COSMIC's `SSH_AUTH_SOCK`), the
+  applet's own drawing and buttons, and that the desktop never lingers.
 - **Not:** tunnels in the configuration tree for a person (a server's are `services autossh`, already there);
   a VPN; setting up a browser's proxy (the person's own, in their profile); accepting a host key from the
   applet.
