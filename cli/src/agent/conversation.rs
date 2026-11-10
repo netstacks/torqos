@@ -199,6 +199,8 @@ pub enum Fate {
     /// Waiting for a person (as TorqOS Settings' Proposals page lists it).
     Waiting,
     Applied,
+    /// A person declined it (ADR-051, amended): never applied.
+    Declined,
     /// Its apply failed.
     Failed,
     /// No proposal of this person's agent has that number: no Review for it.
@@ -217,6 +219,8 @@ pub fn fates(entries: &[crate::history::Entry], agent: &str, seqs: &[u64]) -> Ve
                 Fate::NotYours
             } else if waiting.iter().any(|e| e.seq == seq) {
                 Fate::Waiting
+            } else if ended("declined") {
+                Fate::Declined
             } else if ended("applied") {
                 Fate::Applied
             } else {
@@ -249,6 +253,7 @@ impl Turn {
                     None => "looking it up…",
                     Some(Fate::Waiting) => "waiting for you to apply or refuse it",
                     Some(Fate::Applied) => "applied",
+                    Some(Fate::Declined) => "declined",
                     Some(Fate::Failed) => "did not apply",
                     Some(Fate::NotYours) => "not your agent's proposal",
                 };
@@ -368,18 +373,21 @@ mod tests {
             entry(5, "proposal", json!({"agent": "torq-agent-me"})),
             entry(6, "apply_failed", json!({"proposal": 5})),
             entry(7, "applied", json!({})),
+            entry(10, "proposal", json!({"agent": "torq-agent-me"})),
+            entry(11, "declined", json!({"proposal": 10})),
         ];
-        let f = fates(&entries, "torq-agent-me", &[1, 2, 4, 5, 7, 99]);
-        assert_eq!(f, vec![(1, Fate::Waiting), (2, Fate::Applied), (4, Fate::NotYours), (5, Fate::Failed), (7, Fate::NotYours), (99, Fate::NotYours)]);
+        let f = fates(&entries, "torq-agent-me", &[1, 2, 4, 5, 7, 10, 99]);
+        assert_eq!(f, vec![(1, Fate::Waiting), (2, Fate::Applied), (4, Fate::NotYours), (5, Fate::Failed), (7, Fate::NotYours), (10, Fate::Declined), (99, Fate::NotYours)]);
         let mut c = Conversation::default();
         c.asked("q");
-        for seq in [1, 2, 4, 8] {
+        for seq in [1, 2, 4, 8, 10] {
             c.heard(Event::Proposed { seq });
         }
         let rows = c.last().unwrap().proposal_rows(&f);
-        assert_eq!(rows.iter().map(|r| (r.seq, r.review)).collect::<Vec<_>>(), [(1, true), (2, false), (4, false), (8, false)]);
+        assert_eq!(rows.iter().map(|r| (r.seq, r.review)).collect::<Vec<_>>(), [(1, true), (2, false), (4, false), (8, false), (10, false)]);
         assert_eq!(rows[0].text, "Proposed #1: waiting for you to apply or refuse it");
         assert_eq!(rows[3].text, "Proposed #8: looking it up…");
+        assert_eq!(rows[4].text, "Proposed #10: declined");
         c.heard(Event::Tainted { why: "read_journal".into() });
         let rows = c.last().unwrap().proposal_rows(&f);
         assert!(rows.iter().all(|r| r.text.contains("(tainted)")), "{rows:?}");

@@ -565,6 +565,29 @@ impl Machine for Real<'_> {
         Ok(out)
     }
 
+    fn decline_proposal(&self, seq: u64, me: &str) -> Result<String> {
+        let entries = crate::read_ledger(self.cli)?;
+        let Some(p) = history::waiting_proposals(&entries).into_iter().find(|e| e.seq == seq) else {
+            bail!("#{seq} is not a proposal waiting (show system proposals lists them)");
+        };
+        let by = p.data["caller"].as_str().unwrap_or(&p.actor);
+        let files: Vec<String> = p.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(|f| history::one_line(f, 80)).collect();
+        let what = format!(
+            "Proposal #{seq} \"{}\" (by {}), to {}: declined, it is never applied — the proposer may propose it again.\n",
+            history::one_line(&p.reason, 60),
+            history::one_line(by, 30),
+            files.join(", "),
+        );
+        if let Some(stop) = self.ask(&format!("{what}Decline? ")).go_on("declined")? {
+            return Ok(stop);
+        }
+        let log = run::start_log()?;
+        let seq_s = seq.to_string();
+        let v = done(run::broker_json(broker(self.cli, &["decline", &seq_s, "--approved-by", me])?, &log)?, "decline")?;
+        let cancelled = v["data"]["cancelled"].as_u64().map(|c| format!("; the commit scheduled for it is cancelled (#{c})")).unwrap_or_default();
+        Ok(format!("declined proposal #{seq} (#{}){cancelled}\n", v["seq"].as_u64().unwrap_or(0)))
+    }
+
     fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
         let entries = crate::read_ledger(self.cli)?;
         if !history::waiting_proposals(&entries).iter().any(|e| e.seq == seq) {

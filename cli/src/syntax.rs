@@ -134,6 +134,8 @@ pub enum Request {
     Revert { change: u64 },
     /// Apply a proposal someone else made (the agent's: ADR-041), after showing it and asking.
     Apply { proposal: u64 },
+    /// Decline a waiting proposal (ADR-051, amended): never applied after; who may, the broker says.
+    Decline { proposal: u64 },
     /// Say no more of where the ledger and the repository disagree, on the record.
     LedgerAcknowledge,
     /// A snapshot of the data now (ADR-038).
@@ -290,6 +292,7 @@ pub fn render(op: &Op) -> String {
             Request::Password { user: Some(u) } => format!("request system password {}", quote(u)),
             Request::Revert { change } => format!("request system revert {change}"),
             Request::Apply { proposal } => format!("request system apply {proposal}"),
+            Request::Decline { proposal } => format!("request system decline {proposal}"),
             Request::Trust { minutes } => format!("request system agent trust {minutes}"),
             Request::TrustRevoke => "request system agent trust revoke".into(),
             Request::AgentForget => "request system agent forget".into(),
@@ -399,6 +402,7 @@ mod tests {
             (Mode::Operational, Op::Request(Request::Password { user: Some("dana".into()) })),
             (Mode::Operational, Op::Request(Request::Revert { change: 12 })),
             (Mode::Operational, Op::Request(Request::Apply { proposal: 12 })),
+            (Mode::Operational, Op::Request(Request::Decline { proposal: 12 })),
             (Mode::Operational, Op::Request(Request::Trust { minutes: 30 })),
             (Mode::Operational, Op::Request(Request::TrustRevoke)),
             (Mode::Operational, Op::Request(Request::AgentForget)),

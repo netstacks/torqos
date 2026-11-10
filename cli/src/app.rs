@@ -2042,6 +2042,13 @@ mod apps_remembered {
         let e = [p(1, "me", "user"), p(2, "sam", "user"), p(3, "torq-agent-me", "agent")];
         let seqs: Vec<u64> = waiting_on_me(&e, "me").iter().map(|x| x.seq).collect();
         assert_eq!(seqs, [2, 3]);
+        // Declined (ADR-051, amended): no longer waiting, for anyone.
+        let mut declined = p(5, "", "user");
+        declined.kind = "declined".into();
+        declined.data = serde_json::json!({ "proposal": 3 });
+        let e = [p(1, "me", "user"), p(2, "sam", "user"), p(3, "torq-agent-me", "agent"), declined];
+        let seqs: Vec<u64> = waiting_on_me(&e, "me").iter().map(|x| x.seq).collect();
+        assert_eq!(seqs, [2]);
     }
 }
 

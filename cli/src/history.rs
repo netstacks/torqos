@@ -165,7 +165,7 @@ pub fn parse_ts(ts: &str) -> Option<i64> {
 /// only the result.
 fn settled(entries: &[Entry], proposal: u64) -> bool {
     entries.iter().any(|e| match e.kind.as_str() {
-        "applied" | "apply_failed" => e.data["proposal"].as_u64() == Some(proposal),
+        "applied" | "apply_failed" | "declined" => e.data["proposal"].as_u64() == Some(proposal),
         "interrupted" => e.data["op"] == "apply" && e.data["target"].as_u64() == Some(proposal),
         _ => false,
     })
@@ -205,12 +205,12 @@ fn rolled_back(entries: &[Entry], seq: u64) -> bool {
     entries.iter().any(|e| e.kind == "rolled_back" && e.data["applied"].as_u64() == Some(seq))
 }
 
-/// The proposals not yet applied or failed: waiting for a person (the agent's among them).
+/// The proposals not yet applied, failed or declined: waiting for a person (the agent's among them).
 pub fn waiting_proposals(entries: &[Entry]) -> Vec<&Entry> {
     entries
         .iter()
         .filter(|e| e.kind == "proposal")
-        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed") && e.data["proposal"].as_u64() == Some(p.seq)))
+        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed" | "declined") && e.data["proposal"].as_u64() == Some(p.seq)))
         .collect()
 }
 
@@ -243,6 +243,7 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         "adopted" => ("✓", "This machine adopted the configuration".to_string()),
         "refused" => ("✗", format!("Refused: {}", clean(&e.reason))),
         "apply_refused" => ("✗", format!("Refused: {}", clean(&e.reason))),
+        "declined" => ("✗", clean(&e.reason)),
         "apply_scheduled" | "apply_cancelled" => ("·", clean(&e.reason)),
         "remote_cleared" => ("✓", clean(&e.reason)),
         "data_restored" => ("↺", clean(&e.reason)),

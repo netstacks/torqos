@@ -109,6 +109,9 @@ pub trait Machine {
     fn fetch_incoming(&self) -> Result<Option<String>>;
     /// `request system apply <n>`: show proposal <n>, ask, apply it (as `me`).
     fn apply_proposal(&self, seq: u64, me: &str) -> Result<String>;
+    /// `request system decline <n>`: turn a waiting proposal down (ADR-051, amended), after showing it and
+    /// asking; never applied after. Who may is the broker's gate (an administrator's password for another's).
+    fn decline_proposal(&self, seq: u64, me: &str) -> Result<String>;
     /// `request system agent trust <minutes>`: the agent's untainted proposals in `me`'s own folder
     /// apply without asking, for that long (ADR-042, 7; it asks their password). `revoke`: end it.
     fn trust(&self, minutes: Option<u32>) -> Result<String>;
@@ -1349,6 +1352,7 @@ impl<'a> Session<'a> {
             syntax::Request::Password { user } => self.machine.set_password(user.as_deref().unwrap_or(&self.me.clone())),
             syntax::Request::Revert { change } => self.machine.revert(change, &self.me),
             syntax::Request::Apply { proposal } => self.machine.apply_proposal(proposal, &self.me),
+            syntax::Request::Decline { proposal } => self.machine.decline_proposal(proposal, &self.me),
             syntax::Request::Trust { minutes } => self.machine.trust(Some(minutes)),
             syntax::Request::TrustRevoke => self.machine.trust(None),
             // The person's own agent, on their own socket: no change to the system, nothing for the broker.
@@ -2983,6 +2987,9 @@ mod tests {
         }
         fn trust(&self, minutes: Option<u32>) -> Result<String> {
             Ok(format!("trust {minutes:?}\n"))
+        }
+        fn decline_proposal(&self, seq: u64, me: &str) -> Result<String> {
+            Ok(format!("declined proposal #{seq} for {me}\n"))
         }
         fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
             Ok(format!("applied proposal #{seq} for {me}\n"))
