@@ -61,6 +61,35 @@ impl Handoff {
     }
 }
 
+/// What an **Ask the agent** button is about (TorqOS Settings, TorqOS's applet, the tunnels applet): the
+/// question it opens the window with, and the thing itself attached.
+#[derive(Debug, Clone, PartialEq)]
+pub enum About<'a> {
+    /// An alarm, as `show system alarms` says it.
+    Alarm(&'a str),
+    /// What a command said when it failed: the command, and its words.
+    Failure { command: &'a str, said: &'a str },
+    /// A setting of the configuration: its place, its help, its value now.
+    Setting { place: &'a str, help: &'a str, value: &'a str },
+    /// The person's draft, as `show | compare` shows it.
+    Draft(&'a str),
+    /// An SSH tunnel that will not come up: its name, where it goes, and its last word.
+    Tunnel { name: &'a str, destination: &'a str, state: &'a str },
+}
+
+impl About<'_> {
+    pub fn handoff(&self) -> Handoff {
+        let (q, c) = match self {
+            About::Alarm(a) => ("What does this alarm mean, and how do I fix it?".to_string(), format!("TorqOS's alarm:\n{a}")),
+            About::Failure { command, said } => (format!("Why did `{command}` fail, and what can I do?"), format!("The command: {command}\nWhat it said:\n{said}")),
+            About::Setting { place, help, value } => (format!("What does {place} do, and should I change it?"), format!("The setting: {place}\nIts help: {help}\nIts value now: {value}")),
+            About::Draft(diff) => ("What do these changes do? Is anything risky in them?".to_string(), format!("My draft, not yet committed (show | compare):\n{diff}")),
+            About::Tunnel { name, destination, state } => (format!("Why won't my SSH tunnel {name} come up?"), format!("The tunnel: {name}, to {destination}\nIts state: {state}")),
+        };
+        Handoff::new(&q, Some(&c))
+    }
+}
+
 /// The person's own directory for handoffs: `$XDG_RUNTIME_DIR/torq-agent` (their runtime directory is
 /// theirs, 0700, made by logind).
 fn dir() -> Result<PathBuf> {
@@ -188,5 +217,25 @@ mod tests {
         let c = window_command(Path::new("/run/user/1000/torq-agent/ask-1.json"));
         assert_eq!(c.get_program(), "/run/current-system/sw/bin/torq-agent-ui");
         assert_eq!(c.get_args().collect::<Vec<_>>(), ["--ask", "/run/user/1000/torq-agent/ask-1.json"]);
+    }
+
+    /// Each button's question, and the thing attached: tainting, the person asks, bounded.
+    #[test]
+    fn what_each_button_hands_over() {
+        let cases = [
+            (About::Alarm("⚠ The remote did not take the last push"), "alarm", "The remote did not take"),
+            (About::Failure { command: "commit", said: "error: option does not exist" }, "`commit` fail", "option does not exist"),
+            (About::Setting { place: "services openssh enable", help: "Whether to run sshd", value: "true" }, "services openssh enable", "Its value now: true"),
+            (About::Draft("[edit services]\n+  openssh enable true"), "these changes", "+  openssh enable true"),
+            (About::Tunnel { name: "work", destination: "me@host", state: "Reconnecting: the host's key is not known" }, "tunnel work", "the host's key is not known"),
+        ];
+        for (about, in_question, in_context) in cases {
+            let h = about.handoff();
+            assert!(h.question.contains(in_question), "{h:?}");
+            assert!(h.context.as_deref().unwrap().contains(in_context), "{h:?}");
+            assert!(h.taints() && !h.ask_now, "{h:?}");
+        }
+        let long = "x".repeat(MAX_CONTEXT * 2);
+        assert!(About::Draft(&long).handoff().context.unwrap().chars().count() <= MAX_CONTEXT);
     }
 }

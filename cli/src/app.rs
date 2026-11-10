@@ -826,6 +826,12 @@ pub const AGENT: &[Action] = &[op("Trust the agent for a while…", "request sys
 /// The Agent page's Forget (asked first): the person's own agent's memory erased, through its own socket.
 pub const AGENT_FORGET: &str = "request system agent forget";
 
+/// Every **Decline** (the Proposals page, the agent's applet and window): turn a waiting proposal down, as
+/// torqcli does it (it shows the proposal and asks first; who may, the broker says).
+pub fn decline_line(seq: u64) -> String {
+    format!("request system decline {seq}")
+}
+
 /// The Agent page's buttons (ADR-051 2): the agent's model and who has one, each a line of the tree, into the draft
 /// and committed as every other change is. Its API key is not one: a file outside the repository, entered with
 /// TorqOS's secrets (ADR-052), not here.
@@ -921,6 +927,7 @@ mod page_tests {
         AGENT.iter().for_each(check);
         AGENT_SETTINGS.iter().for_each(check);
         whole(Mode::Operational, AGENT_FORGET);
+        whole(Mode::Operational, &decline_line(12));
         // The Agent page's lines as the person finishes them, then commits them.
         for c in ["set torq agent doctor endpoint https://api.anthropic.com/v1", "set torq agent doctor model claude-sonnet-4-5", "set torq agent model url https://example.org/m.gguf", "set torq agent people alice"] {
             whole(Mode::Configuration, c);
