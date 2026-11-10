@@ -4,6 +4,7 @@
 #
 #   system/packages.json          system packages <name>          (system tier)
 #   users/<name>/packages.json    users <name> packages <name>    (user tier)
+#   users/<name>/flatpaks.json    users <name> flatpaks <id>      (user tier: Flathub ids)
 #
 # Each file is a JSON list of nixpkgs attribute paths, e.g. [ "htop", "python3Packages.numpy" ].
 # A user's folder may hold only the user-tier leaves the broker allows (broker/src/policy.rs,
@@ -82,6 +83,17 @@ let
   links = lib.attrNames (lib.filterAttrs (_: type: type == "symlink") entries);
 in
 {
+  # NixOS has no word for a person's Flatpaks: this is it, typed, kept in users/<name>/flatpaks.json.
+  options.users.users = lib.mkOption {
+    type = lib.types.attrsOf (lib.types.submodule {
+      options.flatpaks = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        description = "Apps installed for this person, from Flathub.";
+      };
+    });
+  };
+
   options.torq.cli.package = lib.mkOption {
     type = lib.types.package;
     description = "The `torq` command line (set by the TorqOS flake).";
@@ -153,6 +165,13 @@ in
         file = "system/packages.json";
         type = "package";
       };
+      "users <name> flatpaks" = {
+        kind = "leaf-list";
+        help = "Apps installed for this person, from Flathub";
+        file = "users/<name>/flatpaks.json";
+        tier = "user";
+        type = "flatpak";
+      };
       "users <name> packages" = {
         kind = "leaf-list";
         help = "Software installed for this person only";
@@ -163,6 +182,11 @@ in
     };
 
     environment.systemPackages = [ config.torq.cli.package ] ++ map (resolve "system") cfg.system;
-    users.users = lib.mapAttrs (user: names: { packages = map (resolve "user ${user}") names; }) cfg.user;
+    users.users = lib.mkMerge [
+      (lib.mapAttrs (user: names: { packages = map (resolve "user ${user}") names; }) cfg.user)
+      # A person's apps: what the panel's applet installs for them (ADR-037), read from the configuration.
+      (lib.mapAttrs (name: _: { flatpaks = lib.importJSON (usersDir + "/${name}/flatpaks.json"); })
+        (lib.filterAttrs (_: leaves: leaves ? "flatpaks.json") userDirs))
+    ];
   };
 }

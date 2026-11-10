@@ -11,7 +11,7 @@ use cosmic::iced::futures::channel::mpsc::Sender;
 use cosmic::iced::futures::SinkExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use torq::app::{self, Action, At, Choice, Console, Glance, How, Machine, Mode, Needs, Proposal, Typed, View, VIEWS};
+use torq::app::{self, Action, App, At, Choice, Console, Glance, How, Machine, Mode, Needs, Proposal, Tool, Typed, View, VIEWS};
 use torq::history::Row;
 
 /// How many changes History shows.
@@ -32,6 +32,7 @@ enum Page {
     Configuration,
     History,
     Proposals,
+    Apps,
     System,
     Commands,
 }
@@ -42,6 +43,13 @@ enum Tab {
     Settings,
     Changes,
     Earlier,
+}
+
+/// The Apps page's tabs.
+#[derive(Clone, Copy, PartialEq)]
+enum AppTab {
+    Apps,
+    Tools,
 }
 
 /// What a diff page shows.
@@ -99,6 +107,7 @@ pub struct Settings {
     cfg_tabs: SingleSelectModel,
     sys_tabs: SingleSelectModel,
     diff_tabs: SingleSelectModel,
+    app_tabs: SingleSelectModel,
     // The tree:
     draft: Values,
     active: Values,
@@ -121,6 +130,16 @@ pub struct Settings {
     comparing: Option<u32>,
     // Detail pages:
     change: Option<u64>,
+    // Apps:
+    apps: Loaded<Vec<App>>,
+    app_search: String,
+    app_results: Option<Loaded<Vec<App>>>,
+    /// What is being installed, removed or remembered.
+    app_work: Option<String>,
+    /// Remembering what is installed: one at a time.
+    syncing: bool,
+    tool_search: String,
+    tool_results: Option<Loaded<Vec<Tool>>>,
     proposal: Option<u64>,
     // Commands:
     line: String,
@@ -215,6 +234,23 @@ pub enum Message {
     OpenChange(u64),
     OpenProposal(u64),
     Back,
+    // Apps:
+    AppTab(Entity),
+    Apps(Result<Vec<App>, String>),
+    AppSearch(String),
+    FindApp,
+    AppsFound(Result<Vec<App>, String>),
+    Install(String),
+    Uninstall(String),
+    OpenApp(String),
+    AppDone(String, Result<(), String>),
+    Synced(Result<bool, String>),
+    ToolSearch(String),
+    FindTool,
+    ToolsFound(Result<String, String>),
+    AddTool(String),
+    RemoveTool(String),
+    ToolDone(String, Result<(), String>),
     // Commands:
     Line(String),
     Offers(u64, Vec<Choice>),
@@ -244,6 +280,7 @@ impl cosmic::Application for Settings {
             "history" => Page::History,
             "proposals" => Page::Proposals,
             "commands" => Page::Commands,
+            "apps" => Page::Apps,
             s if VIEWS.iter().any(|v| v.id == s) => Page::System,
             _ => Page::Overview,
         };
@@ -251,6 +288,7 @@ impl cosmic::Application for Settings {
         for (name, page, glyph) in [
             ("Overview", Page::Overview, "emblem-ok-symbolic"),
             ("Configuration", Page::Configuration, "preferences-system-symbolic"),
+            ("Apps", Page::Apps, "system-software-install-symbolic"),
             ("History", Page::History, "document-open-recent-symbolic"),
             ("Proposals", Page::Proposals, "mail-message-new-symbolic"),
             ("System", Page::System, "computer-symbolic"),
@@ -278,6 +316,9 @@ impl cosmic::Application for Settings {
         let mut diff_tabs = SingleSelectModel::default();
         diff_tabs.insert().text("What changed").data(DiffTab::Plain).activate();
         diff_tabs.insert().text("Exact files").data(DiffTab::Files);
+        let mut app_tabs = SingleSelectModel::default();
+        app_tabs.insert().text("Apps").data(AppTab::Apps).activate();
+        app_tabs.insert().text("Command-line tools").data(AppTab::Tools);
         let mut app = Settings {
             core,
             nav,
@@ -292,6 +333,7 @@ impl cosmic::Application for Settings {
             cfg_tabs,
             sys_tabs,
             diff_tabs,
+            app_tabs,
             draft: Values::new(),
             active: Values::new(),
             filter: String::new(),
@@ -307,6 +349,13 @@ impl cosmic::Application for Settings {
             at: String::new(),
             comparing: None,
             change: None,
+            apps: Loaded::Waiting,
+            app_search: String::new(),
+            app_results: None,
+            app_work: None,
+            syncing: false,
+            tool_search: String::new(),
+            tool_results: None,
             proposal: None,
             line: String::new(),
             typed_cf: false,
@@ -606,6 +655,110 @@ impl cosmic::Application for Settings {
                 return self.load();
             }
 
+            Message::AppTab(id) => {
+                self.app_tabs.activate(id);
+                return self.load();
+            }
+            Message::Apps(r) => {
+                let ok = r.is_ok();
+                self.apps = r.into();
+                // Whatever came from the Store, or was just installed or removed, is remembered.
+                if ok && !self.syncing {
+                    self.syncing = true;
+                    return cosmic::task::future(async { Message::Synced(blocking(app::sync_apps).await) });
+                }
+            }
+            Message::Synced(r) => {
+                self.syncing = false;
+                if let Err(e) = r {
+                    self.note = Some((format!("Your apps are installed, but could not be saved to your configuration yet: {e}"), true));
+                }
+            }
+            Message::AppSearch(s) => {
+                self.app_search = s;
+                if self.app_search.trim().is_empty() {
+                    self.app_results = None;
+                }
+            }
+            Message::FindApp => {
+                let terms = self.app_search.trim().to_string();
+                if !terms.is_empty() {
+                    self.app_results = Some(Loaded::Waiting);
+                    return cosmic::task::future(async move { Message::AppsFound(blocking(move || app::search_apps(&terms)).await) });
+                }
+            }
+            Message::AppsFound(r) => self.app_results = Some(r.into()),
+            Message::Install(id) => {
+                self.app_work = Some(format!("Installing {id}…"));
+                self.note = None;
+                return cosmic::task::future(async move {
+                    let shown = id.clone();
+                    Message::AppDone(shown, blocking(move || app::install_app(&id)).await)
+                });
+            }
+            Message::Uninstall(id) => {
+                self.app_work = Some(format!("Removing {id}…"));
+                self.note = None;
+                return cosmic::task::future(async move {
+                    let shown = id.clone();
+                    Message::AppDone(shown, blocking(move || app::remove_app(&id)).await)
+                });
+            }
+            Message::OpenApp(id) => app::open_app(&id),
+            Message::AppDone(id, r) => {
+                self.app_work = None;
+                if let Err(e) = r {
+                    self.note = Some((format!("{id}: {e}"), true));
+                }
+                self.app_search.clear();
+                self.app_results = None;
+                return self.load();
+            }
+            Message::ToolSearch(s) => {
+                self.tool_search = s;
+                if self.tool_search.trim().is_empty() {
+                    self.tool_results = None;
+                }
+            }
+            Message::FindTool => {
+                let terms = self.tool_search.trim().to_string();
+                if !terms.is_empty() {
+                    self.tool_results = Some(Loaded::Waiting);
+                    let console = self.console.clone();
+                    return cosmic::task::future(async move {
+                        let got = off(move || console.run(At::Read, &format!("show packages {terms}"))).await.and_then(|r| r);
+                        Message::ToolsFound(got)
+                    });
+                }
+            }
+            Message::ToolsFound(r) => self.tool_results = Some(r.map(|t| app::tools_of(&t)).into()),
+            Message::AddTool(name) => {
+                self.app_work = Some(format!("Adding {name}: this builds your system, and can take a few minutes…"));
+                self.note = None;
+                return cosmic::task::future(async move {
+                    let shown = name.clone();
+                    Message::ToolDone(shown, blocking(move || app::add_tool(&name)).await)
+                });
+            }
+            Message::RemoveTool(name) => {
+                self.app_work = Some(format!("Removing {name}…"));
+                self.note = None;
+                return cosmic::task::future(async move {
+                    let shown = name.clone();
+                    Message::ToolDone(shown, blocking(move || app::remove_tool(&name)).await)
+                });
+            }
+            Message::ToolDone(name, r) => {
+                self.app_work = None;
+                self.note = Some(match r {
+                    Ok(()) => (format!("Done: {name}"), false),
+                    Err(e) => (e, true),
+                });
+                self.tool_search.clear();
+                self.tool_results = None;
+                return self.load();
+            }
+
             Message::Line(s) => {
                 self.line = s;
                 return self.offer();
@@ -661,6 +814,7 @@ impl cosmic::Application for Settings {
         let body = match self.page() {
             Page::Overview => self.overview(),
             Page::Configuration => self.configuration(),
+            Page::Apps => self.apps_page(),
             Page::History => match self.change {
                 Some(seq) => self.change_page(seq),
                 None => self.history(),
@@ -749,6 +903,10 @@ impl Settings {
                 Tab::Changes => tasks.push(self.read(At::Draft, COMPARE.into())),
                 Tab::Earlier => tasks.push(self.read(At::Read, COMMITS.into())),
             },
+            Page::Apps => {
+                tasks.push(cosmic::task::future(async { Message::Apps(blocking(app::installed_apps).await) }));
+                tasks.push(self.read(At::Read, ACTIVE.into()));
+            }
             Page::System => {
                 if let Some(v) = self.view_shown() {
                     tasks.extend(v.sections.iter().map(|(_, c)| self.read(At::Read, c.to_string())));
@@ -1314,6 +1472,120 @@ impl Settings {
         page.push(self.diff(&format!("proposal {seq}"))).into()
     }
 
+    fn apps_page(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let tabs = widget::tab_bar::horizontal(&self.app_tabs).on_activate(Message::AppTab);
+        let mut page = widget::column::with_capacity(3).push(tabs).spacing(spacing.space_m);
+        if let Some(work) = &self.app_work {
+            page = page.push(widget::text::body(work.clone()));
+        }
+        let tab = self.app_tabs.active_data::<AppTab>().copied().unwrap_or(AppTab::Apps);
+        page.push(match tab {
+            AppTab::Apps => self.apps_tab(),
+            AppTab::Tools => self.tools_tab(),
+        })
+        .into()
+    }
+
+    fn apps_tab(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let idle = self.app_work.is_none();
+        let mut page = widget::column::with_capacity(3).spacing(spacing.space_m);
+        page = page.push(
+            widget::row::with_capacity(2)
+                .spacing(spacing.space_xs)
+                .align_y(Alignment::Center)
+                .push(widget::search_input("Find an app to install", &self.app_search).on_input(Message::AppSearch).on_clear(Message::AppSearch(String::new())).on_submit(|_| Message::FindApp).width(Length::Fill))
+                .push(widget::button::suggested("Search").on_press(Message::FindApp)),
+        );
+        let installed: Vec<&App> = match &self.apps {
+            Loaded::Got(a) => a.iter().collect(),
+            _ => vec![],
+        };
+        if let Some(found) = &self.app_results {
+            let mut section = settings::section().title("Results");
+            match found {
+                Loaded::Waiting => section = section.add(waiting()),
+                Loaded::Failed(why) => section = section.add(failed(why)),
+                Loaded::Got(list) if list.is_empty() => section = section.add(widget::text::body("Nothing found.")),
+                Loaded::Got(list) => {
+                    for a in list {
+                        let have = installed.iter().any(|i| i.id == a.id);
+                        let action: Element<'_, Message> = if have {
+                            widget::text::caption("Installed").into()
+                        } else {
+                            widget::button::standard("Install").on_press_maybe(idle.then(|| Message::Install(a.id.clone()))).into()
+                        };
+                        section = section.add(app_row(a, app::app_icon(&a.id), action));
+                    }
+                }
+            }
+            return page.push(section).into();
+        }
+        match &self.apps {
+            Loaded::Waiting => page = page.push(waiting()),
+            Loaded::Failed(why) => page = page.push(failed(why)),
+            Loaded::Got(list) if list.is_empty() => page = page.push(widget::text::body("No apps yet. Search above to find one: it installs just for you, with no password.")),
+            Loaded::Got(list) => {
+                let mut section = settings::section().title("Your apps");
+                for a in list {
+                    let action = widget::row::with_capacity(2)
+                        .spacing(spacing.space_xs)
+                        .push(widget::button::standard("Open").on_press(Message::OpenApp(a.id.clone())))
+                        .push(widget::button::destructive("Remove").on_press_maybe(idle.then(|| Message::Uninstall(a.id.clone()))));
+                    section = section.add(app_row(a, app::app_icon(&a.id), action.into()));
+                }
+                page = page.push(section);
+                page = page.push(widget::text::caption("Your apps are remembered in your configuration, so they come back on a rebuilt machine. What they saved stays in your home folder when you remove them."));
+            }
+        }
+        page.into()
+    }
+
+    fn tools_tab(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let idle = self.app_work.is_none();
+        let me = app::who().unwrap_or_default();
+        let path = vec!["users".to_string(), "users".to_string(), me, "packages".to_string()];
+        let mine: Vec<String> = self.active.get(&path).cloned().unwrap_or_default();
+        let mut page = widget::column::with_capacity(3).spacing(spacing.space_m);
+        page = page.push(widget::text::body("Programs you run in a terminal, like htop or git. They are built into your system, so adding one takes longer than an app."));
+        page = page.push(
+            widget::row::with_capacity(2)
+                .spacing(spacing.space_xs)
+                .align_y(Alignment::Center)
+                .push(widget::search_input("Find a tool", &self.tool_search).on_input(Message::ToolSearch).on_clear(Message::ToolSearch(String::new())).on_submit(|_| Message::FindTool).width(Length::Fill))
+                .push(widget::button::suggested("Search").on_press(Message::FindTool)),
+        );
+        if let Some(found) = &self.tool_results {
+            let mut section = settings::section().title("Results");
+            match found {
+                Loaded::Waiting => section = section.add(waiting()),
+                Loaded::Failed(why) => section = section.add(failed(why)),
+                Loaded::Got(list) if list.is_empty() => section = section.add(widget::text::body("Nothing found.")),
+                Loaded::Got(list) => {
+                    for t in list.iter().take(40) {
+                        let action: Element<'_, Message> = if mine.contains(&t.name) {
+                            widget::text::caption("Added").into()
+                        } else {
+                            widget::button::standard("Add").on_press_maybe(idle.then(|| Message::AddTool(t.name.clone()))).into()
+                        };
+                        section = section.add(settings::item::builder(t.name.clone()).description(format!("{} · {}", t.version, t.summary)).control(action));
+                    }
+                }
+            }
+            return page.push(section).into();
+        }
+        if mine.is_empty() {
+            return page.push(widget::text::body("No tools of your own yet.")).into();
+        }
+        let mut section = settings::section().title("Your tools");
+        for name in mine {
+            section = section.add(settings::item::builder(name.clone()).control(widget::button::destructive("Remove").on_press_maybe(idle.then(|| Message::RemoveTool(name.clone())))));
+        }
+        page.push(section).into()
+    }
+
     fn system(&self) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let tabs = widget::tab_bar::horizontal(&self.sys_tabs).on_activate(Message::SysTab);
@@ -1554,4 +1826,20 @@ async fn off<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Resul
 /// `off`, for a call of the library's that can fail: its error as torqcli would say it.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
     off(move || f().map_err(|e| app::said(&e))).await.and_then(|r| r)
+}
+
+/// An application on a list: its icon, name, what it is, and what can be done about it.
+fn app_row<'a>(a: &'a App, catalogue_icon: Option<std::path::PathBuf>, action: Element<'a, Message>) -> Element<'a, Message> {
+    let picture: Element<'a, Message> = match catalogue_icon {
+        Some(p) => icon::icon(icon::from_path(p)).size(40).into(),
+        None => icon::from_name(a.id.clone()).size(40).icon().into(),
+    };
+    settings::item_row(vec![
+        picture,
+        widget::column::with_capacity(2).push(widget::text::body(a.name.clone())).push(widget::text::caption(a.summary.clone())).width(Length::Fill).into(),
+        action,
+    ])
+    .spacing(cosmic::theme::spacing().space_s)
+    .align_y(Alignment::Center)
+    .into()
 }

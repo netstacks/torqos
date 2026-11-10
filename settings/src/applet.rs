@@ -268,6 +268,10 @@ impl cosmic::Application for Applet {
 
     fn init(core: cosmic::Core, _flags: ()) -> (Self, Task<cosmic::Action<Message>>) {
         let mut app = Applet { core, console: Some(Console::watcher()), session: app::session_system(), running: running(), now: app::now(), ..Default::default() };
+        // A rebuilt machine's apps come back at the first login.
+        std::thread::spawn(|| {
+            let _ = app::reconcile_apps();
+        });
         let ask = app.update(Message::Ask);
         (app, ask)
     }
@@ -305,6 +309,10 @@ impl cosmic::Application for Applet {
                 }
                 // Settled: the panel and the rest, where they changed, without a new login. Open windows stay.
                 if let (Some(old), Some(new)) = (self.switched_from.take(), now) {
+                    // The configuration may name other apps now: an undo, or a pull from the remote.
+                    std::thread::spawn(|| {
+                        let _ = app::reconcile_apps();
+                    });
                     app::restart_parts(&app::stale_parts(&old, &new));
                 }
             }

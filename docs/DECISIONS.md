@@ -905,6 +905,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     into `users <name> flatpaks`, user tier, so a machine rebuilt from its repository or a recipe
     (ADR-047) brings it back. Not kept, it stays the person's state, like a file in their home.
   - The agent installs nothing through the Store; its applications are rung 1 or 3, as above.
+- **Amended (2026-11-09, the owner: "start with per user"): on the desktop an application comes from Flathub, and nobody has to know it.** TorqOS Settings has an Apps page: search, Install, Open, Remove, per person and without a password. What is installed is remembered in `users <name> flatpaks` (a typed setting, user tier, `users/<name>/flatpaks.json`, on a candidate of its own, never the draft), so it is in the history, can be undone, and comes back on a rebuilt machine; the Store's installs are remembered the same way. Rung 1 stays for what the system depends on and for command-line tools (the page's Tools tab: `users <name> packages`). "managed" (a file of the person's) tells a removal by hand from a machine that has yet to install: `app::plan_apps`. A Flatpak records which application and where from, not its bytes: on a rebuild it arrives as it is then, which is right for applications and is why tools and the system stay pinned. Installing for everyone is not offered yet.
 
 ## ADR-038 — Data: what a rebuild does not bring back, and what TorqOS does about it
 - **Status:** proposed, 2026-11-03; local snapshots accepted and built 2026-11-06 (the owner: btrfs in

@@ -4,6 +4,7 @@
 
 use crate::{history, status, Cli, BROKER, REPO};
 use anyhow::Result;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 /// The machine, as torqcli sees it: its broker's socket and its configuration repository.
@@ -1106,5 +1107,270 @@ mod reading_tests {
         assert_eq!(card_and_row(&path("services openssh enable")), ("SSH".to_string(), "Enabled".to_string()));
         assert_eq!(card_and_row(&path("services openssh settings PasswordAuthentication")), ("SSH".to_string(), "Settings › Password authentication".to_string()));
         assert_eq!(card_and_row(&path("networking hostName")), ("General".to_string(), "Host name".to_string()));
+    }
+}
+
+// ── Applications ─────────────────────────────────────────────────────────────────────────────────
+
+/// An application, as Flathub names it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct App {
+    pub id: String,
+    pub name: String,
+    pub summary: String,
+}
+
+fn flatpak(args: &[&str]) -> Result<String> {
+    use anyhow::Context as _;
+    let out = std::process::Command::new("flatpak").args(args).stdin(std::process::Stdio::null()).output().context("running flatpak")?;
+    if !out.status.success() {
+        anyhow::bail!("{}", history::one_line(&String::from_utf8_lossy(&out.stderr), 300));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Lines of `id<TAB>name<TAB>summary`.
+fn apps_of(table: &str) -> Vec<App> {
+    table
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            let (id, name) = (f.next()?, f.next()?);
+            crate::tree::flatpak_id_ok(id).then(|| App { id: id.to_string(), name: history::one_line(name, 80), summary: history::one_line(f.next().unwrap_or_default(), 200) })
+        })
+        .collect()
+}
+
+/// This person's installed applications.
+pub fn installed_apps() -> Result<Vec<App>> {
+    let mut apps = apps_of(&flatpak(&["list", "--user", "--app", "--columns=application,name,description"])?);
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    Ok(apps)
+}
+
+/// What Flathub has for `terms`, best first.
+pub fn search_apps(terms: &str) -> Result<Vec<App>> {
+    let found = || flatpak(&["search", "--columns=application,name,description", terms]);
+    let mut table = found()?;
+    // A person new to Flathub has no catalogue yet: fetch it once.
+    if apps_of(&table).is_empty() {
+        let _ = flatpak(&["update", "--user", "--appstream", "--noninteractive"]);
+        table = found()?;
+    }
+    Ok(apps_of(&table).into_iter().take(40).collect())
+}
+
+/// Where Flathub's catalogue keeps an application's icon, if it has one.
+pub fn app_icon(id: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let p = PathBuf::from(home).join(".local/share/flatpak/appstream/flathub").join(std::env::consts::ARCH).join("active/icons/64x64").join(format!("{id}.png"));
+    p.exists().then_some(p)
+}
+
+fn checked(id: &str) -> Result<()> {
+    if !crate::tree::flatpak_id_ok(id) {
+        anyhow::bail!("'{id}' is not an application's id");
+    }
+    Ok(())
+}
+
+pub fn install_app(id: &str) -> Result<()> {
+    checked(id)?;
+    flatpak(&["install", "--user", "--noninteractive", "flathub", id]).map(drop)
+}
+
+/// Remove an application. What it saved in the person's home stays, for if they come back to it.
+pub fn remove_app(id: &str) -> Result<()> {
+    checked(id)?;
+    flatpak(&["uninstall", "--user", "--noninteractive", id]).map(drop)
+}
+
+pub fn open_app(id: &str) {
+    if checked(id).is_ok() {
+        spawn("flatpak", &["run", id]);
+    }
+}
+
+/// What to do to bring what is installed, what the configuration names, and what TorqOS last knew it named
+/// into line. `managed` is what tells a person's own removal from a machine that has yet to install.
+#[derive(Debug, Default, PartialEq)]
+pub struct AppPlan {
+    /// Installed here and not yet remembered (the Store's, or just installed): into the configuration.
+    pub keep: Vec<String>,
+    /// Remembered, known here, and gone: the person removed it. Out of the configuration.
+    pub forget: Vec<String>,
+    /// Named by the configuration and never here (a rebuilt machine): install it.
+    pub install: Vec<String>,
+    /// Taken out of the configuration (an undo): remove it.
+    pub remove: Vec<String>,
+}
+
+pub fn plan_apps(declared: &BTreeSet<String>, managed: &BTreeSet<String>, installed: &BTreeSet<String>) -> AppPlan {
+    let list = |f: &dyn Fn(&String) -> bool, from: &BTreeSet<String>| from.iter().filter(|x| f(x)).cloned().collect();
+    AppPlan {
+        keep: list(&|x| !declared.contains(x) && !managed.contains(x), installed),
+        forget: list(&|x| managed.contains(x) && !installed.contains(x), declared),
+        install: list(&|x| !managed.contains(x) && !installed.contains(x), declared),
+        remove: list(&|x| !declared.contains(x) && installed.contains(x), managed),
+    }
+}
+
+fn managed_file() -> Result<PathBuf> {
+    use anyhow::Context as _;
+    Ok(PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".local/state/torq/flatpaks-managed.json"))
+}
+
+fn managed_apps() -> BTreeSet<String> {
+    managed_file().ok().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn set_managed(apps: &BTreeSet<String>) -> Result<()> {
+    let p = managed_file()?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(p, serde_json::to_vec(apps)?)?;
+    Ok(())
+}
+
+/// A value list of this person's in the configuration in effect: `users users <me> <leaf>`.
+fn my_list(s: &mut crate::session::Session<'_>, leaf: &str) -> Result<BTreeSet<String>> {
+    let me = crate::me()?;
+    let want = ["users".to_string(), "users".to_string(), me, leaf.to_string()];
+    Ok(settings_of(&s.exec("show configuration | display set")?).into_iter().filter(|(p, _)| *p == want).map(|(_, v)| v).collect())
+}
+
+/// Change this person's own settings, on a candidate of its own (never the draft), and commit them.
+fn commit_mine(lines: &[String], comment: &str) -> Result<()> {
+    let cli = cli();
+    let real = crate::shell::Real::new(&cli);
+    let mut s = open_session(&cli, &real, None, At::Draft)?;
+    for l in lines {
+        s.exec(l)?;
+    }
+    s.exec(&format!("commit comment {}", line(&[comment]))).map(drop)
+}
+
+fn app_lines(verb: &str, ids: &[String]) -> Result<Vec<String>> {
+    let me = crate::me()?;
+    Ok(ids.iter().map(|id| line(&[verb, "users", "users", &me, "flatpaks", id])).collect())
+}
+
+/// Remember what this person has installed and forget what they removed, in their own configuration: no
+/// password, a line in the history. Whether anything changed.
+pub fn sync_apps() -> Result<bool> {
+    let cli = cli();
+    let real = crate::shell::Real::new(&cli);
+    let mut s = open_session(&cli, &real, None, At::Read)?;
+    let (declared, managed) = (my_list(&mut s, "flatpaks")?, managed_apps());
+    let installed: BTreeSet<String> = installed_apps()?.into_iter().map(|a| a.id).collect();
+    let plan = plan_apps(&declared, &managed, &installed);
+    let changes = !plan.keep.is_empty() || !plan.forget.is_empty();
+    if changes {
+        let mut lines = app_lines("set", &plan.keep)?;
+        lines.extend(app_lines("delete", &plan.forget)?);
+        let words = |verb: &str, ids: &[String]| if ids.is_empty() { None } else { Some(format!("{verb} {}", ids.join(", "))) };
+        let comment = [words("Apps: keep", &plan.keep), words("Apps: forget", &plan.forget)].into_iter().flatten().collect::<Vec<_>>().join("; ");
+        commit_mine(&lines, &comment)?;
+    }
+    let now: BTreeSet<String> = declared.iter().filter(|d| !plan.forget.contains(d)).cloned().chain(plan.keep.iter().cloned()).filter(|x| installed.contains(x)).collect();
+    set_managed(&now)?;
+    Ok(changes)
+}
+
+/// Bring what is installed in line with the configuration: a rebuilt machine's apps come back, an undone install
+/// goes. Applications the person installed and has yet to be remembered are left for `sync_apps`.
+pub fn reconcile_apps() -> Result<()> {
+    let cli = cli();
+    let real = crate::shell::Real::new(&cli);
+    let mut s = open_session(&cli, &real, None, At::Read)?;
+    let (declared, managed) = (my_list(&mut s, "flatpaks")?, managed_apps());
+    let installed: BTreeSet<String> = installed_apps()?.into_iter().map(|a| a.id).collect();
+    let plan = plan_apps(&declared, &managed, &installed);
+    let mut done: BTreeSet<String> = declared.iter().filter(|d| installed.contains(*d)).cloned().collect();
+    for id in &plan.install {
+        if install_app(id).is_ok() {
+            done.insert(id.clone());
+        }
+    }
+    for id in &plan.remove {
+        let _ = remove_app(id);
+    }
+    set_managed(&done)
+}
+
+// ── Tools: command-line software, a person's own ─────────────────────────────────────────────────
+
+/// A package `show packages` found: its name, version and description.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tool {
+    pub name: String,
+    pub version: String,
+    pub summary: String,
+}
+
+/// `show packages`' lines.
+pub fn tools_of(shown: &str) -> Vec<Tool> {
+    shown
+        .lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            let (name, version) = (w.next()?, w.next()?);
+            crate::tree::package_name_ok(name).then(|| Tool { name: name.to_string(), version: version.to_string(), summary: w.collect::<Vec<_>>().join(" ") })
+        })
+        .collect()
+}
+
+/// Add a tool for this person: their own configuration, no password, a line in the history.
+pub fn add_tool(name: &str) -> Result<()> {
+    let me = crate::me()?;
+    commit_mine(&[line(&["set", "users", "users", &me, "packages", name])], &format!("Tools: add {name}"))
+}
+
+pub fn remove_tool(name: &str) -> Result<()> {
+    let me = crate::me()?;
+    commit_mine(&[line(&["delete", "users", "users", &me, "packages", name])], &format!("Tools: remove {name}"))
+}
+
+/// Who is at the machine: the name in `users users <me>`.
+pub fn who() -> Result<String> {
+    crate::me()
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+
+    fn set(s: &[&str]) -> BTreeSet<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+    fn v(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn what_to_do_about_apps() {
+        // Installed by hand or just now: remembered, not removed.
+        let p = plan_apps(&set(&[]), &set(&[]), &set(&["a.b.store"]));
+        assert_eq!((p.keep, p.remove), (v(&["a.b.store"]), v(&[])));
+        // A rebuilt machine: named, never here. Installed, not forgotten.
+        let p = plan_apps(&set(&["a.b.c"]), &set(&[]), &set(&[]));
+        assert_eq!((p.install, p.forget), (v(&["a.b.c"]), v(&[])));
+        // The person removed it here: forgotten, not installed again.
+        let p = plan_apps(&set(&["a.b.c"]), &set(&["a.b.c"]), &set(&[]));
+        assert_eq!((p.forget, p.install), (v(&["a.b.c"]), v(&[])));
+        // Undone in the history: out of the configuration, and it goes. Not remembered again.
+        let p = plan_apps(&set(&[]), &set(&["a.b.c"]), &set(&["a.b.c"]));
+        assert_eq!((p.remove, p.keep), (v(&["a.b.c"]), v(&[])));
+        // All in step: nothing.
+        assert_eq!(plan_apps(&set(&["a.b.c"]), &set(&["a.b.c"]), &set(&["a.b.c"])), AppPlan::default());
+    }
+
+    #[test]
+    fn what_flatpak_and_show_packages_print() {
+        let apps = apps_of("org.mozilla.firefox\tFirefox\tA browser\nnot an id\tX\tY\n");
+        assert_eq!(apps, vec![App { id: "org.mozilla.firefox".into(), name: "Firefox".into(), summary: "A browser".into() }]);
+        let tools = tools_of("  htop   3.4.1   An interactive process viewer\n");
+        assert_eq!(tools[0], Tool { name: "htop".into(), version: "3.4.1".into(), summary: "An interactive process viewer".into() });
     }
 }

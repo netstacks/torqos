@@ -73,7 +73,7 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
 /// step with broker/user-leaves.json, which modules/packages.nix reads (tested below). A leaf is
 /// added only together with the typed module that reads it, and with its shape in `user_leaf_ok`:
 /// `packages.json` (modules/packages.nix).
-pub const USER_LEAVES: &[&str] = &["packages.json"];
+pub const USER_LEAVES: &[&str] = &["packages.json", "flatpaks.json"];
 
 /// The most packages one user's list may hold: a lightly-approved change must not be able to start
 /// hours of downloads and builds while holding the broker lock.
@@ -88,6 +88,8 @@ pub fn user_leaf_ok(leaf: &str, value: &serde_json::Value) -> bool {
         "packages.json" => value.as_array().is_some_and(|names| {
             names.len() <= MAX_USER_PACKAGES && names.iter().all(|n| n.as_str().is_some_and(package_name_ok))
         }),
+        // A list of Flathub application ids (reverse DNS).
+        "flatpaks.json" => value.as_array().is_some_and(|ids| ids.len() <= MAX_USER_PACKAGES && ids.iter().all(|i| i.as_str().is_some_and(flatpak_id_ok))),
         _ => false,
     }
 }
@@ -95,6 +97,13 @@ pub fn user_leaf_ok(leaf: &str, value: &serde_json::Value) -> bool {
 /// The form of a package name, mirroring modules/packages.nix (`isAttrName`, depth): a top-level
 /// nixpkgs attribute or one level under a package set. Which sets are allowed, and whether the
 /// package exists and is available, is the module's call at evaluation.
+/// A Flatpak application's id: at least three dot-separated parts of letters, digits, - and _.
+fn flatpak_id_ok(id: &str) -> bool {
+    let part = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let parts: Vec<&str> = id.split('.').collect();
+    id.len() <= 255 && parts.len() >= 3 && parts.iter().all(|p| part(p)) && !id.starts_with('-')
+}
+
 fn package_name_ok(name: &str) -> bool {
     let attr = |s: &str| {
         let mut c = s.chars();
@@ -231,12 +240,23 @@ mod tests {
         for p in ["users/casey/packages.json", "users/_svc/packages.json", "users/a-b_9/packages.json"] {
             assert_eq!(tier_for_path(p), Tier::User, "{p}");
         }
-        assert_eq!(USER_LEAVES, ["packages.json"]);
+        assert_eq!(USER_LEAVES, ["packages.json", "flatpaks.json"]);
         // The modules read the same list (modules/packages.nix): the two cannot drift apart.
         let shared: Vec<String> = serde_json::from_str(include_str!("../user-leaves.json")).unwrap();
         assert_eq!(USER_LEAVES, shared, "broker/user-leaves.json");
     }
 
+
+    #[test]
+    fn a_persons_flatpaks_are_ids() {
+        let ok = |json: &str| user_leaf_ok("flatpaks.json", &serde_json::from_str(json).unwrap());
+        assert!(ok(r#"["org.mozilla.firefox", "com.slack.Slack", "io.github.some-one.App_x"]"#));
+        assert!(ok("[]"));
+        for bad in ["{}", "[1]", r#"["firefox"]"#, r#"["a.b"]"#, r#"["../../x.y.z"]"#, r#"["a b.c.d"]"#, r#"["-a.b.c"]"#, r#"["a..c"]"#] {
+            assert!(!ok(bad), "{bad}");
+        }
+        assert_eq!(tier_for_path("users/casey/flatpaks.json"), Tier::User);
+    }
     /// Each user leaf has exactly one shape; anything else is refused at propose rather than failing
     /// at the rebuild.
     #[test]

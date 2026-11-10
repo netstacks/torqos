@@ -117,6 +117,19 @@ pkgs.testers.runNixOSTest {
         code, v = answer(ask("sam", {"args": ["--json", "apply", str(p["seq"])]}))
         assert code == 1 and "not an administrator" in v["error"], (code, v)
 
+    with subtest("a person's apps are their own setting: no password, on the record, and only real ids"):
+        def apps(name, body):
+            return f"--- /dev/null\n+++ b/users/{name}/flatpaks.json\n@@ -0,0 +1 @@\n+{body}\n"
+        p = propose("sam", apps("sam", '["org.mozilla.firefox"]'), "an app")
+        code, v = answer(ask("sam", {"args": ["--json", "apply", str(p["seq"])]}))
+        assert code == 0, (code, v)
+        machine.succeed(f"git -C {repo} show HEAD:users/sam/flatpaks.json | grep -q org.mozilla.firefox")
+        code, v = answer(ask("dev", {"args": ["--json", "propose", f"--base={head()}", "--reason=not an id"], "diff": apps("dev", '["firefox"]')}))
+        assert code == 1, (code, v)
+
+    with subtest("a refused or busy request is an answer, not a failed unit: a switch must not fail for one"):
+        machine.succeed("test -z \"$(systemctl list-units --failed --no-legend 'torq-broker@*')\"")
+
     with subtest("a caller that handed its connection on and left cannot use the password path"):
         # Who connected has gone: there is no record of where it was, so it must not pass for a terminal.
         p = propose("dev", machine.succeed("cat /etc/torq-test/system.diff"), "handed on")

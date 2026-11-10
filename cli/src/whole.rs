@@ -23,6 +23,7 @@ pub const MAP: &[(&str, &str, bool)] = &[
     // Software: NixOS's own places, kept in TorqOS's files (a person's own: user tier).
     ("environment systemPackages", "system packages", true),
     ("users users <name> packages", "users <name> packages", true),
+    ("users users <name> flatpaks", "users <name> flatpaks", false),
     // The old list of services (services.json): shown, and emptied, never added to (OLD_SERVICES).
     ("torq services enabled", "services", false),
 ];
