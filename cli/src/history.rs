@@ -205,13 +205,19 @@ fn rolled_back(entries: &[Entry], seq: u64) -> bool {
     entries.iter().any(|e| e.kind == "rolled_back" && e.data["applied"].as_u64() == Some(seq))
 }
 
-/// The proposals not yet applied, failed or declined: waiting for a person (the agent's among them).
+/// The proposals not yet applied or declined: waiting for a person (the agent's among them). One whose apply
+/// failed waits too: a person may apply it again (ADR-008), or decline it (`failed_once` says so).
 pub fn waiting_proposals(entries: &[Entry]) -> Vec<&Entry> {
     entries
         .iter()
         .filter(|e| e.kind == "proposal")
-        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "apply_failed" | "declined") && e.data["proposal"].as_u64() == Some(p.seq)))
+        .filter(|p| !entries.iter().any(|e| matches!(e.kind.as_str(), "applied" | "declined") && e.data["proposal"].as_u64() == Some(p.seq)))
         .collect()
+}
+
+/// Whether proposal `seq`'s apply has failed at least once (it may be applied again).
+pub fn failed_once(entries: &[Entry], seq: u64) -> bool {
+    entries.iter().any(|e| e.kind == "apply_failed" && e.data["proposal"].as_u64() == Some(seq))
 }
 
 /// The latest change that took effect (applied, undone, repaired), in the log's words.
@@ -379,6 +385,35 @@ mod tests {
             r#"{"seq":7,"ts":"2026-10-30T12:04:00Z","kind":"proposal","actor":"user","tier":"user","reason":"Install vim for viper","data":{}}"#,
         ];
         parse(&lines.join("\n")).unwrap()
+    }
+
+
+    /// The broker's own `declined` (wire/tests/fixtures/declined.jsonl, written by the broker): torqcli reads
+    /// it, the proposal no longer waits, and the history says it was declined.
+    #[test]
+    fn a_declined_entry_as_the_broker_writes_it() {
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../wire/tests/fixtures/declined.jsonl")).unwrap();
+        let l = parse(&text).unwrap();
+        let d = l.iter().find(|e| e.kind == "declined").expect("a declined entry");
+        assert_eq!((d.approved_by.as_deref(), d.data["proposal"].as_u64()), (Some("casey"), Some(2)));
+        assert!(waiting_proposals(&l).is_empty());
+        assert_eq!(describe(&l, d), ("✗", "Declined proposal #2: install htop for casey".to_string()));
+    }
+    /// A proposal whose apply failed waits again (a person may apply it again, ADR-008, or decline it):
+    /// listed, marked; one applied or declined does not wait.
+    #[test]
+    fn a_failed_apply_waits_again_and_a_declined_one_does_not() {
+        let lines = [
+            r#"{"seq":1,"ts":"2026-11-10T12:00:00Z","kind":"proposal","actor":"agent","tier":"user","reason":"htop","data":{}}"#,
+            r#"{"seq":2,"ts":"2026-11-10T12:01:00Z","kind":"apply_failed","actor":"broker","tier":"user","reason":"x","data":{"proposal":1}}"#,
+            r#"{"seq":3,"ts":"2026-11-10T12:02:00Z","kind":"proposal","actor":"agent","tier":"user","reason":"jq","data":{}}"#,
+            r#"{"seq":4,"ts":"2026-11-10T12:03:00Z","kind":"declined","actor":"user","tier":"user","reason":"no","data":{"proposal":3}}"#,
+            r#"{"seq":5,"ts":"2026-11-10T12:04:00Z","kind":"proposal","actor":"agent","tier":"user","reason":"fd","data":{}}"#,
+        ];
+        let l = parse(&lines.join("\n")).unwrap();
+        let w: Vec<u64> = waiting_proposals(&l).iter().map(|e| e.seq).collect();
+        assert_eq!(w, [1, 5]);
+        assert!(failed_once(&l, 1) && !failed_once(&l, 5));
     }
 
     #[test]

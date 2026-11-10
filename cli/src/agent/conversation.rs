@@ -201,7 +201,7 @@ pub enum Fate {
     Applied,
     /// A person declined it (ADR-051, amended): never applied.
     Declined,
-    /// Its apply failed.
+    /// Its apply failed: it waits again, for a person to apply it again or decline it (ADR-008).
     Failed,
     /// No proposal of this person's agent has that number: no Review for it.
     NotYours,
@@ -217,6 +217,8 @@ pub fn fates(entries: &[crate::history::Entry], agent: &str, seqs: &[u64]) -> Ve
             let ended = |kind: &str| entries.iter().any(|e| e.kind == kind && e.data["proposal"].as_u64() == Some(seq));
             let fate = if !mine {
                 Fate::NotYours
+            } else if waiting.iter().any(|e| e.seq == seq) && crate::history::failed_once(entries, seq) {
+                Fate::Failed
             } else if waiting.iter().any(|e| e.seq == seq) {
                 Fate::Waiting
             } else if ended("declined") {
@@ -254,10 +256,10 @@ impl Turn {
                     Some(Fate::Waiting) => "waiting for you to apply or refuse it",
                     Some(Fate::Applied) => "applied",
                     Some(Fate::Declined) => "declined",
-                    Some(Fate::Failed) => "did not apply",
+                    Some(Fate::Failed) => "its apply failed: apply it again or decline it",
                     Some(Fate::NotYours) => "not your agent's proposal",
                 };
-                ProposalRow { seq, text: format!("Proposed #{seq}{mark}: {said}"), review: fate == Some(Fate::Waiting) }
+                ProposalRow { seq, text: format!("Proposed #{seq}{mark}: {said}"), review: matches!(fate, Some(Fate::Waiting | Fate::Failed)) }
             })
             .collect()
     }

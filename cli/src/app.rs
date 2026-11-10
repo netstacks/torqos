@@ -990,6 +990,8 @@ pub struct Proposal {
     pub reason: String,
     pub by: String,
     pub tainted: bool,
+    /// Its apply failed once: it waits for a person again (ADR-008), who may apply it again or decline it.
+    pub failed: bool,
 }
 
 /// What became of each of these proposals (those the person's agent said it made), by the ledger: only
@@ -1013,7 +1015,7 @@ pub fn proposals() -> Result<Vec<Proposal>> {
     let entries = crate::read_ledger(&cli())?;
     Ok(waiting_on_me(&entries, &crate::me()?)
         .into_iter()
-        .map(|e| Proposal { seq: e.seq, reason: history::one_line(&e.reason, 300), by: history::one_line(&e.actor, 40), tainted: e.tainted })
+        .map(|e| Proposal { seq: e.seq, reason: history::one_line(&e.reason, 300), by: history::one_line(&e.actor, 40), tainted: e.tainted, failed: history::failed_once(&entries, e.seq) })
         .collect())
 }
 

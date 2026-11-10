@@ -552,12 +552,13 @@ impl Machine for Real<'_> {
         for e in waiting {
             let by = e.data["caller"].as_str().map_or(e.actor.clone(), |c| format!("{} ({})", e.actor, c));
             let line = format!(
-                "  #{:<4} {}  {:<6} {}{}  {}",
+                "  #{:<4} {}  {:<6} {}{}{}  {}",
                 e.seq,
                 history::one_line(&e.ts, 25),
                 history::one_line(&e.tier, 8),
                 history::one_line(&by, 30),
                 if e.tainted { "  ⚠ read untrusted content" } else { "" },
+                if history::failed_once(&entries, e.seq) { "  ✗ its apply failed once (apply it again, or decline it)" } else { "" },
                 history::one_line(&e.reason, 80)
             );
             out.push_str(&format!("{}\n", history::one_line(&line, width)));
