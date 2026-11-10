@@ -403,6 +403,7 @@ mod tests {
             (Mode::Operational, Op::Request(Request::BackupKey { name: "nas".into() })),
             (Mode::Operational, Op::ShowSecrets),
             (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: None, act: crate::secrets::Act::Set })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "deploy".into(), user: Some("dev".into()), act: crate::secrets::Act::SetFile("/home/dev/.ssh/id_ed25519".into()) })),
             (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: Some("dev".into()), act: crate::secrets::Act::Show })),
             (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: Some("sam".into()), act: crate::secrets::Act::Delete })),
             (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: None, act: crate::secrets::Act::Allow(crate::secrets::Grant::Https("api.github.com".into())) })),

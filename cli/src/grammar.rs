@@ -287,6 +287,12 @@ static SHOW_SYSTEM: &[Node] = &[
 ];
 
 /// `… user <user>`: a person's own secret, not the system's.
+/// After `set <name>`: its value from a file, and whose.
+static SECRET_SET: &[Node] = &[
+    fixed("file", "From a file (an SSH key, ssh-keygen's: several lines, not typed); read as you, not kept anywhere else", In::Op).then(&[value(Value::File, "The file (relative: to where torq runs)").whole(secret).then(SECRET_OWNER)]),
+    fixed("user", "A person's own secret, not the system's: yours (no one else's, an administrator included, but to delete)", In::Op).then(&[value(Value::User, "Whose: yours").whole(secret)]),
+];
+
 static SECRET_OWNER: &[Node] = &[fixed("user", "A person's own secret, not the system's: yours (no one else's, an administrator included, but to delete)", In::Op).then(&[value(Value::User, "Whose: yours").whole(secret)])];
 
 /// What a secret may be used for, or by whom: given (`allow`) or taken back (`disallow`).
@@ -305,7 +311,7 @@ static REQUEST_SECRET: &[Node] = &[
     ])]),
     fixed("delete", "Delete its value and its rule (no undoing the value)", In::Op).then(&[value(Value::Secret, "The secret's name").whole(secret).then(SECRET_OWNER)]),
     fixed("disallow", "Take back a use: a host, or the agent's (one change, undoable)", In::Op).then(&[value(Value::Secret, "The secret's name").then(SECRET_GRANT)]),
-    fixed("set", "Give its value, typed here: kept encrypted, root's alone, outside the configuration, never in the ledger", In::Op).then(&[value(Value::Secret, "Its name: letters, digits, - and _").whole(secret).then(SECRET_OWNER)]),
+    fixed("set", "Give its value, typed here (or from a file): kept encrypted, root's alone, outside the configuration, never in the ledger", In::Op).then(&[value(Value::Secret, "Its name: letters, digits, - and _").whole(secret).then(SECRET_SET)]),
     fixed("show", "Print its value, here (it asks your password)", In::Op).then(&[value(Value::Secret, "The secret's name").whole(secret).then(SECRET_OWNER)]),
 ];
 
@@ -434,6 +440,8 @@ fn secret(r: &Read) -> Result<Op> {
         Act::Disallow(grant())
     } else if r.has("approve") {
         Act::Approve(["each-use", "first-use", "never"].into_iter().find(|w| r.has(w)).and_then(Approve::from_word).unwrap_or_default())
+    } else if r.has("set") && r.has("file") {
+        Act::SetFile(r.value(Value::File).unwrap_or_default().to_string())
     } else if r.has("set") {
         Act::Set
     } else if r.has("show") {

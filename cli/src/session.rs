@@ -1310,7 +1310,7 @@ impl<'a> Session<'a> {
             bail!("{}'s secrets are theirs alone: no one else sets, reads or changes them", user.unwrap_or_default());
         }
         match act {
-            Act::Set | Act::Show => self.machine.secret_value(name, user, act, &self.me),
+            Act::Set | Act::SetFile(_) | Act::Show => self.machine.secret_value(name, user, act, &self.me),
             Act::Delete => {
                 let kept = self.machine.secrets_kept()?.contains(&(user.map(String::from), name.to_string()));
                 let ruled = crate::secrets::read(&self.repo, &self.repo.head()?, user)?.contains_key(name);

@@ -23,6 +23,8 @@ pub enum Grant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
     Set,
+    /// The value from a file (an SSH key: several lines, not typed).
+    SetFile(String),
     Delete,
     Show,
     Allow(Grant),
@@ -33,7 +35,7 @@ pub enum Act {
 impl Act {
     pub fn verb(&self) -> &'static str {
         match self {
-            Act::Set => "set",
+            Act::Set | Act::SetFile(_) => "set",
             Act::Delete => "delete",
             Act::Show => "show",
             Act::Allow(_) => "allow",
@@ -52,6 +54,7 @@ impl Act {
         match self {
             Act::Allow(g) | Act::Disallow(g) => grant(g),
             Act::Approve(a) => format!(" {}", a.word()),
+            Act::SetFile(p) => format!(" file {}", crate::syntax::quote(p)),
             _ => String::new(),
         }
     }
@@ -185,7 +188,7 @@ fn edit_unchecked(rules: &mut Rules, name: &str, act: &Act, known: &[String]) ->
             rules.remove(name).context("no rule")?;
             Ok("its rule removed".into())
         }
-        Act::Set | Act::Show => bail!("not a change of the rules"),
+        Act::Set | Act::SetFile(_) | Act::Show => bail!("not a change of the rules"),
     }
 }
 
@@ -218,6 +221,9 @@ pub fn changed(machine: &dyn Machine, repo: &Repo, name: &str, user: Option<&str
     let seq = change(machine, repo, name, user, act)?;
     Ok(format!("Changed what {} may be used for (change #{seq}).\n", whose(name, user)))
 }
+
+/// The largest value the broker keeps (broker/src/secrets.rs): a file larger is not read.
+pub const VALUE_MAX: usize = 16 * 1024;
 
 /// A secret that has a value, as the broker lists them (None: the system's).
 pub type Kept = (Option<String>, String);

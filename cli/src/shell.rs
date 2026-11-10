@@ -345,27 +345,39 @@ impl Machine for Real<'_> {
         let log = run::start_log()?;
         let command = format!("request system secret {} {name}", act.verb());
         match act {
-            Act::Set => {
-                if !std::io::stdin().is_terminal() {
-                    bail!("a secret is typed at a terminal: `{command}` there");
-                }
+            Act::Set | Act::SetFile(_) => {
                 // Non-dumpable while it is held, as a password is (ADR-040).
                 rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).context("protecting the value")?;
-                let typed = |q: &str| -> Result<String> {
-                    print!("{q}: ");
-                    std::io::stdout().flush()?;
-                    let _hidden = Echo::set(false);
+                let value = if let Act::SetFile(path) = act {
+                    // Read as the person: a file of theirs (an SSH key), no larger than the broker keeps.
+                    use std::io::Read as _;
                     let mut s = String::new();
-                    std::io::stdin().lock().read_line(&mut s)?;
-                    println!();
-                    Ok(s.trim_end_matches(['\n', '\r']).to_string())
+                    std::io::Read::take(fs::File::open(path).with_context(|| format!("reading {path}"))?, crate::secrets::VALUE_MAX as u64 + 1).read_to_string(&mut s).with_context(|| format!("reading {path} (text: an SSH key, a token)"))?;
+                    if s.len() > crate::secrets::VALUE_MAX {
+                        bail!("not changed: {path} is larger than a secret is (16 KiB)");
+                    }
+                    s
+                } else {
+                    if !std::io::stdin().is_terminal() {
+                        bail!("a secret is typed at a terminal: `{command}` there (or `… file <path>`)");
+                    }
+                    let typed = |q: &str| -> Result<String> {
+                        print!("{q}: ");
+                        std::io::stdout().flush()?;
+                        let _hidden = Echo::set(false);
+                        let mut s = String::new();
+                        std::io::stdin().lock().read_line(&mut s)?;
+                        println!();
+                        Ok(s.trim_end_matches(['\n', '\r']).to_string())
+                    };
+                    let value = typed(&format!("Value of {whose} (not shown as you type)"))?;
+                    if typed("Again")? != value {
+                        bail!("not changed: the two differ");
+                    }
+                    value
                 };
-                let value = typed(&format!("Value of {whose} (not shown as you type)"))?;
-                if value.is_empty() {
+                if value.trim().is_empty() {
                     bail!("not changed: no value");
-                }
-                if typed("Again")? != value {
-                    bail!("not changed: the two differ");
                 }
                 // In memory only, never on a disk (a killed torqcli would leave it there), and gone when this is.
                 let scratch = crate::memory_scratch_dir()?;
