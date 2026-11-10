@@ -1515,6 +1515,10 @@ fn run_shell(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str) == Some("agent") {
         return crate::agent::run(&args[1..]);
     }
+    // The person's own agent, resident (ADR-051 3 and 4): asked over its socket, the answer streamed.
+    if args.first().map(String::as_str) == Some("ask") {
+        return crate::agent::ask(&args[1..]);
+    }
     // Doctor mode (ADR-042): the agent asked one question, as the agent's account.
     if args.first().map(String::as_str) == Some("doctor") {
         return crate::agent::doctor_mode(&args[1..], false);

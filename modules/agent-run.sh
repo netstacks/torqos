@@ -1,4 +1,4 @@
-# torq-agent-run [--share-fd <n> <dir>] [--] [<command> …] — started by `torq agent run`, through
+# torq-agent-run [--share-fd <n> <dir>] [--] [<command> …] | torq-agent-run --hold-frozen — started by `torq agent run`, through
 # sudo, as root: it does one thing as root, then is the caller's own agent for good (ADR-051 3).
 #
 # As root, in a mount namespace of its own: every home hidden, and the one directory shared with the
@@ -8,7 +8,8 @@
 # the caller's own agent, torq-agent-<person> (setpriv: its uid and group, no capabilities, no new privileges) and runs the program in
 # bubblewrap, in a process namespace of its own (nothing it starts outlives it): the people's runtime
 # directories (their sockets: ssh-agent, D-Bus) hidden, /tmp its own,
-# its home the agent's. Nothing the person asked for runs as root; the agent has no way into the home.
+# its home the agent's, the agent services' memory hidden. Nothing the person asked for runs as root; the agent
+# has no way into the home. `--hold-frozen` holds the agent still while torqcli shares a directory (below).
 set -euo pipefail
 if [ "$(id -u)" != 0 ]; then
   echo "torq-agent-run: is started by torq agent run (through sudo)" >&2
@@ -47,6 +48,52 @@ home=$(printf '%s\n' "$entry" | cut -d: -f6)
 if [ -z "$uid" ] || [ "$uid" -eq 0 ] || [ "$uid" -ge 1000 ] || [ "$home" != "/var/lib/$agent" ]; then
   echo "torq agent run: $agent is not an agent account (uid $uid, home $home)" >&2
   exit 2
+fi
+# `--hold-frozen` (torq agent run --share, ADR-051 3 step 2): the agent held still while torqcli, as the
+# person, walks the directory being shared and sets its ACLs — a program of the agent's running then could
+# swap a file for a link between the walk's look and its ACL. The person's agent service is frozen
+# (systemd's freezer: each of its processes stopped where it is, the task it runs included), and any
+# other process of the agent's — another `torq agent run` — refuses the share, as one session at a time
+# always did. A service that starts during the walk runs with every home hidden (modules/agent.nix): it
+# cannot reach the directory. `frozen` said, it waits for its input to end (torqcli done with the walk,
+# or gone however it went), then thaws — on every way out.
+if [ "${1-}" = --hold-frozen ]; then
+  unit="torq-agent@$person.service"
+  frozen="" cgroup=""
+  # (Run by the trap below.)
+  # shellcheck disable=SC2329
+  thaw() {
+    if [ -n "$frozen" ] && ! systemctl thaw -- "$unit"; then
+      echo "torq agent run: could not thaw $unit: systemctl thaw $unit" >&2
+      exit 1
+    fi
+  }
+  trap thaw EXIT
+  trap 'exit 130' INT TERM HUP PIPE
+  case "$(systemctl show -P ActiveState -- "$unit" 2>/dev/null || true)" in
+    '' | inactive | failed) ;;
+    *)
+      frozen=1
+      if ! systemctl freeze -- "$unit" || [ "$(systemctl show -P FreezerState -- "$unit")" != frozen ]; then
+        echo "torq agent run: could not hold your agent ($unit) still: nothing shared" >&2
+        exit 2
+      fi
+      cgroup=$(systemctl show -P ControlGroup -- "$unit")
+      ;;
+  esac
+  for p in /proc/[0-9]*; do
+    [ "$(stat -c %u -- "$p" 2>/dev/null)" = "$uid" ] || continue
+    cg=$(sed -n 's/^0:://p' -- "$p/cgroup" 2>/dev/null) || continue
+    [ -n "$cg" ] || continue
+    if [ -n "$cgroup" ] && { [ "$cg" = "$cgroup" ] || [ "${cg#"$cgroup"/}" != "$cg" ]; }; then
+      continue
+    fi
+    echo "torq agent run: your agent ($agent) is running already (process ${p#/proc/}): one session at a time, and none while a directory is shared" >&2
+    exit 2
+  done
+  echo frozen
+  cat >/dev/null || true
+  exit 0
 fi
 share="" fd=""
 if [ "${1-}" = --share-fd ]; then
@@ -102,11 +149,15 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
     mkdir -p -- "$share"
     mount --move "$stage" "$share"
   fi
+  # The memory of the agent services (their conversations, /var/lib/torq-agent-memory/<person>): written by
+  # each service alone, hidden from every program run here (ADR-051 3, step 2) — made first, as root,
+  # so that it is there to hide.
+  mkdir -p -m 0755 /var/lib/torq-agent-memory
   rc=0
   setpriv --reuid "$agent" --regid "$agent" --init-groups --no-new-privs \
     --inh-caps=-all --bounding-set=-all -- \
     bwrap --die-with-parent --unshare-pid --dev-bind / / --proc /proc \
-      --tmpfs /run/user --tmpfs /tmp --tmpfs /root \
+      --tmpfs /run/user --tmpfs /tmp --tmpfs /root --tmpfs /var/lib/torq-agent-memory \
       --clearenv \
       --setenv HOME "$home" --setenv USER "$agent" --setenv LOGNAME "$agent" \
       --setenv SHELL /run/current-system/sw/bin/bash \

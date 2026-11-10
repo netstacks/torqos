@@ -54,7 +54,8 @@ pub enum Event {
     Tainted { why: String },
     /// Something failed; what, in words.
     Error { text: String },
-    /// The task ended, with its process's exit code (killed by `stop`: 128 + the signal).
+    /// The ask is over: its task's exit code (killed by `stop`: 128 + the signal), or 1 when no task
+    /// started (refused: the error before it says why). Every ask ends with it.
     Done { exit: i32 },
     /// The answer to `status` (and to `stop`, after it): whether a task is running.
     Status { running: bool },

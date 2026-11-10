@@ -23,7 +23,8 @@ let
   # binds in only the directory shared with it, and drops to the caller's agent for good.
   agentRun = pkgs.writeShellApplication {
     name = "torq-agent-run";
-    runtimeInputs = [ pkgs.bubblewrap pkgs.coreutils pkgs.util-linux pkgs.bash pkgs.jq pkgs.getent ];
+    # systemctl and sed: holding the agent's service still while a directory is shared (--hold-frozen).
+    runtimeInputs = [ pkgs.bubblewrap pkgs.coreutils pkgs.util-linux pkgs.bash pkgs.jq pkgs.getent pkgs.gnused config.systemd.package ];
     text = builtins.readFile ./agent-run.sh;
   };
 in
@@ -61,6 +62,18 @@ in
     '';
   };
 
+  options.torq.agent.service.enable = lib.mkOption {
+    type = lib.types.bool;
+    default = true;
+    description = ''
+      Whether each person in `people` has their agent resident (ADR-051 3): `torq-agent@<person>.service`,
+      started by its socket (`/run/torq-agent/<person>.sock`, theirs alone) the first time they `torq ask`,
+      as their agent account, in a sandbox. It keeps their conversation (its last turns) and runs one task
+      at a time. Only where doctor mode is on (`torq.agent.doctor.enable`): its harness and its model are
+      the doctor's. Not tied to the desktop: `torq ask` works on a server's terminal too.
+    '';
+  };
+
   options.torq.agent.agents = lib.mkOption {
     type = lib.types.attrsOf lib.types.str;
     internal = true;
@@ -90,7 +103,7 @@ in
     };
   };
 
-  config = {
+  config = lib.mkMerge [ {
     assertions = [{
       assertion = lib.all (s: lib.head (lib.splitString "." s) != "torq") cfg.mayPropose.settings;
       message = "torq.agent.mayPropose.settings: torq.* is never the agent's (its own limits are there).";
@@ -166,5 +179,84 @@ in
     security.sudo.extraConfig = ''
       Defaults!${agentRun}/bin/torq-agent-run closefrom_override, env_reset
     '';
-  };
+  }
+
+  # Each person's agent, resident (ADR-051 3, step 2): `torq-agent@<person>.service`, started by its
+  # socket the first time the person asks (`torq ask`), so it costs nothing until then. It holds the
+  # person's conversation and runs one task at a time, each TorqOS's harness (`torq-doctor --propose
+  # --task`) as its own process, as the agent, in the sandbox below — at least the launcher's (every
+  # home hidden, the people's runtime directories hidden, its own /tmp, no privilege, its home its own)
+  # and systemd's hardening besides. Only where doctor mode is on: the harness and its model are its.
+  (lib.mkIf (cfg.service.enable && config.torq.agent.doctor.enable) {
+    # Only the person may connect (the socket theirs, 0600, in a directory root's) — and the service
+    # answers only them, by the kernel's word (SO_PEERCRED), root included.
+    systemd.sockets = lib.mapAttrs' (agent: person: lib.nameValuePair "torq-agent@${person}" {
+      description = "${person}'s TorqOS agent: its socket";
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "/run/torq-agent/${person}.sock";
+        SocketUser = person;
+        SocketGroup = "root";
+        SocketMode = "0600";
+        DirectoryMode = "0755";
+        Accept = false;
+        RemoveOnStop = true;
+      };
+    }) agents;
+    systemd.services = lib.mapAttrs' (agent: person: lib.nameValuePair "torq-agent@${person}" {
+      description = "${person}'s TorqOS agent (proposes; a person applies)";
+      requires = [ "torq-agent@${person}.socket" ];
+      after = [ "torq-agent@${person}.socket" "torq-broker.socket" ];
+      serviceConfig = {
+        ExecStart = "${config.torq.agent.doctor.package}/bin/torq-agent-service ${person}";
+        # The listening socket as standard input (Accept=no): the program takes it from there.
+        StandardInput = "socket";
+        StandardOutput = "journal";
+        StandardError = "journal";
+        User = agent;
+        Group = agent;
+        WorkingDirectory = "/var/lib/${agent}";
+        # Its memory: the agent's, 0700, outside its home (every program run as the agent can write
+        # that), hidden from `torq agent run` (modules/agent-run.sh).
+        StateDirectory = "torq-agent-memory/${person}";
+        StateDirectoryMode = "0700";
+        # The launcher's sandbox: every home (and /root, and the people's runtime directories in
+        # /run/user) out of reach, /tmp its own, no privilege at all.
+        ProtectHome = true;
+        PrivateTmp = true;
+        NoNewPrivileges = true;
+        CapabilityBoundingSet = "";
+        AmbientCapabilities = "";
+        # And more: the system read-only but its home and its memory; no other user's processes seen;
+        # the kernel's settings, modules, logs and clock, and the control groups, untouchable.
+        ProtectSystem = "strict";
+        ReadWritePaths = [ "/var/lib/${agent}" ];
+        ProtectProc = "invisible";
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        RemoveIPC = true;
+        PrivateIPC = true;
+        KeyringMode = "private";
+        UMask = "0077";
+        # Unix sockets (the broker, the local model), the network (a remote model), and netlink: the
+        # doctor's `ip` and `iw` read the interfaces through it (hardware_facts).
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+        SystemCallFilter = [ "@system-service" ];
+        SystemCallErrorNumber = "EPERM";
+        SystemCallArchitectures = "native";
+        # Not PrivateUsers: in a user namespace of its own, SO_PEERCRED would name every caller nobody.
+        # Not PrivateDevices: the doctor's rfkill and lsblk read devices.
+      };
+    }) agents;
+  })
+  ];
 }

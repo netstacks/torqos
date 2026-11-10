@@ -129,6 +129,7 @@ impl Agent {
                 Ok(Request::Ask { text, context }) => {
                     if let Err(e) = self.ask(text, context, &out, id) {
                         out.send(&Event::Error { text: format!("{e:#}") });
+                        out.send(&Event::Done { exit: 1 });
                     }
                 }
                 Ok(Request::Stop) => {
@@ -191,7 +192,7 @@ impl Agent {
             while let Ok(Some(l)) = read_line(&mut r) {
                 let Some(e) = relayed(&l) else { continue };
                 match &e {
-                    Event::Say { text } => said = Some(text.clone()),
+                    Event::Say { text } => said = Some(text.trim().to_string()),
                     Event::Tainted { .. } => tainted = true,
                     _ => {}
                 }
@@ -408,7 +409,7 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
         }
         assert!(a.running().is_some());
         let busy = talk(&sock, &[ask("another"), Request::Status], |e| matches!(e, Event::Status { .. }));
-        assert_eq!(busy, vec![Event::Error { text: "a task is running already (one at a time): stop it, or wait".into() }, Event::Status { running: true }]);
+        assert_eq!(busy, vec![Event::Error { text: "a task is running already (one at a time): stop it, or wait".into() }, Event::Done { exit: 1 }, Event::Status { running: true }]);
         let stopped = talk(&sock, &[Request::Stop], |e| matches!(e, Event::Status { .. }));
         assert_eq!(stopped, vec![Event::Status { running: false }]);
         let child = std::fs::read_to_string(d.path().join("child")).unwrap();
@@ -450,6 +451,7 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
         let e = |r: &mut BufReader<UnixStream>| serde_json::from_str::<Event>(&read_line(r).unwrap().unwrap()).unwrap();
         assert!(matches!(e(&mut r), Event::Error { text } if text.starts_with("not a request")));
         assert_eq!(e(&mut r), Event::Error { text: "ask what? (an empty question)".into() });
+        assert_eq!(e(&mut r), Event::Done { exit: 1 }, "an ask always ends with done");
         assert_eq!(e(&mut r), Event::Forgotten);
     }
 

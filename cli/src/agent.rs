@@ -110,31 +110,49 @@ pub fn owned(dir: &Path, uid: u32) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
 }
 
 
-/// The uid of agent account `agent`, from /etc/passwd: refused, plainly, if this machine has none (the
+/// Whether this machine has agent account `agent`, from /etc/passwd: refused, plainly, if not (the
 /// person is not in `torq.agent.people`). The launcher checks it again, as root, against the broker's map.
-fn agent_uid(agent: &str) -> Result<u32> {
+fn has_agent(agent: &str) -> Result<()> {
     let passwd = std::fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
-    let Some(uid) = passwd.lines().find_map(|l| {
-        let f: Vec<&str> = l.split(':').collect();
-        (f.first() == Some(&agent)).then(|| f.get(2)?.parse::<u32>().ok()).flatten()
-    }) else {
+    if !passwd.lines().any(|l| l.split(':').next() == Some(agent)) {
         bail!("you have no agent account on this machine ({agent}): `torq agent people` names who has one (the owner, by default) — adding you is a system change, an administrator's");
-    };
-    Ok(uid)
+    }
+    Ok(())
 }
 
-/// A process of agent account `uid` running now, if there is one (its pid): /proc's entries are
-/// owned by each process's user.
-fn agent_running(uid: u32) -> Result<Option<u32>> {
-    use std::os::unix::fs::MetadataExt;
-    for e in std::fs::read_dir("/proc").context("reading /proc")?.flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
-        if e.metadata().is_ok_and(|m| m.uid() == uid) {
-            return Ok(Some(pid));
+/// The person's agent held still (ADR-051 3, step 2): the launcher, as root, freezes their agent's
+/// service (`systemctl freeze torq-agent@<person>.service`, systemd's freezer: every process of it
+/// stopped where it is), refuses if any other process of the agent's runs (another `torq agent run`),
+/// says `frozen`, and thaws when its input ends — when this closes it, or exits, however. A program
+/// of the agent's running during the walk could swap a file it can write for a link, between the
+/// walk's look and its ACL, and be granted wherever the link leads (the review of ADR-041, 5).
+struct Frozen(std::process::Child);
+
+impl Frozen {
+    fn hold(launcher: &str) -> Result<Frozen> {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        let mut child = Command::new(SUDO).args(["--", launcher, "--hold-frozen"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().context("holding your agent still (sudo torq-agent-run)")?;
+        let mut said = String::new();
+        let read = std::io::BufReader::new(child.stdout.take().context("the launcher's output")?).read_line(&mut said);
+        if read.is_err() || said.trim() != "frozen" {
+            drop(child.stdin.take());
+            let _ = child.wait();
+            bail!("nothing shared: your agent could not be held still while the directory is shared (the launcher said why)");
         }
+        Ok(Frozen(child))
     }
-    Ok(None)
+
+    /// Thawed: the launcher's input ended, and it says whether the thaw went through.
+    fn thaw(mut self) -> Result<()> {
+        drop(self.0.stdin.take());
+        if !self.0.wait().context("thawing your agent")?.success() {
+            bail!("your agent could not be thawed: systemctl thaw it (the launcher said why)");
+        }
+        Ok(())
+    }
 }
+
 /// setfacl with `args` on each of `paths` at once.
 fn acl_many(args: &[&str], paths: &[PathBuf]) -> Result<()> {
     if paths.is_empty() {
@@ -145,6 +163,23 @@ fn acl_many(args: &[&str], paths: &[PathBuf]) -> Result<()> {
     }
     Ok(())
 }
+
+/// Share `dir` with `agent`: the agent may read and write what of it is the person's (`uid`, `me`);
+/// what it makes there, the person may rename and delete, and (default ACLs) read and write unless
+/// the agent narrows it — the agent owns what it makes. What the agent made is not the person's to set
+/// ACLs on. No link is followed.
+fn share_acls(dir: &Path, uid: u32, agent: &str, me: &str) -> Result<()> {
+    let (dirs, files) = owned(dir, uid)?;
+    for chunk in files.chunks(200) {
+        acl_many(&["-m", &format!("u:{agent}:rwX")], chunk)?;
+    }
+    for chunk in dirs.chunks(200) {
+        acl_many(&["-m", &format!("u:{agent}:rwx")], chunk)?;
+        acl_many(&["-d", "-m", &format!("u:{agent}:rwX,u:{me}:rwX")], chunk)?;
+    }
+    Ok(())
+}
+
 /// Run it: share the directory (ACLs, and the directory itself, open), then become the agent,
 /// through the launcher. Does not return on success: the program takes this process's place.
 pub fn run(args: &[String]) -> Result<i32> {
@@ -156,7 +191,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
     // Your own agent, and only yours: the launcher runs `torq-agent-<you>` (as sudo says who you are).
     let agent = agent_of(&me);
-    let agent_uid = agent_uid(&agent)?;
+    has_agent(&agent)?;
     // The launcher by its own path in the store, as the sudo rule names it (sudo does not take a link
     // to it for it).
     let launcher = std::fs::canonicalize(LAUNCHER).with_context(|| format!("{LAUNCHER}: the agent's launcher is not installed"))?;
@@ -169,24 +204,15 @@ pub fn run(args: &[String]) -> Result<i32> {
         let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set: no home to share from")?);
         let uid = rustix::process::getuid().as_raw();
         let dir = checked_share(share, &home, uid)?;
-        // One session of the agent's at a time, and none while the directory is walked: a program of the
-        // agent's running now could swap a file it can write for a link, between the walk's look and its
-        // ACL, and be granted wherever the link leads (the review of ADR-041, 5). With its own process
-        // namespace (the launcher), nothing of a session outlives it.
-        if let Some(pid) = agent_running(agent_uid)? {
-            bail!("your agent ({agent}) is running already (process {pid}): one session at a time, and none while a directory is shared");
-        }
-        // The agent may read and write what of it is the person's; what it makes there, the person may
-        // rename and delete, and (default ACLs) read and write unless the agent narrows it — the agent
-        // owns what it makes. What the agent made is not the person's to set ACLs on. No link is followed.
-        let (dirs, files) = owned(&dir, uid)?;
-        for chunk in files.chunks(200) {
-            acl_many(&["-m", &format!("u:{agent}:rwX")], chunk)?;
-        }
-        for chunk in dirs.chunks(200) {
-            acl_many(&["-m", &format!("u:{agent}:rwx")], chunk)?;
-            acl_many(&["-d", "-m", &format!("u:{agent}:rwX,u:{me}:rwX")], chunk)?;
-        }
+        // One session of the agent's at a time, and none of its programs running while the directory is
+        // walked (a link swapped in between the walk's look and its ACL would be granted wherever it
+        // leads): the person's agent service held still by systemd's freezer, any other program of the
+        // agent's refused — both by the launcher, as root — and thawed after, however the walk ended.
+        // With its own process namespace (the launcher), nothing of a session outlives it.
+        let frozen = Frozen::hold(&launch[0])?;
+        let shared = share_acls(&dir, uid, &agent, &me);
+        frozen.thaw()?;
+        shared?;
         // Opened as the person, kept open across exec (no close-on-exec), and kept by sudo (`-C`,
         // which the launcher's rule allows): the agent is handed the directory, not a way to it.
         let f = std::fs::File::open(&dir).with_context(|| format!("opening {}", dir.display()))?;
@@ -202,6 +228,143 @@ pub fn run(args: &[String]) -> Result<i32> {
     use std::os::unix::process::CommandExt;
     let e = Command::new(SUDO).args(&sudo).arg("--").args(&launch).exec();
     Err(anyhow::Error::from(e).context("starting the agent (sudo torq-agent-run)"))
+}
+
+/// What `torq ask` was asked: a question for the person's agent, or to forget the conversation.
+#[derive(Debug, PartialEq)]
+pub enum Asked {
+    Question(String),
+    Forget,
+}
+
+const ASK_USAGE: &str = "usage: torq ask \"<question>\" | torq ask --forget — e.g. torq ask \"why is my wifi flaky?\"";
+
+/// `ask "<question>"`, `ask -- <words…>`, `ask --forget` (after `ask`).
+pub fn parse_ask(args: &[String]) -> Result<Asked> {
+    let words = match args {
+        [f] if f == "--forget" => return Ok(Asked::Forget),
+        [d, rest @ ..] if d == "--" => rest,
+        [first, ..] if first.starts_with('-') => bail!("unknown option {first}\n{ASK_USAGE}"),
+        rest => rest,
+    };
+    let q = words.join(" ");
+    if q.trim().is_empty() {
+        bail!("{ASK_USAGE}");
+    }
+    Ok(Asked::Question(q))
+}
+
+/// Ctrl-C, while an answer comes, asks the agent to stop: the terminal's keys read as keys (no signal,
+/// no echo), each Ctrl-C a `stop` sent; the terminal as it was when this ends.
+struct Keys(rustix::termios::Termios);
+
+impl Keys {
+    fn watch(conn: std::os::unix::net::UnixStream) -> Option<Keys> {
+        use rustix::termios::{tcgetattr, tcsetattr, LocalModes, OptionalActions, SpecialCodeIndex};
+        let stdin = std::io::stdin();
+        let was = tcgetattr(&stdin).ok()?;
+        let mut keys = was.clone();
+        keys.local_modes.remove(LocalModes::ICANON | LocalModes::ECHO | LocalModes::ISIG);
+        keys.special_codes[SpecialCodeIndex::VMIN] = 1;
+        keys.special_codes[SpecialCodeIndex::VTIME] = 0;
+        tcsetattr(&stdin, OptionalActions::Now, &keys).ok()?;
+        std::thread::spawn(move || {
+            let mut b = [0u8; 1];
+            while rustix::io::read(std::io::stdin(), &mut b).is_ok_and(|n| n == 1) {
+                if b[0] == 0x03 {
+                    eprintln!("agent: stopping");
+                    let _ = send(&conn, &torq_wire::agent::Request::Stop);
+                }
+            }
+        });
+        Some(Keys(was))
+    }
+}
+
+impl Drop for Keys {
+    fn drop(&mut self) {
+        let _ = rustix::termios::tcsetattr(std::io::stdin(), rustix::termios::OptionalActions::Now, &self.0);
+    }
+}
+
+/// One request, one line.
+fn send(mut conn: &std::os::unix::net::UnixStream, r: &torq_wire::agent::Request) -> Result<()> {
+    use std::io::Write;
+    writeln!(conn, "{}", serde_json::to_string(r)?).context("asking your agent")?;
+    Ok(())
+}
+
+/// How the person reads an event: the answer and the proposals on standard output, the steps on the
+/// way on standard error, every word of the agent's cleaned of what could fool a terminal. `Some`
+/// (the exit code) when it is the last.
+fn show(e: torq_wire::agent::Event, failed: &mut bool, out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> std::io::Result<Option<i32>> {
+    use crate::history::clean;
+    use torq_wire::agent::Event;
+    match e {
+        Event::Say { text } => {
+            for line in text.lines() {
+                writeln!(out, "{}", clean(line))?;
+            }
+        }
+        Event::Called { tool } => writeln!(err, "agent: {}", clean(&tool))?,
+        Event::Tainted { why } => writeln!(err, "agent: this session read untrusted text ({}): anything it proposes is marked tainted", clean(&why))?,
+        Event::Proposed { seq } => writeln!(out, "Proposed #{seq}: a person applies it — `show system proposals`, `request system apply {seq}`")?,
+        Event::Error { text } => {
+            *failed = true;
+            writeln!(err, "agent: {}", clean(&text))?
+        }
+        Event::Done { exit } => return Ok(Some(if exit == 0 && !*failed { 0 } else { 1 })),
+        Event::Forgotten => {
+            writeln!(out, "Your agent has forgotten the conversation.")?;
+            return Ok(Some(0));
+        }
+        Event::Status { .. } => {}
+    }
+    Ok(None)
+}
+
+/// `torq ask "<question>"` (ADR-051 4, the terminal's way to the agent): the person's own agent —
+/// its service, `torq-agent@<you>.service`, on its socket — asked, the answer streamed as it comes,
+/// with the number of anything it proposed; Ctrl-C stops it. `--forget`: the conversation it keeps
+/// is erased.
+pub fn ask(args: &[String]) -> Result<i32> {
+    use std::io::BufRead;
+    use std::io::Read;
+    use torq_wire::agent::{socket, Event, Request, MAX_LINE};
+    let asked = parse_ask(args)?;
+    let me = crate::me()?;
+    if is_agent(&me) {
+        bail!("this is an agent: it has no agent of its own to ask");
+    }
+    has_agent(&agent_of(&me))?;
+    let path = socket(&me);
+    let conn = std::os::unix::net::UnixStream::connect(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => anyhow::anyhow!("your agent's service is not on this machine ({path}): it runs where doctor mode is (torq agent doctor enable true, an administrator's change)"),
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!("{path}: not yours to connect to"),
+        _ => anyhow::Error::from(e).context(format!("connecting to your agent ({path}): systemctl status torq-agent@{me}.socket")),
+    })?;
+    let question = matches!(asked, Asked::Question(_));
+    send(&conn, &match asked {
+        Asked::Question(text) => Request::Ask { text, context: None },
+        Asked::Forget => Request::Forget,
+    })?;
+    use std::io::IsTerminal;
+    let _keys = if question && std::io::stdin().is_terminal() { Keys::watch(conn.try_clone()?) } else { None };
+    let mut r = std::io::BufReader::new(conn);
+    let mut failed = false;
+    loop {
+        let mut line = String::new();
+        if (&mut r).take(MAX_LINE as u64 + 1).read_line(&mut line).context("reading your agent's answer")? == 0 {
+            if failed {
+                return Ok(1);
+            }
+            bail!("your agent's service ended before it answered (journalctl -u torq-agent@{me}.service, an administrator's)");
+        }
+        let e: Event = serde_json::from_str(&line).context("your agent said something this torq does not know")?;
+        if let Some(code) = show(e, &mut failed, &mut std::io::stdout(), &mut std::io::stderr())? {
+            return Ok(code);
+        }
+    }
 }
 
 /// `torq doctor "<question>"` (ADR-042): the agent, in doctor mode, asked one question — run as the
@@ -328,4 +491,39 @@ mod tests {
         assert_eq!(owned(&p, uid + 1).unwrap(), (vec![], vec![]), "someone else's: nothing");
     }
 
+
+    #[test]
+    fn what_torq_ask_is_asked() {
+        assert_eq!(parse_ask(&a("why is it slow?")).unwrap(), Asked::Question("why is it slow?".into()));
+        assert_eq!(parse_ask(&a("--forget")).unwrap(), Asked::Forget);
+        assert_eq!(parse_ask(&a("-- --forget me")).unwrap(), Asked::Question("--forget me".into()), "after --, words");
+        assert_eq!(parse_ask(&a("forget --forget")).unwrap(), Asked::Question("forget --forget".into()));
+        for bad in ["", "   ", "--", "--stop", "-x why"] {
+            assert!(parse_ask(&a(bad)).is_err(), "{bad:?}");
+        }
+        assert!(format!("{:#}", parse_ask(&a("--stop")).unwrap_err()).contains("unknown option --stop"));
+    }
+
+    /// The answer and the proposals on standard output, the steps on standard error, nothing of the
+    /// agent's able to fool a terminal; the end, and its code, at `done`.
+    #[test]
+    fn how_the_answer_is_shown() {
+        use torq_wire::agent::Event;
+        let (mut out, mut err, mut failed) = (Vec::new(), Vec::new(), false);
+        let mut s = |e| show(e, &mut failed, &mut out, &mut err).unwrap();
+        assert_eq!(s(Event::Called { tool: "read_journal".into() }), None);
+        assert_eq!(s(Event::Tainted { why: "read_journal".into() }), None);
+        assert_eq!(s(Event::Say { text: "line one\nrewrite\rd \u{1b}[2J\u{202e}".into() }), None);
+        assert_eq!(s(Event::Proposed { seq: 12 }), None);
+        assert_eq!(s(Event::Done { exit: 0 }), Some(0));
+        let (out, err) = (String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap());
+        assert!(out.starts_with("line one\n") && out.contains("Proposed #12") && out.contains("request system apply 12"), "{out}");
+        assert!(!out.contains('\u{1b}') && !out.contains('\r') && !out.contains('\u{202e}'), "{out:?}");
+        assert!(err.contains("agent: read_journal") && err.contains("untrusted text (read_journal)"), "{err}");
+        // An error, then done: failed, whatever the code.
+        let (mut failed, mut sink) = (false, Vec::new());
+        assert_eq!(show(Event::Error { text: "a task is running already".into() }, &mut failed, &mut Vec::new(), &mut sink).unwrap(), None);
+        assert_eq!(show(Event::Done { exit: 0 }, &mut failed, &mut Vec::new(), &mut Vec::new()).unwrap(), Some(1));
+        assert_eq!(show(Event::Done { exit: 137 }, &mut false, &mut Vec::new(), &mut Vec::new()).unwrap(), Some(1), "stopped");
+    }
 }
