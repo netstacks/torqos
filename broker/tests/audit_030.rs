@@ -13,7 +13,8 @@ fn setup() -> (tempfile::TempDir, Broker) {
     let repo = dir.path().join("config");
     fs::create_dir_all(repo.join("users")).unwrap();
     fs::write(repo.join("desktop.nix"), "{ }\n").unwrap();
-    let b = Broker::new(&repo, dir.path().join("state"), "true").with_agent_limits(&Limits { users: vec!["casey".into()], settings: vec![] });
+    let casey = [("torq-agent-casey".to_string(), "casey".to_string())].into_iter().collect();
+    let b = Broker::new(&repo, dir.path().join("state"), "true").with_agent_limits(&Limits { agents: casey, settings: vec![] }).as_agent(Some("torq-agent-casey"));
     b.init().unwrap();
     (dir, b)
 }

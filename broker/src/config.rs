@@ -44,8 +44,9 @@ pub struct Settings {
     /// password `password` sets. None listed (an older file): no password is set.
     #[serde(default)]
     pub people: Vec<String>,
-    /// What the agent may propose (ADR-041, `torq.agent.mayPropose`). None listed (an older file):
-    /// nothing but what is no setting at all is refused — it may propose nothing.
+    /// Which accounts are agents, whose, and what they may propose (ADR-041, ADR-051 3: `torq.agent.people`,
+    /// `torq.agent.mayPropose`). None listed (an older file): no account is an agent, and
+    /// nothing is proposed as one.
     #[serde(default)]
     pub agent: crate::agent::Limits,
     /// The config repo's remote (ADR-036, `torq.remote.url`): SSH only. None: local, as ever.

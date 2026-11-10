@@ -1,26 +1,42 @@
 //! What the agent may propose (ADR-041): a default-deny list, checked by what a change does.
 //!
-//! The agent's account (`torq-agent`) only proposes (ADR-040); this decides which proposals it may
-//! make at all. A person's packages: the people `users` names (the owner, by default). Settings:
-//! only the subtrees `settings` lists, checked setting by setting — each JSON file of the tree is
-//! compared before and after the change, and every setting that changes must lie inside one of
-//! them. Anything else — the config files and the Nix files they attach, `flake.nix`, the lock, the
-//! hardware file, and `torq.*` (where the agent's own limits are set) — is never the agent's.
+//! Each person's agent is an account of its own, `torq-agent-<person>` (ADR-051 3, amending ADR-041
+//! 1); it only proposes (ADR-040), and this decides which proposals it may make at all. Packages: only
+//! the person it serves (`users/<person>/packages.json`), never anyone else's. Settings: only the
+//! subtrees `settings` lists (machine-wide, the same for every agent), checked setting by setting —
+//! each JSON file of the tree is compared before and after the change, and every setting that changes
+//! must lie inside one of them. Anything else — the config files and the Nix files they attach,
+//! `flake.nix`, the lock, the hardware file, and `torq.*` (where the agents' own limits are set) — is
+//! never an agent's.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
-/// The agent's limits, from /etc/torq/broker.json (`torq.agent.mayPropose`).
+/// The agents' limits, from /etc/torq/broker.json (`torq.agent.people`, `torq.agent.mayPropose`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
-    /// The people whose packages (`users/<name>/packages.json`) the agent may propose.
+    /// Each agent account, and the person it serves (`torq-agent-<person>` → `<person>`): the only
+    /// accounts that are an agent, and the one folder each may propose packages in.
     #[serde(default)]
-    pub users: Vec<String>,
+    pub agents: BTreeMap<String, String>,
     /// The settings subtrees it may propose changes in, as dotted paths (`services.openssh`,
     /// `system.host`). `torq` and anything under it is never one, whatever is listed.
     #[serde(default)]
     pub settings: Vec<String>,
+}
+
+impl Limits {
+    /// The person agent account `agent` serves, if it is one.
+    pub fn serves(&self, agent: &str) -> Option<&str> {
+        self.agents.get(agent).map(String::as_str)
+    }
+
+    /// Whether some agent serves `person`.
+    pub fn has_agent(&self, person: &str) -> bool {
+        self.agents.values().any(|p| p == person)
+    }
 }
 
 /// One file the change touches: its path in the repo, and its JSON before and after (None: absent).
@@ -88,14 +104,18 @@ fn inside(setting: &[String], allowed: &[String]) -> bool {
     })
 }
 
-/// Why the agent may not propose this change, or None if it may.
-pub fn refusal(limits: &Limits, touched: &[Touched]) -> Option<String> {
+/// Why agent account `agent` may not propose this change, or None if it may: an account that serves
+/// no one proposes nothing, and one that serves a person proposes packages only in their folder.
+pub fn refusal(limits: &Limits, agent: &str, touched: &[Touched]) -> Option<String> {
+    let Some(person) = limits.serves(agent) else {
+        return Some(format!("{agent} is not an agent this machine names (torq.agent.people)"));
+    };
     for t in touched {
         if let Some(name) = t.path.strip_prefix("users/").and_then(|r| r.strip_suffix("/packages.json")) {
-            if crate::policy::is_user_data(&t.path) && limits.users.iter().any(|u| u == name) {
+            if crate::policy::is_user_data(&t.path) && name == person {
                 continue;
             }
-            return Some(format!("{}: the agent proposes packages only for {}", t.path, list(&limits.users)));
+            return Some(format!("{}: {agent} proposes packages only for {person}, whose agent it is", t.path));
         }
         let Some(prefix) = settings_prefix(&t.path) else {
             return Some(format!("{}: not a setting — config files, flake.nix, the lock and the hardware file are never the agent's", t.path));
@@ -166,7 +186,7 @@ pub fn cuts_off(touched: &[Touched]) -> Vec<String> {
 
 fn list(items: &[String]) -> String {
     if items.is_empty() {
-        "nothing, until the owner lists some (torq.agent.mayPropose)".into()
+        "nothing, until the owner lists some (torq.agent.mayPropose.settings)".into()
     } else {
         items.join(", ")
     }
@@ -177,8 +197,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn limits(users: &[&str], settings: &[&str]) -> Limits {
-        Limits { users: users.iter().map(|s| s.to_string()).collect(), settings: settings.iter().map(|s| s.to_string()).collect() }
+    const VIPER: &str = "torq-agent-viper";
+
+    /// Two people, each with an agent: viper's and sam's.
+    fn limits(settings: &[&str]) -> Limits {
+        let agents = [("torq-agent-viper", "viper"), ("torq-agent-sam", "sam")].iter().map(|(a, p)| (a.to_string(), p.to_string())).collect();
+        Limits { agents, settings: settings.iter().map(|s| s.to_string()).collect() }
     }
     fn t(path: &str, before: Option<Value>, after: Option<Value>) -> Touched {
         Touched { path: path.into(), before, after }
@@ -186,47 +210,70 @@ mod tests {
 
     #[test]
     fn the_owners_packages_by_default_and_no_one_elses() {
-        let l = limits(&["viper"], &[]);
-        assert_eq!(refusal(&l, &[t("users/viper/packages.json", None, Some(json!(["htop"])))]), None);
-        assert!(refusal(&l, &[t("users/sam/packages.json", None, Some(json!(["htop"])))]).is_some());
-        assert!(refusal(&l, &[t("users/viper/other.json", None, Some(json!({})))]).is_some());
+        let l = limits(&[]);
+        assert_eq!(refusal(&l, VIPER, &[t("users/viper/packages.json", None, Some(json!(["htop"])))]), None);
+        assert!(refusal(&l, VIPER, &[t("users/sam/packages.json", None, Some(json!(["htop"])))]).is_some());
+        assert!(refusal(&l, VIPER, &[t("users/viper/other.json", None, Some(json!({})))]).is_some());
+    }
+
+    /// ADR-051 3: each agent proposes packages for the person it serves, and for no one else; an
+    /// account the machine does not name as an agent proposes nothing.
+    #[test]
+    fn each_agent_proposes_only_in_its_own_persons_folder() {
+        let l = limits(&["services.openssh"]);
+        let pkgs = |who: &str| t(&format!("users/{who}/packages.json"), None, Some(json!(["htop"])));
+        assert_eq!(refusal(&l, "torq-agent-sam", &[pkgs("sam")]), None);
+        let r = refusal(&l, "torq-agent-sam", &[pkgs("viper")]).unwrap();
+        assert!(r.contains("users/viper/packages.json") && r.contains("only for sam"), "{r}");
+        assert!(refusal(&l, VIPER, &[pkgs("sam")]).is_some());
+        // Both at once: one of them another's, refused.
+        assert!(refusal(&l, VIPER, &[pkgs("viper"), pkgs("sam")]).is_some());
+        // The settings list is the machine's, the same for both.
+        let ssh = || t("nixos/services.json", Some(json!({})), Some(json!({"openssh": {"enable": true}})));
+        assert_eq!(refusal(&l, "torq-agent-sam", &[ssh()]), None);
+        assert_eq!(refusal(&l, VIPER, &[ssh()]), None);
+        // Not in the map (a name that looks like one, the old single account): nothing at all.
+        for nobody in ["torq-agent-x", "torq-agent", "viper"] {
+            assert!(refusal(&l, nobody, &[ssh()]).unwrap().contains("not an agent"), "{nobody}");
+            assert!(refusal(&l, nobody, &[pkgs("x")]).is_some(), "{nobody}");
+        }
     }
 
     #[test]
     fn no_setting_until_the_owner_lists_it() {
-        let l = limits(&["viper"], &[]);
-        let r = refusal(&l, &[t("nixos/services.json", Some(json!({})), Some(json!({"openssh": {"enable": true}})))]).unwrap();
+        let l = limits(&[]);
+        let r = refusal(&l, VIPER, &[t("nixos/services.json", Some(json!({})), Some(json!({"openssh": {"enable": true}})))]).unwrap();
         assert!(r.contains("services.openssh.enable") && r.contains("until the owner"), "{r}");
     }
 
     #[test]
     fn a_listed_subtree_and_nothing_beside_it() {
-        let l = limits(&[], &["services.openssh"]);
+        let l = limits(&["services.openssh"]);
         let before = json!({"openssh": {"enable": false}, "nginx": {"enable": false}});
-        assert_eq!(refusal(&l, &[t("nixos/services.json", Some(before.clone()), Some(json!({"openssh": {"enable": true}, "nginx": {"enable": false}})))]), None);
+        assert_eq!(refusal(&l, VIPER, &[t("nixos/services.json", Some(before.clone()), Some(json!({"openssh": {"enable": true}, "nginx": {"enable": false}})))]), None);
         // One allowed change beside one that is not: refused.
         let both = json!({"openssh": {"enable": true}, "nginx": {"enable": true}});
-        assert!(refusal(&l, &[t("nixos/services.json", Some(before.clone()), Some(both))]).unwrap().contains("services.nginx.enable"));
+        assert!(refusal(&l, VIPER, &[t("nixos/services.json", Some(before.clone()), Some(both))]).unwrap().contains("services.nginx.enable"));
         // Segment by segment: not openssh2, not a key that is itself "openssh.x".
-        assert!(refusal(&l, &[t("nixos/services.json", Some(json!({})), Some(json!({"openssh2": {"enable": true}})))]).is_some());
-        assert!(refusal(&l, &[t("nixos/services.json", Some(json!({})), Some(json!({"openssh.x": true})))]).is_some());
+        assert!(refusal(&l, VIPER, &[t("nixos/services.json", Some(json!({})), Some(json!({"openssh2": {"enable": true}})))]).is_some());
+        assert!(refusal(&l, VIPER, &[t("nixos/services.json", Some(json!({})), Some(json!({"openssh.x": true})))]).is_some());
         // Removing what is listed is a change in it too; removing what is not, is refused.
-        assert_eq!(refusal(&l, &[t("nixos/services.json", Some(json!({"openssh": {"enable": true}})), Some(json!({})))]), None);
-        assert!(refusal(&l, &[t("nixos/services.json", Some(json!({"nginx": {"enable": true}})), None)]).is_some());
+        assert_eq!(refusal(&l, VIPER, &[t("nixos/services.json", Some(json!({"openssh": {"enable": true}})), Some(json!({})))]), None);
+        assert!(refusal(&l, VIPER, &[t("nixos/services.json", Some(json!({"nginx": {"enable": true}})), None)]).is_some());
     }
 
     #[test]
     fn torq_and_the_files_that_are_not_settings_are_never_the_agents() {
         // Even listed: torq.* holds the agent's own limits.
-        let l = limits(&["viper"], &["torq", "torq.agent", "services"]);
-        assert!(refusal(&l, &[t("nixos/torq.json", Some(json!({})), Some(json!({"agent": {"mayPropose": {"settings": ["nix"]}}})))]).is_some());
+        let l = limits(&["torq", "torq.agent", "services"]);
+        assert!(refusal(&l, VIPER, &[t("nixos/torq.json", Some(json!({})), Some(json!({"agent": {"mayPropose": {"settings": ["nix"]}}})))]).is_some());
         // The secrets' rules (ADR-052), the system's and a person's own, even one whose packages it may propose.
         for f in ["flake.nix", "flake.lock", "config-files.json", "hardware-configuration.nix", "nixos/x.nix", "nixos/sub/services.json", "nixos/.json", "secrets/x.json", "secrets/system.json", "users/viper/secrets.json"] {
-            assert!(refusal(&l, &[t(f, None, Some(json!({})))]).is_some(), "{f}");
+            assert!(refusal(&l, VIPER, &[t(f, None, Some(json!({})))]).is_some(), "{f}");
         }
         // torq's own tree (system/*.json) by its own prefix.
-        assert_eq!(refusal(&limits(&[], &["system.host"]), &[t("system/host.json", Some(json!({"host-name": "a"})), Some(json!({"host-name": "b"})))]), None);
-        assert!(refusal(&limits(&[], &["system.host"]), &[t("system/packages.json", Some(json!([])), Some(json!(["jq"])))]).is_some());
+        assert_eq!(refusal(&limits(&["system.host"]), VIPER, &[t("system/host.json", Some(json!({"host-name": "a"})), Some(json!({"host-name": "b"})))]), None);
+        assert!(refusal(&limits(&["system.host"]), VIPER, &[t("system/packages.json", Some(json!([])), Some(json!(["jq"])))]).is_some());
     }
 
     /// ADR-042, 6: what could lose the network or the screen is named, and nothing else is.
@@ -262,9 +309,9 @@ mod tests {
 
     #[test]
     fn an_empty_or_odd_entry_allows_nothing() {
-        assert!(refusal(&limits(&[], &["system"]), &[t("nixos/system.json", Some(json!({})), Some(json!({"activationScripts": {"x": "id"}})))]).is_some(), "a bare system");
+        assert!(refusal(&limits(&["system"]), VIPER, &[t("nixos/system.json", Some(json!({})), Some(json!({"activationScripts": {"x": "id"}})))]).is_some(), "a bare system");
         for bad in ["", ".", "services.", ".openssh"] {
-            assert!(refusal(&limits(&[], &[bad]), &[t("nixos/services.json", Some(json!({})), Some(json!({"openssh": {"enable": true}})))]).is_some(), "{bad:?}");
+            assert!(refusal(&limits(&[bad]), VIPER, &[t("nixos/services.json", Some(json!({})), Some(json!({"openssh": {"enable": true}})))]).is_some(), "{bad:?}");
         }
     }
 }

@@ -12,8 +12,9 @@ use anyhow::{bail, Context, Result};
 // The socket's words, shared with its callers (ADR-044).
 pub use torq_wire::socket::{Frame, Request, NEED_PASSWORD, SOCKET};
 
-/// The agent's account (ADR-035): whatever arrives from it is the agent.
-pub const AGENT: &str = "torq-agent";
+/// What every agent account's name begins with: `torq-agent-<person>` (ADR-051 3). A name is not
+/// what makes an account an agent — the broker's map is (`caller`) — but no agent is named otherwise.
+pub const AGENT_PREFIX: &str = "torq-agent-";
 /// The PAM service a system change's password is checked against (modules/broker.nix).
 pub const PAM_SERVICE: &str = "torq-approve";
 /// The group whose members may approve a system change (with their password).
@@ -35,7 +36,9 @@ pub const TIMEOUT_SECONDS: u64 = 10;
 pub struct Caller {
     pub uid: u32,
     pub name: String,
-    pub agent: bool,
+    /// The person this account is the agent of: it is in the broker's map of agents
+    /// (/etc/torq/broker.json, `torq.agent.people`) and is not a person's uid. None: not an agent.
+    pub agent_for: Option<String>,
     pub admin: bool,
     /// A normal account (NixOS gives people uids from 1000): not a service's, which proposes nothing.
     pub person: bool,
@@ -61,7 +64,7 @@ pub struct Change {
 /// asking and who approves (the kernel's), and files (they come in the request).
 const NOT_FROM_CALLERS: &[&str] = &[
     "--repo", "--state-dir", "--rebuild-cmd", "--build-cmd", "--activate-cmd", "--boot-cmd", "--schedule-cmd",
-    "--commit-at-cmd", "--commit-at-cancel-cmd", "--current-system", "--system-profile", "--actor", "--approved-by", "--diff", "--hash-file", "--key-file", "--value-file",
+    "--commit-at-cmd", "--commit-at-cancel-cmd", "--current-system", "--system-profile", "--actor", "--agent", "--approved-by", "--diff", "--hash-file", "--key-file", "--value-file",
 ];
 
 /// Refuse arguments that name the caller, a file, or the broker's settings.
@@ -75,8 +78,10 @@ pub fn check_args(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The account with `uid`, from /etc/passwd's text; an admin if /etc/group's `wheel` lists it.
-pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
+/// The account with `uid`, from /etc/passwd's text; an admin if /etc/group's `wheel` lists it; an
+/// agent if `agents` (the broker's map, agent account → person) names it and its uid is no person's —
+/// a person's account is never an agent, whatever it is called.
+pub fn caller(uid: u32, passwd: &str, group: &str, agents: &crate::agent::Limits) -> Result<Caller> {
     let name = passwd
         .lines()
         .filter_map(|l| {
@@ -94,7 +99,9 @@ pub fn caller(uid: u32, passwd: &str, group: &str) -> Result<Caller> {
         let f: Vec<&str> = l.split(':').collect();
         f.len() == 4 && f[0] == ADMINS && f[3].split(',').any(|m| m == name)
     });
-    Ok(Caller { uid, agent: name == AGENT, person: (PEOPLE_UIDS).contains(&uid), name, admin })
+    let person = PEOPLE_UIDS.contains(&uid);
+    let agent_for = if person { None } else { agents.serves(&name).map(String::from) };
+    Ok(Caller { uid, agent_for, person, name, admin })
 }
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
@@ -123,7 +130,7 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
     if OBSERVE.contains(&cmd) {
         return Gate::Open;
     }
-    if who.agent {
+    if who.agent_for.is_some() {
         // It proposes, and keeps the broker told of what its sessions read (session.rs).
         return if matches!(cmd, "propose" | "session-start" | "session-taint") {
             Gate::Open
@@ -188,7 +195,7 @@ pub fn theirs(name: &str, c: &Change) -> bool {
 }
 
 /// The account named `name`, as `caller` reads it for its uid.
-pub fn account(name: &str, passwd: &str, group: &str) -> Result<Caller> {
+pub fn account(name: &str, passwd: &str, group: &str, agents: &crate::agent::Limits) -> Result<Caller> {
     let uid = passwd
         .lines()
         .find_map(|l| {
@@ -196,7 +203,7 @@ pub fn account(name: &str, passwd: &str, group: &str) -> Result<Caller> {
             (f.next()? == name).then(|| f.nth(1)?.parse::<u32>().ok()).flatten()
         })
         .with_context(|| format!("no account is named {name:?}"))?;
-    let c = caller(uid, passwd, group)?;
+    let c = caller(uid, passwd, group, agents)?;
     if c.name != name {
         bail!("{name:?} shares its uid with {:?}: not one account", c.name);
     }
@@ -224,8 +231,19 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             if !args.iter().any(|x| x == "--base" || x.starts_with("--base=")) {
                 bail!("a proposal needs --base, the commit it was prepared against");
             }
-            a.extend(["--actor".into(), if who.agent { "agent".into() } else { "user".into() }]);
+            match &who.agent_for {
+                // Which agent: the broker judges its proposal by the person it serves (ADR-051 3).
+                Some(_) => a.extend(["--actor".into(), "agent".into(), "--agent".into(), who.name.clone()]),
+                None => a.extend(["--actor".into(), "user".into()]),
+            }
             a.extend(["--diff".into(), diff.context("a proposal needs its diff, in the request")?.into()]);
+        }
+        // A session is its agent account's own: no other agent starts, reports into or cites it.
+        "session-start" | "session-taint" => {
+            if who.agent_for.is_none() {
+                bail!("a session is an agent's");
+            }
+            a.extend(["--agent".into(), who.name.clone()]);
         }
         "password" => {
             a.extend(["--hash-file".into(), hash.context("a password needs its hash, in the request")?.into()]);
@@ -316,11 +334,17 @@ pub fn start_time(stat: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent:x:990:990::/var/empty:/run/current-system/sw/bin/nologin\nnobody:x:65534:65534::/var/empty:/run/current-system/sw/bin/nologin\nsshd:x:998:998::/var/empty:/run/current-system/sw/bin/nologin\ntorq-secrets:x:989:989::/var/empty:/run/current-system/sw/bin/nologin\n";
+    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent-viper:x:990:990::/var/lib/torq-agent-viper:/run/current-system/sw/bin/nologin\ntorq-agent-sam:x:991:991::/var/lib/torq-agent-sam:/run/current-system/sw/bin/nologin\ntorq-agent-x:x:992:992::/var/empty:/run/current-system/sw/bin/nologin\ntorq-agent-pat:x:1002:100::/home/pat:/bin/zsh\nnobody:x:65534:65534::/var/empty:/run/current-system/sw/bin/nologin\nsshd:x:998:998::/var/empty:/run/current-system/sw/bin/nologin\ntorq-secrets:x:989:989::/var/empty:/run/current-system/sw/bin/nologin\n";
+    /// The broker's map: viper's and sam's agents, and one (`torq-agent-pat`) that names a person's
+    /// account — which is a person, never an agent.
+    fn agents() -> crate::agent::Limits {
+        let agents = [("torq-agent-viper", "viper"), ("torq-agent-sam", "sam"), ("torq-agent-pat", "pat")].iter().map(|(a, p)| (a.to_string(), p.to_string())).collect();
+        crate::agent::Limits { agents, settings: vec![] }
+    }
     const GROUP: &str = "root:x:0:\nwheel:x:1:viper\nusers:x:100:sam\n";
 
     fn who(uid: u32) -> Caller {
-        caller(uid, PASSWD, GROUP).unwrap()
+        caller(uid, PASSWD, GROUP, &agents()).unwrap()
     }
     fn change(tier: Tier, files: &[&str]) -> Change {
         Change { tier, files: files.iter().map(|f| f.to_string()).collect() }
@@ -328,13 +352,38 @@ mod tests {
 
     #[test]
     fn the_caller_is_the_uid() {
-        assert_eq!(who(1000), Caller { uid: 1000, name: "viper".into(), agent: false, admin: true, person: true });
-        assert_eq!(who(1001), Caller { uid: 1001, name: "sam".into(), agent: false, admin: false, person: true });
+        assert_eq!(who(1000), Caller { uid: 1000, name: "viper".into(), agent_for: None, admin: true, person: true });
+        assert_eq!(who(1001), Caller { uid: 1001, name: "sam".into(), agent_for: None, admin: false, person: true });
         assert!(!who(65534).person && !who(998).person && !who(990).person);
-        assert!(who(990).agent && !who(990).admin);
-        assert!(caller(4242, PASSWD, GROUP).is_err(), "no account");
+        assert!(who(990).agent_for.as_deref() == Some("viper") && !who(990).admin);
+        assert!(caller(4242, PASSWD, GROUP, &agents()).is_err(), "no account");
         // A name that is only a prefix of a wheel member's is not one.
-        assert!(!caller(1, "vipe:x:1:1::/:/bin/sh\n", GROUP).unwrap().admin);
+        assert!(!caller(1, "vipe:x:1:1::/:/bin/sh\n", GROUP, &agents()).unwrap().admin);
+    }
+
+    /// ADR-051 3: an agent is an account the broker's map names, and whose uid is no person's — the
+    /// name alone makes nothing an agent, and each agent is told apart by the person it serves.
+    #[test]
+    fn an_agent_is_the_maps_and_never_a_person() {
+        assert_eq!(who(990).agent_for.as_deref(), Some("viper"));
+        assert_eq!(who(991).agent_for.as_deref(), Some("sam"));
+        // Named like one, not in the map: no agent (and no person: it proposes nothing).
+        assert_eq!(who(992).agent_for, None);
+        assert!(matches!(gate(&who(992), "propose", None, None), Gate::Refused(_)));
+        assert!(matches!(gate(&who(992), "session-start", None, None), Gate::Refused(_)));
+        // In the map, with a person's uid: a person, never an agent.
+        let pat = who(1002);
+        assert!(pat.person && pat.agent_for.is_none(), "{pat:?}");
+        assert!(matches!(gate(&pat, "session-start", None, None), Gate::Refused(_)));
+        let p = with_identity(&["propose".into(), "--base=c".into()], "propose", &pat, Some("/run/d"), None, None).unwrap();
+        assert!(p.contains(&"user".to_string()) && !p.contains(&"--agent".to_string()), "{p:?}");
+        // With no map at all (an older broker.json), nothing is an agent.
+        assert_eq!(caller(990, PASSWD, GROUP, &crate::agent::Limits::default()).unwrap().agent_for, None);
+        // Each agent's identity is its own account, as the kernel says.
+        let s = with_identity(&["session-start".into()], "session-start", &who(991), None, None, None).unwrap();
+        assert_eq!(s, ["session-start", "--agent", "torq-agent-sam"]);
+        assert!(with_identity(&["session-start".into()], "session-start", &who(1000), None, None, None).is_err());
+        assert!(check_args(&["propose".into(), "--agent=torq-agent-viper".into()]).is_err(), "no caller names its agent");
     }
 
     #[test]
@@ -471,9 +520,9 @@ mod tests {
     fn the_agent_proposes_and_nothing_more() {
         let a = who(990);
         assert_eq!(gate(&a, "propose", None, None), Gate::Open);
-        let own = change(Tier::User, &["users/torq-agent/packages.json"]);
+        let own = change(Tier::User, &["users/torq-agent-viper/packages.json"]);
         for cmd in ["apply", "revert", "confirm", "reconcile", "repair", "password", "init", "setup", "expire-confirm", "serve"] {
-            assert!(matches!(gate(&a, cmd, Some(&own), Some(AGENT)), Gate::Refused(_)), "{cmd}");
+            assert!(matches!(gate(&a, cmd, Some(&own), Some("torq-agent-viper")), Gate::Refused(_)), "{cmd}");
         }
     }
 
@@ -500,7 +549,7 @@ mod tests {
         assert_eq!(a, ["apply", "3", "--approved-by", "sam"]);
         assert!(with_identity(&["propose".into(), "--reason".into(), "x".into()], "propose", &who(1000), Some("/run/d"), None, None).is_err(), "no base");
         let p = with_identity(&["propose".into(), "--base=c".into(), "--reason".into(), "x".into()], "propose", &who(990), Some("/run/d"), None, None).unwrap();
-        assert_eq!(p, ["propose", "--base=c", "--reason", "x", "--actor", "agent", "--diff", "/run/d"]);
+        assert_eq!(p, ["propose", "--base=c", "--reason", "x", "--actor", "agent", "--agent", "torq-agent-viper", "--diff", "/run/d"]);
         assert!(with_identity(&["propose".into()], "propose", &who(1000), None, None, None).is_err(), "a proposal brings its diff");
     }
 
@@ -531,11 +580,11 @@ mod tests {
         // Its approver cancels their own without a password (`user`: who approved it, as the ledger says).
         assert_eq!(gate(&who(1001), "cancel-scheduled", None, Some("sam")), Gate::Open);
         assert!(matches!(gate(&who(1001), "cancel-scheduled", None, Some("viper")), Gate::Refused(_)));
-        assert!(matches!(gate(&who(990), "cancel-scheduled", None, Some(AGENT)), Gate::Refused(_)), "the agent cancels nothing");
-        assert_eq!(account("sam", PASSWD, GROUP).unwrap(), who(1001));
-        assert!(account("nobody-here", PASSWD, GROUP).is_err());
-        assert!(account("sam", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP).is_ok());
-        assert!(account("viper", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP).is_err(), "a uid shared is not one account");
+        assert!(matches!(gate(&who(990), "cancel-scheduled", None, Some("torq-agent-viper")), Gate::Refused(_)), "the agent cancels nothing");
+        assert_eq!(account("sam", PASSWD, GROUP, &agents()).unwrap(), who(1001));
+        assert!(account("nobody-here", PASSWD, GROUP, &agents()).is_err());
+        assert!(account("sam", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP, &agents()).is_ok());
+        assert!(account("viper", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP, &agents()).is_err(), "a uid shared is not one account");
         for uid in [1000, 1001, 990] {
             assert!(matches!(gate(&who(uid), "run-scheduled", None, None), Gate::Refused(_)), "{uid}");
             assert!(matches!(gate(&who(uid), "resume-scheduled", None, None), Gate::Refused(_)), "{uid}");

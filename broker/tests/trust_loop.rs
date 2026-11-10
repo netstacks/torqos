@@ -25,7 +25,8 @@ fn config_dir() -> (tempfile::TempDir, std::path::PathBuf) {
 fn setup(rebuild: &str) -> (tempfile::TempDir, Broker) {
     let (dir, repo) = config_dir();
     // The agent may propose casey's packages (ADR-041: the owner's, by default), nothing else.
-    let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_agent_limits(&torq_broker::agent::Limits { users: vec!["casey".into()], settings: vec![] });
+    let casey = [("torq-agent-casey".to_string(), "casey".to_string())].into_iter().collect();
+    let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_agent_limits(&torq_broker::agent::Limits { agents: casey, settings: vec![] }).as_agent(Some("torq-agent-casey"));
     b.init().unwrap();
     (dir, b)
 }
@@ -1348,7 +1349,7 @@ fn an_agents_rechecked_proposal_is_judged_by_its_list_on_the_new_head() {
     let o = b.propose(&write_diff(dir.path(), "nl.diff", NIGHT_LIGHT), "night", Actor::User, false).unwrap();
     b.apply(o.body.seq, "casey", false).unwrap();
     // The owner narrowed the agent's list meanwhile.
-    let narrowed = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_agent_limits(&torq_broker::agent::Limits { users: vec![], settings: vec![] });
+    let narrowed = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_agent_limits(&torq_broker::agent::Limits::default());
     let err = format!("{:#}", narrowed.apply(p.body.seq, "casey", true).unwrap_err());
     assert!(err.contains("the agent's limits no longer allow this"), "{err}");
     assert!(!b.repo.root().join("users/casey/packages.json").exists());
@@ -2301,7 +2302,8 @@ fn the_agent_proposes_only_what_its_list_allows_and_a_refusal_is_ledgered() {
     assert_eq!(b.propose_on(Some(&head), &d, "a person's", Actor::User, false).unwrap().body.kind, "proposal");
     // Listed by the owner: services.openssh, and nothing beside it.
     let (dir, b) = setup("true");
-    let b = b.with_agent_limits(&torq_broker::agent::Limits { users: vec![], settings: vec!["services.openssh".into()] });
+    let casey = [("torq-agent-casey".to_string(), "casey".to_string())].into_iter().collect();
+    let b = b.with_agent_limits(&torq_broker::agent::Limits { agents: casey, settings: vec!["services.openssh".into()] });
     let head = b.repo.head().unwrap();
     let ok = write_diff(dir.path(), "ok.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
     assert_eq!(b.propose_on(Some(&head), &ok, "ssh", Actor::Agent, false).unwrap().body.kind, "proposal");
@@ -2445,13 +2447,17 @@ fn the_agents_waiting_proposals_that_apply_would_refuse_do_not_count() {
     assert_eq!(still, torq_broker::AGENT_WAITING_MAX);
     b.propose_on(Some(&head), &write_diff(dir.path(), "q.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"vim\"]\n"), "vim", Actor::Agent, false).unwrap();
 
-    // The owner narrows the list: none of the earlier ones could be applied now, nor count.
+    // The owner narrows the list: none of the earlier ones could be applied now, nor count. (Settings,
+    // since ADR-051 3: an agent's own person's packages are always its to propose.)
     let (dir, b) = setup("true");
+    let casey = || [("torq-agent-casey".to_string(), "casey".to_string())].into_iter().collect();
+    let b = b.with_agent_limits(&torq_broker::agent::Limits { agents: casey(), settings: vec!["services.nginx".into()] });
     let head = b.repo.head().unwrap();
+    let nginx = write_diff(dir.path(), "nginx.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"nginx\": {\"enable\": true}}\n");
     for i in 0..torq_broker::AGENT_WAITING_MAX {
-        b.propose_on(Some(&head), &d, &format!("htop {i}"), Actor::Agent, false).unwrap();
+        b.propose_on(Some(&head), &nginx, &format!("nginx {i}"), Actor::Agent, false).unwrap();
     }
-    let b = b.with_agent_limits(&torq_broker::agent::Limits { users: vec![], settings: vec!["services.openssh".into()] });
+    let b = b.with_agent_limits(&torq_broker::agent::Limits { agents: casey(), settings: vec!["services.openssh".into()] });
     let ssh = write_diff(dir.path(), "ssh.diff", "--- /dev/null\n+++ b/nixos/services.json\n@@ -0,0 +1 @@\n+{\"openssh\": {\"enable\": true}}\n");
     b.propose_on(Some(&head), &ssh, "ssh", Actor::Agent, false).unwrap();
 }
@@ -3044,7 +3050,7 @@ struct At {
 
 /// The machine's accounts: casey and viper people, viper an administrator, casey too unless `casey_admin` is false.
 fn accounts(dir: &Path, casey_admin: bool) {
-    fs::write(dir.join("passwd"), "root:x:0:0::/root:/bin/sh\ncasey:x:1000:100::/home/casey:/bin/sh\nviper:x:1001:100::/home/viper:/bin/sh\ntorq-agent:x:990:990::/var/empty:/bin/false\n").unwrap();
+    fs::write(dir.join("passwd"), "root:x:0:0::/root:/bin/sh\ncasey:x:1000:100::/home/casey:/bin/sh\nviper:x:1001:100::/home/viper:/bin/sh\ntorq-agent-casey:x:990:990::/var/empty:/bin/false\n").unwrap();
     fs::write(dir.join("group"), format!("wheel:x:1:{}viper\nusers:x:100:\n", if casey_admin { "casey," } else { "" })).unwrap();
 }
 
@@ -3353,7 +3359,7 @@ fn a_commit_at_whose_approver_may_no_longer_is_refused() {
     let e = t.s().schedule(own, "casey", &At::in_seconds(30)).unwrap();
     assert_eq!(t.s().run(e.body.data["timer"].as_u64().unwrap()).unwrap().unwrap().body.kind, "applied");
     // No account by that name any more; the agent's; no name at all.
-    for (by, why) in [("gone", "not who they were"), ("torq-agent", "not a person's account"), ("not a name!", "names no person")] {
+    for (by, why) in [("gone", "not who they were"), ("torq-agent-casey", "not a person's account"), ("not a name!", "names no person")] {
         let q = t.propose(&format!("night-{}", by.len()), NIGHT_LIGHT);
         let sha = t.m.b.ledger.get(q).unwrap().body.data["diff_sha256"].as_str().unwrap().to_string();
         let (seq, timer) = t.forged(q, by, &At::in_seconds(30), &sha);

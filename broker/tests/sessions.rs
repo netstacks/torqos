@@ -15,10 +15,15 @@ fn setup(settings: &[&str]) -> (tempfile::TempDir, Broker) {
     let repo = dir.path().join("config");
     fs::create_dir_all(repo.join("users")).unwrap();
     fs::write(repo.join("desktop.nix"), "{ }\n").unwrap();
-    let limits = Limits { users: vec!["casey".into()], settings: settings.iter().map(|s| s.to_string()).collect() };
-    let b = Broker::new(&repo, dir.path().join("state"), "true").with_agent_limits(&limits);
+    let limits = Limits { agents: agents(&["casey"]), settings: settings.iter().map(|s| s.to_string()).collect() };
+    let b = Broker::new(&repo, dir.path().join("state"), "true").with_agent_limits(&limits).as_agent(Some("torq-agent-casey"));
     b.init().unwrap();
     (dir, b)
+}
+
+/// Each person's agent account (ADR-051 3): `torq-agent-<person>` → `<person>`.
+fn agents(people: &[&str]) -> std::collections::BTreeMap<String, String> {
+    people.iter().map(|p| (format!("torq-agent-{p}"), p.to_string())).collect()
 }
 
 fn diff(dir: &Path, name: &str, path: &str, body: &str) -> PathBuf {
@@ -109,7 +114,7 @@ fn sessions_are_bounded() {
     // As many as are kept, from long ago: one more start takes the oldest away.
     for i in 0..session::SESSIONS_KEPT {
         let id = format!("{i:032x}");
-        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": format!("2020-01-01T00:{:02}:{:02}Z", i / 60 % 60, i % 60), "tainted": i == 0, "tainted_by": []}).to_string()).unwrap();
+        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": format!("2020-01-01T00:{:02}:{:02}Z", i / 60 % 60, i % 60), "tainted": i == 0, "tainted_by": [], "agent": "torq-agent-casey"}).to_string()).unwrap();
     }
     let oldest = format!("{:032x}", 0);
     session::start(&b).unwrap();
@@ -120,9 +125,15 @@ fn sessions_are_bounded() {
     let now = chrono::Utc::now().to_rfc3339();
     for i in 0..session::SESSIONS_AN_HOUR {
         let id = format!("{:032x}", 1_000_000 + i);
-        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": now, "tainted": false, "tainted_by": []}).to_string()).unwrap();
+        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": now, "tainted": false, "tainted_by": [], "agent": "torq-agent-casey"}).to_string()).unwrap();
     }
     assert!(format!("{:#}", session::start(&b).unwrap_err()).contains("in the last hour"));
+    // Each agent its own count, and its own oldest (ADR-051 3): casey's agent used up, sam's starts, and its
+    // start takes none of casey's records away.
+    let before = fs::read_dir(&sessions).unwrap().count();
+    let sam = as_agent(dir.path(), "torq-agent-sam", &["casey", "sam"]);
+    assert_eq!(session::start(&sam).unwrap().agent, "torq-agent-sam");
+    assert_eq!(fs::read_dir(&sessions).unwrap().count(), before + 1);
 }
 
 #[test]
@@ -203,14 +214,73 @@ fn trust_never_covers_a_tainted_or_sessionless_or_system_proposal() {
 #[test]
 fn trust_is_the_persons_own_folder_only() {
     let (dir, b) = setup(&[]);
-    let b = b.with_agent_limits(&Limits { users: vec!["casey".into(), "sam".into()], settings: vec![] });
+    let b = b.with_agent_limits(&Limits { agents: agents(&["casey", "sam"]), settings: vec![] });
     session::grant(&b, "sam", 30).unwrap();
     let s = session::start(&b).unwrap();
     // casey's folder: sam's trust does not cover it.
     let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
     assert!(session::apply_trusted(&b, &p).unwrap().is_none());
-    // Not on the agent's list: nothing to trust it with.
-    assert!(format!("{:#}", session::grant(&b, "pat", 10).unwrap_err()).contains("mayPropose"));
+    // No agent of theirs: nothing to trust it with.
+    assert!(format!("{:#}", session::grant(&b, "pat", 10).unwrap_err()).contains("has no agent"));
+}
+
+/// The same machine's state, as another agent account sees it: a second broker run for `agent`.
+fn as_agent(dir: &Path, agent: &str, people: &[&str]) -> Broker {
+    Broker::new(dir.join("config"), dir.join("state"), "true").with_agent_limits(&Limits { agents: agents(people), settings: vec![] }).as_agent(Some(agent))
+}
+
+/// ADR-051 3: casey's trust covers casey's agent alone. sam's agent cannot propose in casey's folder
+/// (refused, and ledgered as sam's agent's), and a proposal of casey's packages by an account that is
+/// not casey's agent is never applied under casey's trust — judged by the broker's map as it is now.
+#[test]
+fn a_persons_trust_covers_their_own_agent_alone() {
+    let (dir, b) = setup(&[]);
+    let b = b.with_agent_limits(&Limits { agents: agents(&["casey", "sam"]), settings: vec![] });
+    let sam = as_agent(dir.path(), "torq-agent-sam", &["casey", "sam"]);
+    session::grant(&b, "casey", 30).unwrap();
+    // sam's agent, in casey's folder: refused, on the record as sam's agent's.
+    let s = session::start(&sam).unwrap();
+    let e = format!("{:#}", propose(&sam, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap_err());
+    assert!(e.contains("only for sam"), "{e}");
+    let last = b.ledger.read_all().unwrap().pop().unwrap();
+    assert_eq!((last.body.kind.as_str(), last.body.data["agent"].as_str()), ("refused", Some("torq-agent-sam")));
+    assert_eq!(kinds(&b, "applied"), 0);
+    // sam's agent in sam's folder: a proposal, which casey's trust does not apply.
+    let own = propose(&sam, &diff(dir.path(), "s.diff", "users/sam/packages.json", "[\"jq\"]"), Actor::Agent, false, Some(&s.id)).unwrap();
+    assert_eq!((own.body.data["agent"].as_str(), own.body.data["agent_for"].as_str()), (Some("torq-agent-sam"), Some("sam")));
+    assert!(session::apply_trusted(&sam, &own).unwrap().is_none());
+    // casey's agent's proposal of casey's packages, while the map says that account is now sam's:
+    // not casey's agent, so not under casey's trust.
+    let c = session::start(&b).unwrap();
+    let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&c.id)).unwrap();
+    let moved = Broker::new(dir.path().join("config"), dir.path().join("state"), "true")
+        .with_agent_limits(&Limits { agents: [("torq-agent-casey".to_string(), "sam".to_string())].into_iter().collect(), settings: vec![] });
+    assert!(session::apply_trusted(&moved, &p).unwrap().is_none(), "not casey's agent now");
+    assert_eq!(kinds(&b, "applied"), 0);
+    // As the map has it: applied under casey's trust.
+    assert!(session::apply_trusted(&b, &p).unwrap().is_some());
+}
+
+/// ADR-051 3: a session is its agent account's: no other agent reports into it or cites it, and an
+/// account that is not an agent (none named, or one the map does not name) starts none.
+#[test]
+fn a_session_is_its_own_agents() {
+    let (dir, b) = setup(&[]);
+    let b = b.with_agent_limits(&Limits { agents: agents(&["casey", "sam"]), settings: vec![] });
+    let sam = as_agent(dir.path(), "torq-agent-sam", &["casey", "sam"]);
+    let s = session::start(&b).unwrap();
+    assert_eq!(s.agent, "torq-agent-casey");
+    assert!(format!("{:#}", session::taint(&sam, &s.id, "read_journal").unwrap_err()).contains("not torq-agent-sam's"));
+    assert!(!session::read(&b, &s.id).unwrap().unwrap().tainted, "sam's agent reported nothing into it");
+    let e = format!("{:#}", propose(&sam, &diff(dir.path(), "s.diff", "users/sam/packages.json", "[\"jq\"]"), Actor::Agent, false, Some(&s.id)).unwrap_err());
+    assert!(e.contains("not torq-agent-sam's"), "{e}");
+    // No agent named, or one the map does not name: no session, no proposal.
+    let none = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] });
+    assert!(session::start(&none).is_err());
+    assert!(propose(&none, &htop(dir.path()), Actor::Agent, false, None).is_err());
+    let stranger = as_agent(dir.path(), "torq-agent-x", &["casey"]);
+    assert!(format!("{:#}", session::start(&stranger).unwrap_err()).contains("not an agent"));
+    assert!(propose(&stranger, &htop(dir.path()), Actor::Agent, false, None).is_err());
 }
 
 #[test]

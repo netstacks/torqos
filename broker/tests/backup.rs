@@ -23,7 +23,7 @@ fn me() -> u32 {
 /// The machine's accounts: alice and torq-test-nobody are this test's own uid, carol another's, rooty
 /// root's, and the agent a fourth.
 fn accounts() -> String {
-    format!("alice:x:{0}:100::/home/alice:/bin/sh\ntorq-test-nobody:x:{0}:100::/:/bin/sh\ncarol:x:4242:100::/home/carol:/bin/sh\nrooty:x:0:0::/:/bin/sh\ntorq-agent:x:4343:4343::/var/empty:/bin/false\n", me())
+    format!("alice:x:{0}:100::/home/alice:/bin/sh\ntorq-test-nobody:x:{0}:100::/:/bin/sh\ncarol:x:4242:100::/home/carol:/bin/sh\nrooty:x:0:0::/:/bin/sh\ntorq-agent-casey:x:4343:4343::/var/empty:/bin/false\n", me())
 }
 
 /// A machine with one declared backup, `home`, whose restic is `script` (a shell script's body: `$@`
@@ -204,23 +204,29 @@ fn what_restic_brought_back_is_checked_as_a_snapshot_is() {
 
 /// The review of the backup, H1: whose a folder is, the machine says, never the repository. A home is
 /// its account's, which must exist; a service's folder its live owner's, which must be there; neither
-/// root's nor the agent's; and the uid restic restored must be that one.
+/// root's nor any agent's; and the uid restic restored must be that one.
 #[test]
 fn whose_it_is_the_machine_says() {
     let m = restoring("mkdir -p \"$4$6\" && echo x > \"$4$6/f\"");
     assert!(m.restore("/home/nobody-here").contains("no account named nobody-here"));
     let e = m.restore("/home/carol");
     assert!(e.contains(&format!("uid {} in the backup and uid 4242 here", me())), "{e}");
-    assert!(m.restore("/home/rooty").contains("root's or the agent's"));
+    assert!(m.restore("/home/rooty").contains("root's or an agent's"));
     assert!(m.restore("/var/lib/torq-test-not-here").contains("is not on this machine"));
     // A service's folder of root's, live: root's, so not restored.
     if let Some(live) = ["/var/lib/systemd-coredump", "/var/lib/machines", "/var/lib/lastlog", "/var/lib/sudo"].into_iter().find(|p| fs::symlink_metadata(p).is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0)) {
-        assert!(m.restore(live).contains("root's or the agent's"), "{live}");
+        assert!(m.restore(live).contains("root's or an agent's"), "{live}");
     }
     // The agent's: refused, whatever its uid is.
     let agent = Machine::with_accounts(&format!("{}\n[ \"$1\" = restore ] && mkdir -p \"$4$6\"\nexit 0", listing()), &format!("torq-agent:x:{}:1::/var/empty:/bin/false\n", me()));
     agent.b.set_backup_key("home", "k", "casey").unwrap();
-    assert!(agent.restore("/home/torq-agent").contains("root's or the agent's"));
+    assert!(agent.restore("/home/torq-agent").contains("root's or an agent's"));
+    // Any agent's (ADR-051 3): each person's, and one left behind by an older machine.
+    for name in ["torq-agent-alice", "torq-agent-bob"] {
+        let agent = Machine::with_accounts(&format!("{}\n[ \"$1\" = restore ] && mkdir -p \"$4$6\"\nexit 0", listing()), &format!("{name}:x:{}:1::/var/empty:/bin/false\n", me()));
+        agent.b.set_backup_key("home", "k", "casey").unwrap();
+        assert!(agent.restore(&format!("/home/{name}")).contains("root's or an agent's"), "{name}");
+    }
     // None of it reached restic's restore for the account that is not here.
     assert!(m.rooms().is_empty());
 }

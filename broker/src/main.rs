@@ -34,6 +34,8 @@ struct Cli {
     commit_at_cancel_cmd: Option<String>,
     current_system: Option<PathBuf>,
     system_profile: Option<PathBuf>,
+    /// The agent account a request is for (ADR-051 3): the socket adds it, from the kernel's answer.
+    agent: Option<String>,
     json: bool,
     cmd: Cmd,
 }
@@ -100,6 +102,7 @@ fn command_line() -> clap::Command {
     let flag = |name: &'static str, help: &'static str| Arg::new(name).long(name).action(ArgAction::SetTrue).help(help);
     let by = || Arg::new("approved-by").long("approved-by").required(true);
     let seq = || Arg::new("seq").required(true).value_parser(value_parser!(u64));
+    let agent = || Arg::new("agent").long("agent").help("The agent account this is for (torq-agent-<person>; the socket adds it, from the kernel's answer): its proposals and sessions are judged by the person it serves.");
     Command::new("torq-broker")
         .version(env!("CARGO_PKG_VERSION"))
         .about("TorqOS change broker — the only writer of the system config repo.")
@@ -157,14 +160,16 @@ fn command_line() -> clap::Command {
                 .arg(Arg::new("actor").long("actor").default_value("user").value_parser(["user", "agent"]))
                 .arg(flag("tainted", "The proposing session ingested untrusted content (web, email, downloads): only adds to what the broker's record of the session says."))
                 .arg(Arg::new("base").long("base").help("The commit this change was prepared against: refused if the configuration has moved on."))
-                .arg(Arg::new("session").long("session").help("The agent's session (session-start): the proposal is tainted as the broker's record of it says; an agent's proposal without one is tainted.")),
+                .arg(Arg::new("session").long("session").help("The agent's session (session-start): the proposal is tainted as the broker's record of it says; an agent's proposal without one is tainted."))
+                .arg(agent()),
         )
-        .subcommand(Command::new("session-start").about("The agent starts a session (ADR-042): its record kept by the broker (ledgered in the proposals that cite it); its id printed."))
+        .subcommand(Command::new("session-start").about("The agent starts a session (ADR-042): its record kept by the broker (ledgered in the proposals that cite it); its id printed.").arg(agent()))
         .subcommand(
             Command::new("session-taint")
                 .about("The agent's session read untrusted text: marked tainted for good (nothing clears it).")
                 .arg(Arg::new("id").required(true))
-                .arg(Arg::new("source").long("source").required(true).help("What it read: a tool's name.")),
+                .arg(Arg::new("source").long("source").required(true).help("What it read: a tool's name."))
+                .arg(agent()),
         )
         .subcommand(Command::new("session").about("The broker's record of one of the agent's sessions.").arg(Arg::new("id").required(true)))
         .subcommand(
@@ -334,6 +339,7 @@ fn parse_cli() -> Cli {
         commit_at_cancel_cmd: s(&m, "commit-at-cancel-cmd"),
         current_system: p(&m, "current-system"),
         system_profile: p(&m, "system-profile"),
+        agent: sub.try_get_one::<String>("agent").ok().flatten().cloned(),
         json: m.get_flag("json"),
         cmd,
     }
@@ -425,6 +431,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_backup_restore(&s.restore)
         .with_people(&s.people)
         .with_agent_limits(&s.agent)
+        .as_agent(cli.agent.as_deref())
         .with_remote(s.remote.as_deref())
         .with_nix_cache(s.home.join(".cache/nix"))
         // On a real machine the rollback uses the old system's own commands (its etc/torq/broker.json).
@@ -614,6 +621,10 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             println!("set up: change #{} (commit {})", e.body.seq, e.body.data["commit"].as_str().unwrap_or_default());
         }
         Cmd::Propose { diff, reason, actor, tainted, base, session } => {
+            // A person's proposal is no agent's, whatever it says (the socket adds --agent only with --actor agent).
+            if actor == Actor::User && cli.agent.is_some() {
+                anyhow::bail!("refused: --agent goes with --actor agent");
+            }
             let e = b.propose_in(base.as_deref(), &diff, &reason, actor, tainted, session.as_deref())?;
             // Under a person's trust, applied now (session.rs): the proposal stands either way.
             let trusted = torq_broker::session::apply_trusted(&b, &e);

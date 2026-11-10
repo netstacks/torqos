@@ -77,6 +77,8 @@ pub struct Broker {
     releases_file: PathBuf,
     /// Nix's own caches under the broker's HOME (`.cache/nix`), removed when Nix says one is damaged (None: never).
     nix_cache: Option<PathBuf>,
+    /// The agent account this run acts for (ADR-051 3; `--agent`): None, a person or the machine.
+    agent: Option<String>,
     /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
     backup: backup::Backups,
     /// Where the values of the secrets are, and what encrypts them (ADR-052, secrets.rs).
@@ -688,6 +690,7 @@ impl Broker {
             agent_limits: agent::Limits::default(),
             releases_file: PathBuf::from(torq_wire::releases::FILE),
             nix_cache: None,
+            agent: None,
             backup: backup::Backups::default(),
             secrets: secrets::Store::default(),
             remote: None,
@@ -1279,7 +1282,6 @@ impl Broker {
         })
     }
 
-    /// What the agent may propose (ADR-041): `torq.agent.mayPropose`, from broker.json.
     /// Where the releases' setting is read from (a test's own; a machine's is /etc/torq/releases.json).
     pub fn with_releases_file(mut self, path: impl Into<PathBuf>) -> Self {
         self.releases_file = path.into();
@@ -1292,9 +1294,26 @@ impl Broker {
         self
     }
 
+    /// What the agents may propose (ADR-041, ADR-051 3): which accounts are agents and whose
+    /// (`torq.agent.people`), and `torq.agent.mayPropose`, from broker.json.
     pub fn with_agent_limits(mut self, limits: &agent::Limits) -> Self {
         self.agent_limits = limits.clone();
         self
+    }
+
+    /// The agent account this run acts for (`--agent`, which only the socket adds, from the kernel's
+    /// answer): an agent's proposal and session are that account's, judged by the person it serves.
+    pub fn as_agent(mut self, account: Option<&str>) -> Self {
+        self.agent = account.map(String::from);
+        self
+    }
+
+    /// The agent account this run acts for, and the person it serves; refused if it names none, or one
+    /// the broker's map does not.
+    pub fn acting_agent(&self) -> Result<(&str, &str)> {
+        let a = self.agent.as_deref().context("refused: an agent's request names its agent account (--agent)")?;
+        let p = self.agent_limits.serves(a).with_context(|| format!("refused: {a} is not an agent this machine names (torq.agent.people)"))?;
+        Ok((a, p))
     }
 
     pub fn with_people(mut self, people: &[String]) -> Self {
@@ -1904,11 +1923,11 @@ impl Broker {
         Ok(())
     }
 
-    /// The agent's change in `diff_path` (touching `files`) judged (ADR-041) — each file as HEAD has
+    /// Agent account `agent`'s change in `diff_path` (touching `files`) judged (ADR-041, ADR-051 3) — each file as HEAD has
     /// it and as the change leaves it, read as JSON; a file that is not JSON is no setting, and never
     /// the agent's: why it may not be proposed (Err), or the settings it changes that could lose the
     /// network or the screen (Ok; empty: none), which a person applies as a commit confirmed (ADR-042, 6).
-    fn agent_check(&self, diff_path: &Path, files: &[String]) -> Result<std::result::Result<Vec<String>, String>> {
+    fn agent_check(&self, agent: &str, diff_path: &Path, files: &[String]) -> Result<std::result::Result<Vec<String>, String>> {
         const MAX: u64 = 1 << 20;
         let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).ok();
         let mut touched = Vec::new();
@@ -1932,7 +1951,7 @@ impl Broker {
             };
             touched.push(agent::Touched { path, before, after });
         }
-        Ok(match agent::refusal(&self.agent_limits, &touched) {
+        Ok(match agent::refusal(&self.agent_limits, agent, &touched) {
             Some(why) => Err(why),
             None => Ok(agent::cuts_off(&touched)),
         })
@@ -1977,7 +1996,8 @@ impl Broker {
     }
 
     /// The agent's refusals, ledgered (kind `refused`): why, the diff's hash, its reason shortened —
-    /// never the diff. At most `AGENT_REFUSALS_AN_HOUR` an hour: past that they are turned away
+    /// never the diff, and which agent account (ADR-051 3). At most `AGENT_REFUSALS_AN_HOUR` an hour for
+    /// each agent: past that its refusals are turned away
     /// without an entry each, so that refusals cannot fill the ledger.
     fn record_refusal(&self, diff_path: &Path, reason: &str, tainted: bool, why: &str) -> Result<()> {
         let entries = self.ledger.read_all()?;
@@ -1989,7 +2009,7 @@ impl Broker {
         let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
         let recent = entries
             .iter()
-            .filter(|e| e.body.kind == "refused" && e.body.actor == "agent")
+            .filter(|e| e.body.kind == "refused" && e.body.actor == "agent" && e.body.data["agent"] == json!(self.agent))
             .filter(|e| chrono::DateTime::parse_from_rfc3339(&e.body.ts).is_ok_and(|t| t > hour_ago))
             .count();
         if recent >= AGENT_REFUSALS_AN_HOUR {
@@ -2008,7 +2028,7 @@ impl Broker {
             tier: Tier::System.to_string(),
             tainted,
             reason: if reason.trim().is_empty() { "(no reason)".into() } else { reason },
-            data: json!({ "diff_sha256": hex::encode(Sha256::digest(&diff)), "why": one_line(why, 1000) }),
+            data: json!({ "diff_sha256": hex::encode(Sha256::digest(&diff)), "why": one_line(why, 1000), "agent": self.agent }),
         })?;
         Ok(())
     }
@@ -2219,8 +2239,11 @@ impl Broker {
             bail!("refused: the reason is one line of text (no line breaks or control characters), not empty");
         }
         if actor == Actor::Agent {
+            // Which agent, and whose (ADR-051 3): none the broker's map names proposes anything.
+            let (account, _) = self.acting_agent()?;
             // Short, and not many waiting at once: the agent cannot fill the ledger, or bury one
-            // proposal under others (the audit of ADR-041).
+            // proposal under others (the audit of ADR-041) — each agent its own count, so that one
+            // person's agent cannot crowd out another's.
             if reason.chars().count() > AGENT_REASON_MAX {
                 bail!("refused: the agent's reason is at most {AGENT_REASON_MAX} characters");
             }
@@ -2229,7 +2252,8 @@ impl Broker {
             // a head that has moved on, if they would still do there exactly what was shown — judged as
             // apply judges it. Not by base alone: the desktop's own saves move the head every quarter of
             // an hour, and each would empty the count (the review of the desktop line, 2026-11-10).
-            // Newest first, no further than the limit, and among the newest AGENT_WAITING_LOOK not yet
+            // Each agent account its own count (ADR-051 3). Newest first, no further than the limit, and
+            // among the newest AGENT_WAITING_LOOK of its own not yet
             // applied: each one judged costs git runs under the lock, and the dead ones of a machine's
             // whole life are not judged again on every proposal. Older ones pass out of the count only
             // as newer ones stop being able to land, which takes a person's commits (the review).
@@ -2242,7 +2266,7 @@ impl Broker {
             for p in entries
                 .iter()
                 .rev()
-                .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent" && !done.contains(&p.body.seq))
+                .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent" && p.body.data["agent"].as_str() == Some(account) && !done.contains(&p.body.seq))
                 .take(AGENT_WAITING_LOOK)
             {
                 if self.could_still_land(p)? {
@@ -2291,7 +2315,7 @@ impl Broker {
         let checked = self.repo.diff_files(&copy).and_then(|files| {
             self.check_user_data(&copy, &files)?;
             // The agent's proposals: only what its list allows (ADR-041), judged by what changes.
-            let judged = if actor == Actor::Agent { self.agent_check(&copy, &files)? } else { Ok(vec![]) };
+            let judged = if actor == Actor::Agent { self.agent_check(self.acting_agent()?.0, &copy, &files)? } else { Ok(vec![]) };
             // What it does, as git writes it: what a person is shown before applying it.
             let effect = self.repo.proposal_effect(&copy)?;
             Ok((files, judged, effect))
@@ -2319,6 +2343,12 @@ impl Broker {
         // change could cut the machine off.
         if let Some(s) = session {
             data["session"] = s;
+        }
+        // Which agent proposed it, and for whom: trust is the person's for their own agent alone.
+        if actor == Actor::Agent {
+            let (account, person) = self.acting_agent()?;
+            data["agent"] = account.into();
+            data["agent_for"] = person.into();
         }
         if !cuts_off.is_empty() {
             data["cuts_off"] = cuts_off.into();
@@ -2396,7 +2426,9 @@ impl Broker {
             return Ok(false);
         }
         let Ok(files) = self.repo.diff_files(&tmp.0) else { return Ok(false) };
-        Ok(matches!(self.agent_check(&tmp.0, &files), Ok(Ok(_))))
+        // Judged as the agent that proposed it (ADR-051 3), as apply judges it.
+        let by = p.body.data["agent"].as_str().unwrap_or_default();
+        Ok(matches!(self.agent_check(by, &tmp.0, &files), Ok(Ok(_))))
     }
 
     fn find_child(&self, kind: &str, key: &str, seq: u64) -> Result<Option<Entry>> {
@@ -2906,7 +2938,9 @@ impl Broker {
         // The agent's list as it is now, not as it was when it proposed: the limits may have been
         // narrowed since (the audit of ADR-041).
         if actor == Actor::Agent {
-            match self.agent_check(&tmp, &files)? {
+            // Judged as the agent that proposed it (ADR-051 3): one the map no longer names, refused.
+            let by = p.body.data["agent"].as_str().unwrap_or_default();
+            match self.agent_check(by, &tmp, &files)? {
                 Err(why) => bail!("refused: the agent's limits no longer allow this — {why}"),
                 // What could lose the network or the screen rolls itself back unless a person, still
                 // reaching the machine, confirms it (ADR-042, 6).

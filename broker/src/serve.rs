@@ -175,9 +175,10 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
         return Err(refused(anyhow::anyhow!("root runs torq-broker itself, not through the socket")));
     }
     let read = |p: &str| std::fs::read_to_string(p).with_context(|| format!("reading {p}"));
-    let who = socket::caller(uid, &read("/etc/passwd").map_err(&refused)?, &read("/etc/group").map_err(&refused)?).map_err(&refused)?;
     socket::check_args(&req.args).map_err(&refused)?;
     let settings = Settings::read(Path::new(config::FIXED), false).map_err(&refused)?.context("no /etc/torq/broker.json").map_err(&refused)?;
+    // Which accounts are agents, and whose: the broker's map (ADR-051 3), never the caller's word.
+    let who = socket::caller(uid, &read("/etc/passwd").map_err(&refused)?, &read("/etc/group").map_err(&refused)?, &settings.agent).map_err(&refused)?;
 
     // The request's files, private to root, gone when this is.
     let scratch = Scratch::new(Path::new(SCRATCH)).map_err(&refused)?;

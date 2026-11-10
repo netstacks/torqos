@@ -78,6 +78,16 @@ fn uid_of(passwd: &str, name: &str) -> Option<u32> {
     })
 }
 
+/// Whether `uid` is an agent's (ADR-051 3): any account with it that the broker's map names, or that
+/// is named as an agent account is (`torq-agent-…`, and the single `torq-agent` of before) — a folder
+/// of an agent's is never written from a backup, the map's or one left behind.
+fn agents_uid(passwd: &str, uid: u32, agents: &crate::agent::Limits) -> bool {
+    passwd.lines().any(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        f.len() >= 3 && f[2].parse() == Ok(uid) && (agents.serves(f[0]).is_some() || f[0] == "torq-agent" || f[0].starts_with(crate::socket::AGENT_PREFIX))
+    })
+}
+
 /// Bytes free on the file system `p` is on, and its size, for whoever is root.
 fn room_on(p: &Path) -> Result<(u64, u64)> {
     let s = rustix::fs::statvfs(p).with_context(|| format!("how much room {} has", p.display()))?;
@@ -247,7 +257,7 @@ impl Broker {
 
     /// Who owns `tree`'s folder `first` on this machine, as the machine says, never the repository: the
     /// account of that name for a home, the live folder's owner for a service's. Not root's, not the
-    /// agent's (the review of the backup, H1).
+    /// any agent's (the review of the backup, H1; ADR-051 3).
     fn owner_here(&self, tree: &str, first: &str) -> Result<u32> {
         use std::os::unix::fs::MetadataExt;
         let passwd = fs::read_to_string(&self.backup.passwd).context("reading the accounts")?;
@@ -261,8 +271,8 @@ impl Broker {
             }
             m.uid()
         };
-        if uid == 0 || uid_of(&passwd, crate::socket::AGENT) == Some(uid) {
-            bail!("{} is root's or the agent's: not restored from a backup", snapshot::written_out(tree, &[first.to_string()]));
+        if uid == 0 || agents_uid(&passwd, uid, &self.agent_limits) {
+            bail!("{} is root's or an agent's: not restored from a backup", snapshot::written_out(tree, &[first.to_string()]));
         }
         Ok(uid)
     }
