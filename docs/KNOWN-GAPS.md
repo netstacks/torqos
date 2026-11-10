@@ -1140,9 +1140,24 @@ Its §5 lists claims without a test.
      count the time the service was frozen; a task in the middle of one while a large directory is shared
      may be stopped as timed out after the thaw (failing the task, never doing more).
    - **The memory keeps the person's questions** (the last 8, each at most 2 000 characters) and only
-     untainted answers, in `/var/lib/torq-agent-memory/<person>` — the agent's, written by its service alone and
-     hidden from `torq agent run`'s programs; root reads it. `torq ask --forget` erases it; showing it is the
-     Agent page's (ADR-051 9).
+     untainted answers, in `/var/lib/torq-agent-memory/<person>` — the agent's, hidden from `torq agent run`'s
+     programs; root reads it. `torq ask --forget` erases it; showing it is the Agent page's (ADR-051 9).
+     **Not written by the service alone:** the harness and its tools run as the same uid in the same unit,
+     so they could write it too. None of them runs code a model or another program chose (the harness, its
+     closed set of fixed read-only tools, torqcli), so in effect only TorqOS's own programs do; making it the
+     service's alone needs a mount namespace per task or another uid, neither small (the unit has no
+     capabilities and RestrictNamespaces).
+   - **Started outside the unit during the walk:** `--hold-frozen` refuses an agent process it sees outside
+     the unit, once, before it says `frozen`. Something that starts one as the agent afterwards, during the
+     walk — not the person's agent itself (nothing of the agent's runs but in the frozen unit), but e.g. an
+     `at` job of the agent's account if atd were ever on, or a timer — is neither frozen nor refused. TorqOS
+     turns on no such thing for agent accounts.
+   - **The thaw:** torqcli killed in the middle of the walk leaves the agent thawed (tested: agent-service).
+     A thaw that fails is tried three times and then the unit is stopped (it starts again at the next ask);
+     that path is not tested (no way to make `systemctl thaw` fail in a VM test short of breaking systemd).
+   - **An agent process is told by its uids** (its status' `Uid:` line), not by the owner of its /proc entry.
+     On the kernel tested (6.18) an undumpable process's `/proc/<pid>` directory still shows its owner (its
+     files show root), so the old check also caught it there; the new one does not depend on that.
    - **`torq ask` is every listed person's, administrator or not**: it reaches the service over its socket,
      no sudo involved. What the agent can do is propose; a person in `torq.agent.people` has had an agent
      account since step 1 — this is the first way a non-administrator reaches it.

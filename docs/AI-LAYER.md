@@ -26,7 +26,7 @@ the map names it and its uid is no person's.
   names; a person with none is told so. A restore from a backup into any agent's folder is
   refused. With the agent's service running, `--share` holds it still (systemd's freezer) through the walk.
 - **Its service** (ADR-051 3, step 2): `torq-agent@<person>.service`, reached only by that person (`torq ask
-  "<question>"`), keeps their conversation in its own state directory, which no other program of the agent's sees.
+  "<question>"`), keeps their conversation in its own state directory, which no program run as the agent by `torq agent run` sees (the service's own programs — it, the harness and its fixed tools — share its uid and unit).
 
 ## What it is for
 

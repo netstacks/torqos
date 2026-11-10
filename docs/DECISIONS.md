@@ -2274,7 +2274,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
   `torq agent run`'s programs; an answer is kept only from a session that read nothing untrusted, so memory
   never carries a taint into a later session; a file over 256 KiB, or reached through a link, is no memory;
   `forget` (`torq ask --forget`) erases it. `stop` (and a client gone) kills the task's process group, then
-  whatever of it is left in the unit's own control group (a tool's program has a group of its own) — never a
+  whatever of it is left in the unit's own control group (a tool's program has a group of its own; below) — never a
   process elsewhere. **`torq ask "<question>"`** (torqcli; like `torq doctor`, an entry before the grammar)
   connects to the caller's own socket, streams the answer to standard output with `Proposed #n` for each
   proposal, the steps to standard error; on a terminal, Ctrl-C is read as a key and sends `stop`. A person with
@@ -2292,6 +2292,28 @@ vouches for, that only proposes, every change ledgered and undone in one command
   harness: events in order, memory as messages, the attached text tainting first), torqcli (`torq ask`'s
   arguments, how events are shown) and `tests/agent-service.nix`. Not in this step: the panel's window
   (`torq-agent-ui`), the Agent page, `torq-mcp`, an idle exit, a key per person (KNOWN-GAPS 6zzl).
+  Also in this step, not said above: the share's "no agent process running" check moved from torqcli (its
+  `agent_running`, by /proc owners) into the root launcher, and torqcli's `agent_uid` became `has_agent` (the
+  plain refusal only); the launcher creates `/var/lib/torq-agent-memory` (root's, 0755) so there is always
+  something to hide; a client that leaves stops its task; `torq ask` reads Ctrl-C as a key; `status` answers
+  whether a task runs; the harness writes `error` on standard output too in task mode; the unit also has
+  PrivateIPC, RemoveIPC, KeyringMode=private, UMask=0077, ProtectHostname and RestrictRealtime; agent/package.nix
+  builds from a fileset with `../wire` (torq-wire), as torqcli's does. **Fixed from its review (2026-11-10):**
+  an agent process is told by the uids of its status (real, effective, saved, filesystem), not the owner of its
+  /proc entry (undumpable); nothing of a task outlives it — when the harness ends, by itself or by `stop`'s kill
+  of its group, every other process in the unit's `cgroup.procs` is killed until none is left (at most 5 s),
+  before the slot is free, so a tool in a session of its own and an undumpable process go too (not /proc,
+  which ProtectProc and undumpability hide; not a delegated sub-cgroup with `cgroup.kill`, which would give the
+  agent account write access to its cgroup tree and conflicts with ProtectControlGroups — read-only cgroup
+  files are what keep a process from leaving the unit); the relay reads in a thread of its own, so a leftover
+  holding the output cannot keep `done` from coming; a line too long is read to its end and dropped (the
+  harness also cuts its answer to 64 000 characters); every request ends with a last frame (`done` after any
+  refusal or error, `forget`'s included); the memory is read with the task slot held, and `forget` takes it;
+  a refused peer's drain has one 2 s deadline; `torq ask`'s second Ctrl-C, or none of its answer 5 s after the
+  first, restores the terminal and exits 130; a thaw that fails is tried three times, then the unit is stopped
+  (its socket starts it again), the first failure's exit code kept. The memory is the service's own programs'
+  (the service, the harness, its fixed tools — one uid, one unit), not the service process's alone (KNOWN-GAPS
+  6zzl).
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
