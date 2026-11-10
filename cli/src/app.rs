@@ -782,6 +782,9 @@ pub enum How {
     FillOp,
     /// The same, in configuration mode.
     FillCf,
+    /// Put it in the person's draft (configuration mode), to commit from Your Changes: through the broker,
+    /// ledgered, approved.
+    Draft,
 }
 
 /// A button: its label, the torqcli command, and how it acts.
@@ -813,9 +816,25 @@ const fn op(label: &'static str, command: &'static str) -> Action {
 const fn cf(label: &'static str, command: &'static str) -> Action {
     Action { label, command, how: How::FillCf }
 }
+const fn draft(label: &'static str, command: &'static str) -> Action {
+    Action { label, command, how: How::Draft }
+}
 
 /// What the agent may do without asking, and every button on the Proposals page besides each proposal's own.
 pub const AGENT: &[Action] = &[op("Trust the agent for a while…", "request system agent trust "), run("End that trust now", "request system agent trust revoke")];
+
+/// The Agent page's buttons (ADR-051 2): the agent's model and who has one, each a line of the tree, into the draft
+/// and committed as every other change is. Its API key is not one: a file outside the repository, entered with
+/// TorqOS's secrets (ADR-052), not here.
+pub const AGENT_SETTINGS: &[Action] = &[
+    draft("Turn the agent on (doctor mode)", "set torq agent doctor enable true"),
+    cf("Use a remote model: its endpoint…", "set torq agent doctor endpoint "),
+    cf("The remote model's name…", "set torq agent doctor model "),
+    draft("Use the local model again", "delete torq agent doctor endpoint"),
+    cf("The local model's file (its URL)…", "set torq agent model url "),
+    cf("…and its hash", "set torq agent model hash "),
+    cf("Give someone an agent of their own…", "set torq agent people "),
+];
 
 pub static VIEWS: &[View] = &[
     View {
@@ -886,6 +905,7 @@ mod page_tests {
             How::Run => whole(Mode::Operational, a.command),
             How::FillOp => assert!(walk(Mode::Operational, &words(a.command).unwrap()).is_ok(), "`{}`", a.command),
             How::FillCf => assert!(walk(Mode::Configuration, &words(a.command).unwrap()).is_ok(), "`{}`", a.command),
+            How::Draft => whole(Mode::Configuration, a.command),
         };
         for v in VIEWS {
             for (_, c) in v.sections {
@@ -894,6 +914,11 @@ mod page_tests {
             v.actions.iter().for_each(check);
         }
         AGENT.iter().for_each(check);
+        AGENT_SETTINGS.iter().for_each(check);
+        // The Agent page's lines as the person finishes them, then commits them.
+        for c in ["set torq agent doctor endpoint https://api.anthropic.com/v1", "set torq agent doctor model claude-sonnet-4-5", "set torq agent model url https://example.org/m.gguf", "set torq agent people alice"] {
+            whole(Mode::Configuration, c);
+        }
         BACKUP.iter().for_each(check);
         for c in ["show system alarms", "show system ledger", "show system proposals", "show system commit", "show system remote", "request system remote key", "help nginx"] {
             whole(Mode::Operational, c);

@@ -18,6 +18,8 @@
 pub mod client;
 pub mod conversation;
 pub mod setup;
+/// What the agent says, as its service streams it (torq-wire's, for the programs built on this library).
+pub use torq_wire::agent::Event;
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};

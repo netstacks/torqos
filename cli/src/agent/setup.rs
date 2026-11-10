@@ -115,6 +115,16 @@ pub fn setup() -> anyhow::Result<Setup> {
     Ok(Setup { me, agent, service, brain: brain()? })
 }
 
+/// Whether `me`'s agent service runs now — asked of systemd, not of the service, so that looking never
+/// starts it (its socket starts it when the person first asks).
+pub fn service_running(me: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["show", "-P", "ActiveState", &format!("torq-agent@{me}.service")])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "active")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

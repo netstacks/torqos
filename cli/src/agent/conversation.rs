@@ -3,6 +3,7 @@
 //! proposed, and how it ended. Kept here, tested, so the two programs only draw it. Everything the agent
 //! says is cleaned again (nothing in it can draw on a screen), and bounded.
 
+use super::client::{Status, Unreachable};
 use torq_wire::agent::Event;
 
 /// The most of an answer kept (the harness cuts its own at 64 000 characters).
@@ -160,6 +161,38 @@ impl Turn {
     }
 }
 
+/// How the agent's mark stands in the panel: quiet when idle, the accent while it works, the warning when
+/// something is wrong.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mood {
+    Quiet,
+    Working,
+    Trouble,
+}
+
+/// The agent at a glance — its one line, and its mark — from what its service said (`None`: not running,
+/// so idle and not asked, since asking would start it) and from this program's own last turn.
+pub fn glance(reach: &Result<Option<Status>, Unreachable>, here: Option<&Turn>) -> (String, Mood) {
+    if here.is_some_and(|t| t.ended == Ended::Working) {
+        return ("Working…".into(), Mood::Working);
+    }
+    let failed = here.is_some_and(|t| t.ended == Ended::Failed);
+    match reach {
+        Ok(Some(s)) if s.running => ("Working…".into(), Mood::Working),
+        Ok(Some(s)) => {
+            let kept = match s.turns {
+                0 => "remembers nothing yet".to_string(),
+                1 => "remembers 1 turn".to_string(),
+                n => format!("remembers {n} turns"),
+            };
+            (format!("Idle · {kept}"), if failed { Mood::Trouble } else { Mood::Quiet })
+        }
+        Ok(None) => ("Idle".into(), if failed { Mood::Trouble } else { Mood::Quiet }),
+        Err(e) if e.not_set_up() => (e.line(), Mood::Quiet),
+        Err(e) => (e.line(), Mood::Trouble),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +259,23 @@ mod tests {
         assert_eq!(c.last().unwrap().called.len(), MAX_ITEMS);
         c.clear();
         assert_eq!(c.turns().count(), 0);
+    }
+
+    /// The panel's line and mark: idle quiet, working in the accent, trouble in the warning colour; an agent
+    /// not set up is said, quietly.
+    #[test]
+    fn at_a_glance() {
+        let idle = |turns| Ok(Some(Status { running: false, turns }));
+        assert_eq!(glance(&idle(0), None), ("Idle · remembers nothing yet".into(), Mood::Quiet));
+        assert_eq!(glance(&idle(3), None), ("Idle · remembers 3 turns".into(), Mood::Quiet));
+        assert_eq!(glance(&Ok(None), None), ("Idle".into(), Mood::Quiet), "not running: not asked");
+        assert_eq!(glance(&Ok(Some(Status { running: true, turns: 1 })), None).1, Mood::Working, "a task from anywhere: working");
+        assert_eq!(glance(&Err(Unreachable::NoAgent("torq-agent-me".into())), None), ("The agent is not set up for you".into(), Mood::Quiet));
+        assert_eq!(glance(&Err(Unreachable::Silent("x".into())), None).1, Mood::Trouble);
+        let mut c = Conversation::default();
+        c.asked("q");
+        assert_eq!(glance(&idle(0), c.last()), ("Working…".into(), Mood::Working), "its own question, before the service says so");
+        c.lost("gone");
+        assert_eq!(glance(&idle(0), c.last()).1, Mood::Trouble, "its last question failed");
     }
 }
