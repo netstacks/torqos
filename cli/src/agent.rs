@@ -13,6 +13,12 @@
 //! home: torqcli opens the directory, as the person, and the launcher binds that open descriptor —
 //! everything around it stays out of the agent's reach, by name or otherwise.
 
+/// The person's own agent, as every program of theirs reaches it (ADR-051 4): its client, what a
+/// conversation shows, and what the agent is here.
+pub mod client;
+pub mod conversation;
+pub mod setup;
+
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -297,7 +303,7 @@ impl Interrupt {
 struct Keys(rustix::termios::Termios);
 
 impl Keys {
-    fn watch(conn: std::os::unix::net::UnixStream) -> Option<Keys> {
+    fn watch(agent: client::Client) -> Option<Keys> {
         use rustix::termios::{tcgetattr, tcsetattr, LocalModes, OptionalActions, SpecialCodeIndex};
         let stdin = std::io::stdin();
         let was = tcgetattr(&stdin).ok()?;
@@ -327,7 +333,10 @@ impl Keys {
                 }
                 if does == KeyDoes::Stop {
                     eprintln!("agent: stopping (Ctrl-C again to leave now)");
-                    let _ = send(&conn, &torq_wire::agent::Request::Stop);
+                    // On a thread of its own: the service answers a stop once the task is over, and a second
+                    // Ctrl-C must be read meanwhile.
+                    let agent = agent.clone();
+                    std::thread::spawn(move || agent.stop());
                 }
                 if does == KeyDoes::Leave || i.given_up(std::time::Instant::now()) {
                     let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &restore);
@@ -344,13 +353,6 @@ impl Drop for Keys {
     fn drop(&mut self) {
         let _ = rustix::termios::tcsetattr(std::io::stdin(), rustix::termios::OptionalActions::Now, &self.0);
     }
-}
-
-/// One request, one line.
-fn send(mut conn: &std::os::unix::net::UnixStream, r: &torq_wire::agent::Request) -> Result<()> {
-    use std::io::Write;
-    writeln!(conn, "{}", serde_json::to_string(r)?).context("asking your agent")?;
-    Ok(())
 }
 
 /// How the person reads an event: the answer and the proposals on standard output, the steps on the
@@ -386,47 +388,38 @@ fn show(e: torq_wire::agent::Event, error_ends: bool, failed: &mut bool, out: &m
 }
 
 /// `torq ask "<question>"` (ADR-051 4, the terminal's way to the agent): the person's own agent —
-/// its service, `torq-agent@<you>.service`, on its socket — asked, the answer streamed as it comes,
-/// with the number of anything it proposed; Ctrl-C stops it. `--forget`: the conversation it keeps
-/// is erased.
+/// its service, `torq-agent@<you>.service`, on its socket — asked through the client every UI shares
+/// (`client::Client`), the answer streamed as it comes, with the number of anything it proposed; Ctrl-C
+/// stops it. `--forget`: the conversation it keeps is erased.
 pub fn ask(args: &[String]) -> Result<i32> {
-    use std::io::BufRead;
-    use std::io::Read;
-    use torq_wire::agent::{socket, Event, Request, MAX_LINE};
+    use torq_wire::agent::Event;
     let asked = parse_ask(args)?;
-    let me = crate::me()?;
-    if is_agent(&me) {
-        bail!("this is an agent: it has no agent of its own to ask");
-    }
-    has_agent(&agent_of(&me))?;
-    let path = socket(&me);
-    let conn = std::os::unix::net::UnixStream::connect(&path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => anyhow::anyhow!("your agent's service is not on this machine ({path}): it runs where doctor mode is (torq agent doctor enable true, an administrator's change)"),
-        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!("{path}: not yours to connect to"),
-        _ => anyhow::Error::from(e).context(format!("connecting to your agent ({path}): systemctl status torq-agent@{me}.socket")),
-    })?;
-    let question = matches!(asked, Asked::Question(_));
-    send(&conn, &match asked {
-        Asked::Question(text) => Request::Ask { text, context: None },
-        Asked::Forget => Request::Forget,
-    })?;
-    use std::io::IsTerminal;
-    let _keys = if question && std::io::stdin().is_terminal() { Keys::watch(conn.try_clone()?) } else { None };
-    let mut r = std::io::BufReader::new(conn);
-    let mut failed = false;
-    loop {
-        let mut line = String::new();
-        if (&mut r).take(MAX_LINE as u64 + 1).read_line(&mut line).context("reading your agent's answer")? == 0 {
-            if failed {
-                return Ok(1);
-            }
-            bail!("your agent's service ended before it answered (journalctl -u torq-agent@{me}.service, an administrator's)");
+    let agent = client::Client::mine()?;
+    let text = match asked {
+        Asked::Forget => {
+            return match agent.forget() {
+                Ok(()) => show(Event::Forgotten, true, &mut false, &mut std::io::stdout(), &mut std::io::stderr()).map(|c| c.unwrap_or(0)).map_err(Into::into),
+                Err(client::Unreachable::Refused(text)) => show(Event::Error { text }, true, &mut false, &mut std::io::stdout(), &mut std::io::stderr()).map(|c| c.unwrap_or(1)).map_err(Into::into),
+                Err(e) => Err(e.into()),
+            };
         }
-        let e: Event = serde_json::from_str(&line).context("your agent said something this torq does not know")?;
-        if let Some(code) = show(e, !question, &mut failed, &mut std::io::stdout(), &mut std::io::stderr())? {
+        Asked::Question(text) => text,
+    };
+    let answer = agent.ask(&text, None)?;
+    use std::io::IsTerminal;
+    let _keys = if std::io::stdin().is_terminal() { Keys::watch(agent.clone()) } else { None };
+    let mut failed = false;
+    for e in answer {
+        // An error, then the end: said already, so only the code (as the service closed without its `done`).
+        let e = match e {
+            Err(_) if failed => return Ok(1),
+            e => e?,
+        };
+        if let Some(code) = show(e, false, &mut failed, &mut std::io::stdout(), &mut std::io::stderr())? {
             return Ok(code);
         }
     }
+    bail!("your agent's service ended before it answered (journalctl -u torq-agent@<you>.service, an administrator's)")
 }
 
 /// `torq doctor "<question>"` (ADR-042): the agent, in doctor mode, asked one question — run as the

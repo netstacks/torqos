@@ -12,7 +12,7 @@
 
 pub mod app;
 pub mod tunnels;
-mod agent;
+pub mod agent;
 mod at;
 mod facts;
 mod grammar;

@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1"
-rustix = { version = "1.1.6", features = ["event", "fs", "mount", "process", "termios"] }
+rustix = { version = "1.1.6", features = ["event", "fs", "mount", "net", "process", "termios"] }
 # buffer-redux: input read past one line (a paste without bracketed paste, keys typed ahead) is
 # kept for the next line instead of dropped.
 rustyline = { version = "17", default-features = false, features = ["custom-bindings", "buffer-redux"] }
