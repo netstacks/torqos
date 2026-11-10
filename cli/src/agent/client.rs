@@ -7,7 +7,7 @@
 //! torq-wire's `agent` requests; what it hands back is the service's events, as they come.
 
 use super::{agent_of, is_agent};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -164,7 +164,7 @@ impl Client {
         let mut conn = self.connect()?;
         let line = serde_json::to_string(r).map_err(|e| Unreachable::Broken(e.to_string()))?;
         writeln!(conn, "{line}").map_err(|e| Unreachable::Broken(format!("asking your agent: {e}")))?;
-        Ok(Lines(BufReader::new(conn)))
+        Ok(Lines { r: BufReader::new(conn), deadline: Some(Instant::now() + self.quick) })
     }
 
     /// Whether a task runs, and how much the conversation keeps.
@@ -206,31 +206,56 @@ impl Client {
     /// Ask: the answer's events, as they come, `done` last. Dropping it before then ends the task (the
     /// service stops what no one hears).
     pub fn ask(&self, text: &str, context: Option<String>) -> Result<Answer, Unreachable> {
-        let lines = self.send(&Request::Ask { text: text.to_string(), context })?;
-        lines.0.get_ref().set_read_timeout(Some(self.quiet)).map_err(|e| Unreachable::Broken(e.to_string()))?;
+        let mut lines = self.send(&Request::Ask { text: text.to_string(), context })?;
+        // An answer has no deadline of its own: each of its events comes within `quiet` of the one before.
+        lines.deadline = None;
+        lines.r.get_ref().set_read_timeout(Some(self.quiet)).map_err(|e| Unreachable::Broken(e.to_string()))?;
         Ok(Answer { lines, over: false })
     }
 }
 
-/// A connection's lines, one event each, each at most `MAX_LINE` bytes.
-struct Lines(BufReader<UnixStream>);
+/// A connection's lines, one event each, each at most `MAX_LINE` bytes; with a deadline, the whole of a
+/// short answer is read by it, however slowly its bytes come.
+struct Lines {
+    r: BufReader<UnixStream>,
+    deadline: Option<Instant>,
+}
 
 impl Lines {
     /// The next event, or why there is none: `what` was asked.
     fn next(&mut self, what: &str) -> Result<Event, Unreachable> {
-        let mut line = String::new();
-        let n = match (&mut self.0).take(MAX_LINE as u64 + 1).read_line(&mut line) {
-            Ok(n) => n,
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(Unreachable::Silent(format!("{what} in time"))),
-            Err(e) => return Err(Unreachable::Broken(format!("reading your agent's answer: {e}"))),
-        };
-        if n == 0 {
-            return Err(Unreachable::Silent(format!("{what}: it ended before it answered")));
+        let silent = || Unreachable::Silent(format!("{what} in time"));
+        let mut line = Vec::new();
+        loop {
+            if let Some(d) = self.deadline {
+                let left = d.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(silent());
+                }
+                self.r.get_ref().set_read_timeout(Some(left)).map_err(|e| Unreachable::Broken(e.to_string()))?;
+            }
+            let got = match self.r.fill_buf() {
+                Ok(b) => b,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(silent()),
+                Err(e) => return Err(Unreachable::Broken(format!("reading your agent's answer: {e}"))),
+            };
+            if got.is_empty() {
+                return Err(Unreachable::Silent(format!("{what}: it ended before it answered")));
+            }
+            let (used, whole) = match got.iter().position(|&b| b == b'\n') {
+                Some(i) => (i + 1, true),
+                None => (got.len(), false),
+            };
+            line.extend_from_slice(&got[..used]);
+            self.r.consume(used);
+            if line.len() > MAX_LINE + 1 {
+                return Err(Unreachable::Broken(format!("your agent said something longer than {MAX_LINE} bytes")));
+            }
+            if whole {
+                break;
+            }
         }
-        if !line.ends_with('\n') {
-            return Err(Unreachable::Broken(format!("your agent said something longer than {MAX_LINE} bytes")));
-        }
-        serde_json::from_str(&line).map_err(|_| Unreachable::Broken("your agent said something this torq does not know".into()))
+        serde_json::from_slice(&line).map_err(|_| Unreachable::Broken("your agent said something this torq does not know".into()))
     }
 }
 
@@ -421,5 +446,27 @@ mod tests {
         assert_eq!(Unreachable::NoAgent("torq-agent-me".into()).line(), "The agent is not set up for you");
         assert!(Unreachable::NoService("/x".into()).not_set_up() && !Unreachable::Silent("x".into()).not_set_up());
         assert!(!Unreachable::Refused("a\nb\u{1b}".into()).line().contains(['\n', '\u{1b}']));
+    }
+
+    /// A service that trickles its answer a byte at a time, never ending the line: one deadline for the
+    /// whole short answer, not one for each byte.
+    #[test]
+    fn a_trickling_service_is_given_up_on() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("slow.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                for _ in 0..200 {
+                    if c.write_all(b" ").is_err() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        });
+        let t = Instant::now();
+        assert!(matches!(quick(&path).status(), Err(Unreachable::Silent(_))));
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
     }
 }
