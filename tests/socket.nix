@@ -205,7 +205,10 @@ pkgs.testers.runNixOSTest {
         def changed(path, new):
             return f"--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{good}\n+{new}\n"
         # An administrator's password does not change anyone else's.
-        p = propose("dev", changed("users/sam/secrets.json", good.replace('"torq-agent"', '"torq-agent", "dev"')), "dev's say over sam's")
+        # Naming another person in a person's own rules is no rules file of theirs: refused when proposed.
+        code, v = answer(ask("sam", {"args": ["--json", "propose", f"--base={head()}", "--reason=dev too"], "diff": changed("users/sam/secrets.json", good.replace('"torq-agent"', '"torq-agent", "dev"'))}))
+        assert code == 1, (code, v)
+        p = propose("dev", changed("users/sam/secrets.json", good.replace('"api.github.com"', '"api.github.com", "git.example.org"')), "dev's say over sam's")
         code, v = answer(ask("dev", {"args": ["--json", "apply", str(p["seq"])], "password": "Torq-sock-2210"}))
         assert code == 1 and "theirs alone" in v["error"], (code, v)
         # Nothing but rules: an address is no host; a field nothing reads is refused.
