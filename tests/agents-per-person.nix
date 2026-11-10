@@ -123,8 +123,13 @@ pkgs.testers.runNixOSTest {
         assert code == 0 and out.strip() == "torq-agent-alice", (code, out)
         # The launcher takes whose agent from sudo, never from the caller: bob naming alice gets nothing of hers.
         launcher = machine.succeed("readlink -f /run/current-system/sw/bin/torq-agent-run").strip()
-        code, out = run_as("bob", f"sudo SUDO_USER=alice SUDO_UID=1000 {launcher} -- id -un")
-        assert "torq-agent-alice" not in out, (code, out)
+        # Whose agent is sudo's SUDO_UID, which the launcher's rule never lets a caller set (no SETENV,
+        # asserted by the module): bob naming alice is refused by sudo itself, and nothing runs.
+        alice_uid = machine.succeed("id -u alice").strip()
+        code, out = run_as("bob", f"sudo SUDO_USER=alice SUDO_UID={alice_uid} {launcher} -- id -un")
+        assert code != 0 and "not allowed to set the following environment variables" in out and "torq-agent-alice" not in out, (code, out)
+        code, out = run_as("bob", f"sudo SUDO_UID={alice_uid} {launcher} -- id -un")
+        assert code != 0 and "not allowed to set" in out, (code, out)
         code, out = run_as("bob", f"sudo {launcher} -- id -un")
         assert code == 0 and out.strip() == "torq-agent-bob", (code, out)
 

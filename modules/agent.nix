@@ -12,6 +12,11 @@ let
   # Each agent account, and the person it serves: the broker's map (broker.json), and the accounts below.
   # (Only names that fit: one too long is the assertion's to say, below, not NixOS's abort.)
   fits = p: lib.stringLength (agentOf p) <= 31;
+  # The launcher's sudo rules that would let its caller set the environment (SETENV), as text or as rules.
+  isLauncher = c: lib.hasInfix "torq-agent-run" (if builtins.isString c then c else c.command);
+  launcherSetenv = lib.filter (c: isLauncher c && !(builtins.isString c) && builtins.elem "SETENV" c.options) (lib.concatMap (r: r.commands) config.security.sudo.extraRules)
+    ++ lib.filter (l: lib.hasInfix "torq-agent-run" l && lib.hasInfix "SETENV" l) (lib.splitString "\n" config.security.sudo.extraConfig);
+  personsLikeAgents = lib.attrNames (lib.filterAttrs (n: u: u.isNormalUser && lib.hasPrefix "torq-agent" n) config.users.users);
   agents = lib.listToAttrs (map (p: lib.nameValuePair (agentOf p) p) (lib.filter fits cfg.people));
   # `torq agent run` (ADR-041, 5): a person starts a program as their own agent. This runs as root
   # (through sudo), hides every home and the people's runtime directories, gives a private /tmp,
@@ -113,6 +118,19 @@ in
     ++ [{
       assertion = lib.unique cfg.people == cfg.people;
       message = "torq.agent.people: a person is named twice.";
+    }]
+    ++ [{
+      # Whose agent the launcher runs is sudo's SUDO_UID (modules/agent-run.sh). A rule that lets the
+      # caller set the environment lets them set that too (`sudo SUDO_UID=<another's> …` is taken as
+      # given, and `Defaults !setenv` does not undo a rule's SETENV): never on the launcher's rules.
+      assertion = launcherSetenv == [ ];
+      message = "security.sudo: a rule for torq-agent-run with SETENV would let its caller say whose agent it runs (SUDO_UID); it never has one.";
+    }
+    {
+      # No person is named as an agent account is, whether they have an agent or not: torqcli tells an
+      # agent by its name (cli/src/agent.rs, is_agent), and would take such a person for one.
+      assertion = personsLikeAgents == [ ];
+      message = "users.users: ${lib.concatStringsSep ", " personsLikeAgents} is a person named as an agent account is (torq-agent…): a person's name never begins so.";
     }];
 
     # Static system users: the broker names its caller from /etc/passwd, where a DynamicUser is not.
@@ -146,7 +164,7 @@ in
     # The shared directory comes as a descriptor torqcli opened, as the person — the agent has no
     # way into their home: sudo keeps that descriptor open for the launcher (`-C`).
     security.sudo.extraConfig = ''
-      Defaults!${agentRun}/bin/torq-agent-run closefrom_override
+      Defaults!${agentRun}/bin/torq-agent-run closefrom_override, env_reset
     '';
   };
 }

@@ -15,19 +15,26 @@ if [ "$(id -u)" != 0 ]; then
   exit 2
 fi
 # Whose agent (ADR-051 3): the caller's own, torq-agent-<the person who ran sudo>, and no other — never
-# one the caller names. It must be the account the broker's map (/etc/torq/broker.json, written by
-# modules/agent.nix) names as that person's agent, and a system account, not a person's.
-person=${SUDO_USER-}
-case "$person" in
-  '' | [!a-z_]* | *[!a-z0-9_-]*) echo "torq-agent-run: is started by a person, through sudo (no person's name in SUDO_USER)" >&2; exit 2 ;;
+# one the caller names. Who ran sudo is SUDO_UID, which sudo sets: the caller can set it only where
+# its sudo rule allows SETENV (sudo then takes `sudo SUDO_UID=… cmd` as given — tried, 2026-11-10), and
+# modules/agent.nix asserts the launcher's rule never does (and resets the environment). /proc/self/loginuid
+# is not used: it is unset when a person is reached by su or runuser from a root shell, and stays the
+# first person's after `su - <another>`. The person's name is the account of that uid, as the machine
+# says; their agent must be the account the broker's map (/etc/torq/broker.json, written by
+# modules/agent.nix) names as theirs, and a system account, not a person's.
+case "${SUDO_UID-}" in
+  '' | *[!0-9]*) echo "torq-agent-run: is started by a person, through sudo (no SUDO_UID)" >&2; exit 2 ;;
 esac
-if [ "$(id -u -- "$person" 2>/dev/null)" != "${SUDO_UID-}" ]; then
-  echo "torq-agent-run: $person is not who ran sudo" >&2
+if [ "$SUDO_UID" -lt 1000 ] || ! person=$(getent passwd -- "$SUDO_UID" | cut -d: -f1) || [ -z "$person" ]; then
+  echo "torq-agent-run: uid $SUDO_UID, who ran sudo, is not a person of this machine" >&2
   exit 2
 fi
+case "$person" in
+  [!a-z_]* | *[!a-z0-9_-]*) echo "torq-agent-run: $person is not a person's name TorqOS acts for" >&2; exit 2 ;;
+esac
 agent=torq-agent-$person
 if ! jq -e --arg a "$agent" --arg p "$person" '.agent.agents[$a] == $p' /etc/torq/broker.json >/dev/null 2>&1; then
-  echo "torq agent run: $person has no agent account on this machine (torq.agent.people names who has one: set torq agent people …, a system change)" >&2
+  echo "torq agent run: $person has no agent account on this machine (torq agent people names who has one; adding you is a system change, an administrator's)" >&2
   exit 2
 fi
 if ! entry=$(getent passwd -- "$agent"); then
