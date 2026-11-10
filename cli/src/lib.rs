@@ -208,6 +208,16 @@ fn flake_ref(dir: &Path) -> String {
 
 /// A private (0700), unpredictable scratch directory: the broker, as root, reads the diff from it.
 /// In XDG_RUNTIME_DIR (the user's own) if there is one, else /tmp; TMPDIR is not consulted.
+/// A private scratch directory in memory (the session's runtime directory, else /dev/shm), never on a disk: for a
+/// secret's value on its way to the broker (ADR-052). None there is refused rather than a disk used.
+pub(crate) fn memory_scratch_dir() -> Result<tempfile::TempDir> {
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| PathBuf::from("/dev/shm"));
+    if !base.is_dir() {
+        anyhow::bail!("there is no memory-backed directory (XDG_RUNTIME_DIR, /dev/shm) to pass the value through");
+    }
+    tempfile::Builder::new().prefix("torq-").tempdir_in(base).context("creating a scratch directory in memory")
+}
+
 pub(crate) fn scratch_dir() -> Result<tempfile::TempDir> {
     let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
     tempfile::Builder::new().prefix("torq-").tempdir_in(base).context("creating a scratch directory")

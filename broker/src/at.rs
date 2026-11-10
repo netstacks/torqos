@@ -203,6 +203,8 @@ impl<'a> Scheduler<'a> {
         if crate::session::cuts_off(&p).is_some() {
             bail!("refused: proposal {proposal_seq} could lose the network or the screen: it is applied confirmed, by a person who is there");
         }
+        // Refused now, not at its time (where applying checks it again).
+        crate::policy::check_secret_rules(p.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()), approved_by)?;
         let base = p.body.data["base"].as_str().context("refused: a scheduled change says the commit it was prepared against (its base)")?.to_string();
         let diff = b.proposal_text(&p, "diff")?;
         // On a configuration moved on from its base, only if it still does exactly what was shown

@@ -50,6 +50,15 @@ impl Owner {
         }
     }
 
+    /// A person's own value is set and read back by them alone, however the broker is reached (ADR-052): the
+    /// socket's gate says so first, and this is where sudo and every other way in pass too.
+    fn theirs_alone(&self, by: &str) -> Result<()> {
+        match self {
+            Owner::Person(p) if p != by => bail!("refused: {p}'s secrets are theirs alone: no one else sets or reads them, an administrator included"),
+            _ => Ok(()),
+        }
+    }
+
     fn tier(&self) -> Tier {
         match self {
             Owner::System => Tier::System,
@@ -146,6 +155,7 @@ impl Broker {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let _lock = Lock::acquire(&self.state_dir)?;
         self.ledger.verify().context("cannot keep a secret on a broken ledger")?;
+        owner.theirs_alone(by)?;
         let file = self.secret_file(owner, name)?;
         value_ok(value)?;
         let entry = self.record(owner, name, by, "secret_set", format!("A value given for {}", owner.whose(name)), None)?;
@@ -213,6 +223,7 @@ impl Broker {
     pub fn show_secret(&self, owner: &Owner, name: &str, by: &str) -> Result<(Entry, String)> {
         let _lock = Lock::acquire(&self.state_dir)?;
         self.ledger.verify().context("cannot show a secret on a broken ledger")?;
+        owner.theirs_alone(by)?;
         let file = self.secret_file(owner, name)?;
         if !fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) {
             bail!("{} has no value", owner.whose(name));

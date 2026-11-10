@@ -367,13 +367,15 @@ impl Machine for Real<'_> {
                 if typed("Again")? != value {
                     bail!("not changed: the two differ");
                 }
-                let scratch = crate::scratch_dir()?;
+                // In memory only, never on a disk (a killed torqcli would leave it there), and gone when this is.
+                let scratch = crate::memory_scratch_dir()?;
                 let file = scratch.path().join("value");
                 {
                     use std::os::unix::fs::OpenOptionsExt;
                     fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?.write_all(value.as_bytes())?;
                 }
-                args.extend(["--key-file".into(), file.to_string_lossy().into_owned()]);
+                // As the broker reads it run directly (root's torqcli); over the socket, sent as the request's own.
+                args.extend(["--value-file".into(), file.to_string_lossy().into_owned(), "--approved-by".into(), me.into()]);
                 let a: Vec<&str> = args.iter().map(String::as_str).collect();
                 let v = done(run::broker_json(broker(self.cli, &a)?, &log)?, &command)?;
                 Ok(format!(

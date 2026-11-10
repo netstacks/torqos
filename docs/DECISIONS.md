@@ -2114,6 +2114,28 @@ off many times a day.
     person approves an agent's use as they apply a proposal (ADR-045): the daemon holds the request, the
     panel and Settings show it, and the person's yes goes through the usual dialog. The agent's own process
     is in no person's session, so COSMIC's dialog cannot be asked for it directly.
+- **Step 1 built (2026-11-10), and its independent review's findings fixed:** the broker keeps the values
+  (`broker/src/secrets.rs`), the rules' one shape is `torq_wire::secrets`, and torqcli has the commands above
+  (`cli/src/secrets.rs`). Tested in `broker/tests/secrets.rs`, `trust_loop.rs`, torqcli's session tests and
+  `tests/socket.nix` (the real socket, systemd-creds and agent account). The VM test found systemd-creds writing
+  its output anew, 0644; the broker makes it 0600 before it is in place. From the review:
+  - **A person's own is theirs at the broker itself, not only at its socket.** `sudo torq-broker secret-show
+    --user sam` is refused to anyone but sam, as is `secret-set`; an apply, a schedule or an undo of a change to
+    `users/<p>/secrets.json` approved by anyone but p is refused where every way in passes
+    (`policy::check_secret_rules`), as `check_allowed` is.
+  - **What this does not promise, said plainly:** root can always decrypt a value by hand (`systemd-creds
+    decrypt`), unrecorded, and an administrator can set a person's password and then be them, which the ledger
+    records. TorqOS's own commands never give an administrator a person's value; root on the machine is not
+    fenced from it, as ADR-035 says root is not fenced. The agent is: it is never root.
+  - **No value on a disk or in a core.** torqcli passes a value through a private file in memory (the
+    session's runtime directory or `/dev/shm`, never `/tmp`), and the broker is not dumpable, with no core for
+    itself or `systemd-creds` (`RLIMIT_CORE` 0; `LimitCORE=0` on `torq-broker@`).
+  - **A rules file is read as every reader reads it:** from its bytes, a secret or a host named twice refused (JSON
+    allows it and serde keeps the last, so a reviewer would read one rule and the daemon another). In a person's
+    own file, only the agent may be named besides them (`parse_person`); another person uses a system secret.
+  - **`delete` removes the rule first, then the value:** a declined commit leaves both as they were.
+  - **For the steps to come:** a token holding a line break must never reach a header (the daemon refuses it,
+    step 2); an SSH key is several lines, so it is given from a file, not typed (step 3).
 - **Later, not now:** a person's own secret typed into the focused window by a COSMIC shortcut, theirs and never
   the agent's (the owner's Alt+O, 2026-11-10; it needs a way to type into windows that COSMIC accepts, and it
   never serves `torq-agent`); a service's secret from the same store (systemd's `LoadCredential`, instead of a

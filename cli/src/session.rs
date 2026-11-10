@@ -1314,14 +1314,19 @@ impl<'a> Session<'a> {
                 if !kept && !ruled {
                     bail!("there is no secret {name}{}", user.map(|u| format!(" of {u}'s")).unwrap_or_default());
                 }
+                // The rule first: a commit declined, or refused, leaves the value as it was too, and nothing half done.
                 let mut out = String::new();
-                if kept {
-                    out.push_str(&self.machine.secret_value(name, user, act, &self.me)?);
-                }
                 if ruled && theirs {
                     out.push_str(&format!("Its rule stays: {}'s to change.\n", user.unwrap_or_default()));
                 } else if ruled {
                     out.push_str(&crate::secrets::changed(self.machine, &self.repo, name, user, act)?);
+                }
+                if kept {
+                    match self.machine.secret_value(name, user, act, &self.me) {
+                        Ok(said) => out.push_str(&said),
+                        Err(e) if !out.is_empty() => bail!("{}but its value was not deleted: {e:#}", out),
+                        Err(e) => return Err(e),
+                    }
                 }
                 Ok(out)
             }

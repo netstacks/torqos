@@ -254,6 +254,10 @@ fn describe(entries: &[Entry], e: &Entry) -> (&'static str, String) {
         "disagreement_acknowledged" => ("✓", clean(&e.reason)),
         "password" => ("✓", clean(&e.reason)),
         "password_failed" => ("✗", clean(&e.reason)),
+        // A secret (ADR-052): a value shown is worth noticing, as a root shell is.
+        "secret_set" | "secret_deleted" => ("✓", clean(&e.reason)),
+        "secret_shown" => ("⚠", clean(&e.reason)),
+        "secret_set_failed" => ("✗", clean(&e.reason)),
         "proposal" => ("·", format!("Proposed, not applied: {}", e.reason)),
         other if e.reason.is_empty() => ("·", other.to_string()),
         _ => ("·", clean(&e.reason)),

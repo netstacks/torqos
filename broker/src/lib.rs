@@ -1778,7 +1778,9 @@ impl Broker {
             let leaf = path.rsplit('/').next().unwrap_or_default();
             let data = f.mode == "100644"
                 && f.size <= policy::user_leaf_max(leaf)
-                && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| policy::user_leaf_ok(leaf, &v));
+                && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| policy::user_leaf_ok(leaf, &v))
+                // A person's secrets' rules as every reader takes them, from the bytes: a name twice is refused (ADR-052).
+                && (leaf != torq_wire::secrets::PERSON_RULES || torq_wire::secrets::parse_person(&f.content).is_ok());
             if !data {
                 bail!(
                     "refused: {path} must be a regular file holding {} of at most {} KiB",
@@ -2688,6 +2690,7 @@ impl Broker {
         let tier = policy::tier_for_paths(&files);
         let actor = if p.body.actor == "agent" { Actor::Agent } else { Actor::User };
         policy::check_allowed(tier)?;
+        policy::check_secret_rules(files.iter().map(String::as_str), approved_by)?;
         // What was judged is what is applied. The gate decided on the proposal's tier and files, as they
         // were on the commit it was made on, and a diff means what it does at HEAD: nothing there can be
         // something here (the audit of M3, H1). Refused, never judged again: a proposal is to be made anew.
@@ -3101,6 +3104,7 @@ impl Broker {
         if self.find_child("reverted", "applied", applied_seq)?.is_some() {
             bail!("change {applied_seq} was already reverted");
         }
+        policy::check_secret_rules(a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()), approved_by)?;
         let commit = a.body.data["commit"].as_str().context("applied entry has no commit")?.to_string();
         let next_seq = self.ledger.read_all()?.len() as u64 + 1;
         let msg = format!(

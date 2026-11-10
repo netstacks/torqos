@@ -544,6 +544,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         }
         Cmd::Secrets => println!("{}", serde_json::to_string(&b.kept_secrets())?),
         Cmd::SecretSet { name, user, value_file, approved_by } => {
+            no_core()?;
             let owner = torq_broker::secrets::Owner::of(user.as_deref())?;
             let value = plain_file(&value_file, torq_broker::secrets::VALUE_MAX as u64 + 1, "the value")?;
             let e = b.set_secret(&owner, &name, value.strip_suffix('\n').unwrap_or(&value), &approved_by)?;
@@ -561,6 +562,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         }
         // Always JSON: a value is printed for a program to hand on, never mixed with words.
         Cmd::SecretShow { name, user, approved_by } => {
+            no_core()?;
             let (e, value) = b.show_secret(&torq_broker::secrets::Owner::of(user.as_deref())?, &name, &approved_by)?;
             println!("{}", json!({ "seq": e.body.seq, "value": value }));
         }
@@ -867,4 +869,14 @@ impl Drop for PushAfter<'_> {
             let _ = self.0.sync_remote();
         }
     }
+}
+
+/// While it holds a secret's value (ADR-052), the broker leaves no core: not dumpable, so nothing of its memory
+/// is written or read out, and no core for what it runs either (systemd-creds), whose limit it inherits —
+/// systemd-coredump keeps nothing of a process whose limit is 0.
+fn no_core() -> Result<()> {
+    use rustix::process::{set_dumpable_behavior, setrlimit, DumpableBehavior, Resource, Rlimit};
+    set_dumpable_behavior(DumpableBehavior::NotDumpable).context("protecting the value")?;
+    setrlimit(Resource::Core, Rlimit { current: Some(0), maximum: Some(0) }).context("protecting the value")?;
+    Ok(())
 }

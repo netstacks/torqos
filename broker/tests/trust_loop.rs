@@ -3459,3 +3459,38 @@ fn a_saved_desktop_builds_nothing_after_the_first() {
     b.apply(p.body.seq, "casey", false).unwrap();
     assert!(builds() > first, "anything else is built");
 }
+
+/// ADR-052: a person's secrets' rules are changed by them alone, at the broker itself (sudo, as well as the socket):
+/// an administrator's approval applies, schedules and undoes no change to them. Each change builds nothing.
+#[test]
+fn a_persons_secrets_rules_are_theirs_alone_at_the_broker() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = dir.path().join("builds");
+    let script = dir.path().join("rebuild");
+    fs::write(&script, format!("#!/bin/sh\necho built >> {}\n", count.display())).unwrap();
+    Command::new("chmod").arg("+x").arg(&script).status().unwrap();
+    let (cfg, b) = setup(script.to_str().unwrap());
+    let builds = || fs::read_to_string(&count).map(|t| t.lines().count()).unwrap_or(0);
+    let first = "{\"gh\": {\"kind\": \"token\", \"https\": {\"hosts\": [\"api.github.com\"]}}}";
+    let wider = "{\"gh\": {\"kind\": \"token\", \"https\": {\"hosts\": [\"api.github.com\"]}, \"actors\": [\"torq-agent\"]}}";
+    let propose = |name: &str, body: String| {
+        let d = write_diff(cfg.path(), name, &body);
+        b.propose_on(Some(&b.repo.head().unwrap()), &d, "Secret gh", Actor::User, false).unwrap()
+    };
+    let p = propose("1.diff", format!("--- /dev/null\n+++ b/users/alice/secrets.json\n@@ -0,0 +1 @@\n+{first}\n"));
+    let e = format!("{:#}", b.apply(p.body.seq, "casey", false).unwrap_err());
+    assert!(e.contains("theirs alone"), "{e}");
+    let applied = b.apply(p.body.seq, "alice", false).unwrap();
+    let built = builds();
+    let p = propose("2.diff", format!("--- a/users/alice/secrets.json\n+++ b/users/alice/secrets.json\n@@ -1 +1 @@\n-{first}\n+{wider}\n"));
+    assert!(b.apply(p.body.seq, "casey", false).is_err());
+    let second = b.apply(p.body.seq, "alice", false).unwrap();
+    assert_eq!(builds(), built, "a change of the rules builds nothing");
+    assert!(format!("{:#}", b.revert(second.body.seq, "casey").unwrap_err()).contains("theirs alone"));
+    assert!(format!("{:#}", b.revert(applied.body.seq, "casey").unwrap_err()).contains("theirs alone"));
+    b.revert(second.body.seq, "alice").unwrap();
+    assert_eq!(builds(), built, "nor does its undo");
+    // A name twice is no rules file: refused before it is proposed.
+    let d = write_diff(cfg.path(), "3.diff", &format!("--- a/users/alice/secrets.json\n+++ b/users/alice/secrets.json\n@@ -1 +1 @@\n-{first}\n+{{\"t\": {{\"kind\": \"token\"}}, \"t\": {{\"kind\": \"ssh-key\"}}}}\n"));
+    assert!(b.propose_on(Some(&b.repo.head().unwrap()), &d, "twice", Actor::User, false).is_err());
+}

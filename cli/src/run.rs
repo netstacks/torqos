@@ -259,6 +259,8 @@ fn request(args: &[String]) -> Result<Request> {
             "--diff" => r.diff = Some(fs::read_to_string(value()?).context("reading the change")?),
             "--hash-file" => r.hash = Some(fs::read_to_string(value()?).context("reading the hash")?),
             "--key-file" => r.key = Some(fs::read_to_string(value()?).context("reading the key")?),
+            // A secret's value goes as a key does (ADR-052).
+            "--value-file" => r.key = Some(fs::read_to_string(value()?).context("reading the value")?),
             _ => r.args.push(a.clone()),
         }
     }

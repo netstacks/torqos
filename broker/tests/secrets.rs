@@ -140,3 +140,17 @@ fn a_value_not_kept_says_so_and_leaves_nothing() {
     assert_eq!(fs::read_dir(m.store().join("system")).unwrap().count(), 0, "no part-written file");
     assert!(m.b.kept_secrets().is_empty());
 }
+
+/// However the broker is reached (sudo, as well as the socket): a person's value is set and read by them alone.
+#[test]
+fn a_persons_value_is_theirs_alone_whoever_runs_the_broker() {
+    let m = Machine::new();
+    m.b.set_secret(&alice(), "gh", VALUE, "alice").unwrap();
+    for e in [m.b.set_secret(&alice(), "gh", "another", "casey").map(drop), m.b.show_secret(&alice(), "gh", "casey").map(drop)] {
+        let e = format!("{:#}", e.unwrap_err());
+        assert!(e.contains("theirs alone"), "{e}");
+    }
+    assert_eq!(m.b.show_secret(&alice(), "gh", "alice").unwrap().1, VALUE, "unchanged");
+    // Deleting it is an administrator's too: the gate (socket.rs) says who may.
+    m.b.delete_secret(&alice(), "gh", "casey").unwrap();
+}

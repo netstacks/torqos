@@ -77,7 +77,7 @@ pub fn read(repo: &Repo, rev: &str, user: Option<&str>) -> Result<Rules> {
     let path = rules_path(user);
     match repo.file_at(rev, &path)? {
         None => Ok(Rules::new()),
-        Some(bytes) => w::parse(&bytes).map_err(|why| anyhow::anyhow!("{path}: {why}")),
+        Some(bytes) => if user.is_some() { w::parse_person(&bytes) } else { w::parse(&bytes) }.map_err(|why| anyhow::anyhow!("{path}: {why}")),
     }
 }
 

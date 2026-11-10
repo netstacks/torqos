@@ -94,7 +94,7 @@ pub struct Rule {
     pub https: Option<Https>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<Ssh>,
-    /// Who may use it besides its owner: `torq-agent`, or people (a system secret's).
+    /// Who may use it besides its owner: `torq-agent`; for a system secret, people too (`parse_person` refuses them in a person's).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actors: Vec<String>,
     #[serde(default)]
@@ -145,6 +145,9 @@ fn hosts_ok(hosts: &[String]) -> Result<(), String> {
     if let Some(h) = hosts.iter().find(|h| !host_ok(h)) {
         return Err(format!("{h:?} is not a host name (lowercase, with a dot; no address, no wildcard)"));
     }
+    if let Some(h) = hosts.iter().enumerate().find_map(|(i, h)| hosts[..i].contains(h).then_some(h)) {
+        return Err(format!("{h} is named twice"));
+    }
     Ok(())
 }
 
@@ -190,9 +193,47 @@ pub fn parse(bytes: &[u8]) -> Result<Rules, String> {
     if bytes.len() as u64 > MAX_FILE {
         return Err(format!("larger than {} KiB", MAX_FILE / 1024));
     }
-    let rules: Rules = serde_json::from_slice(bytes).map_err(|e| format!("not a rules file: {e}"))?;
+    let Unique(rules) = serde_json::from_slice(bytes).map_err(|e| format!("not a rules file: {e}"))?;
     check(&rules)?;
     Ok(rules)
+}
+
+/// A person's own rules file: as `parse`, and only the agent besides them may use their secrets. Another
+/// person is given a secret as a system secret, by an administrator.
+pub fn parse_person(bytes: &[u8]) -> Result<Rules, String> {
+    let rules = parse(bytes)?;
+    if let Some((name, r)) = rules.iter().find(|(_, r)| r.actors.iter().any(|a| a != AGENT)) {
+        let other = r.actors.iter().find(|a| *a != AGENT).cloned().unwrap_or_default();
+        return Err(format!("secret {name}: {other:?} is not the agent: a person's secret is used by them, and the agent if they say so"));
+    }
+    Ok(rules)
+}
+
+/// The rules, each secret named once. JSON lets a name come twice and serde keeps the last: a reviewer would read
+/// the first and every program the last, so a name twice is no rules file at all.
+struct Unique(Rules);
+
+impl<'de> Deserialize<'de> for Unique {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Names;
+        impl<'de> serde::de::Visitor<'de> for Names {
+            type Value = Unique;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("the secrets, by name")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<Unique, A::Error> {
+                let mut out = Rules::new();
+                while let Some((name, rule)) = m.next_entry::<String, Rule>()? {
+                    if out.contains_key(&name) {
+                        return Err(serde::de::Error::custom(format!("secret {name} is named twice")));
+                    }
+                    out.insert(name, rule);
+                }
+                Ok(Unique(out))
+            }
+        }
+        d.deserialize_map(Names)
+    }
 }
 
 /// A rules file as it is written: sorted, two-space indented, ending in a newline.
@@ -254,6 +295,25 @@ mod tests {
             assert!(one(bad).is_err(), "{bad}");
         }
         assert!(parse(&vec![b' '; MAX_FILE as usize + 1]).is_err());
+    }
+
+    /// What a reviewer reads is what every program reads: nothing named twice.
+    #[test]
+    fn nothing_is_named_twice() {
+        for twice in [
+            r#"{"t":{"kind":"token"},"t":{"kind":"ssh-key"}}"#,
+            r#"{"t":{"kind":"token","kind":"ssh-key"}}"#,
+            r#"{"t":{"kind":"token","https":{"hosts":["a.com","a.com"]}}}"#,
+        ] {
+            assert!(one(twice).is_err(), "{twice}");
+        }
+    }
+
+    #[test]
+    fn a_persons_secret_is_theirs_and_the_agents_at_most() {
+        assert!(parse_person(br#"{"t":{"kind":"token","actors":["torq-agent"]}}"#).is_ok());
+        assert!(parse_person(br#"{"t":{"kind":"token","actors":["sam"]}}"#).is_err());
+        assert!(parse(br#"{"t":{"kind":"token","actors":["sam"]}}"#).is_ok(), "a system secret may be a person's to use");
     }
 
     #[test]

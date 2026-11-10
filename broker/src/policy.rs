@@ -94,7 +94,7 @@ pub fn user_leaf_ok(leaf: &str, value: &serde_json::Value) -> bool {
         // A person's COSMIC settings (cli/src/desktop.rs mirrors this): when to save, and each setting's text.
         "desktop.json" => desktop_ok(value),
         // What the person's own secrets may be used for (ADR-052): the daemon reads it, no module does.
-        "secrets.json" => serde_json::from_value::<torq_wire::secrets::Rules>(value.clone()).is_ok_and(|r| torq_wire::secrets::check(&r).is_ok()),
+        "secrets.json" => serde_json::to_vec(value).is_ok_and(|b| torq_wire::secrets::parse_person(&b).is_ok()),
         _ => false,
     }
 }
@@ -224,6 +224,19 @@ pub fn tier_for_paths<S: AsRef<str>>(paths: &[S]) -> Tier {
         .unwrap_or(Tier::Observe)
 }
 
+/// A person's secrets' rules are theirs alone (ADR-052): refused unless every `users/<p>/secrets.json` among
+/// `files` is `by`'s own. Checked where every way in passes (the socket, sudo, a schedule), as `check_allowed` is.
+pub fn check_secret_rules<'a>(files: impl IntoIterator<Item = &'a str>, by: &str) -> Result<()> {
+    for f in files {
+        if let Some((owner, _)) = f.strip_prefix("users/").and_then(|r| r.split_once('/')).filter(|(_, leaf)| *leaf == torq_wire::secrets::PERSON_RULES) {
+            if owner != by {
+                bail!("refused: {f} is {owner}'s: a person's secrets are theirs alone to change, an administrator's password included");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn check_allowed(tier: Tier) -> Result<()> {
     // For everyone, here, where every way in passes: the socket refusing it was one door of several
     // (sudo, setup, recovery), and a new one would have had to know (the review of 0.2.1, M2).
@@ -324,6 +337,15 @@ mod tests {
 
     /// ADR-052: a person's secrets' rules are theirs, in the shape torq_wire reads; changing them, or the
     /// system's, builds nothing.
+    #[test]
+    fn a_persons_secrets_rules_are_theirs_alone_wherever_the_change_comes_from() {
+        assert!(check_secret_rules(["users/sam/secrets.json", "users/viper/packages.json"], "sam").is_ok());
+        assert!(check_secret_rules(["users/sam/secrets.json"], "viper").is_err(), "an administrator's approval is not sam's");
+        assert!(check_secret_rules(["nixos/services.json", "secrets/system.json"], "viper").is_ok(), "the system's are an administrator's");
+        // Named twice, or naming another person: no rules file of a person's.
+        assert!(!user_leaf_ok("secrets.json", &serde_json::json!({"t": {"kind": "token", "actors": ["sam"]}})));
+    }
+
     #[test]
     fn a_persons_secrets_rules_are_theirs_and_build_nothing() {
         let ok = |json: &str| user_leaf_ok("secrets.json", &serde_json::from_str(json).unwrap());
