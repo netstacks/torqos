@@ -258,6 +258,13 @@ impl Turn {
     }
 }
 
+/// Whether the agent's memory was erased since the last look (by Forget, from anywhere): it never shrinks
+/// otherwise — it keeps its last turns, and drops the oldest as it adds one. A window then stops showing
+/// the forgotten conversation as current.
+pub fn forgotten(before: Option<usize>, now: usize) -> bool {
+    before.is_some_and(|b| now < b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +383,12 @@ mod tests {
         c.heard(Event::Tainted { why: "read_journal".into() });
         let rows = c.last().unwrap().proposal_rows(&f);
         assert!(rows.iter().all(|r| r.text.contains("(tainted)")), "{rows:?}");
+    }
+
+    #[test]
+    fn forgotten_elsewhere() {
+        assert!(forgotten(Some(3), 0) && forgotten(Some(8), 1));
+        assert!(!forgotten(None, 0), "never seen: nothing to say");
+        assert!(!forgotten(Some(8), 8) && !forgotten(Some(2), 3));
     }
 }
