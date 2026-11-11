@@ -128,6 +128,24 @@ other program run as your agent (a coding tool such as Claude Code, `torq doctor
 anything under `torq agent run`) is tainted from its first request, because TorqOS cannot see what such a
 program read; `request system apply` says so (`not-the-resident-agent`).
 
+Your resident agent's sessions start clean only if its model is one no program on this machine could stand
+in for: the local model TorqOS runs (llama-server, on a socket only its service writes) or a model reached over
+`https`. A model on one of this machine's network ports (`http://127.0.0.1:11434`, a local Ollama) is not: any
+account here can listen on another of the machine's addresses and answer in its place, so every session with
+it is tainted (`local-tcp-model`) and your trust never applies what it proposes. To have a local server
+trusted, give it a unix socket in a directory only root (or its own service) writes.
+
+A remote model's key goes in a file only root reads, named by `torq agent doctor apiKeyFile`:
+
+```text
+alice@torq> sudo install -D -o root -g root -m 600 key.txt /var/lib/torq/secrets/model.key
+alice@torq# set torq agent doctor apiKeyFile /var/lib/torq/secrets/model.key
+```
+
+Only your resident agent gets it (as its service's credential): no program run as your agent — Claude Code
+included — can read it, and so `torq doctor` and `torq agent propose` cannot use a keyed model; they say so.
+Ask with `torq ask`.
+
 ## Claude Code, as your agent
 
 Claude Code can run as your agent instead of as you: in your agent's account, seeing only the folder you

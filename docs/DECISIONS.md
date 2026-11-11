@@ -2611,6 +2611,41 @@ vouches for, that only proposes, every change ledgered and undone in one command
   `agent-proposals`, `agents-per-person`, `agent-service` (systemd-analyze security still 1.8), `doctor`,
   `agent-run`, `agent` and `desktop-agent` (which builds torq-settings), all green; not a whole `nix flake
   check`. Open: KNOWN-GAPS 6zzo.
+  **Fixed from its review (2026-11-10):** *A model any account here could stand in for* (high): the design
+  believed a resident session whatever its model, and a local TCP model can be answered by any account while
+  its server runs (an impostor on `[::1]` beside `127.0.0.1`, which curl tries first). Now the **broker** judges
+  the model, from broker.json's new `model` (`torq.agent.doctor.modelEndpoint`, as agent.json names it), at each
+  resident session's start (`agent::model_taint`): `https` believed; `unix:` only if every directory above the
+  socket is root's and writable by no one else (the socket's own directory may be its service's, never a
+  person's or an agent's); anything else — plain `http`, only ever to this machine — taints it from its start
+  (`local-tcp-model`, `model-socket-open`, `model-unknown`). The harness reads its session's record at its
+  start and takes every source the broker holds there (`Session.held`): the answer is headed tainted, the
+  service does not remember it, and an event says it — the harness's word never cleaner than the broker's.
+  *A non-resident proposal listed as the resident's*: a session records whether the resident agent started
+  it (`Record.resident`), and only its own kind of caller may cite it (`judge` refuses the other). *The key
+  unreadable by the resident, readable by Claude Code*: `apiKeyFile` is now a file only root reads (asserted:
+  not the store, the config repo, an agent's or a person's home, /tmp), given to the unit by
+  `LoadCredential=model-key:…`; the service hands its path to each task (`TORQ_MODEL_KEY_FILE`), and **the
+  one-shot `torq doctor` and `torq agent propose` cannot use a keyed model** — they run as any program of the
+  agent's does, so they say so plainly and send the person to `torq ask` (decided here: routing them through
+  the resident service would give them its untainted standing, which they have not got). `torq agent run`
+  hides `/run/credentials` (an agent-uid process outside that sandbox still reads the unit's credential: systemd
+  makes it the unit user's, KNOWN-GAPS 6zzo). *`--link` outside the sandbox*: the launcher builds its sandbox once and runs both
+  `torq-mcp --link` and the program in it (the memory and the credentials hidden). *What the rule rests on*:
+  asserted in modules/agent.nix (no `Delegate`/`DelegateSubgroup` on the unit, no `linger` for an agent
+  account, `kernel.yama.ptrace_scope` ≥ 1; `checks.agent-assertions`), and the agent uid's write to the
+  unit's `cgroup.procs` refused, as itself and under `torq agent run` (`tests/agent-service.nix`); the
+  design's word that Yama hides `/proc/<pid>/root` was wrong (it does not, for a same-uid process outside the
+  sandbox; only the sandbox's process namespace does: KNOWN-GAPS 6zzo). *An unbounded session call*: the
+  doctor's and torq-mcp's calls to torqcli about their session end within 30 s, killed as a group past it.
+  *Taint said in one place*: `app::taint_line` (not the resident agent; a model another program could stand
+  in for; what it read) on the Proposals page, the conversation's taint line in the applet and window, and in
+  torqcli's apply prompt. The VM tests' fake models moved to a unix socket in a root-owned directory; agent-mcp
+  now also checks a resident proposal with its configured `http://127.0.0.1:…` model is tainted and not applied,
+  and the same with a root-held socket is. **Open, waiting on the owner (item 2 of the review):** the service's
+  state directory (its memory and its programs' home) is the agent uid's, so an agent-uid process outside the
+  launcher's sandbox (an administrator's `sudo -u torq-agent-<person> …`) could write it; the likely fix, a uid
+  of the resident service's own, changes decision 3.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

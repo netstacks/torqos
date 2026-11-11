@@ -83,7 +83,9 @@ is told, and cannot see what a program reads (KNOWN-GAPS 6zq): so only the perso
 a process in `torq-agent@<person>.service`'s own control group, which the broker reads from the peer's pidfd
 (ADR-051 step 5) — starts a session untainted and has its proposals judged by it. Every other program of an
 agent account (a coding tool, `torq doctor`, anything under `torq agent run`) starts tainted
-(`not-the-resident-agent`), whatever session it cites (KNOWN-GAPS 6zzo).
+(`not-the-resident-agent`), and may not cite the resident agent's sessions (KNOWN-GAPS 6zzo). Even the resident agent
+starts tainted when its model is one another account here could stand in for — any TCP model on this machine
+(`local-tcp-model`), a socket in a place others write — so a local model is trusted only on a root-held socket.
 
 ## Ledger format (v0)
 

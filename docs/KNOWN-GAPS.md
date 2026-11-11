@@ -1258,7 +1258,10 @@ Its §5 lists claims without a test.
      to `torq-agent@<person>.service` by LoadCredential; `torq agent run` hides `/run/credentials`. So
      `torq doctor` and `torq agent propose` cannot use a keyed model: they say so and send the person to `torq
      ask` (`tests/agent-service.nix`). An agent-uid process outside the sandbox (an administrator's `sudo -u`) and
-     the credential: CREDENTIAL-OUTSIDE.
+     the credential: **it reads it** — systemd makes `/run/credentials/torq-agent@<person>.service/` the unit user's
+     to read, and that user is the agent account (seen in `tests/agent-service.nix`, printed, not asserted). Only the
+     sandbox hides it; an administrator's `sudo -u` is root acting (6zzk). A uid of the resident service's own
+     (item 2 of the review, the owner's to decide) would close this too.
    - **A session is cited only by its own kind of caller** (fixed from step 5's review): a program of the agent's
      citing the resident agent's session id (the ledger shows it) is refused, so its proposal is never put in
      that session's record and told to the resident agent as its own; the resident agent cites only sessions
