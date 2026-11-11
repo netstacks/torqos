@@ -320,7 +320,7 @@ impl<'a> Scheduler<'a> {
     fn approver_gone(&self, s: &Scheduled, p: &Entry) -> Result<Option<String>> {
         let by = s.approved_by.as_deref().unwrap_or_default();
         let read = |f: &std::path::Path| std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()));
-        let who = match crate::socket::account(by, &read(&self.passwd)?, &read(&self.group)?, &self.b.agent_limits) {
+        let who = match crate::socket::account(by, &read(&self.passwd)?, &read(&self.group)?, &self.b.agent_limits, self.b.residents()) {
             Ok(w) => w,
             Err(e) => return Ok(Some(format!("its approver is not who they were: {e:#}"))),
         };

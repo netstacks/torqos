@@ -440,6 +440,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_people(&s.people)
         .with_agent_limits(&s.agent)
         .with_model(s.model.as_deref())
+        .with_residents(&s.residents)
         .as_agent(cli.agent.as_deref())
         .from_resident(cli.resident)
         .with_remote(s.remote.as_deref())

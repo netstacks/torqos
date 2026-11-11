@@ -84,6 +84,8 @@ pub struct Broker {
     resident: bool,
     /// The model the agents' harness asks (broker.json's `model`): whether a resident session can start clean.
     model: Option<String>,
+    /// Each resident account and the person it serves (broker.json's `residents`).
+    residents: std::collections::BTreeMap<String, String>,
     /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
     backup: backup::Backups,
     /// Where the values of the secrets are, and what encrypts them (ADR-052, secrets.rs).
@@ -698,6 +700,7 @@ impl Broker {
             agent: None,
             resident: false,
             model: None,
+            residents: Default::default(),
             backup: backup::Backups::default(),
             secrets: secrets::Store::default(),
             remote: None,
@@ -1327,6 +1330,22 @@ impl Broker {
         self.resident
     }
 
+    /// Each person's resident agent's own account (broker.json's `residents`, ADR-051 3 amended 2026-11-11).
+    pub fn with_residents(mut self, residents: &std::collections::BTreeMap<String, String>) -> Self {
+        self.residents = residents.clone();
+        self
+    }
+
+    /// Every resident account and the person it serves.
+    pub fn residents(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.residents
+    }
+
+    /// The resident account of `person`'s agent, if the map names one and the person has an agent.
+    pub fn resident_of(&self, person: &str) -> Option<&str> {
+        self.agent_limits.has_agent(person).then(|| self.residents.iter().find(|(_, p)| p.as_str() == person).map(|(r, _)| r.as_str())).flatten()
+    }
+
     /// The model the agents' harness asks (broker.json's `model`, as agent.json names it).
     pub fn with_model(mut self, endpoint: Option<&str>) -> Self {
         self.model = endpoint.map(String::from);
@@ -1342,7 +1361,7 @@ impl Broker {
             .lines()
             .filter_map(|l| {
                 let f: Vec<&str> = l.split(':').collect();
-                (f.len() > 2 && self.agent_limits.serves(f[0]).is_some()).then(|| f[2].parse().ok()).flatten()
+                (f.len() > 2 && (self.agent_limits.serves(f[0]).is_some() || self.residents.contains_key(f[0]))).then(|| f[2].parse().ok()).flatten()
             })
             .collect();
         agent::model_taint(

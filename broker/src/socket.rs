@@ -42,11 +42,18 @@ pub struct Caller {
     pub admin: bool,
     /// A normal account (NixOS gives people uids from 1000): not a service's, which proposes nothing.
     pub person: bool,
-    /// An agent account calling from its person's resident agent, `torq-agent@<person>.service` (its
-    /// process in that unit's control group, as `serve` reads it from the peer's pidfd: ADR-051 step 5).
-    /// Never the caller's word; false unless serve found it so. Only then is its session untainted at its
-    /// start, and its proposal judged by the session it cites.
+    /// An agent account calling from its person's resident agent, `torq-agent@<person>.service`: the person's
+    /// resident account (`resident_account`, the map's word for the uid) *and* its process in that unit's
+    /// control group (as `serve` reads it from the peer's pidfd: ADR-051 step 5, amended 2026-11-11). Never the
+    /// caller's word; false unless serve found it so. Only then is its session untainted at its start, and its
+    /// proposal judged by the session it cites.
     pub resident: bool,
+    /// The agent account this caller acts as at the broker: its own, or — for a resident account — its
+    /// person's agent account (`torq-agent-<person>`): both are the person's one agent (`data.agent`, the caps).
+    pub acts_as: Option<String>,
+    /// Whether this account is a person's resident agent's own (`torq-resident-<person>`, the map's
+    /// `residents`): the only account whose requests can be resident.
+    pub resident_account: bool,
 }
 
 /// What a session of an agent account's is tainted by from its start, and a proposal of one, when the
@@ -138,9 +145,10 @@ pub fn check_args(args: &[String]) -> Result<()> {
 }
 
 /// The account with `uid`, from /etc/passwd's text; an admin if /etc/group's `wheel` lists it; an
-/// agent if `agents` (the broker's map, agent account → person) names it and its uid is no person's —
+/// agent if `agents` (the broker's map, agent account → person) names it, or `residents` (resident account →
+/// person, ADR-051 3 amended 2026-11-11) names it for a person who has an agent, and its uid is no person's —
 /// a person's account is never an agent, whatever it is called.
-pub fn caller(uid: u32, passwd: &str, group: &str, agents: &crate::agent::Limits) -> Result<Caller> {
+pub fn caller(uid: u32, passwd: &str, group: &str, agents: &crate::agent::Limits, residents: &std::collections::BTreeMap<String, String>) -> Result<Caller> {
     let name = passwd
         .lines()
         .filter_map(|l| {
@@ -159,8 +167,20 @@ pub fn caller(uid: u32, passwd: &str, group: &str, agents: &crate::agent::Limits
         f.len() == 4 && f[0] == ADMINS && f[3].split(',').any(|m| m == name)
     });
     let person = PEOPLE_UIDS.contains(&uid);
-    let agent_for = if person { None } else { agents.serves(&name).map(String::from) };
-    Ok(Caller { uid, agent_for, person, name, admin, resident: false })
+    let (agent_for, acts_as, resident_account) = if person {
+        (None, None, false)
+    } else if let Some(p) = agents.serves(&name) {
+        (Some(p.to_string()), Some(name.clone()), false)
+    } else if let Some(p) = residents.get(&name) {
+        // A resident account acts as its person's one agent account, which the map must name.
+        match agents.agents.iter().find(|(_, q)| *q == p) {
+            Some((a, _)) => (Some(p.clone()), Some(a.clone()), true),
+            None => (None, None, false),
+        }
+    } else {
+        (None, None, false)
+    };
+    Ok(Caller { uid, agent_for, person, name, admin, resident: false, acts_as, resident_account })
 }
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
@@ -262,7 +282,7 @@ pub fn theirs(name: &str, c: &Change) -> bool {
 }
 
 /// The account named `name`, as `caller` reads it for its uid.
-pub fn account(name: &str, passwd: &str, group: &str, agents: &crate::agent::Limits) -> Result<Caller> {
+pub fn account(name: &str, passwd: &str, group: &str, agents: &crate::agent::Limits, residents: &std::collections::BTreeMap<String, String>) -> Result<Caller> {
     let uid = passwd
         .lines()
         .find_map(|l| {
@@ -270,7 +290,7 @@ pub fn account(name: &str, passwd: &str, group: &str, agents: &crate::agent::Lim
             (f.next()? == name).then(|| f.nth(1)?.parse::<u32>().ok()).flatten()
         })
         .with_context(|| format!("no account is named {name:?}"))?;
-    let c = caller(uid, passwd, group, agents)?;
+    let c = caller(uid, passwd, group, agents, residents)?;
     if c.name != name {
         bail!("{name:?} shares its uid with {:?}: not one account", c.name);
     }
@@ -300,11 +320,11 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             }
             match &who.agent_for {
                 // Which agent: the broker judges its proposal by the person it serves (ADR-051 3).
-                Some(_) => a.extend(["--actor".into(), "agent".into(), "--agent".into(), who.name.clone()]),
+                Some(_) => a.extend(["--actor".into(), "agent".into(), "--agent".into(), who.acts_as.clone().context("an agent acts as its agent account")?]),
                 None => a.extend(["--actor".into(), "user".into()]),
             }
             // From the resident agent alone is it judged by its session (ADR-051 step 5); else tainted.
-            if who.agent_for.is_some() && who.resident {
+            if who.agent_for.is_some() && who.resident && who.resident_account {
                 a.push("--resident".into());
             }
             a.extend(["--diff".into(), diff.context("a proposal needs its diff, in the request")?.into()]);
@@ -313,12 +333,12 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
         // (Anyone else's is refused by the gate: a session is an agent's.) Untainted at its start only
         // from the resident agent (ADR-051 step 5).
         "session-start" if who.agent_for.is_some() => {
-            a.extend(["--agent".into(), who.name.clone()]);
-            if who.resident {
+            a.extend(["--agent".into(), who.acts_as.clone().context("an agent acts as its agent account")?]);
+            if who.resident && who.resident_account {
                 a.push("--resident".into());
             }
         }
-        "session-taint" if who.agent_for.is_some() => a.extend(["--agent".into(), who.name.clone()]),
+        "session-taint" if who.agent_for.is_some() => a.extend(["--agent".into(), who.acts_as.clone().context("an agent acts as its agent account")?]),
         "password" => {
             a.extend(["--hash-file".into(), hash.context("a password needs its hash, in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
@@ -408,17 +428,22 @@ pub fn start_time(stat: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent-viper:x:990:990::/var/lib/torq-agent-viper:/run/current-system/sw/bin/nologin\ntorq-agent-sam:x:991:991::/var/lib/torq-agent-sam:/run/current-system/sw/bin/nologin\ntorq-agent-x:x:992:992::/var/empty:/run/current-system/sw/bin/nologin\ntorq-agent-pat:x:1002:100::/home/pat:/bin/zsh\nnobody:x:65534:65534::/var/empty:/run/current-system/sw/bin/nologin\nsshd:x:998:998::/var/empty:/run/current-system/sw/bin/nologin\ntorq-secrets:x:989:989::/var/empty:/run/current-system/sw/bin/nologin\n";
+    const PASSWD: &str = "root:x:0:0::/root:/bin/sh\nviper:x:1000:100::/home/viper:/bin/zsh\nsam:x:1001:100::/home/sam:/bin/zsh\ntorq-agent-viper:x:990:990::/var/lib/torq-agent-viper:/run/current-system/sw/bin/nologin\ntorq-agent-sam:x:991:991::/var/lib/torq-agent-sam:/run/current-system/sw/bin/nologin\ntorq-agent-x:x:992:992::/var/empty:/run/current-system/sw/bin/nologin\ntorq-agent-pat:x:1002:100::/home/pat:/bin/zsh\nnobody:x:65534:65534::/var/empty:/run/current-system/sw/bin/nologin\nsshd:x:998:998::/var/empty:/run/current-system/sw/bin/nologin\ntorq-resident-viper:x:980:980::/var/empty:/run/current-system/sw/bin/nologin\ntorq-resident-dave:x:981:981::/var/empty:/run/current-system/sw/bin/nologin\ntorq-resident-pat:x:1003:100::/home/pat2:/bin/zsh\ntorq-resident-sam:x:982:982::/var/empty:/run/current-system/sw/bin/nologin\n";
     /// The broker's map: viper's and sam's agents, and one (`torq-agent-pat`) that names a person's
     /// account — which is a person, never an agent.
     fn agents() -> crate::agent::Limits {
         let agents = [("torq-agent-viper", "viper"), ("torq-agent-sam", "sam"), ("torq-agent-pat", "pat")].iter().map(|(a, p)| (a.to_string(), p.to_string())).collect();
         crate::agent::Limits { agents, settings: vec![] }
     }
+    /// The residents' map (ADR-051 3 amended 2026-11-11): viper's, one for dave (who has no agent), one with a
+    /// person's uid; sam's account exists but the map does not name it.
+    fn residents() -> std::collections::BTreeMap<String, String> {
+        [("torq-resident-viper", "viper"), ("torq-resident-dave", "dave"), ("torq-resident-pat", "pat")].iter().map(|(a, p)| (a.to_string(), p.to_string())).collect()
+    }
     const GROUP: &str = "root:x:0:\nwheel:x:1:viper\nusers:x:100:sam\n";
 
     fn who(uid: u32) -> Caller {
-        caller(uid, PASSWD, GROUP, &agents()).unwrap()
+        caller(uid, PASSWD, GROUP, &agents(), &residents()).unwrap()
     }
     fn change(tier: Tier, files: &[&str]) -> Change {
         Change { tier, files: files.iter().map(|f| f.to_string()).collect() }
@@ -426,13 +451,13 @@ mod tests {
 
     #[test]
     fn the_caller_is_the_uid() {
-        assert_eq!(who(1000), Caller { uid: 1000, name: "viper".into(), agent_for: None, admin: true, person: true, resident: false });
-        assert_eq!(who(1001), Caller { uid: 1001, name: "sam".into(), agent_for: None, admin: false, person: true, resident: false });
+        assert_eq!(who(1000), Caller { uid: 1000, name: "viper".into(), agent_for: None, admin: true, person: true, resident: false, acts_as: None, resident_account: false });
+        assert_eq!(who(1001), Caller { uid: 1001, name: "sam".into(), agent_for: None, admin: false, person: true, resident: false, acts_as: None, resident_account: false });
         assert!(!who(65534).person && !who(998).person && !who(990).person);
         assert!(who(990).agent_for.as_deref() == Some("viper") && !who(990).admin);
-        assert!(caller(4242, PASSWD, GROUP, &agents()).is_err(), "no account");
+        assert!(caller(4242, PASSWD, GROUP, &agents(), &residents()).is_err(), "no account");
         // A name that is only a prefix of a wheel member's is not one.
-        assert!(!caller(1, "vipe:x:1:1::/:/bin/sh\n", GROUP, &agents()).unwrap().admin);
+        assert!(!caller(1, "vipe:x:1:1::/:/bin/sh\n", GROUP, &agents(), &residents()).unwrap().admin);
     }
 
     /// ADR-051 3: an agent is an account the broker's map names, and whose uid is no person's — the
@@ -452,7 +477,7 @@ mod tests {
         let p = with_identity(&["propose".into(), "--base=c".into()], "propose", &pat, Some("/run/d"), None, None).unwrap();
         assert!(p.contains(&"user".to_string()) && !p.contains(&"--agent".to_string()), "{p:?}");
         // With no map at all (an older broker.json), nothing is an agent.
-        assert_eq!(caller(990, PASSWD, GROUP, &crate::agent::Limits::default()).unwrap().agent_for, None);
+        assert_eq!(caller(990, PASSWD, GROUP, &crate::agent::Limits::default(), &residents()).unwrap().agent_for, None);
         // Each agent's identity is its own account, as the kernel says.
         let s = with_identity(&["session-start".into()], "session-start", &who(991), None, None, None).unwrap();
         assert_eq!(s, ["session-start", "--agent", "torq-agent-sam"]);
@@ -536,6 +561,41 @@ mod tests {
         }
     }
 
+    /// ADR-051 3, amended 2026-11-11: a person's resident agent has its own account, which the residents' map
+    /// names; at the broker it is that person's one agent (it acts as `torq-agent-<person>`), and it alone can be
+    /// resident. The agent account never is, wherever it runs; a name alone makes nothing a resident.
+    #[test]
+    fn the_resident_account_is_the_persons_one_agent() {
+        let r = who(980);
+        assert_eq!((r.agent_for.as_deref(), r.acts_as.as_deref(), r.resident_account, r.person, r.admin), (Some("viper"), Some("torq-agent-viper"), true, false, false));
+        let a = who(990);
+        assert_eq!((a.acts_as.as_deref(), a.resident_account), (Some("torq-agent-viper"), false));
+        // Named like one but not in the map (sam's), in the map for a person with no agent (dave), in the map with
+        // a person's uid (pat): none is a resident, nor an agent.
+        for uid in [982, 981, 1003] {
+            let c = who(uid);
+            assert!(c.agent_for.is_none() && !c.resident_account, "{c:?}");
+            assert!(c.person || matches!(gate(&c, "propose", None, None), Gate::Refused(_)), "a service proposes nothing: {c:?}");
+        }
+        // As the person's agent account, both: the broker judges and counts them as one agent.
+        let p = |c: &Caller| with_identity(&["propose".into(), "--base=c".into()], "propose", c, Some("/run/d"), None, None).unwrap();
+        let s = |c: &Caller| with_identity(&["session-start".into()], "session-start", c, None, None, None).unwrap();
+        let mut res = who(980);
+        assert_eq!(s(&res), ["session-start", "--agent", "torq-agent-viper"], "its uid alone is not enough: serve says resident");
+        res.resident = true;
+        assert_eq!(p(&res), ["propose", "--base=c", "--actor", "agent", "--agent", "torq-agent-viper", "--resident", "--diff", "/run/d"]);
+        assert_eq!(s(&res), ["session-start", "--agent", "torq-agent-viper", "--resident"]);
+        // The agent account, even were it found in the unit's control group: never resident.
+        let mut agent = who(990);
+        agent.resident = true;
+        assert!(!p(&agent).contains(&"--resident".to_string()) && !s(&agent).contains(&"--resident".to_string()));
+        // It proposes, and nothing more, as the agent does.
+        for cmd in ["apply", "revert", "decline", "trust-grant", "password", "fetch-incoming"] {
+            assert!(matches!(gate(&who(980), cmd, Some(&change(Tier::User, &["users/viper/packages.json"])), Some("viper")), Gate::Refused(_)), "{cmd}");
+        }
+        assert_eq!(account("torq-resident-viper", PASSWD, GROUP, &agents(), &residents()).unwrap(), who(980));
+    }
+
     #[test]
     fn a_pidfds_pid() {
         assert_eq!(fdinfo_pid("pos:\t0\nflags:\t02000002\nmnt_id:\t15\nino:\t1057\nPid:\t4242\nNSpid:\t4242\n"), Some(4242));
@@ -550,7 +610,8 @@ mod tests {
     fn resident_is_added_never_taken() {
         assert!(check_args(&["session-start".into(), "--resident".into()]).is_err());
         assert!(check_args(&["propose".into(), "--resident=true".into()]).is_err());
-        let mut a = who(990);
+        // The person's resident account (ADR-051 3 amended 2026-11-11): the only one that can be resident.
+        let mut a = who(980);
         let p = |a: &Caller| with_identity(&["propose".into(), "--base=c".into()], "propose", a, Some("/run/d"), None, None).unwrap();
         let s = |a: &Caller| with_identity(&["session-start".into()], "session-start", a, None, None, None).unwrap();
         assert!(!p(&a).contains(&"--resident".to_string()) && !s(&a).contains(&"--resident".to_string()), "not found so: not resident");
@@ -786,10 +847,10 @@ mod tests {
         assert_eq!(gate(&who(1001), "cancel-scheduled", None, Some("sam")), Gate::Open);
         assert!(matches!(gate(&who(1001), "cancel-scheduled", None, Some("viper")), Gate::Refused(_)));
         assert!(matches!(gate(&who(990), "cancel-scheduled", None, Some("torq-agent-viper")), Gate::Refused(_)), "the agent cancels nothing");
-        assert_eq!(account("sam", PASSWD, GROUP, &agents()).unwrap(), who(1001));
-        assert!(account("nobody-here", PASSWD, GROUP, &agents()).is_err());
-        assert!(account("sam", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP, &agents()).is_ok());
-        assert!(account("viper", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP, &agents()).is_err(), "a uid shared is not one account");
+        assert_eq!(account("sam", PASSWD, GROUP, &agents(), &residents()).unwrap(), who(1001));
+        assert!(account("nobody-here", PASSWD, GROUP, &agents(), &residents()).is_err());
+        assert!(account("sam", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP, &agents(), &residents()).is_ok());
+        assert!(account("viper", "sam:x:1000:100::/:/bin/sh\nviper:x:1000:100::/:/bin/sh\n", GROUP, &agents(), &residents()).is_err(), "a uid shared is not one account");
         for uid in [1000, 1001, 990] {
             assert!(matches!(gate(&who(uid), "run-scheduled", None, None), Gate::Refused(_)), "{uid}");
             assert!(matches!(gate(&who(uid), "resume-scheduled", None, None), Gate::Refused(_)), "{uid}");

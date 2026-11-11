@@ -248,11 +248,14 @@ fn as_agent(dir: &Path, agent: &str, people: &[&str]) -> Broker {
 /// A model reached over TLS: nothing here can stand in for it (agent::model_taint).
 const TLS_MODEL: &str = "https://api.example.org/v1";
 
-/// What the ledger records of a call that came over the socket from `caller`, from its person's resident
-/// agent (serve.rs sets both so: ADR-051 step 5).
-fn by_socket(b: Broker, caller: &str) -> Broker {
-    let mut b = b.from_resident(true).with_model(Some(TLS_MODEL));
-    b.ledger.set_via(Some("socket".into()), Some(caller.into()));
+/// What the ledger records of a call that came over the socket from `agent`'s person's resident agent (its own
+/// account, as the kernel names it), found resident (serve.rs sets both so: ADR-051 step 5).
+fn by_socket(b: Broker, agent: &str) -> Broker {
+    // The resident agent's own account (ADR-051 3 amended 2026-11-11), the residents' map naming it.
+    let person = agent.strip_prefix("torq-agent-").unwrap_or(agent);
+    let resident = format!("torq-resident-{person}");
+    let mut b = b.from_resident(true).with_model(Some(TLS_MODEL)).with_residents(&[(resident.clone(), person.to_string())].into_iter().collect());
+    b.ledger.set_via(Some("socket".into()), Some(resident));
     b
 }
 
@@ -264,8 +267,9 @@ fn trust_applies_only_what_the_agent_itself_sent() {
     let (dir, b) = setup(&[]);
     session::grant(&b, "casey", 30).unwrap();
     let s = session::start(&b).unwrap();
-    for (via, caller) in [(None, None), (Some("sudo"), None), (Some("socket"), Some("dev")), (Some("socket"), Some("torq-agent-sam"))] {
-        let mut root = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey")).from_resident(true);
+    // The agent account itself over the socket is not the resident agent (ADR-051 3 amended 2026-11-11).
+    for (via, caller) in [(None, None), (Some("sudo"), None), (Some("socket"), Some("dev")), (Some("socket"), Some("torq-agent-sam")), (Some("socket"), Some("torq-agent-casey")), (Some("socket"), Some("torq-resident-sam"))] {
+        let mut root = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey")).from_resident(true).with_model(Some(TLS_MODEL)).with_residents(&[("torq-resident-casey".to_string(), "casey".to_string()), ("torq-resident-sam".to_string(), "sam".to_string())].into_iter().collect());
         root.ledger.set_via(via.map(String::from), caller.map(String::from));
         let p = propose(&root, &diff(dir.path(), "r.diff", "users/casey/packages.json", "[\"nmap\"]"), Actor::Agent, false, Some(&s.id)).unwrap();
         assert!(session::apply_trusted(&root, &p).unwrap().is_none(), "{via:?} {caller:?}");

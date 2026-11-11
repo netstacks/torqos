@@ -416,9 +416,10 @@ fn trusted_by(b: &Broker, p: &Entry) -> Option<String> {
     if b.agent_limits.serves(agent) != Some(person.as_str()) {
         return None;
     }
-    // Made by that agent itself, over the socket (the kernel's word for who called): never a proposal
-    // that only says it is the agent's — `torq-broker propose --actor agent --agent …` as root (the review).
-    if e.data["via"].as_str() != Some("socket") || e.data["caller"].as_str() != Some(agent) {
+    // Made by that person's resident agent itself, over the socket (the kernel's word for who called: its own account,
+    // ADR-051 3 amended 2026-11-11) — never a proposal that only says it is the agent's (root's `torq-broker propose
+    // --actor agent --agent …`), nor the agent account's (any program run as it: tainted, but said here too).
+    if e.data["via"].as_str() != Some("socket") || e.data["caller"].as_str().is_none_or(|c| Some(c) != b.resident_of(&person)) {
         return None;
     }
     socket::theirs(&person, &socket::Change { tier: Tier::User, files }).then_some(person)
