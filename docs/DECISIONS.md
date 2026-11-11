@@ -727,8 +727,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   continue unchanged — both faces want them. Nothing is deleted; the server face is the base the
   laptop face is loaded on.
 
-## ADR-035 — Closing the root gap: the account, the door, and the record (proposed)
-- **Status:** proposed, 2026-11-03; the plan for M3. The order below is the build order.
+## ADR-035 — Closing the root gap: the account, the door, and the record (built)
+- **Status:** proposed 2026-11-03 as the plan for M3; built (status updated 2026-11-11 from ROADMAP M3: the socket broker, the agent's account and the remote on 2026-11-05, strict mode and break-glass in the same milestone, whose audit is dated 2026-11-06), in v0.3.x. The order below was the build order.
 - **Context:** Root is root: no program can tell a person from an AI typing in a root shell, and
   TorqOS's model already says so (SECURITY-MODEL, "Root, the owner, and an AI the owner runs").
   Today every guarantee is *visibility*, not *enforcement*: the broker trusts `--actor` and
@@ -867,8 +867,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   configuration runs here as root, SSH on or off, who has keys, which Nix files it attaches.
 - **Amended (2026-11-09, the owner: "a nice UI for github login and config store repo setup"): setting a remote up from TorqOS Settings.** System → Backup signs in to GitHub by the device flow (TorqOS's OAuth app; a public client id, no secret), creates or finds a private repository (an existing public one is refused), loads `torq remote url` into the draft for the usual review and commit, then adds the machine's key to that one repository as a deploy key. The sign-in has GitHub's `repo` scope, the narrowest that can create a private repository: it stays in the window's memory, goes to curl on standard input, and is dropped when setup ends or the window closes. It remains valid at GitHub until revoked there (Settings, Applications): the device flow has no secret with which TorqOS could revoke it. What remains on the machine is what this ADR says: the deploy key. Any other Git server: paste an SSH address, copy the key. On GitHub's free plan a private repository has no branch protection, so a rewritten remote is detected (the alarm) but not prevented.
 
-## ADR-037 — Applications: a ladder, every rung declared (proposed)
-- **Status:** proposed, 2026-11-03; the design for M4's applications. Rung 3 needs its own small
+## ADR-037 — Applications: a ladder, every rung declared (part built)
+- **Status:** proposed, 2026-11-03; part built (status updated 2026-11-11 from ROADMAP M4): the Apps page, per person, remembered in `users <name> flatpaks` (2026-11-09, amended). Not built: `flatpaks` reconciled at switch, the COSMIC Store per user, rung 3 (a person's own builds in the tree), the refusals of `curl | sh` and self-updaters. Rung 3 needs its own small
   design before the agent builds anything.
 - **Context:** A desktop needs Firefox and LibreOffice, a vendor's proprietary application, and what
   the person or the agent builds. An installer that puts a binary somewhere and on PATH does not
@@ -1182,9 +1182,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   model, tools or prompts (M5).
 
 ## ADR-042 — The agent's runtime: doctor mode, the model, the tool boundary
-- **Status:** proposed (2026-11-07); doctor mode (1–5) built on `work/w3`, its VM test written and
-  not yet run; Proposals (6) and Session trust (7) built on `work/w5` (2026-11-07), the taint held by
-  the broker, amended from their design as each says; `tests/agent-proposals.nix` written, not yet run. ROADMAP M5's first item,
+- **Status:** proposed (2026-11-07); built (status updated 2026-11-11 from ROADMAP M5): doctor mode (1–5) on `work/w3`, Proposals (6) and Session trust (7) on `work/w5`, all 2026-11-07, in v0.3.x, the taint held by the broker, amended from their design as each says; `tests/doctor.nix`, `tests/agent-proposals.nix` and `tests/commit-at.nix` ran green in the v0.3.2 release run (CI 42667820600). Experimental: doctor is off by default, no real model has been tried. ROADMAP M5's first item, building
   on ADR-005 (local by default), ADR-034, ADR-040 and ADR-041 (the account, `torq agent run`).
 - **Context:** M5 starts with doctor mode: "why is my wifi flaky?" — read logs, hardware and the
   configuration, explain, propose nothing. Four things had no answer yet: how TorqOS's own agent runs
