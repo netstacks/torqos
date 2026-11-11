@@ -1185,13 +1185,17 @@ fn apply_warning(body: &serde_json::Value) -> (String, Option<u32>) {
     let mut why = String::new();
     if body["tainted"].as_bool().unwrap_or(false) {
         // Not TorqOS's resident agent (ADR-051 step 5): what the program read is not known at all.
-        let (unseen, read): (Vec<String>, Vec<String>) = read.unwrap_or_default().into_iter().partition(|s| UNSEEN.contains(&s.as_str()));
+        let (unseen, read): (Vec<String>, Vec<String>) = read.unwrap_or_default().into_iter().partition(|s| crate::app::UNSEEN.contains(&s.as_str()));
+        let (model, read): (Vec<String>, Vec<String>) = read.into_iter().partition(|s| crate::app::MODEL.contains(&s.as_str()));
+        if !model.is_empty() {
+            why.push_str(&format!("Its model is one another program on this machine could have stood in for ({}): what it was told to propose may not be the model's. ", model.join(", ")));
+        }
         if !unseen.is_empty() {
             why.push_str(&format!("This came from a program run as your agent that is not TorqOS's resident agent ({}): a coding tool, `torq agent run`, `torq doctor`. The broker cannot see what it read: treat it as if it read the web. ", unseen.join(", ")));
         }
         let from = match read.as_slice() {
             r if !r.is_empty() => format!("Before proposing this, the agent read text that anyone could have written ({}): a log line, a device's name, a web page can carry instructions meant for it. ", r.join(", ")),
-            _ if !unseen.is_empty() => String::new(),
+            _ if !unseen.is_empty() || !model.is_empty() => String::new(),
             _ if body["actor"] == "agent" => "The broker cannot vouch for what the program that proposed this read (it named no session TorqOS's agent keeps): treat it as if it read the web. ".into(),
             _ => "The one who proposed it said it came from untrusted text (the web, mail, a download). ".into(),
         };
@@ -1239,10 +1243,6 @@ fn trust_is_shown_while_it_holds() {
     assert!(!trust_lines(&serde_json::json!([{"seq": 1, "person": "v\u{1b}[2J", "until": "x"}])).contains('\u{1b}'));
 }
 
-/// The taint sources that say the broker saw nothing of what was read (ADR-051 step 5): the session was not
-/// TorqOS's resident agent's (the broker's word), or a coding tool's (torq-mcp's own).
-const UNSEEN: &[&str] = &["not-the-resident-agent", "coding-tool"];
-
 /// How long an agent's change that could cut the machine off waits for a person's confirmation.
 const CUTS_OFF_MINUTES: u32 = 10;
 
@@ -1260,6 +1260,9 @@ fn a_person_is_told_why_before_applying() {
     assert!(w.contains("not TorqOS's resident agent (not-the-resident-agent, coding-tool)") && w.contains("could have written (read_journal)") && w.contains("not the reason"), "{w}");
     let (w, _) = apply_warning(&json!({"tier": "user", "tainted": true, "actor": "agent", "data": {"session": {"id": "s", "tainted_by": ["not-the-resident-agent"]}}}));
     assert!(w.contains("cannot see what it read") && !w.contains("could have written") && !w.contains("named no session"), "{w}");
+    // The resident agent, with a model another program here could have stood in for (ADR-051 step 5's review).
+    let (w, _) = apply_warning(&json!({"tier": "user", "tainted": true, "actor": "agent", "data": {"session": {"id": "s", "tainted_by": ["local-tcp-model"]}}}));
+    assert!(w.contains("could have stood in for (local-tcp-model)") && !w.contains("named no session") && !w.contains("could have written"), "{w}");
     let (w, c) = apply_warning(&json!({"tier": "system", "tainted": false, "actor": "agent", "data": {"cuts_off": ["networking.wireless.enable"]}}));
     assert!(w.contains("networking.wireless.enable") && w.contains("commit confirmed"), "{w}");
     assert_eq!(c, Some(CUTS_OFF_MINUTES));

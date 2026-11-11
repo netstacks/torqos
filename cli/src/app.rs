@@ -915,6 +915,17 @@ mod page_tests {
 
     /// Every action the window offers is a torqcli command (ADR-045 2): the grammar's own reading of it.
     #[test]
+    fn taint_said_plainly() {
+        let s = |v: &[&str]| taint_line(&v.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        assert_eq!(s(&["read_journal", "show_ledger"]), "made after reading untrusted content (read_journal, show_ledger)");
+        assert_eq!(s(&[]), "made after reading untrusted content");
+        let n = s(&["not-the-resident-agent", "coding-tool", "show_alarms"]);
+        assert!(n.starts_with("not from TorqOS's resident agent") && n.contains("(not-the-resident-agent, coding-tool)") && n.ends_with("untrusted content (show_alarms)"), "{n}");
+        let m = s(&["local-tcp-model"]);
+        assert!(m.starts_with("its model could have been stood in for") && !m.contains("untrusted content"), "{m}");
+    }
+
+    #[test]
     fn everything_the_pages_offer_is_a_command() {
         let check = |a: &Action| match a.how {
             How::Run => whole(Mode::Operational, a.command),
@@ -987,6 +998,31 @@ fn of<'b, 's>(made: &'b mut [(At, Result<crate::session::Session<'s>, String>)],
     made.iter_mut().find(|(a, _)| *a == at).map(|(_, s)| s)
 }
 
+/// The broker's words for what tainted a session that the broker could not see into at all (ADR-051 step 5):
+/// it was not TorqOS's resident agent's (or a coding tool said so of itself).
+pub const UNSEEN: &[&str] = &["not-the-resident-agent", "coding-tool"];
+/// …and for a resident session whose model another program here could have stood in for.
+pub const MODEL: &[&str] = &["local-tcp-model", "model-socket-open", "model-unknown"];
+
+/// Why a session (and what it proposed) is tainted, in plain words, from the broker's own sources: one line for
+/// torqcli's apply prompt, TorqOS Settings' Proposals page, and the agent's applet and window.
+pub fn taint_line(sources: &[String]) -> String {
+    let (unseen, rest): (Vec<&String>, Vec<&String>) = sources.iter().partition(|s| UNSEEN.contains(&s.as_str()));
+    let (model, read): (Vec<&String>, Vec<&String>) = rest.into_iter().partition(|s| MODEL.contains(&s.as_str()));
+    let names = |v: &[&String]| v.iter().map(|s| history::one_line(s, 40)).collect::<Vec<_>>().join(", ");
+    let mut said = Vec::new();
+    if !unseen.is_empty() {
+        said.push(format!("not from TorqOS's resident agent — a coding tool, torq agent run or torq doctor — so the broker cannot see what it read ({})", names(&unseen)));
+    }
+    if !model.is_empty() {
+        said.push(format!("its model could have been stood in for by another program on this machine ({})", names(&model)));
+    }
+    if !read.is_empty() || said.is_empty() {
+        said.push(if read.is_empty() { "made after reading untrusted content".to_string() } else { format!("made after reading untrusted content ({})", names(&read)) });
+    }
+    said.join("; ")
+}
+
 /// A proposal waiting for a person.
 #[derive(Debug, Clone)]
 pub struct Proposal {
@@ -994,6 +1030,8 @@ pub struct Proposal {
     pub reason: String,
     pub by: String,
     pub tainted: bool,
+    /// What tainted it, as the broker recorded it in the proposal (its session's sources): `taint_line`'s words.
+    pub sources: Vec<String>,
     /// Its apply failed once: it waits for a person again (ADR-008), who may apply it again or decline it.
     pub failed: bool,
     /// Whether this person may decline it without anyone else's password: their own agent proposed it (the
@@ -1029,7 +1067,15 @@ pub fn proposals() -> Result<Vec<Proposal>> {
     let me = crate::me()?;
     Ok(waiting_on_me(&entries, &me)
         .into_iter()
-        .map(|e| Proposal { seq: e.seq, reason: history::one_line(&e.reason, 300), by: history::one_line(&e.actor, 40), tainted: e.tainted, failed: history::failed_once(&entries, e.seq), yours: yours(e, &me) })
+        .map(|e| Proposal {
+            seq: e.seq,
+            reason: history::one_line(&e.reason, 300),
+            by: history::one_line(&e.actor, 40),
+            tainted: e.tainted,
+            sources: e.data["session"]["tainted_by"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).take(32).collect(),
+            failed: history::failed_once(&entries, e.seq),
+            yours: yours(e, &me),
+        })
         .collect())
 }
 

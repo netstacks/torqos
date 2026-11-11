@@ -157,7 +157,7 @@ impl Turn {
     /// Said plainly when the session read untrusted text: what it proposes is marked so, and asked for one
     /// by one.
     pub fn taint(&self) -> Option<String> {
-        (!self.tainted.is_empty()).then(|| format!("Tainted: this session read untrusted text ({}). What it proposes is marked so.", self.tainted.join(", ")))
+        (!self.tainted.is_empty()).then(|| format!("Tainted: {}. What it proposes is marked so.", crate::app::taint_line(&self.tainted)))
     }
 }
 
@@ -292,7 +292,7 @@ mod tests {
         assert!(!t.question.contains('\u{1b}') && !t.answer.contains(['\r', '\u{202e}']), "{t:?}");
         assert!(t.answer.starts_with("line one\nrewrite"), "{:?}", t.answer);
         assert_eq!(t.state(), "Answered · called read_journal");
-        assert!(t.taint().unwrap().contains("untrusted text (read_journal)"));
+        assert!(t.taint().unwrap().contains("untrusted content (read_journal)"));
         assert_eq!(c.proposals(), vec![(12, true)]);
         // Nothing more lands on a turn that is over.
         c.heard(Event::Say { text: "late".into() });

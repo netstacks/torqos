@@ -1723,7 +1723,7 @@ impl Settings {
                         who.push_str(" · its apply failed once — apply it again, or decline it");
                     }
                     if p.tainted {
-                        who.push_str(" · ⚠ tainted: made after reading untrusted content");
+                        who.push_str(&format!(" · ⚠ tainted: {}", app::taint_line(&p.sources)));
                     }
                     let row = settings::item_row(vec![
                         widget::column::with_capacity(2).push(widget::text::body(format!("#{}  {}", p.seq, p.reason))).push(widget::text::caption(who)).width(Length::Fill).into(),
@@ -1757,7 +1757,7 @@ impl Settings {
                     who.push_str(" · its apply failed once — apply it again, or decline it");
                 }
                 if p.tainted {
-                    who.push_str(" · ⚠ tainted: made after reading untrusted content");
+                    who.push_str(&format!(" · ⚠ tainted: {}", app::taint_line(&p.sources)));
                 }
                 page = page.push(widget::text::caption(who));
             }
