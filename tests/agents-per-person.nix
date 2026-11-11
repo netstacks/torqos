@@ -28,7 +28,10 @@ pkgs.testers.runNixOSTest {
     torq.agent.people = [ "alice" "bob" ];
     # Doctor mode on, for its resident service: the trust subtest speaks from that service's control group, as
     # TorqOS's resident agent does (ADR-051 step 5). No model is ever asked here.
-    torq.agent.doctor = { enable = true; endpoint = "http://127.0.0.1:9/v1"; model = "none"; };
+    # Its model a socket in a directory only root writes (none listens: no model is asked), so the resident
+    # agent's sessions can start clean (a TCP model on this machine would taint them: ADR-051 step 5).
+    torq.agent.doctor = { enable = true; endpoint = "unix:/run/torq-test-model/none.sock"; model = "none"; };
+    systemd.tmpfiles.rules = [ "d /run/torq-test-model 0755 root root -" ];
     # Named like an agent account, made by hand, not in torq.agent.people: no agent.
     users.users.torq-agent-carol = { isSystemUser = true; group = "torq-agent-carol"; home = "/var/lib/torq-agent-carol"; createHome = true; };
     users.groups.torq-agent-carol = { };

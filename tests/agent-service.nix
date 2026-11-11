@@ -45,7 +45,12 @@ let
             return answer("You said hello." if "Hello alice." in said else "I remember nothing.")
         return answer("Hello alice.")
     class H(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
         def do_POST(self):
+            # Which key each request came with: the resident agent's credential, or none.
+            with open("/run/fake-model/auth", "a") as a:
+                a.write(self.headers.get("Authorization", "none") + "\n")
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             out = json.dumps(reply(body)).encode()
             self.send_response(200)
@@ -53,7 +58,17 @@ let
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
             self.wfile.write(out)
-    ThreadingHTTPServer(("127.0.0.1", 8099), H).serve_forever()
+    # On a unix socket in a directory only root writes (its RuntimeDirectory): a model no account here can stand
+    # in for, so the resident agent's sessions start clean (ADR-051 step 5; a TCP one on this machine would not).
+    import os, socketserver
+    class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+    SOCK = "/run/fake-model/model.sock"
+    if os.path.exists(SOCK):
+        os.unlink(SOCK)
+    server = S(SOCK, H)
+    os.chmod(SOCK, 0o666)
+    server.serve_forever()
   '';
   # A program that makes itself undumpable (prctl PR_SET_DUMPABLE 0: its /proc files then root's), then
   # waits <seconds>.
@@ -104,8 +119,10 @@ pkgs.testers.runNixOSTest {
     users.users.bob = { isNormalUser = true; hashedPasswordFile = lib.mkForce null; hashedPassword = hash; };
     torq.agent.people = [ "alice" "bob" ];
     torq.broker.rebuildCommand = "true";
-    torq.agent.doctor = { enable = true; endpoint = "http://127.0.0.1:8099/v1"; model = "fake"; journal = true; maxSteps = 2; };
-    systemd.services.fake-model = { wantedBy = [ "multi-user.target" ]; serviceConfig.ExecStart = fakeModel; };
+    # The model's key in a file only root reads: the resident agent's credential (ADR-051 step 5's review).
+    torq.agent.doctor = { enable = true; endpoint = "unix:/run/fake-model/model.sock"; model = "fake"; journal = true; maxSteps = 2; apiKeyFile = "/var/lib/torq/secrets/model.key"; };
+    systemd.tmpfiles.rules = [ "d /var/lib/torq/secrets 0700 root root -" "f /var/lib/torq/secrets/model.key 0600 root root - sk-test-key" ];
+    systemd.services.fake-model = { wantedBy = [ "multi-user.target" ]; serviceConfig = { ExecStart = fakeModel; RuntimeDirectory = "fake-model"; }; };
     environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.tmux pkgs.procps (lib.hiPrio torqcli) (lib.hiPrio setfacl) ];
   };
 
@@ -113,7 +130,7 @@ pkgs.testers.runNixOSTest {
     import json, re, shlex
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("torq-broker.socket")
-    machine.wait_for_open_port(8099)
+    machine.wait_for_file("/run/fake-model/model.sock")
     repo = "/var/lib/torq/config"
     machine.succeed(f"mkdir -p {repo} && echo '{{}}' > {repo}/desktop.json && touch {repo}/flake.nix && torq-broker init")
     unit = "torq-agent@alice.service"
@@ -208,6 +225,27 @@ pkgs.testers.runNixOSTest {
         assert p["data"]["session"]["id"] == doctor["brokerSession"], (p, doctor)
         # Untainted because it came from the resident agent: the unit's own control group, which the broker reads.
         assert prop("ControlGroup") == "/system.slice/system-torq\\x2dagent.slice/torq-agent@alice.service", prop("ControlGroup")
+
+    with subtest("the model's key: the resident agent's credential; nothing run as the agent elsewhere reads it"):
+        auth = machine.succeed("cat /run/fake-model/auth").split("\n")
+        assert "Bearer sk-test-key" in auth and "none" not in [a for a in auth if a], auth
+        assert machine.succeed("stat -c %a:%U /var/lib/torq/secrets/model.key").strip() == "600:root"
+        machine.fail("su -s /bin/sh torq-agent-alice -c 'cat /var/lib/torq/secrets/model.key'")
+        as_user("alice", "torq agent run -- cat /var/lib/torq/secrets/model.key", ok=False)
+        assert as_user("alice", "torq agent run -- ls -A /run/credentials").strip() == "", "the units' credentials hidden"
+        # What the agent account would see of the unit's credential outside the sandbox (an administrator's
+        # sudo -u, which is root acting): shown, for the record.
+        print(machine.execute(f"su -s /bin/sh torq-agent-alice -c 'cat /run/credentials/{unit}/model-key' 2>&1"))
+        # One question at a terminal runs as any program of the agent's: it cannot use the key, and says so.
+        out = machine.execute("su - alice -c 'torq doctor hello' 2>&1")[1]
+        assert "only your resident agent holds" in out and "torq ask" in out, out
+
+    with subtest("no process of the agent's can put itself in the resident agent's control group"):
+        procs = f"/sys/fs/cgroup{prop('ControlGroup')}/cgroup.procs"
+        assert machine.succeed(f"stat -c %U {shlex.quote(procs)}").strip() == "root"
+        machine.fail(f"su -s /bin/sh torq-agent-alice -c {shlex.quote(f'echo $$ > {shlex.quote(procs)}')}")
+        as_user("alice", "torq agent run -- sh -c " + shlex.quote(f"echo $$ > {shlex.quote(procs)}"), ok=False)
+        assert machine.succeed(f"cat {shlex.quote(procs)}").split() == [prop("MainPID")], "nothing moved in"
 
     with subtest("bob cannot connect to alice's agent; the service answers alice alone, whoever connects"):
         out = machine.fail(f"su - bob -c 'socat -t 5 - UNIX-CONNECT:{sock} </dev/null' 2>&1")

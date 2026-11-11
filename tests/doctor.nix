@@ -118,7 +118,8 @@ pkgs.testers.runNixOSTest {
         r = json.loads(machine.succeed(f"cat {rec[0]}"))
         # Each tool it called that returns untrusted text, by name; the option docs not.
         assert r["tainted"] is True and r["proposed"] == [] and len(r["brokerSession"]) == 32, r
-        assert sorted(r["taintedBy"]) == sorted(["read_journal", "hardware_facts", "show_configuration", "show_ledger", "show_alarms"]), r["taintedBy"]
+        # First what the broker held from its start (torq doctor is not the resident agent: ADR-051 step 5).
+        assert r["taintedBy"][0] == "not-the-resident-agent" and sorted(r["taintedBy"][1:]) == sorted(["read_journal", "hardware_facts", "show_configuration", "show_ledger", "show_alarms"]), r["taintedBy"]
         assert len(r["refused"]) == 2, r
 
     with subtest("the broker holds the session's taint, where the agent cannot write; nothing was proposed or changed"):
@@ -130,7 +131,7 @@ pkgs.testers.runNixOSTest {
         b = json.loads(machine.succeed(f"cat {held}"))
         # What it read, and before that what it is: torq doctor runs through torq agent run, not the resident service
         # (ADR-051 step 5), so its session is tainted from its start.
-        assert b["tainted"] is True and b["tainted_by"][0] == "not-the-resident-agent" and sorted(b["tainted_by"][1:]) == sorted(r["taintedBy"]), (b, r)
+        assert b["tainted"] is True and b["tainted_by"][0] == "not-the-resident-agent" and sorted(b["tainted_by"]) == sorted(r["taintedBy"]), (b, r)
         machine.fail(f"su -s /bin/sh torq-agent-dev -c 'cat {held}'")
         machine.succeed("torq-broker verify")
   '';

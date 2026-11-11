@@ -17,6 +17,8 @@ let
     import json
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     class H(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
             out = json.dumps({"choices": [{"message": {"role": "assistant", "content": "Hello alice."}}]}).encode()
@@ -25,7 +27,17 @@ let
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
             self.wfile.write(out)
-    ThreadingHTTPServer(("127.0.0.1", 8099), H).serve_forever()
+    # On a unix socket in a directory only root writes (its RuntimeDirectory): a model no account here can stand
+    # in for, so the resident agent's sessions start clean (ADR-051 step 5; a TCP one on this machine would not).
+    import os, socketserver
+    class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+    SOCK = "/run/fake-model/model.sock"
+    if os.path.exists(SOCK):
+        os.unlink(SOCK)
+    server = S(SOCK, H)
+    os.chmod(SOCK, 0o666)
+    server.serve_forever()
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -44,8 +56,8 @@ pkgs.testers.runNixOSTest {
     torq.broker.rebuildCommand = "true";
     # alice's agent, resident, asking a scripted model on this machine.
     torq.agent.people = [ "alice" ];
-    torq.agent.doctor = { enable = true; endpoint = "http://127.0.0.1:8099/v1"; model = "fake"; maxSteps = 2; };
-    systemd.services.fake-model = { wantedBy = [ "multi-user.target" ]; serviceConfig.ExecStart = fakeModel; };
+    torq.agent.doctor = { enable = true; endpoint = "unix:/run/fake-model/model.sock"; model = "fake"; maxSteps = 2; };
+    systemd.services.fake-model = { wantedBy = [ "multi-user.target" ]; serviceConfig = { ExecStart = fakeModel; RuntimeDirectory = "fake-model"; }; };
   };
 
   testScript = ''
@@ -97,7 +109,7 @@ pkgs.testers.runNixOSTest {
     with subtest("from her session, the client the UIs share reaches her own agent"):
         out = in_session("torq-agent-ui --check")
         assert out.splitlines()[0] == "Idle · remembers nothing yet", out
-        assert "On this machine: 127.0.0.1:8099 · fake" in out, out
+        assert "Local model (llama-server on this machine)" in out, out
         assert machine.succeed(f"ps -o user= -p $(systemctl show -P MainPID {unit})").strip() == "torq-agent-alice"
         assert in_session("torq ask hello").strip() == "Hello alice."
         assert in_session("torq-agent-ui --check").splitlines()[0] == "Idle · remembers 1 turn"

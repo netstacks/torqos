@@ -25,6 +25,8 @@ let
         {"choices": [{"message": {"role": "assistant", "content": "Install jq."}}]},
     ]
     class H(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
         n = 0
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
@@ -35,7 +37,17 @@ let
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
             self.wfile.write(out)
-    HTTPServer(("127.0.0.1", 8099), H).serve_forever()
+    # On a unix socket in a directory only root writes (its RuntimeDirectory): a model no account here can stand
+    # in for, so the resident agent's sessions start clean (ADR-051 step 5; a TCP one on this machine would not).
+    import os, socketserver
+    class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+    SOCK = "/run/fake-model/model.sock"
+    if os.path.exists(SOCK):
+        os.unlink(SOCK)
+    server = S(SOCK, H)
+    os.chmod(SOCK, 0o666)
+    server.serve_forever()
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -52,8 +64,8 @@ pkgs.testers.runNixOSTest {
     torq.agent.people = [ "dev" "sam" ];
     torq.agent.mayPropose.settings = [ "networking" ];
     torq.broker.rebuildCommand = "true";
-    torq.agent.doctor = { enable = true; endpoint = "http://127.0.0.1:8099/v1"; model = "fake"; journal = true; maxSteps = 2; };
-    systemd.services.fake-model = { wantedBy = [ "multi-user.target" ]; serviceConfig.ExecStart = fakeModel; };
+    torq.agent.doctor = { enable = true; endpoint = "unix:/run/fake-model/model.sock"; model = "fake"; journal = true; maxSteps = 2; };
+    systemd.services.fake-model = { wantedBy = [ "multi-user.target" ]; serviceConfig = { ExecStart = fakeModel; RuntimeDirectory = "fake-model"; }; };
     environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.tmux ];
   };
 
@@ -61,7 +73,7 @@ pkgs.testers.runNixOSTest {
     import json, shlex
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("torq-broker.socket")
-    machine.wait_for_open_port(8099)
+    machine.wait_for_file("/run/fake-model/model.sock")
     repo = "/var/lib/torq/config"
     state = "/var/lib/torq/state"
     machine.succeed(f"mkdir -p {repo}/nixos && echo '{{}}' > {repo}/desktop.json && touch {repo}/flake.nix")
@@ -162,7 +174,8 @@ pkgs.testers.runNixOSTest {
         held = json.loads(machine.succeed(f"cat {state}/sessions/{doctor}.json"))
         # torq doctor runs through torq agent run, not the resident service: tainted from its start (ADR-051 step 5).
         assert doctor != sid and held["tainted_by"] == ["not-the-resident-agent", "read_journal"], held
-        code, jq = propose(packages("dev", ["jq"]), "jq for dev", session=doctor)
+        # Cited by a program of the agent's like the one that started it (not the resident agent).
+        code, jq = propose(packages("dev", ["jq"]), "jq for dev", session=doctor, resident=False)
         assert code == 0 and jq["tainted"] is True and jq["data"]["session"]["tainted_by"] == ["not-the-resident-agent", "read_journal"], jq
         # What the agent is told it proposed is the broker's record of the session.
         told = json.loads(machine.succeed(f"su -s /bin/sh torq-agent-dev -c 'torqcli agent session show {doctor}'"))
@@ -253,11 +266,13 @@ pkgs.testers.runNixOSTest {
         before = head()
         code, v = propose(packages("dev", ["ripgrep"]), "outside, its own session", session=outside, resident=False)
         assert code == 0 and v["tainted"] is True and "trust_applied" not in v, (code, v)
-        # Citing the resident agent's own clean session, whose id the ledger shows anyone: tainted all the same.
+        # Citing the resident agent's own clean session, whose id the ledger shows anyone: refused, and nothing of
+        # it lands in that session's record (the resident agent is never told it as its own).
         inside = start()
         code, v = propose(packages("dev", ["ripgrep"]), "outside, the resident agent's session", session=inside, resident=False)
-        assert code == 0 and v["tainted"] is True and v["data"]["session"]["tainted_by"] == ["not-the-resident-agent"] and "trust_applied" not in v, (code, v)
-        assert json.loads(machine.succeed(f"cat {state}/sessions/{inside}.json"))["tainted"] is False, "its record untouched"
+        assert code == 1 and "the resident agent's" in v["error"], (code, v)
+        rec = json.loads(machine.succeed(f"cat {state}/sessions/{inside}.json"))
+        assert rec["tainted"] is False and rec["proposals"] == [] and rec["resident"] is True, rec
         assert head() == before, "nothing applied"
         # No caller says it is the resident agent: the broker's word alone.
         code, v = ask("torq-agent-dev", {"args": ["--json", "session-start", "--resident"]})

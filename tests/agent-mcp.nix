@@ -86,6 +86,8 @@ pkgs.testers.runNixOSTest {
     # Doctor mode on, for alice's resident service (the control below speaks from its control group); no model
     # is ever asked.
     torq.agent.doctor = { enable = true; endpoint = "http://127.0.0.1:9/v1"; model = "none"; journal = true; };
+    # Where the control below says the model is: a directory only root writes.
+    systemd.tmpfiles.rules = [ "d /run/torq-test-model 0755 root root -" ];
     torq.broker.rebuildCommand = "true";
     # Claude Code chosen, allowed, and standing in.
     torq.unfree.packages = [ "claude-code" ];
@@ -186,16 +188,32 @@ pkgs.testers.runNixOSTest {
         assert held["tainted"] is True and held["tainted_by"] == ["not-the-resident-agent"], held
         assert head() == before, "not applied under alice's trust"
 
-    with subtest("the control: the same, from alice's resident agent's control group, is applied under her trust"):
+    with subtest("the resident agent, with a model on this machine's TCP: tainted from its start, not applied"):
+        # ADR-051 step 5's review: plain http is only ever to this machine, and any account here can listen on
+        # another of its addresses ([::1] beside the real 127.0.0.1) and answer as the model.
         unit = "torq-agent@alice.service"
         machine.succeed(f"systemctl start {unit}")
         cg = machine.succeed(f"systemctl show -P ControlGroup {unit}").strip()
         assert cg == "/system.slice/system-torq\\x2dagent.slice/torq-agent@alice.service", cg
         procs = shlex.quote(f"/sys/fs/cgroup{cg}/cgroup.procs")
-        inner = "TORQ_AGENT_SESSION=$(torqcli agent session start) torqcli -c 'configure; set users alice packages htop; commit comment \"resident\"'"
-        # Root moves this shell into the unit's group (root may; no process of the agent's can), then becomes the agent.
-        machine.succeed(f"sh -c {shlex.quote(f'echo $$ > {procs} && exec setpriv --reuid torq-agent-alice --regid torq-agent-alice --init-groups -- env HOME={home} sh -c {shlex.quote(inner)}')}")
-        p = proposal("resident")
+
+        def resident(reason):
+            inner = "TORQ_AGENT_SESSION=$(torqcli agent session start) torqcli -c " + shlex.quote(f'configure; set users alice packages htop; commit comment "{reason}"')
+            # Root moves this shell into the unit's group (root may; no process of the agent's can), then becomes the agent.
+            machine.succeed(f"sh -c {shlex.quote(f'echo $$ > {procs} && exec setpriv --reuid torq-agent-alice --regid torq-agent-alice --init-groups -- env HOME={home} sh -c {shlex.quote(inner)}')}")
+            return proposal(reason)
+
+        assert json.loads(machine.succeed("cat /etc/torq/broker.json"))["model"] == "http://127.0.0.1:9/v1"
+        before = head()
+        p = resident("resident, a TCP model")
+        assert p["tainted"] is True and p["data"]["session"]["tainted_by"] == ["local-tcp-model"], p
+        assert head() == before and not [e for e in entries() if e["kind"] == "applied"], "not applied under alice's trust"
+
+    with subtest("the control: with a model no account here can stand in for, the same is applied under her trust"):
+        # The broker's own settings, as the module would write them with the model on a socket only root's
+        # directory holds (root in the test; the agent can write neither).
+        machine.succeed("jq '.model = \"unix:/run/torq-test-model/none.sock\"' /etc/torq/broker.json > /root/broker.json && rm /etc/torq/broker.json && install -m 644 /root/broker.json /etc/torq/broker.json")
+        p = resident("resident")
         assert p["tainted"] is False and p["data"]["session"]["tainted_by"] == [], p
         applied = [e for e in entries() if e["kind"] == "applied"]
         assert len(applied) == 1 and applied[0]["data"]["proposal"] == p["seq"] and applied[0]["data"]["trust"] == g["seq"], applied

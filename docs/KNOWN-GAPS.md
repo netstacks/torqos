@@ -1106,8 +1106,8 @@ Its §5 lists claims without a test.
      in `torq.agent.people` who is not an administrator has an agent account the broker answers for, but
      cannot start a program as it; widening the rule is a decision of its own (the launcher's root step
      taking a non-administrator's input).
-   - **One model key for every agent.** `torq.agent.doctor.apiKeyFile` is one path, which each person's
-     agent must be able to read; a key per person is ADR-051's Agent page.
+   - **One model key for every agent.** `torq.agent.doctor.apiKeyFile` is one path (a file only root reads, since
+     step 5's review: each resident service gets it as its credential); a key per person is ADR-051's Agent page.
    - **A configuration that sets `torq agent mayPropose users` no longer evaluates** after the update: the
      option is removed (not renamed, its meaning changed), and NixOS says so ("no longer has any effect;
      please remove it") at `commit check` and at the update's build, so the update is not applied. Take the
@@ -1222,24 +1222,56 @@ Its §5 lists claims without a test.
    `tests/agent-mcp.nix`).** Open:
    - **What the resident rule rests on.** A session is untainted only from `torq-agent@<person>.service`'s own
      control group, read through the peer's pidfd. It holds because the unit delegates nothing (its
-     `cgroup.procs` is root's), no agent account has a user manager of its own, `torq agent run`'s programs are
-     in a process namespace of their own (they cannot name a process of the service's to trace or signal it),
-     and the unit's programs no longer read the agent's home (their home is the service's state directory,
-     hidden from `torq agent run`; the agent's home is inaccessible to the unit). Anything that breaks one of
-     those breaks the rule: a `Delegate=` on the unit, a lingering user manager for an agent account, a
-     `torq agent run` without `--unshare-pid`, a new place the harness or torqcli reads that the agent can
-     write. An administrator's `sudo -u torq-agent-<person>` shell is in the root process namespace, but Yama's
-     `ptrace_scope` 1 (modules/security.nix) lets it trace only its own descendants: only root traces the
-     harness, and that is root acting (6zzk), closed by strict mode.
-   - **A model on a TCP port of this machine can be stood in for.** With `torq agent doctor endpoint
-     http://127.0.0.1:<port>/…` (a person's own Ollama, say), any local program — one run as the agent
-     included — that binds that port while the model server is down answers as the model, and the resident
-     agent's untainted session then proposes what it is told, which trust would apply. The default local
-     model is a unix socket in a directory only llama-server writes, and a remote model is reached over TLS;
-     neither has this. Not fixed here: it is the endpoint's, not the broker's.
+     `cgroup.procs` is root's: `tests/agent-service.nix` checks the agent can write it neither as itself nor
+     under `torq agent run`), no agent account has a user manager of its own, `torq agent run`'s programs are in
+     a process namespace of their own (they cannot name a process of the service's to trace, signal, or reach
+     through `/proc/<pid>/root`), and the unit's programs no longer read the agent's home (their home is the
+     service's state directory, hidden from `torq agent run`; the agent's home is inaccessible to the unit).
+     modules/agent.nix asserts the first two and `kernel.yama.ptrace_scope` ≥ 1 (`checks.agent-assertions`).
+     Anything else that breaks one of those breaks the rule: a `torq agent run` without `--unshare-pid`, a new
+     place the harness or torqcli reads that the agent can write. **Yama does not cover the rest:** with
+     `ptrace_scope` 1 a same-uid process outside that sandbox — an administrator's `sudo -u torq-agent-<person>
+     …` in the root process namespace — still reaches the harness's `/proc/<pid>/root` (and so the service's
+     state directory: its home, its memory) though it may not trace it (checked by step 5's review). Only the
+     sandbox's process namespace keeps `torq agent run`'s programs from that; the administrator's own shell is
+     root acting (6zzk), closed by strict mode. That the state directory is the agent uid's to write at all is
+     item 2 of the review, waiting on the owner (a uid of the resident service's own).
+   - **A model any account here could stand in for taints the resident agent** (fixed from step 5's review,
+     2026-11-10). This said, wrongly, that a TCP model could be stood in for only while its server was down:
+     any account may listen on another of the machine's addresses (`[::1]` beside a server on `127.0.0.1`), and
+     curl tries that first, so an impostor answers while the real server runs. Now the broker judges the model
+     from broker.json's `model` (agent.json's endpoint, the module's) at each resident session's start: `https`
+     is believed; `unix:` only if every directory above the socket is root's and writable by no one else (its
+     own directory may be its service's, never a person's or an agent's: llama-server's default is); anything
+     else — plain `http`, which is only ever to this machine — taints the session from its start
+     (`local-tcp-model`, `model-socket-open`, `model-unknown`), and the harness takes that taint before the
+     model is asked (its answer headed, not remembered). `tests/agent-mcp.nix` (a resident proposal with
+     `http://127.0.0.1:…` tainted and not applied; with a root-held socket, applied), broker units. Left: a
+     person who wants their local Ollama trusted gives it a unix socket in a root-owned directory; an `https`
+     endpoint on this machine is believed (TLS: only who holds its key answers — if that key is readable by an
+     agent or a person, it is not).
    - **A kernel before 6.5** has no SO_PEERPIDFD: every agent session is tainted and trust applies nothing.
    - **`torq doctor` and `torq agent propose` no longer get session trust**: they run through `torq agent run`,
      so their proposals are tainted from the start (the guide says so). `torq ask` is the untainted path.
+   - **The model's key is the resident service's credential** (fixed from step 5's review): `apiKeyFile` is a file
+     only root reads (the module refuses the store, the config repo, an agent's or a person's home, /tmp), given
+     to `torq-agent@<person>.service` by LoadCredential; `torq agent run` hides `/run/credentials`. So
+     `torq doctor` and `torq agent propose` cannot use a keyed model: they say so and send the person to `torq
+     ask` (`tests/agent-service.nix`). An agent-uid process outside the sandbox (an administrator's `sudo -u`) and
+     the credential: CREDENTIAL-OUTSIDE.
+   - **A session is cited only by its own kind of caller** (fixed from step 5's review): a program of the agent's
+     citing the resident agent's session id (the ledger shows it) is refused, so its proposal is never put in
+     that session's record and told to the resident agent as its own; the resident agent cites only sessions
+     it started (`tests/sessions.rs`, `tests/agent-proposals.nix`).
+   - **`torq-mcp --link` runs in the launcher's sandbox** (fixed from step 5's review), with the services' memory
+     and the credentials hidden. Its own checks (a link, not a directory) and its writes are separate steps: a
+     Claude Code already running as the same agent can swap `~/.claude` for a link in between, which leads the
+     write only where that agent can write in that sandbox — nothing the agent could not change itself.
+   - **The doctor's and torq-mcp's calls to the broker about their session end within 30 s**
+     (`machine::SESSION_TIMEOUT`, fixed from step 5's review); one that does not is a failed report.
+   - **The applet's window list of proposals marks taint, not its kind**: the Proposals page, the conversation's
+     taint line and torqcli's apply prompt say it plainly (`app::taint_line`: not the resident agent; a model
+     another program could stand in for; what it read); the window's short proposal rows say only "(tainted)".
    - **torq-mcp answers one request at a time**: a `propose_change` (up to 30 minutes, torqcli's evaluation)
      holds a `ping` behind it; `notifications/cancelled` is ignored; no resources, prompts or pagination; the
      MCP versions 2024-11-05 to 2025-06-18. Only the doctor's tools (`show_configuration` is the only part of
