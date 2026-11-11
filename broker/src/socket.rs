@@ -93,6 +93,19 @@ pub fn resident_peer(conn: &impl std::os::fd::AsFd, pid: i32, person: &str) -> b
     peer_in(conn, pid, |cgroup| in_resident(cgroup, person))
 }
 
+/// Whether `who`, at the other end of `conn` (its pid `pid`), is its person's resident agent: the resident
+/// account (the map's word for the uid) first, then its process in the unit's control group (ADR-051 3 amended
+/// 2026-11-11: the uid primary, the control group a second line). What serve sets `Caller.resident` by.
+pub fn found_resident(who: &Caller, conn: &impl std::os::fd::AsFd, pid: i32) -> bool {
+    found_resident_by(who, conn, pid, in_resident)
+}
+
+/// `found_resident`, the control group judged by `in_unit` (the cgroup text, the person).
+fn found_resident_by(who: &Caller, conn: &impl std::os::fd::AsFd, pid: i32, in_unit: impl Fn(&str, &str) -> bool) -> bool {
+    let Some(person) = who.agent_for.as_deref().filter(|_| who.resident_account) else { return false };
+    peer_in(conn, pid, |cgroup| in_unit(cgroup, person))
+}
+
 /// `resident_peer`, its control group judged by `ok`.
 fn peer_in(conn: &impl std::os::fd::AsFd, pid: i32, ok: impl Fn(&str) -> bool) -> bool {
     use std::os::fd::AsRawFd as _;
@@ -549,6 +562,21 @@ mod tests {
         assert!(!peer_in(&c, pid, |_| true), "it exited: its pid could soon be anyone's");
         child.wait().unwrap();
         assert!(!peer_in(&c, pid, |_| true), "reaped: gone");
+    }
+
+    /// What serve sets `resident` by: the resident account, *and* its process in the unit — each needed. A test's
+    /// process is in no unit, so the unit is said to be found here; the agent account in it is still no resident.
+    #[test]
+    fn residency_takes_the_uid_and_the_unit() {
+        let me = std::process::id() as i32;
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let in_any = |_: &str, _: &str| true;
+        assert!(found_resident_by(&who(980), &a, me, in_any), "the resident account, in its unit");
+        assert!(!found_resident_by(&who(980), &a, me, |_, _| false), "the resident account, outside its unit");
+        assert!(!found_resident_by(&who(990), &a, me, in_any), "the agent account, even in the unit");
+        assert!(!found_resident_by(&who(1000), &a, me, in_any), "a person");
+        assert!(!found_resident_by(&who(982), &a, me, in_any), "named like a resident, not in the map");
+        assert!(!found_resident(&who(980), &a, me), "a test is no unit's");
     }
 
     /// Not a test: the peer of `the_peer_is_read_by_its_pidfd`, which connects and ends.

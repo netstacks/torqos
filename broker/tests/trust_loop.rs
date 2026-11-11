@@ -1997,6 +1997,8 @@ fn nothing_builds_on_an_unledgered_commit() {
         b.propose(&t, "on it", Actor::User, false).unwrap_err(),
         b.apply(pending.body.seq, "casey", false).unwrap_err(),
         b.revert(applied.body.seq, "casey").unwrap_err(),
+        // Nor a decline (step 5's second review): the record is put right first, as for every other act.
+        torq_broker::at::Scheduler::new(&b, "true", "true").decline(pending.body.seq, "casey").unwrap_err(),
     ] {
         let err = format!("{err:#}");
         assert!(err.contains("not the last ledgered commit") && err.contains("reset --hard"), "{err}");
@@ -3931,4 +3933,47 @@ fn a_failed_apply_still_waits() {
     let s = torq_broker::at::Scheduler::new(&b, "true", "true");
     assert_eq!(s.decline(first.body.seq, "casey").unwrap().body.kind, "declined");
     b.propose_on(Some(&head), &d, "one more, now", Actor::Agent, false).unwrap();
+}
+
+/// The not-done limit exactly (step 5's second review): 99 not done, one more is taken; at 100, refused; past it,
+/// refused.
+#[test]
+fn the_not_done_limit_is_exactly_its_number() {
+    let n = torq_broker::AGENT_WAITING_LOOK;
+    for (dead, ok) in [(n - 2, true), (n - 1, true), (n, false), (n + 1, false)] {
+        let (dir, b) = setup("true");
+        dead_proposal(&b, "torq-agent-casey", dead);
+        let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+        let r = b.propose_on(Some(&b.repo.head().unwrap()), &d, "htop", Actor::Agent, false);
+        assert_eq!(r.is_ok(), ok, "{dead} not done: {r:?}");
+        if !ok {
+            assert!(format!("{:#}", r.unwrap_err()).contains("neither applied nor declined"));
+        }
+    }
+}
+
+/// The resident agent's not-done limit is its own (step 5's second review): a coding tool's 100 dead proposals do
+/// not stop the resident agent proposing, nor the resident's a coding tool.
+#[test]
+fn the_resident_agents_not_done_limit_is_its_own() {
+    let (dir, b) = setup("true");
+    let casey = [("torq-agent-casey".to_string(), "casey".to_string())].into_iter().collect();
+    let resident = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_agent_limits(&torq_broker::agent::Limits { agents: casey, settings: vec![] }).as_agent(Some("torq-agent-casey")).from_resident(true);
+    dead_proposal(&b, "torq-agent-casey", torq_broker::AGENT_WAITING_LOOK);
+    let d = write_diff(dir.path(), "p.diff", "--- /dev/null\n+++ b/users/casey/packages.json\n@@ -0,0 +1 @@\n+[\"htop\"]\n");
+    assert!(b.propose_on(Some(&b.repo.head().unwrap()), &d, "htop", Actor::Agent, false).is_err(), "the coding tool's own: used up");
+    let p = resident.propose_on(Some(&b.repo.head().unwrap()), &d, "htop", Actor::Agent, false).unwrap();
+    assert_eq!(p.body.data["resident"], true);
+}
+
+/// Step 5's second review: schedule says a declined proposal was declined, before anything else it would say of it
+/// (that it is tainted, here) — so a person is told the one thing that settles it.
+#[test]
+fn a_declined_proposal_is_said_declined_first_when_scheduled() {
+    let t = At::new();
+    let d = write_diff(t.m.dir.path(), "theme.diff", THEME);
+    let p = t.m.b.propose_on(Some(&t.m.b.repo.head().unwrap()), &d, "theme", Actor::User, true).unwrap().body.seq;
+    t.s().decline(p, "casey").unwrap();
+    let e = format!("{:#}", t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap_err());
+    assert!(e.contains("was declined") && !e.contains("untrusted"), "{e}");
 }

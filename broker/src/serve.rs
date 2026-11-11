@@ -188,9 +188,9 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     let cmd = req.args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_default();
     // Whether an agent account calls from its person's resident agent (ADR-051 step 5): the kernel's answer, read
     // here, for what the broker judges by it — a session's start and a proposal.
-    if let (Some(person), "propose" | "session-start") = (who.agent_for.clone(), cmd.as_str()) {
+    if matches!(cmd.as_str(), "propose" | "session-start") {
         // From its uid first (the resident's own account), then its control group (ADR-051 3 amended 2026-11-11).
-        who.resident = who.resident_account && socket::resident_peer(&std::io::stdin(), pid, &person);
+        who.resident = socket::found_resident(&who, &std::io::stdin(), pid);
     }
     let diff_s = diff.as_ref().map(|p| p.to_string_lossy().into_owned());
     let hash_s = hash.as_ref().map(|p| p.to_string_lossy().into_owned());

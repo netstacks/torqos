@@ -394,6 +394,10 @@ impl<'a> Scheduler<'a> {
         }
         let b = self.b;
         let lock = Lock::acquire(&b.state_dir)?;
+        // As schedule and apply do, first (step 5's second review): an interrupted change put right, and a head
+        // the ledger does not hold refused — a decline is ledgered on the record as it is.
+        b.reconcile_locked(&lock, by)?;
+        b.refuse_unledgered_head()?;
         let p = b.ledger.get(proposal_seq)?;
         match p.body.kind.as_str() {
             "proposal" => {}

@@ -114,7 +114,7 @@ fn sessions_are_bounded() {
     // As many as are kept, from long ago: one more start takes the oldest away.
     for i in 0..session::SESSIONS_KEPT {
         let id = format!("{i:032x}");
-        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": format!("2020-01-01T00:{:02}:{:02}Z", i / 60 % 60, i % 60), "tainted": i == 0, "tainted_by": [], "agent": "torq-agent-casey"}).to_string()).unwrap();
+        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": format!("2020-01-01T00:{:02}:{:02}Z", i / 60 % 60, i % 60), "tainted": i == 0, "tainted_by": [], "agent": "torq-agent-casey", "resident": true}).to_string()).unwrap();
     }
     let oldest = format!("{:032x}", 0);
     session::start(&b).unwrap();
@@ -125,9 +125,20 @@ fn sessions_are_bounded() {
     let now = chrono::Utc::now().to_rfc3339();
     for i in 0..session::SESSIONS_AN_HOUR {
         let id = format!("{:032x}", 1_000_000 + i);
-        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": now, "tainted": false, "tainted_by": [], "agent": "torq-agent-casey"}).to_string()).unwrap();
+        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": now, "tainted": false, "tainted_by": [], "agent": "torq-agent-casey", "resident": true}).to_string()).unwrap();
     }
     assert!(format!("{:#}", session::start(&b).unwrap_err()).contains("in the last hour"));
+    // The resident agent's own count (step 5's second review): its hour used up, another program of the agent
+    // account's still starts (tainted, as ever) — and the other way round.
+    let other = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey"));
+    assert!(session::start(&other).unwrap().tainted);
+    for i in 0..session::SESSIONS_AN_HOUR {
+        let id = format!("{:032x}", 2_000_000 + i);
+        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": now, "tainted": true, "tainted_by": ["not-the-resident-agent"], "agent": "torq-agent-casey"}).to_string()).unwrap();
+    }
+    assert!(format!("{:#}", session::start(&other).unwrap_err()).contains("in the last hour"));
+    assert!(format!("{:#}", session::start(&b).unwrap_err()).contains("in the last hour"), "the resident's own hour is still used up");
+    // (The other way round: the_resident_agents_budget_is_its_own.)
     // Each agent its own count, and its own oldest (ADR-051 3): casey's agent used up, sam's starts, and its
     // start takes none of casey's records away.
     let before = fs::read_dir(&sessions).unwrap().count();
@@ -248,13 +259,18 @@ fn as_agent(dir: &Path, agent: &str, people: &[&str]) -> Broker {
 /// A model reached over TLS: nothing here can stand in for it (agent::model_taint).
 const TLS_MODEL: &str = "https://api.example.org/v1";
 
+/// No host is this machine (the build's sandbox resolves none: `this_host` would take each for this machine).
+fn elsewhere(_: &str) -> bool {
+    false
+}
+
 /// What the ledger records of a call that came over the socket from `agent`'s person's resident agent (its own
 /// account, as the kernel names it), found resident (serve.rs sets both so: ADR-051 step 5).
 fn by_socket(b: Broker, agent: &str) -> Broker {
     // The resident agent's own account (ADR-051 3 amended 2026-11-11), the residents' map naming it.
     let person = agent.strip_prefix("torq-agent-").unwrap_or(agent);
     let resident = format!("torq-resident-{person}");
-    let mut b = b.from_resident(true).with_model(Some(TLS_MODEL)).with_residents(&[(resident.clone(), person.to_string())].into_iter().collect());
+    let mut b = b.from_resident(true).with_model(Some(TLS_MODEL)).with_this_host(elsewhere).with_residents(&[(resident.clone(), person.to_string())].into_iter().collect());
     b.ledger.set_via(Some("socket".into()), Some(resident));
     b
 }
@@ -269,7 +285,7 @@ fn trust_applies_only_what_the_agent_itself_sent() {
     let s = session::start(&b).unwrap();
     // The agent account itself over the socket is not the resident agent (ADR-051 3 amended 2026-11-11).
     for (via, caller) in [(None, None), (Some("sudo"), None), (Some("socket"), Some("dev")), (Some("socket"), Some("torq-agent-sam")), (Some("socket"), Some("torq-agent-casey")), (Some("socket"), Some("torq-resident-sam"))] {
-        let mut root = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey")).from_resident(true).with_model(Some(TLS_MODEL)).with_residents(&[("torq-resident-casey".to_string(), "casey".to_string()), ("torq-resident-sam".to_string(), "sam".to_string())].into_iter().collect());
+        let mut root = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey")).from_resident(true).with_model(Some(TLS_MODEL)).with_this_host(elsewhere).with_residents(&[("torq-resident-casey".to_string(), "casey".to_string()), ("torq-resident-sam".to_string(), "sam".to_string())].into_iter().collect());
         root.ledger.set_via(via.map(String::from), caller.map(String::from));
         let p = propose(&root, &diff(dir.path(), "r.diff", "users/casey/packages.json", "[\"nmap\"]"), Actor::Agent, false, Some(&s.id)).unwrap();
         assert!(session::apply_trusted(&root, &p).unwrap().is_none(), "{via:?} {caller:?}");
@@ -512,4 +528,69 @@ fn the_resident_agent_with_a_model_others_can_stand_in_for_is_tainted() {
     // Over TLS: clean, and applied (the control).
     let s = session::start(&b).unwrap();
     assert!(!s.tainted, "{s:?}");
+}
+
+/// The second review of step 5: the broker's own reading of the model — the residents' and agents' uids from
+/// /etc/passwd (none may hold the socket's directory), /etc/passwd unreadable (not believed), https to this host —
+/// and whose resident account is whose.
+#[test]
+fn the_brokers_model_judgement_and_its_residents() {
+    let (_dir, b) = setup(&[]);
+    let b = b
+        .with_agent_limits(&Limits { agents: agents(&["casey", "sam"]), settings: vec![] })
+        .with_residents(&[("torq-resident-casey".to_string(), "casey".to_string()), ("torq-resident-pat".to_string(), "pat".to_string())].into_iter().collect());
+    assert_eq!(b.resident_of("casey"), Some("torq-resident-casey"));
+    assert_eq!(b.resident_of("sam"), None, "an agent, but no resident account named");
+    assert_eq!(b.resident_of("pat"), None, "a resident account named, but no agent");
+    let passwd = "root:x:0:0::/root:/bin/sh\ncasey:x:1000:100::/home/casey:/bin/sh\ntorq-agent-casey:x:990:990::/var/lib/torq-agent-casey:/sbin/nologin\ntorq-resident-casey:x:980:980::/var/empty:/sbin/nologin\n";
+    let dir = |uid: u32| Some(torq_broker::agent::Dir { uid, mode: 0o40755, dir: true });
+    let at = |owner: u32| move |p: &Path| if p == Path::new("/run/m") { dir(owner) } else { dir(0) };
+    let no = |_: &str| false;
+    let b = b.with_model(Some("unix:/run/m/model.sock"));
+    assert_eq!(b.model_taint_from(Some(passwd), at(61234), no), None, "its service's own directory");
+    for owner in [980, 990, 1000] {
+        assert_eq!(b.model_taint_from(Some(passwd), at(owner), no), Some("model-socket-open"), "{owner}: a resident's, an agent's, a person's");
+    }
+    assert_eq!(b.model_taint_from(None, at(61234), no), Some("model-unknown"), "/etc/passwd unreadable: not believed");
+    let b = b.with_model(Some("https://models.example.org/v1"));
+    assert_eq!(b.model_taint_from(Some(passwd), at(0), no), None);
+    assert_eq!(b.model_taint_from(Some(passwd), at(0), |h: &str| h == "models.example.org"), Some("local-tcp-model"), "https to this host");
+    // The real question of this host, as far as the build's sandbox can ask it.
+    assert!(torq_broker::this_host("127.0.0.1") && torq_broker::this_host("::1") && torq_broker::this_host("localhost"));
+    assert!(torq_broker::this_host("no-such-host.invalid"), "what cannot be resolved is not believed");
+    assert!(!torq_broker::this_host("203.0.113.7"), "an address that is not this machine's");
+}
+
+/// Step 5's second review: a coding tool (any program of the agent account's) that uses up its hour of sessions
+/// does not keep the resident agent from starting one.
+#[test]
+fn the_resident_agents_budget_is_its_own() {
+    let (dir, b) = setup(&[]);
+    let sessions = dir.path().join("state/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    for i in 0..session::SESSIONS_AN_HOUR {
+        let id = format!("{:032x}", 3_000_000 + i);
+        fs::write(sessions.join(format!("{id}.json")), json!({"id": id, "started": now, "tainted": true, "tainted_by": ["not-the-resident-agent"], "agent": "torq-agent-casey"}).to_string()).unwrap();
+    }
+    let other = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey"));
+    assert!(format!("{:#}", session::start(&other).unwrap_err()).contains("in the last hour"));
+    let s = session::start(&b).unwrap();
+    assert!(s.resident && !s.tainted, "{s:?}");
+}
+
+/// Step 5's second review: the model is judged at the session's start and again at a trusted apply. A session that
+/// started clean is not trusted once the broker's settings name a model that is not believed.
+#[test]
+fn the_model_is_judged_again_at_a_trusted_apply() {
+    let (dir, b) = setup(&[]);
+    session::grant(&b, "casey", 30).unwrap();
+    let s = session::start(&b).unwrap();
+    assert!(!s.tainted);
+    // The same agent, its model now a TCP one on this machine.
+    let tcp = by_socket(Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey")), "torq-agent-casey").with_model(Some("http://127.0.0.1:11434/v1"));
+    let p = propose(&tcp, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    assert!(!p.body.tainted, "its session was clean when it started");
+    assert!(session::apply_trusted(&tcp, &p).unwrap().is_none(), "not under trust: the model is not believed now");
+    assert!(session::apply_trusted(&b, &p).unwrap().is_some(), "with the believed model: applied");
 }

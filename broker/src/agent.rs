@@ -57,15 +57,19 @@ pub struct Dir {
 }
 
 /// Why the resident agent's sessions with model `endpoint` cannot be believed untainted, or None if they
-/// can. `https://`: TLS says who answers. `unix:<path>`: only if every directory above the socket is root's
+/// can. `https://`: TLS says who answers — unless the host is this machine (`here`, or a loopback name: then a local
+/// TCP model, as plain http is). `unix:<path>`: only if every directory above the socket is root's
 /// and writable by no one else (no group or other write bit, no link on the way), but for the socket's own
 /// directory, which may be its service's (llama-server's RuntimeDirectory) — never a person's or an agent's
 /// (`untrusted`). Anything else (`http://`, which is only ever to this machine): a local TCP model.
-pub fn model_taint(endpoint: Option<&str>, stat: impl Fn(&std::path::Path) -> Option<Dir>, untrusted: impl Fn(u32) -> bool) -> Option<&'static str> {
+pub fn model_taint(endpoint: Option<&str>, stat: impl Fn(&std::path::Path) -> Option<Dir>, untrusted: impl Fn(u32) -> bool, here: impl Fn(&str) -> bool) -> Option<&'static str> {
     use std::path::{Component, Path};
     let Some(e) = endpoint else { return Some(MODEL_UNKNOWN) };
     if let Some(rest) = e.strip_prefix("https://") {
-        return (rest.is_empty() || rest.starts_with('/')).then_some(MODEL_UNKNOWN);
+        // TLS says who answers — but not on this machine, where a local CA or a key readable by an account here
+        // would let that account answer too (the second review of step 5): https to this host is a local TCP model.
+        let Some(host) = https_host(rest) else { return Some(MODEL_UNKNOWN) };
+        return (loopback_name(&host) || here(&host)).then_some(LOCAL_TCP_MODEL);
     }
     if let Some(path) = e.strip_prefix("unix:") {
         let p = Path::new(path);
@@ -88,6 +92,34 @@ pub fn model_taint(endpoint: Option<&str>, stat: impl Fn(&std::path::Path) -> Op
     Some(MODEL_UNKNOWN)
 }
 
+
+/// The host of an `https://` URL's rest (`host[:port]/path`, `[v6]:port/…`), lowercased, brackets kept off;
+/// None if there is none, or it carries a user (`u@h`), which the module refuses anyway.
+pub fn https_host(rest: &str) -> Option<String> {
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split_once(']')?.0
+    } else {
+        authority.rsplit_once(':').map_or(authority, |(h, _)| h)
+    };
+    (!host.is_empty()).then(|| host.trim_end_matches('.').to_ascii_lowercase())
+}
+
+/// Whether `host` names this machine by itself: `localhost` (and any `*.localhost`), an address in 127/8,
+/// `::1`, the unspecified addresses, or an IPv4-mapped loopback.
+pub fn loopback_name(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => a.is_loopback() || a.is_unspecified(),
+        Ok(std::net::IpAddr::V6(a)) => a.is_loopback() || a.is_unspecified() || a.to_ipv4_mapped().is_some_and(|m| m.is_loopback() || m.is_unspecified()),
+        Err(_) => false,
+    }
+}
 /// One file the change touches: its path in the repo, and its JSON before and after (None: absent).
 pub struct Touched {
     pub path: String,
@@ -267,12 +299,26 @@ mod tests {
             _ => None,
         };
         let untrusted = |uid: u32| (1000..30000).contains(&uid) || uid == 990;
-        assert_eq!(model_taint(Some("unix:/run/llama-cpp/llama.sock"), llama, untrusted), None);
-        assert_eq!(model_taint(Some("https://api.anthropic.com/v1"), llama, untrusted), None);
+        // This machine, by its own names and addresses (the broker asks the system: `Broker::model_taint`).
+        let here = |h: &str| h == "laptop" || h == "laptop.lan" || h == "192.168.1.38" || h == "fe80::1";
+        assert_eq!(model_taint(Some("unix:/run/llama-cpp/llama.sock"), llama, untrusted, here), None);
+        assert_eq!(model_taint(Some("https://api.anthropic.com/v1"), llama, untrusted, here), None);
         for (e, why) in [
             ("http://127.0.0.1:11434/v1", LOCAL_TCP_MODEL),
             ("http://localhost:11434/v1", LOCAL_TCP_MODEL),
             ("http://[::1]:8080/v1", LOCAL_TCP_MODEL),
+            ("https://localhost:8443/v1", LOCAL_TCP_MODEL),
+            ("https://LOCALHOST./v1", LOCAL_TCP_MODEL),
+            ("https://ollama.localhost/v1", LOCAL_TCP_MODEL),
+            ("https://127.0.0.2:8443/v1", LOCAL_TCP_MODEL),
+            ("https://[::1]:8443/v1", LOCAL_TCP_MODEL),
+            ("https://[::ffff:127.0.0.1]/v1", LOCAL_TCP_MODEL),
+            ("https://0.0.0.0/v1", LOCAL_TCP_MODEL),
+            ("https://laptop:8443/v1", LOCAL_TCP_MODEL),
+            ("https://Laptop.LAN/v1", LOCAL_TCP_MODEL),
+            ("https://192.168.1.38:8443/v1", LOCAL_TCP_MODEL),
+            ("https://[fe80::1]/v1", LOCAL_TCP_MODEL),
+            ("https://user@api.example/v1", MODEL_UNKNOWN),
             ("unix:/run/open/m.sock", MODEL_SOCKET_OPEN),
             ("unix:/run/alices/m.sock", MODEL_SOCKET_OPEN),
             ("unix:/run/agents/m.sock", MODEL_SOCKET_OPEN),
@@ -285,9 +331,9 @@ mod tests {
             ("ftp://x", MODEL_UNKNOWN),
             ("https://", MODEL_UNKNOWN),
         ] {
-            assert_eq!(model_taint(Some(e), llama, untrusted), Some(why), "{e}");
+            assert_eq!(model_taint(Some(e), llama, untrusted, here), Some(why), "{e}");
         }
-        assert_eq!(model_taint(None, llama, untrusted), Some(MODEL_UNKNOWN), "doctor off, or an older broker.json");
+        assert_eq!(model_taint(None, llama, untrusted, here), Some(MODEL_UNKNOWN), "doctor off, or an older broker.json");
     }
 
     /// Two people, each with an agent: viper's and sam's.

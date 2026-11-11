@@ -42,9 +42,9 @@ use serde_json::json;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-/// How many sessions may be started in an hour: past that, refused. Each agent account has its own count,
-/// and the doctor's sessions and any other program's run as that agent share it: a program run as it can use it up
-/// and keep the doctor from starting for the rest of the hour — refused, never less careful.
+/// How many sessions may be started in an hour: past that, refused. Each agent its own count, and within it the
+/// resident agent's own, apart from every other program's of the agent account (step 5's second review): a program
+/// run as the agent account can use up its own, never the resident agent's.
 pub const SESSIONS_AN_HOUR: usize = 600;
 /// How many session records are kept for each agent: past that, its oldest go. A proposal naming a session whose
 /// record is gone is refused, never taken as untainted; what tainted it is in its proposal's entry.
@@ -142,15 +142,15 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// Every record kept, as (when it started, its id, whose).
-fn kept(b: &Broker) -> Result<Vec<(String, String, String)>> {
+/// Every record kept, as (when it started, its id, whose, whether the resident agent started it).
+fn kept(b: &Broker) -> Result<Vec<(String, String, String, bool)>> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir(b)) else { return Ok(out) };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let Some(id) = name.strip_suffix(".json").filter(|i| id_ok(i)) else { continue };
         if let Some(r) = read(b, id)? {
-            out.push((r.started, r.id, r.agent));
+            out.push((r.started, r.id, r.agent, r.resident));
         }
     }
     out.sort();
@@ -166,17 +166,19 @@ pub fn start(b: &Broker) -> Result<Record> {
     let kept = kept(b)?;
     let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
     // Each agent its own count: one person's agent cannot keep another's from starting.
-    let recent = kept.iter().filter(|(t, _, a)| a == agent && chrono::DateTime::parse_from_rfc3339(t).is_ok_and(|t| t > hour_ago)).count();
+    // And the resident agent its own, apart from any other program of the agent account's (step 5's second review):
+    // a coding tool cannot keep the resident agent from starting, nor it a coding tool; together at most twice.
+    let recent = kept.iter().filter(|(t, _, a, r)| a == agent && *r == b.resident() && chrono::DateTime::parse_from_rfc3339(t).is_ok_and(|t| t > hour_ago)).count();
     if recent >= SESSIONS_AN_HOUR {
         bail!("refused: {recent} of {agent}'s sessions were started in the last hour (at most {SESSIONS_AN_HOUR})");
     }
     // A record of no agent's (from before ADR-051 3) is no one's to report into or cite: it goes. Then its
     // own oldest go, never another agent's.
-    for (_, id, _) in kept.iter().filter(|(_, _, a)| a.is_empty()) {
+    for (_, id, _, _) in kept.iter().filter(|(_, _, a, _)| a.is_empty()) {
         std::fs::remove_file(dir(b).join(format!("{id}.json")))?;
     }
-    let mine: Vec<&(String, String, String)> = kept.iter().filter(|(_, _, a)| a == agent).collect();
-    for (_, id, _) in mine.iter().take((mine.len() + 1).saturating_sub(SESSIONS_KEPT)) {
+    let mine: Vec<&(String, String, String, bool)> = kept.iter().filter(|(_, _, a, r)| a == agent && *r == b.resident()).collect();
+    for (_, id, _, _) in mine.iter().take((mine.len() + 1).saturating_sub(SESSIONS_KEPT)) {
         std::fs::remove_file(dir(b).join(format!("{id}.json")))?;
     }
     let mut bytes = [0u8; 16];
@@ -431,6 +433,12 @@ fn trusted_by(b: &Broker, p: &Entry) -> Option<String> {
 /// is never kept waiting by the build.
 pub fn apply_trusted(b: &Broker, p: &Entry) -> Result<Option<Entry>> {
     if trusted_by(b, p).is_none() {
+        return Ok(None);
+    }
+    // The model judged again, as the broker's settings stand at this apply (step 5's second review): a session that
+    // started clean with one model is not trusted once the machine asks one that is not believed. Before any lock:
+    // it may ask the resolver.
+    if b.model_taint().is_some() {
         return Ok(None);
     }
     let lock = Lock::acquire(&b.state_dir)?;

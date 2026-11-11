@@ -84,6 +84,8 @@ pub struct Broker {
     resident: bool,
     /// The model the agents' harness asks (broker.json's `model`): whether a resident session can start clean.
     model: Option<String>,
+    /// Whether a host is this machine (`this_host`; a test's own answer).
+    here: fn(&str) -> bool,
     /// Each resident account and the person it serves (broker.json's `residents`).
     residents: std::collections::BTreeMap<String, String>,
     /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
@@ -700,6 +702,7 @@ impl Broker {
             agent: None,
             resident: false,
             model: None,
+            here: this_host,
             residents: Default::default(),
             backup: backup::Backups::default(),
             secrets: secrets::Store::default(),
@@ -1346,6 +1349,20 @@ impl Broker {
         self.agent_limits.has_agent(person).then(|| self.residents.iter().find(|(_, p)| p.as_str() == person).map(|(r, _)| r.as_str())).flatten()
     }
 
+    /// How this run asks whether a host is this machine (`this_host`, the system's own answer, by default).
+    pub fn with_this_host(mut self, here: fn(&str) -> bool) -> Self {
+        self.here = here;
+        self
+    }
+
+    /// Whether ledger entry `e` (an agent's proposal or refusal) counts against this run's budget: the resident
+    /// agent's and every other program's of the agent account are counted apart (step 5's second review), so a
+    /// coding tool cannot use up what the resident agent may propose — and the resident agent not a coding tool's.
+    /// Each has the whole limit; together, at most twice it.
+    pub fn same_budget(&self, e: &Entry) -> bool {
+        e.body.data["resident"].as_bool().unwrap_or(false) == self.resident
+    }
+
     /// The model the agents' harness asks (broker.json's `model`, as agent.json names it).
     pub fn with_model(mut self, endpoint: Option<&str>) -> Self {
         self.model = endpoint.map(String::from);
@@ -1356,7 +1373,19 @@ impl Broker {
     /// socket's directories as they are, people and agent accounts by /etc/passwd and the broker's map.
     pub fn model_taint(&self) -> Option<&'static str> {
         use std::os::unix::fs::MetadataExt;
-        let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+        let passwd = std::fs::read_to_string("/etc/passwd").ok();
+        self.model_taint_from(
+            passwd.as_deref(),
+            |p| std::fs::symlink_metadata(p).ok().map(|m| agent::Dir { uid: m.uid(), mode: m.mode(), dir: m.is_dir() }),
+            self.here,
+        )
+    }
+
+    /// `model_taint`, with /etc/passwd's text (None: it could not be read — then nothing can be said of who owns
+    /// what, and the model is not believed), the directories' metadata and whether a host is this machine given.
+    /// People's uids and every agent and resident account's (the maps') may not hold the socket's directory.
+    pub fn model_taint_from(&self, passwd: Option<&str>, stat: impl Fn(&std::path::Path) -> Option<agent::Dir>, here: impl Fn(&str) -> bool) -> Option<&'static str> {
+        let Some(passwd) = passwd else { return Some(agent::MODEL_UNKNOWN) };
         let agent_uids: Vec<u32> = passwd
             .lines()
             .filter_map(|l| {
@@ -1364,11 +1393,7 @@ impl Broker {
                 (f.len() > 2 && (self.agent_limits.serves(f[0]).is_some() || self.residents.contains_key(f[0]))).then(|| f[2].parse().ok()).flatten()
             })
             .collect();
-        agent::model_taint(
-            self.model.as_deref(),
-            |p| std::fs::symlink_metadata(p).ok().map(|m| agent::Dir { uid: m.uid(), mode: m.mode(), dir: m.is_dir() }),
-            |uid| crate::socket::PEOPLE_UIDS.contains(&uid) || agent_uids.contains(&uid),
-        )
+        agent::model_taint(self.model.as_deref(), stat, |uid| crate::socket::PEOPLE_UIDS.contains(&uid) || agent_uids.contains(&uid), here)
     }
 
     /// The agent account this run acts for, and the person it serves; refused if it names none, or one
@@ -2072,7 +2097,7 @@ impl Broker {
         let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
         let recent = entries
             .iter()
-            .filter(|e| e.body.kind == "refused" && e.body.actor == "agent" && e.body.data["agent"] == json!(self.agent))
+            .filter(|e| e.body.kind == "refused" && e.body.actor == "agent" && e.body.data["agent"] == json!(self.agent) && self.same_budget(e))
             .filter(|e| chrono::DateTime::parse_from_rfc3339(&e.body.ts).is_ok_and(|t| t > hour_ago))
             .count();
         if recent >= AGENT_REFUSALS_AN_HOUR {
@@ -2091,7 +2116,13 @@ impl Broker {
             tier: Tier::System.to_string(),
             tainted,
             reason: if reason.trim().is_empty() { "(no reason)".into() } else { reason },
-            data: json!({ "diff_sha256": hex::encode(Sha256::digest(&diff)), "why": one_line(why, 1000), "agent": self.agent }),
+            data: {
+                let mut d = json!({ "diff_sha256": hex::encode(Sha256::digest(&diff)), "why": one_line(why, 1000), "agent": self.agent });
+                if self.resident {
+                    d["resident"] = true.into();
+                }
+                d
+            },
         })?;
         Ok(())
     }
@@ -2330,7 +2361,7 @@ impl Broker {
             let mine: Vec<&Entry> = entries
                 .iter()
                 .rev()
-                .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent" && p.body.data["agent"].as_str() == Some(account) && !done.contains(&p.body.seq))
+                .filter(|p| p.body.kind == "proposal" && p.body.actor == "agent" && p.body.data["agent"].as_str() == Some(account) && self.same_budget(p) && !done.contains(&p.body.seq))
                 .collect();
             // However many of them could land: at most AGENT_WAITING_LOOK not done, so that the window below
             // always holds every one of them — dying proposals (a file the desktop saves, say) can never push
@@ -2420,6 +2451,10 @@ impl Broker {
             let (account, person) = self.acting_agent()?;
             data["agent"] = account.into();
             data["agent_for"] = person.into();
+            // The resident agent's own, counted apart from any other program's of the agent's (step 5's second review).
+            if self.resident {
+                data["resident"] = true.into();
+            }
         }
         if !cuts_off.is_empty() {
             data["cuts_off"] = cuts_off.into();
@@ -3531,4 +3566,56 @@ mod tests {
         let p = status(None, false, "/nix/store/old").problems();
         assert!(p.len() == 1 && p[0].contains("next boot"), "{p:?}");
     }
+}
+
+/// Whether `host` (as an https URL names it, lowercased) is this machine: its own host name, or a name or address
+/// that resolves to a loopback, unspecified or own address (the system's resolver: /etc/hosts, then DNS). One that
+/// cannot be resolved is taken for this machine — not believed — since nothing can say it is not (step 5's second
+/// review: https to this host is a local TCP model).
+pub fn this_host(host: &str) -> bool {
+    let name = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_ascii_lowercase();
+    if !name.is_empty() && (host == name || host.split('.').next() == Some(name.as_str())) {
+        return true;
+    }
+    let own = own_addresses();
+    let local = |ip: std::net::IpAddr| ip.is_loopback() || ip.is_unspecified() || own.contains(&ip) || agent::loopback_name(&ip.to_string());
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return local(ip);
+    }
+    use std::net::ToSocketAddrs;
+    match (host, 443).to_socket_addrs() {
+        Ok(addrs) => {
+            let addrs: Vec<_> = addrs.collect();
+            addrs.is_empty() || addrs.iter().any(|a| local(a.ip()))
+        }
+        Err(_) => true,
+    }
+}
+
+/// This machine's own addresses, as the kernel lists them: IPv6 from /proc/net/if_inet6, IPv4 from the local
+/// routing table (/proc/net/fib_trie's `/32 host LOCAL`).
+pub fn own_addresses() -> Vec<std::net::IpAddr> {
+    let mut out = Vec::new();
+    for l in std::fs::read_to_string("/proc/net/if_inet6").unwrap_or_default().lines() {
+        let Some(hex) = l.split_whitespace().next().filter(|h| h.len() == 32) else { continue };
+        let bytes: Option<Vec<u8>> = (0..16).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect();
+        if let Some(b) = bytes.and_then(|b| <[u8; 16]>::try_from(b).ok()) {
+            out.push(std::net::IpAddr::V6(std::net::Ipv6Addr::from(b)));
+        }
+    }
+    let trie = std::fs::read_to_string("/proc/net/fib_trie").unwrap_or_default();
+    let mut last = None;
+    for l in trie.lines() {
+        let t = l.trim_start_matches([' ', '|', '+', '-']).trim();
+        if let Ok(a) = t.parse::<std::net::Ipv4Addr>() {
+            last = Some(a);
+        } else if t.starts_with("/32 host LOCAL") {
+            if let Some(a) = last {
+                out.push(std::net::IpAddr::V4(a));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
