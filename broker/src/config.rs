@@ -49,6 +49,11 @@ pub struct Settings {
     /// nothing is proposed as one.
     #[serde(default)]
     pub agent: crate::agent::Limits,
+    /// The model the agents' harness asks, as /etc/torq/agent.json names it (`unix:/run/llama-cpp/llama.sock`,
+    /// `http://127.0.0.1:…`, `https://…`): whether the resident agent's sessions can be believed untainted depends
+    /// on it (ADR-051 step 5, amended: `agent::model_taint`). None (doctor mode off, or an older file): they cannot.
+    #[serde(default)]
+    pub model: Option<String>,
     /// The config repo's remote (ADR-036, `torq.remote.url`): SSH only. None: local, as ever.
     #[serde(default)]
     pub remote: Option<String>,
@@ -144,6 +149,7 @@ impl Settings {
             home,
             people: Vec::new(),
             agent: crate::agent::Limits::default(),
+            model: None,
             remote: None,
             snapshot: String::new(),
             backups: Default::default(),
@@ -229,6 +235,7 @@ pub fn resolve(root: bool, fixed: Option<Settings>, asked: Requested, defaults: 
             home: defaults.home,
             people: defaults.people,
             agent: defaults.agent,
+            model: defaults.model,
             remote: defaults.remote,
             snapshot: defaults.snapshot,
             backups: defaults.backups,
@@ -304,6 +311,7 @@ mod tests {
             home: "/root".into(),
             people: vec!["casey".into()],
             agent: crate::agent::Limits::default(),
+            model: None,
             remote: None,
             snapshot: String::new(),
             backups: Default::default(),

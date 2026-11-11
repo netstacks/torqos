@@ -42,6 +42,14 @@ in
       description = "torq-agent package (set by the TorqOS flake).";
     };
 
+    modelEndpoint = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      internal = true;
+      readOnly = true;
+      default = if !cfg.enable then null else if local then "unix:${socket}" else cfg.endpoint;
+      description = "The model the harness asks, as agent.json and broker.json name it (the broker judges by it whether a resident session can start clean: ADR-051 step 5).";
+    };
+
     endpoint = lib.mkOption {
       type = lib.types.nullOr (lib.types.strMatching "(https://[^[:space:]]+|http://(127\\.0\\.0\\.1|localhost|\\[::1])(:[0-9]+)?(/[^[:space:]]*)?|unix:/[^[:space:]]+)");
       default = null;
@@ -177,7 +185,7 @@ in
     (lib.mkIf cfg.enable {
       environment.systemPackages = [ cfg.package ];
       environment.etc."torq/agent.json".text = builtins.toJSON {
-        endpoint = if local then "unix:${socket}" else cfg.endpoint;
+        endpoint = cfg.modelEndpoint;
         inherit (cfg) model apiKeyFile journal maxSteps;
       };
       # Every agent account (ADR-051 3): each person's agent runs the doctor for them.

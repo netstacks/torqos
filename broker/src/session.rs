@@ -69,6 +69,11 @@ pub struct Record {
     /// The proposals that cited it, as the broker ledgered them (what the agent is told it did).
     #[serde(default)]
     pub proposals: Vec<Cited>,
+    /// Whether its person's resident agent started it (ADR-051 step 5): only the resident agent cites a session it
+    /// started, and only another program of the agent's one that program's kind started — so no proposal of
+    /// another program's is told to the resident agent as its own. False for a record from before.
+    #[serde(default)]
+    pub resident: bool,
 }
 
 /// A proposal that cited a session, and the change it became if a person's trust applied it.
@@ -180,10 +185,14 @@ pub fn start(b: &Broker) -> Result<Record> {
     if read(b, &id)?.is_some() {
         bail!("a session {id} exists already");
     }
-    // Untainted at its start only from the resident agent (ADR-051 step 5): any other program of the agent's
-    // reads what the broker never sees.
-    let (tainted, tainted_by) = if b.resident() { (false, vec![]) } else { (true, vec![socket::NOT_RESIDENT.to_string()]) };
-    let r = Record { id, started: now(), tainted, tainted_by, agent: agent.into(), proposals: vec![] };
+    // Untainted at its start only from the resident agent (ADR-051 step 5), and only when its model is one no
+    // account here can stand in for (its review: a TCP model on this machine, a socket in a place others write).
+    let taint = if b.resident() { b.model_taint() } else { Some(socket::NOT_RESIDENT) };
+    let (tainted, tainted_by) = match taint {
+        None => (false, vec![]),
+        Some(why) => (true, vec![why.to_string()]),
+    };
+    let r = Record { id, started: now(), tainted, tainted_by, agent: agent.into(), proposals: vec![], resident: b.resident() };
     write(b, &r)?;
     Ok(r)
 }
@@ -230,6 +239,13 @@ pub fn judge(b: &Broker, actor: Actor, flag: bool, session: Option<&str>) -> Res
             // Its own session, or none: one agent never cites another's (ADR-051 3).
             if r.agent != agent {
                 bail!("refused: session {id} is not {agent}'s");
+            }
+            // A session is cited by its own kind of caller only (step 5's review): its id is in the ledger, and a
+            // proposal of another program's cited by the resident agent's session would be told to the resident
+            // agent as its own (`cite`, the record's `proposals`).
+            if r.resident != b.resident() {
+                let whose = if r.resident { "the resident agent's" } else { "another program's of the agent's" };
+                bail!("refused: session {id} is {whose}: only that kind of caller cites it");
             }
             // Judged by its session only when it comes from the resident agent (ADR-051 step 5): a session's id
             // is in the ledger for anyone to read, so another program of the agent's could cite one.

@@ -439,6 +439,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_backup_restore(&s.restore)
         .with_people(&s.people)
         .with_agent_limits(&s.agent)
+        .with_model(s.model.as_deref())
         .as_agent(cli.agent.as_deref())
         .from_resident(cli.resident)
         .with_remote(s.remote.as_deref())

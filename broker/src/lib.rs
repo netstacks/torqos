@@ -82,6 +82,8 @@ pub struct Broker {
     /// Whether that agent account calls from its person's resident agent (ADR-051 step 5; `--resident`, which
     /// only the socket adds): only then is its session untainted at its start, and its proposal judged by it.
     resident: bool,
+    /// The model the agents' harness asks (broker.json's `model`): whether a resident session can start clean.
+    model: Option<String>,
     /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
     backup: backup::Backups,
     /// Where the values of the secrets are, and what encrypts them (ADR-052, secrets.rs).
@@ -695,6 +697,7 @@ impl Broker {
             nix_cache: None,
             agent: None,
             resident: false,
+            model: None,
             backup: backup::Backups::default(),
             secrets: secrets::Store::default(),
             remote: None,
@@ -1322,6 +1325,31 @@ impl Broker {
     /// See `from_resident`.
     pub fn resident(&self) -> bool {
         self.resident
+    }
+
+    /// The model the agents' harness asks (broker.json's `model`, as agent.json names it).
+    pub fn with_model(mut self, endpoint: Option<&str>) -> Self {
+        self.model = endpoint.map(String::from);
+        self
+    }
+
+    /// Why a resident session cannot start clean because of its model (`agent::model_taint`), read now: the
+    /// socket's directories as they are, people and agent accounts by /etc/passwd and the broker's map.
+    pub fn model_taint(&self) -> Option<&'static str> {
+        use std::os::unix::fs::MetadataExt;
+        let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+        let agent_uids: Vec<u32> = passwd
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split(':').collect();
+                (f.len() > 2 && self.agent_limits.serves(f[0]).is_some()).then(|| f[2].parse().ok()).flatten()
+            })
+            .collect();
+        agent::model_taint(
+            self.model.as_deref(),
+            |p| std::fs::symlink_metadata(p).ok().map(|m| agent::Dir { uid: m.uid(), mode: m.mode(), dir: m.is_dir() }),
+            |uid| crate::socket::PEOPLE_UIDS.contains(&uid) || agent_uids.contains(&uid),
+        )
     }
 
     /// The agent account this run acts for, and the person it serves; refused if it names none, or one

@@ -245,10 +245,13 @@ fn as_agent(dir: &Path, agent: &str, people: &[&str]) -> Broker {
     by_socket(Broker::new(dir.join("config"), dir.join("state"), "true").with_agent_limits(&Limits { agents: agents(people), settings: vec![] }).as_agent(Some(agent)), agent)
 }
 
+/// A model reached over TLS: nothing here can stand in for it (agent::model_taint).
+const TLS_MODEL: &str = "https://api.example.org/v1";
+
 /// What the ledger records of a call that came over the socket from `caller`, from its person's resident
 /// agent (serve.rs sets both so: ADR-051 step 5).
 fn by_socket(b: Broker, caller: &str) -> Broker {
-    let mut b = b.from_resident(true);
+    let mut b = b.from_resident(true).with_model(Some(TLS_MODEL));
     b.ledger.set_via(Some("socket".into()), Some(caller.into()));
     b
 }
@@ -465,17 +468,44 @@ fn only_the_resident_agent_is_untainted() {
     let p = propose(&other, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
     assert!(p.body.tainted && p.body.data["session"]["tainted_by"] == json!(["not-the-resident-agent"]), "{:?}", p.body);
     assert!(session::apply_trusted(&other, &p).unwrap().is_none(), "not applied under trust");
-    // Citing the resident agent's untainted session: tainted all the same.
+    // Citing the resident agent's session (its id is in the ledger): refused, and nothing of it lands in that
+    // session's record — so the resident agent is never told another program's proposal as its own.
     let clean = session::start(&b).unwrap();
-    assert!(!clean.tainted && clean.tainted_by.is_empty());
-    let p = propose(&other, &diff(dir.path(), "j.diff", "users/casey/packages.json", "[\"jq\"]"), Actor::Agent, false, Some(&clean.id)).unwrap();
-    assert!(p.body.tainted && p.body.data["session"]["tainted_by"] == json!(["not-the-resident-agent"]), "{:?}", p.body);
-    assert!(session::apply_trusted(&other, &p).unwrap().is_none());
-    assert!(session::apply_trusted(&b, &p).unwrap().is_none(), "nor by the resident agent's broker run: the proposal is tainted on the record");
-    assert!(!session::read(&b, &clean.id).unwrap().unwrap().tainted, "its record untouched: only the proposal is tainted");
+    assert!(!clean.tainted && clean.tainted_by.is_empty() && clean.resident);
+    let e = format!("{:#}", propose(&other, &diff(dir.path(), "j.diff", "users/casey/packages.json", "[\"jq\"]"), Actor::Agent, false, Some(&clean.id)).unwrap_err());
+    assert!(e.contains("the resident agent's"), "{e}");
+    let held = session::read(&b, &clean.id).unwrap().unwrap();
+    assert!(!held.tainted && held.proposals.is_empty(), "its record untouched: {held:?}");
+    // Nor the other way: the resident agent does not cite another program's session.
+    let e = format!("{:#}", propose(&b, &diff(dir.path(), "k.diff", "users/casey/packages.json", "[\"jq\"]"), Actor::Agent, false, Some(&s.id)).unwrap_err());
+    assert!(e.contains("another program's"), "{e}");
     assert_eq!(kinds(&b, "applied"), 0);
     // The resident agent's own, on that session: applied under trust.
     let p = propose(&b, &diff(dir.path(), "t.diff", "users/casey/packages.json", "[\"tree\"]"), Actor::Agent, false, Some(&clean.id)).unwrap();
     assert!(!p.body.tainted && p.body.data["session"]["tainted_by"] == json!([]), "{:?}", p.body);
     assert!(session::apply_trusted(&b, &p).unwrap().is_some());
+}
+
+/// ADR-051 step 5's review: the resident agent's session starts clean only with a model no account here can
+/// stand in for. A TCP model on this machine (an impostor on `[::1]` beside the real one on `127.0.0.1`), a
+/// socket in a place others can write, or no model named: tainted from its start, and not applied under trust.
+#[test]
+fn the_resident_agent_with_a_model_others_can_stand_in_for_is_tainted() {
+    let (dir, b) = setup(&[]);
+    session::grant(&b, "casey", 30).unwrap();
+    let open = tempfile::tempdir().unwrap();
+    let sock = format!("unix:{}/m.sock", open.path().display());
+    for (model, why) in [(Some("http://localhost:11434/v1"), "local-tcp-model"), (Some("http://127.0.0.1:8080/v1"), "local-tcp-model"), (Some(sock.as_str()), "model-socket-open"), (None, "model-unknown")] {
+        let mut r = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey")).from_resident(true).with_model(model);
+        r.ledger.set_via(Some("socket".into()), Some("torq-agent-casey".into()));
+        let s = session::start(&r).unwrap();
+        assert!(s.resident && s.tainted && s.tainted_by == [why], "{model:?}: {s:?}");
+        let p = propose(&r, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+        assert!(p.body.tainted, "{model:?}");
+        assert!(session::apply_trusted(&r, &p).unwrap().is_none(), "{model:?}");
+    }
+    assert_eq!(kinds(&b, "applied"), 0);
+    // Over TLS: clean, and applied (the control).
+    let s = session::start(&b).unwrap();
+    assert!(!s.tainted, "{s:?}");
 }

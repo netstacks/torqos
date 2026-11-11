@@ -39,6 +39,55 @@ impl Limits {
     }
 }
 
+/// What taints the resident agent's sessions from their start because of the model it asks (ADR-051 step 5,
+/// amended by its review): a model the agent — or any account here — could stand in for. Plain http is only
+/// ever to this machine (agent/src/model.rs), and any local process may listen on another of its addresses
+/// (`[::1]` beside `127.0.0.1`), so a TCP model on this machine is never believed.
+pub const LOCAL_TCP_MODEL: &str = "local-tcp-model";
+/// A unix socket for the model in a place someone other than root (and the model's own service) can write.
+pub const MODEL_SOCKET_OPEN: &str = "model-socket-open";
+/// No model named (doctor mode off, an older broker.json), or one not understood.
+pub const MODEL_UNKNOWN: &str = "model-unknown";
+
+/// What `model_taint` reads of a directory: its owner, its mode, whether it is one (a link is not).
+pub struct Dir {
+    pub uid: u32,
+    pub mode: u32,
+    pub dir: bool,
+}
+
+/// Why the resident agent's sessions with model `endpoint` cannot be believed untainted, or None if they
+/// can. `https://`: TLS says who answers. `unix:<path>`: only if every directory above the socket is root's
+/// and writable by no one else (no group or other write bit, no link on the way), but for the socket's own
+/// directory, which may be its service's (llama-server's RuntimeDirectory) — never a person's or an agent's
+/// (`untrusted`). Anything else (`http://`, which is only ever to this machine): a local TCP model.
+pub fn model_taint(endpoint: Option<&str>, stat: impl Fn(&std::path::Path) -> Option<Dir>, untrusted: impl Fn(u32) -> bool) -> Option<&'static str> {
+    use std::path::{Component, Path};
+    let Some(e) = endpoint else { return Some(MODEL_UNKNOWN) };
+    if let Some(rest) = e.strip_prefix("https://") {
+        return (rest.is_empty() || rest.starts_with('/')).then_some(MODEL_UNKNOWN);
+    }
+    if let Some(path) = e.strip_prefix("unix:") {
+        let p = Path::new(path);
+        if !p.is_absolute() || !p.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_))) {
+            return Some(MODEL_SOCKET_OPEN);
+        }
+        let Some(parent) = p.parent().filter(|d| *d != Path::new("/")) else { return Some(MODEL_SOCKET_OPEN) };
+        for (i, d) in parent.ancestors().enumerate() {
+            let Some(m) = stat(d) else { return Some(MODEL_SOCKET_OPEN) };
+            let owner_ok = m.uid == 0 || (i == 0 && !untrusted(m.uid));
+            if !m.dir || m.mode & 0o022 != 0 || !owner_ok {
+                return Some(MODEL_SOCKET_OPEN);
+            }
+        }
+        return None;
+    }
+    if e.starts_with("http://") {
+        return Some(LOCAL_TCP_MODEL);
+    }
+    Some(MODEL_UNKNOWN)
+}
+
 /// One file the change touches: its path in the repo, and its JSON before and after (None: absent).
 pub struct Touched {
     pub path: String,
@@ -198,6 +247,48 @@ mod tests {
     use serde_json::json;
 
     const VIPER: &str = "torq-agent-viper";
+
+    /// ADR-051 step 5, amended by its review: a model any account here could stand in for taints the resident
+    /// agent's sessions. TCP on this machine always (an impostor on `[::1]` beside the real server on
+    /// `127.0.0.1`); a unix socket only in a place that is root's (its own directory may be its service's).
+    #[test]
+    fn a_model_that_can_be_stood_in_for_taints() {
+        let dir = |uid: u32, mode: u32| Some(Dir { uid, mode, dir: true });
+        // llama-server's: /run root's 0755, /run/llama-cpp its DynamicUser's 0755.
+        let llama = |p: &std::path::Path| match p.to_str().unwrap() {
+            "/" | "/run" => dir(0, 0o755),
+            "/run/llama-cpp" => dir(61234, 0o755),
+            "/run/open" => dir(0, 0o1777),
+            "/run/alices" => dir(1000, 0o755),
+            "/run/agents" => dir(990, 0o755),
+            "/run/root/deeper" => dir(61234, 0o755),
+            "/run/root" => dir(61234, 0o755),
+            "/run/link" => Some(Dir { uid: 0, mode: 0o777, dir: false }),
+            _ => None,
+        };
+        let untrusted = |uid: u32| (1000..30000).contains(&uid) || uid == 990;
+        assert_eq!(model_taint(Some("unix:/run/llama-cpp/llama.sock"), llama, untrusted), None);
+        assert_eq!(model_taint(Some("https://api.anthropic.com/v1"), llama, untrusted), None);
+        for (e, why) in [
+            ("http://127.0.0.1:11434/v1", LOCAL_TCP_MODEL),
+            ("http://localhost:11434/v1", LOCAL_TCP_MODEL),
+            ("http://[::1]:8080/v1", LOCAL_TCP_MODEL),
+            ("unix:/run/open/m.sock", MODEL_SOCKET_OPEN),
+            ("unix:/run/alices/m.sock", MODEL_SOCKET_OPEN),
+            ("unix:/run/agents/m.sock", MODEL_SOCKET_OPEN),
+            ("unix:/run/root/deeper/m.sock", MODEL_SOCKET_OPEN),
+            ("unix:/run/link/m.sock", MODEL_SOCKET_OPEN),
+            ("unix:/run/missing/m.sock", MODEL_SOCKET_OPEN),
+            ("unix:/run/llama-cpp/../open/m.sock", MODEL_SOCKET_OPEN),
+            ("unix:relative.sock", MODEL_SOCKET_OPEN),
+            ("unix:/m.sock", MODEL_SOCKET_OPEN),
+            ("ftp://x", MODEL_UNKNOWN),
+            ("https://", MODEL_UNKNOWN),
+        ] {
+            assert_eq!(model_taint(Some(e), llama, untrusted), Some(why), "{e}");
+        }
+        assert_eq!(model_taint(None, llama, untrusted), Some(MODEL_UNKNOWN), "doctor off, or an older broker.json");
+    }
 
     /// Two people, each with an agent: viper's and sam's.
     fn limits(settings: &[&str]) -> Limits {

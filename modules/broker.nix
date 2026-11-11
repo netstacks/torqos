@@ -331,6 +331,9 @@ in
         people = config.torq.accounts.people;
         # Each agent account and the person it serves (ADR-051 3), and what every agent may propose.
         agent = { inherit (config.torq.agent) agents; inherit (config.torq.agent.mayPropose) settings; };
+        # The model the harness asks (ADR-051 step 5, amended): a resident session starts clean only with one no
+        # account here can stand in for — a TCP model on this machine never (broker/src/agent.rs, model_taint).
+        model = config.torq.agent.doctor.modelEndpoint;
         # The config repo's remote (ADR-036): none, or an SSH URL.
         remote = config.torq.remote.url;
         # The backups the configuration declares, each with its restic (ADR-038, modules/backup.nix).
