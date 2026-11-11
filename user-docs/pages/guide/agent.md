@@ -37,8 +37,10 @@ alice@machine:~$ torq doctor "why is my wifi flaky?"        # reads and explains
 alice@machine:~$ torq agent propose "install htop for me"   # may also propose one change
 ```
 
-Only an administrator can run them. Both run as your agent, in a sandbox, for that one question.
-`torq agent propose` ends with a proposal number, or nothing.
+Only an administrator can run them. Both run as your agent, in a sandbox, for that one question. `torq agent propose` ends with a
+proposal number, or nothing. They run as any program of your agent's does (through `torq agent run`), not
+as your resident agent, so what they propose is always marked tainted and waits for you: your trust (below)
+never applies it. For that, ask your resident agent (`torq ask`).
 
 ## Ask your agent
 
@@ -118,15 +120,40 @@ holds no secret.
 Logs, device names, the ledger and configuration values are text anyone could have written, and a
 line in a log can carry instructions meant for the agent. So each time the agent reads such text, it
 tells the broker first, and the broker marks the agent's session **tainted** — for good: nothing
-the agent can do clears it. A proposal from a tainted session is marked so, and so is a proposal
-from a program run as the agent that keeps no session with the broker (Claude Code under
-`torq agent run`, for example): TorqOS cannot see what such a program read.
+the agent can do clears it. A proposal from a tainted session is marked so.
 
-This is a limit to know about. The broker holds only what it is told: TorqOS's own doctor reports
-every read before the model sees it, but another program run as the agent can open a session and
-never report, and its proposals then look untainted. What bounds that is the rest of the design:
-trust covers only your own folder, lasts at most 60 minutes, needs your password, is recorded, and
-never covers a system change.
+Only your **resident agent** — the one `torq ask`, the panel and its window talk to — starts with a
+clean session: the broker checks, from the kernel, that the request comes from inside its service. Any
+other program run as your agent (a coding tool such as Claude Code, `torq doctor`, `torq agent propose`,
+anything under `torq agent run`) is tainted from its first request, because TorqOS cannot see what such a
+program read; `request system apply` says so (`not-the-resident-agent`).
+
+## Claude Code, as your agent
+
+Claude Code can run as your agent instead of as you: in your agent's account, seeing only the folder you
+share with it, and changing the system only by proposing. An administrator chooses it (it is unfree, so
+allowed first):
+
+```text
+alice@torq# set torq unfree packages claude-code
+alice@torq# set torq agent tools claude-code
+alice@torq# commit
+```
+
+(or the Agent page: **Allow Claude Code**, then **Install Claude Code for the agents**, then Your Changes).
+Then start it in a folder of yours:
+
+```text
+alice@torq> torq agent run --share ~/projects/site -- claude
+```
+
+The first time, sign in there (your Claude subscription or an API key): the sign-in is kept in your agent's
+home, never in yours. Each time it starts, TorqOS links its own tools into Claude Code — an MCP server named
+`torqos` (read the machine's alarms, ledger, configuration, logs and hardware; propose a change) and a skill
+on how this machine is configured — and leaves your other Claude Code settings as they were. Everything it
+proposes, through those tools or with `torqcli` in its shell, is marked tainted and waits for you; your
+trust never applies it. Its own "skip permissions" mode is safe to use for that reason: there is nothing it
+can apply. The Agent page says whether it is installed for you, and how to start it.
 
 ## Apply a proposal
 
@@ -164,6 +191,6 @@ alice@torq> request system agent trust revoke
 
 For the next 30 minutes (at most 60), your agent's proposals **in your own folder** — your packages —
 apply as soon as it makes them, without asking you. Never a system change, never a proposal from a
-tainted session, never someone else's folder, and never another person's agent. Each one is its own change in the ledger, marked with
+tainted session — so only your resident agent's, never Claude Code's or `torq agent propose`'s — never someone else's folder, and never another person's agent. Each one is its own change in the ledger, marked with
 your trust, and `request system revert <n>` undoes it. While it holds, `show system alarms` says so.
 Only you can give trust for your folder, and you can end it at any time.

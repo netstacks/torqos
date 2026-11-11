@@ -2547,6 +2547,66 @@ vouches for, that only proposes, every change ledgered and undone in one command
      that chooses Claude Code (into the draft, as its other settings), and how to start it. **Not in this step:**
      "Start Claude Code" from the agent's window (a folder to choose and a terminal to open: its own step), Codex
      and opencode.
+- **As built (step 5, 2026-11-10, `work/agents`; decisions 5 and 7, as the design above, which differs from them
+  where it says):** **`torq-mcp`** (agent/src/mcp.rs, its program agent/src/mcp/main.rs): MCP's stdio transport,
+  hand-written on serde_json; `initialize` (the client's version where it is one of 2025-06-18, 2025-03-26,
+  2024-11-05, else the first; `tools` its one capability; once), `notifications/initialized`, `ping` (also before
+  `initialize`), `tools/list` and `tools/call` (both refused before `initialize`); any other request -32601, a
+  batch, a non-object, a wrong `jsonrpc`, an id not a string or whole number, a member JSON-RPC does not have
+  -32600, `params` not an object -32602, text not JSON or not UTF-8 -32700, a line past 1 MiB read to its end and
+  -32600 (the next is served); notifications and responses never answered. `tools/call` takes an offered tool by
+  its exact name (else -32602 "Unknown tool"), its arguments checked by the tool's own `plan`; a refusal or a
+  failure is the call's result with `isError`, cleaned. Each listed tool has its tier in its description,
+  `annotations.readOnlyHint` and `_meta["org.torqos/tier"]` (`Tool::tier`, new in tools.rs: `observe`, `propose`).
+  Before it reads a message it starts its session (`torqcli agent session start`) and reports `coding-tool`;
+  failing either it serves nothing. Each tool's first tainting read is reported after it runs and before a word
+  of it is returned (a failed report returns nothing of it); a proposal's result is the broker's record of the
+  session (`doctor::broker_said`) and says it waits for the person. The agent crate gained a library
+  (agent/src/lib.rs: `clean`, `doctor`, `link`, `machine`, `mcp`, `model`, `session`, `tools`) so its three
+  programs share one tool set; `Machine` (the doctor's way of running programs) moved to `machine.rs`.
+  **The broker's resident rule** (broker/src/socket.rs `resident_peer`, `in_resident`, `fdinfo_pid`; serve.rs;
+  session.rs): for an agent's `propose` and `session-start`, serve takes the peer's pidfd (`SO_PEERPIDFD`,
+  through `nix`'s `PeerPidfd`), requires `/proc/self/fdinfo/<fd>`'s `Pid:` to be SO_PEERCRED's pid, reads
+  `/proc/<pid>/cgroup` (exactly one `0::` line, exactly `/system.slice/system-torq\x2dagent.slice/
+  torq-agent@<person>.service`, the person the map says the agent serves) and then polls the pidfd (readable:
+  exited, refused); only then it adds `--resident` (refused from callers). `session::start` without it records
+  the session tainted by `not-the-resident-agent`; `session::judge` without it taints the proposal and adds that
+  source to what the entry carries, whatever session it cites. **The service's home**: `torq-agent-service`
+  makes `$STATE_DIRECTORY/home` (0700, refused if not a directory of its own) and gives it to the harness as
+  HOME and working directory; the unit's WorkingDirectory is its state directory, `InaccessiblePaths` the agent's
+  home, `ReadWritePaths` gone. **Claude Code**: `torq.agent.tools` (a list of `claude-code`), an assertion that
+  `torq.unfree` allows it, `users.users.torq-agent-P.packages` (only when allowed: nothing unfree is evaluated
+  otherwise) from `torq.agent.claudeCode` (internal: the pinned override; a test's stand-in), torq-agent's package
+  in systemPackages when a tool is chosen (for `/run/current-system/sw/bin/torq-mcp`), `/etc/torq/agent-tools.json`
+  and `/etc/torq/skills/torqos/SKILL.md` (modules/agent-skill.md); the launcher's PATH has
+  `/etc/profiles/per-user/torq-agent-P/bin`, and, where agent-tools.json names `claude-code`, it runs `torq-mcp
+  --link` with setpriv as the agent (`env -i`, HOME the agent's, inside the launcher's mount namespace with the
+  homes hidden) before the program, a failure said and not fatal. `--link` (agent/src/link.rs): `~/.claude.json`
+  read only if a plain file (O_NOFOLLOW, at most 16 MiB) of a JSON object whose `mcpServers` is an object, the
+  `torqos` entry `{type: stdio, command: /run/current-system/sw/bin/torq-mcp, args: [], env: {}}` set, written
+  (0600, a new file renamed over it) only if it changed; `~/.claude` and `~/.claude/skills` made 0700 if missing,
+  refused if not directories (no link followed); `torqos` linked to `/etc/torq/skills/torqos` where nothing is or
+  a link into /etc/torq or the store was, else left and said. **The Agent page** (settings/src/window.rs) has a
+  "Coding tools" section: Claude Code installed for the person's agent or not (`setup::tools_of`: chosen in
+  agent-tools.json and its program in the agent's profile), and its start line; `app::AGENT_SETTINGS` gained
+  `set torq unfree packages claude-code`, `set torq agent tools claude-code`, `delete torq agent tools`.
+  torqcli's apply warning says, for `not-the-resident-agent` or `coding-tool`, that the broker could not see what
+  the program read, and lists the other sources apart. Docs: the user guide's "Claude Code, as your agent" and
+  taint, AI-LAYER.md, CLI-DESIGN.md (`torq agent tools`). Tests: agent units (`mcp::tests`: the session first,
+  the handshake and every refusal, lines and the bound, the closed set with tiers, a call cleaned and reported
+  first, a proposal; `link::tests`: a new home, what was there kept, links and non-JSON left alone, the skill's
+  link; `tools`: tiers), broker units (`socket::tests::the_resident_agent_is_its_units_control_group`,
+  `the_peer_is_read_by_its_pidfd` — a live peer, another pid, a zombie, a reaped one —, `a_pidfds_pid`,
+  `resident_is_added_never_taken`; `tests/sessions.rs::only_the_resident_agent_is_untainted`), torqcli units (the
+  Agent page's tools, the warning), `checks.agent-assertions` (claude-code refused unallowed, not installed then;
+  allowed, in the agent's packages and not the system's), and VM tests: **`tests/agent-mcp.nix`** (new),
+  `agent-proposals`, `agents-per-person` and `agent-service` (trust applied only from the resident agent's
+  control group; the service's home, the agent's home out of the unit's reach), `doctor` (its broker record
+  starts `not-the-resident-agent`). Mutation-checked: the resident check in `judge` and in `start` (each fails
+  `only_the_resident_agent_is_untainted`), the pidfd poll (fails `the_peer_is_read_by_its_pidfd`), torq-mcp's
+  report before returning and its `coding-tool` report at start, the line bound. **Not in this step:** "Start
+  Claude Code" from the agent's window; Codex and opencode; the screen tools (step 6); the rest of torqcli's
+  `show` tree as tools (phase 2); a short form of `torq agent run … claude`. Open: KNOWN-GAPS 6zzo.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

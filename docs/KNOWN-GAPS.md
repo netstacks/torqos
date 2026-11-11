@@ -988,16 +988,16 @@ Its §5 lists claims without a test.
    - **Only the image's layout grows.** Any other (an install by hand, a partition added) is left as it
      is, and its root is not grown: by design, never repartitioned rather than guessed at.
 6zq. **Proposals and session trust (ADR-042 6 and 7, amended; built on `work/w5` 2026-11-07).** Open:
-   - **A session's taint is what was reported.** The broker cannot see what a program of the agent's
-     reads; it holds what it is told, where the agent cannot undo it. TorqOS's doctor reports every
-     tainting read before the model sees it, and stops if a report fails. But any program run as
-     `torq-agent` (Claude Code under `torq agent run`) can start a session over the socket and never
-     report, so its proposals look untainted — and under a person's trust, a user-tier change in that
-     person's folder (their packages) would then apply without asking. Same-uid programs cannot be
-     told apart: checking the caller's executable (ADR-042, 7 as first designed) is defeated by a
-     parent that traces TorqOS's own doctor. What bounds it: trust is the person's own folder, at
-     most 60 minutes, given with their password, each change ledgered and revertible; never system
-     tier. A real fix would run TorqOS's own agent as an account other tools cannot run as.
+   - **A session's taint is what was reported — now only the resident agent's is believed** (closed for the
+     case it named by ADR-051 step 5, 2026-11-10; what is left is 6zzo's). The broker cannot see what a program
+     of the agent's reads; it holds what it is told. Any program run as an agent account (Claude Code under
+     `torq agent run`) could start a session over the socket and never report, so its proposals looked
+     untainted and, under a person's trust, applied. Now a session starts untainted, and a proposal is judged
+     by its session, only when the caller is in the control group of `torq-agent@<person>.service` (read from
+     the peer's pidfd); everything else from an agent account is tainted from its start
+     (`not-the-resident-agent`) — `tests/agent-mcp.nix`, `tests/agent-proposals.nix`, broker units. The
+     resident agent's own reports are still only what it reported: it is TorqOS's harness, which reports every
+     tainting read before the model sees it.
    - **Expiry is ledgered late.** A grant is over at its time whatever the ledger says; its
      `trust_expired` is written by the next operation that may apply under trust (a proposal, a grant,
      a revoke), not at the time itself.
@@ -1217,3 +1217,42 @@ Its §5 lists claims without a test.
    - **A crash notification's thread** ends when the notification is clicked, closed or expires (10 minutes,
      said to the daemon); a daemon that never says so leaves it waiting until its next signal. At most 3 are
      open at once.
+
+6zzo. **torq-mcp, Claude Code as a tool, and the broker's resident rule (ADR-051 5 and 7, step 5, built 2026-11-10,
+   `tests/agent-mcp.nix`).** Open:
+   - **What the resident rule rests on.** A session is untainted only from `torq-agent@<person>.service`'s own
+     control group, read through the peer's pidfd. It holds because the unit delegates nothing (its
+     `cgroup.procs` is root's), no agent account has a user manager of its own, `torq agent run`'s programs are
+     in a process namespace of their own (they cannot name a process of the service's to trace or signal it),
+     and the unit's programs no longer read the agent's home (their home is the service's state directory,
+     hidden from `torq agent run`; the agent's home is inaccessible to the unit). Anything that breaks one of
+     those breaks the rule: a `Delegate=` on the unit, a lingering user manager for an agent account, a
+     `torq agent run` without `--unshare-pid`, a new place the harness or torqcli reads that the agent can
+     write. An administrator's `sudo -u torq-agent-<person>` shell is in the root process namespace, but Yama's
+     `ptrace_scope` 1 (modules/security.nix) lets it trace only its own descendants: only root traces the
+     harness, and that is root acting (6zzk), closed by strict mode.
+   - **A model on a TCP port of this machine can be stood in for.** With `torq agent doctor endpoint
+     http://127.0.0.1:<port>/…` (a person's own Ollama, say), any local program — one run as the agent
+     included — that binds that port while the model server is down answers as the model, and the resident
+     agent's untainted session then proposes what it is told, which trust would apply. The default local
+     model is a unix socket in a directory only llama-server writes, and a remote model is reached over TLS;
+     neither has this. Not fixed here: it is the endpoint's, not the broker's.
+   - **A kernel before 6.5** has no SO_PEERPIDFD: every agent session is tainted and trust applies nothing.
+   - **`torq doctor` and `torq agent propose` no longer get session trust**: they run through `torq agent run`,
+     so their proposals are tainted from the start (the guide says so). `torq ask` is the untainted path.
+   - **torq-mcp answers one request at a time**: a `propose_change` (up to 30 minutes, torqcli's evaluation)
+     holds a `ping` behind it; `notifications/cancelled` is ignored; no resources, prompts or pagination; the
+     MCP versions 2024-11-05 to 2025-06-18. Only the doctor's tools (`show_configuration` is the only part of
+     torqcli's `show` tree it has; the operational `show` commands are phase 2's); no screen tools (step 6).
+   - **The link rewrites `~/.claude.json`** when its `torqos` entry is not as it should be: as pretty-printed
+     JSON, its keys in sorted order (serde_json's), everything else kept. A Claude Code already running as the
+     same agent and writing the file at that moment could lose its write. The `torqos` entry is put back at
+     every start, so removing it does not stick (it is advice; the limits are the broker's).
+   - **Only a stand-in Claude Code is tested.** The VM test's `claude` is a scripted MCP client: whether the real
+     Claude Code takes a user-scope server from `~/.claude.json` and a symlinked skill directory as it does, its
+     sign-in in the agent's home and a subscription's login there, are not checked in a VM (unfree and large);
+     nor is the Agent page's new section drawn (not opened in a VM).
+   - **The service's home moved**: session records the harness kept under `/var/lib/torq-agent-<person>` before
+     stay there, unused; new ones go under `/var/lib/torq-agent-memory/<person>/home`.
+   - **Not in this step**: "Start Claude Code" from the agent's window (a folder to choose and a terminal to
+     open), Codex and opencode, removing the link when the tool is no longer chosen.

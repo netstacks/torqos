@@ -49,7 +49,7 @@ owner's shell does not have; in a terminal it is torqcli's prompt, the same text
 |---|---|---|---|
 | `torq-doctor` (`agent/`), as the person's `torq-agent-<person>` | unprivileged, sandboxed (`torq agent run`, or the agent service) | Rust | TorqOS's harness: talks to the model (OpenAI-compatible chat API), calls its read-only tools, *proposes* changes (ADR-042); one process per question or task |
 | `torq-agent@<person>.service` (`agent/`: `torq-agent-service`), as `torq-agent-<person>` | unprivileged, the launcher's sandbox and systemd's hardening; socket-activated, its socket the person's alone, SO_PEERCRED checked | Rust | The person's agent, resident (ADR-051 3, step 2): holds their conversation (its last turns), runs one task at a time as its own `torq-doctor --propose --task`, streams its events to `torq ask` (later the panel's window); `stop` ends a task |
-| MCP tool servers (`torq-mcp`) | unprivileged, read-mostly | Rust | Typed access per subsystem |
+| `torq-mcp` (`agent/`), as `torq-agent-<person>` under `torq agent run` | unprivileged, the launcher's sandbox | Rust | TorqOS's tools for a coding tool (ADR-051 7): an MCP server on standard input and output with the doctor's closed set of tools and `propose_change`; its session reported a coding tool's first, so what it proposes waits for a person |
 | `torq-broker` | privileged (root, minimal) | Rust | Only writer of the config repo; tiers, commits, rebuild, rollback, ledger |
 | Model runtime | unprivileged (DynamicUser) | llama.cpp (`llama-server`, a unix socket) | Local inference; or a remote endpoint as a setting (ADR-042) |
 | torqcli | the person's | Rust | Shows proposals, diffs and the ledger; a person approves at a terminal |
@@ -79,7 +79,11 @@ one that names no session — any other program run as the agent — is tainted;
 agent's session is refused. `request system apply`
 says what the session read; session trust never covers a tainted proposal, nor another person's
 agent's. The broker holds what it
-is told, and cannot see what a program reads. So taint is reported by TorqOS's own doctor and held by the broker; a different program run as the agent (Claude Code under `torq agent run`, say) can open a session and simply not report, and its proposals then look untainted. Taint is a defence against a prompt injection reaching TorqOS's own doctor, not against a hostile program running as the agent. What bounds that is the rest of the design (trust is a person's own folder, at most 60 minutes, never the system tier): KNOWN-GAPS 6zq.
+is told, and cannot see what a program reads (KNOWN-GAPS 6zq): so only the person's resident agent —
+a process in `torq-agent@<person>.service`'s own control group, which the broker reads from the peer's pidfd
+(ADR-051 step 5) — starts a session untainted and has its proposals judged by it. Every other program of an
+agent account (a coding tool, `torq doctor`, anything under `torq agent run`) starts tainted
+(`not-the-resident-agent`), whatever session it cites (KNOWN-GAPS 6zzo).
 
 ## Ledger format (v0)
 
@@ -128,5 +132,7 @@ Built (doctor mode, ADR-042, `agent/src/tools.rs`; all read-only): `read_journal
 `hardware_facts`, `show_configuration`, `show_ledger`, `show_alarms`, `nixos_option_docs`. All but
 the option docs return untrusted text (a configuration value too) and
 taint the session. In propose mode (ADR-042 6): `propose_change`, structured words of the tree, a
-proposal through torqcli as the agent.
+proposal through torqcli as the agent. Each tool has its tier (`tools.rs`, `Tool::tier`): the six read-only
+ones `observe`, `propose_change` `propose` (the change's own tier is the broker's). The same set is offered to
+coding tools by `torq-mcp` (ADR-051 7), without the screen's (step 6).
 Later: `logs.coredump`, `pkg.search`, `power.status`, `secureboot.status`, `files.read_scoped`.
