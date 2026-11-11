@@ -2484,6 +2484,69 @@ vouches for, that only proposes, every change ledgered and undone in one command
   **In the diff, not said above:** each Decline in the applet and the window runs on a fresh torqcli session
   (`Console::start()`), its own; the key opens the window with no handoff (nothing to attach); a setting's Ask
   attaches its help as NixOS wrote it (the option's description), with its place and value. Open: KNOWN-GAPS 6zzn.
+- **Design (step 5: decisions 5 and 7, phase 1; written before it was built, 2026-11-10).**
+  1. **`torq-mcp`**, a third program of `agent/` beside `torq-doctor` and `torq-agent-service`: an MCP server on
+     MCP's stdio transport (JSON-RPC 2.0, one message a line), started by a coding tool, so run as the person's
+     agent account (under `torq agent run`). It answers `initialize`, `notifications/initialized`, `ping`,
+     `tools/list` and `tools/call`; any other request gets JSON-RPC's "method not found", a batch or a malformed
+     message "invalid request", a line past its bound is read to its end and refused; a notification is never
+     answered (JSON-RPC). Hand-written on serde_json, no MCP library. Its tools are the doctor's closed set
+     (`tools.rs`'s enum, not a copy: the read-only six, the journal only where `torq.agent.doctor.journal` lets
+     the agent read it, and `propose_change`), each listed with its tier (AI-LAYER.md: the six `observe`;
+     `propose_change` proposes — the change's own tier, user or system, is the broker's to judge, a person's to
+     apply); every result cleaned and cut as the doctor's (ADR-042 5) and marked untrusted data. torqcli's `show`
+     tree is `show_configuration` (`show configuration [<path>]`); the operational `show` commands are phase 2's.
+     No `screen_capture` / `screen_watch` (step 6). The agent crate gains a library (`src/lib.rs`) so the three
+     programs share `tools.rs` and the rest without a copy (and without dead code in any of them, ADR-020).
+  2. **A coding tool's proposals are tainted — and so is everything not TorqOS's resident agent** (decision 7;
+     KNOWN-GAPS 6zq's first item). Two layers. *torq-mcp's own:* it starts its session at the broker and
+     reports the source `coding-tool` before it reads a request; failing either, it serves nothing. That is
+     advice from a program the tool could do without: anything run as the agent (Claude Code itself) can open
+     the broker's socket. *The broker's, the guarantee:* a session starts untainted, and an agent's proposal is
+     judged by the session it cites, **only when the process at the other end of the socket is in the control
+     group of `torq-agent@P.service`**, P the person the calling agent account serves by the broker's map. The
+     broker (serve, as root) takes the peer's pidfd (`SO_PEERPIDFD`, fixed at connect), reads
+     `/proc/<pid>/cgroup` for that pid, then polls the pidfd: not exited, so the pid was still that process's
+     when it was read (a pid alone could be another's by then). Any other caller of an agent account — `torq
+     agent run`'s programs, Claude Code, torq-mcp, `torq doctor` and `torq agent propose` (they run through
+     `torq agent run`), root's `sudo -u torq-agent-P` — gets a session tainted from its start (source
+     `not-the-resident-agent`) and its proposals tainted whatever session they cite (else one could cite a
+     resident session's id, which the ledger shows). Why it holds: a unit's `cgroup.procs` is root's (no
+     `Delegate=`, `ProtectControlGroups`), so a same-uid process cannot move itself in, and no agent account has
+     a user manager to make units with; in the unit run only the service, the harness and its fixed tools;
+     `torq agent run`'s programs are in a process namespace of their own, so cannot name a process of the
+     service's (to trace it, signal it, write its memory). What they could still do is leave files for the
+     service's programs to read — its home was the agent's: a `~/.config/nix/nix.conf` whose `plugin-files`
+     torqcli's `nix` would load, a `~/.gitconfig`, torqcli's caches. So **the service's programs get a home of
+     their own**, `/var/lib/torq-agent-memory/P/home` (its state directory, which `torq agent run` already hides),
+     and the agent's home is made inaccessible to the unit. **Differs from the decisions as written:** decision 7
+     taints a coding tool's proposals; this taints every agent program's but the resident service's, so `torq
+     doctor` and `torq agent propose` lose session trust (their proposals wait for a person, said in the
+     guide); `torq ask` (decision 3's service) is the untainted path, which 7 already gives TorqOS's agent. The
+     service's home moves (step 2 had it the agent's). Rejected: the caller's executable (6zq: a parent can trace
+     the doctor); a broker socket only the service's mount namespace sees (a mount namespace is a weaker and
+     wider thing to keep closed than a control group); a pid without a pidfd (reused). Cost: one crate in the
+     broker, `nix` (its `socket` feature: `PeerPidfd`) — rustix 1.1 has no `SO_PEERPIDFD`, and `unsafe` is
+     forbidden (ADR-020); a kernel before 6.5 has no `SO_PEERPIDFD`, and then every agent session is tainted
+     (closed, not open).
+  3. **Claude Code as a tool** (decision 5): `torq agent tools` (`torq.agent.tools`, a list; `claude-code` the one
+     value in this step), the owner's commit. Refused at evaluation unless `torq unfree` allows `claude-code`
+     (all, or by name), saying so and the line that does (ADR-039: nothing unfree in an image). Chosen, it is
+     installed in each agent account's own profile (`users.users.torq-agent-P.packages`, so on no person's PATH),
+     the version dev mode pins (`modules/claude-code-manifest.json`), and `torq agent run` puts that profile on
+     the agent's PATH. Started as before, `torq agent run --share <folder> -- claude` (no short form: CLI-DESIGN's
+     `torq agent run` is already the way to run a tool as the agent), so it runs as `torq-agent-P`, its sign-in
+     (a subscription's login included) kept in the agent's home. **Who links TorqOS into it: the launcher, at
+     every start, as the agent** — after it drops to `torq-agent-P` and before the program, it runs
+     `torq-mcp --link`, so nothing is written into the agent's home as root and no link there is followed with
+     privilege: `~/.claude.json`'s `mcpServers.torqos` (stdio, `/run/current-system/sw/bin/torq-mcp`), the rest
+     of the file as it was (one it cannot read as JSON is left alone, and it says so); `~/.claude/skills/torqos`
+     a link to the system's skill (`/run/current-system/sw/share/torq/skills/torqos/SKILL.md`: torqcli and the
+     tree, proposing, what the agent may not do), made only where nothing is or TorqOS's link was. Advice, which
+     the tool may rewrite: the limits are the broker's. The Agent page says which tools are installed, the line
+     that chooses Claude Code (into the draft, as its other settings), and how to start it. **Not in this step:**
+     "Start Claude Code" from the agent's window (a folder to choose and a terminal to open: its own step), Codex
+     and opencode.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
