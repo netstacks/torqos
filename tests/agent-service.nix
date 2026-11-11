@@ -161,7 +161,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("its sandbox: alice's agent, no privilege, every home and runtime directory out of reach"):
         want = {
-            "User": "torq-agent-alice", "Group": "torq-agent-alice", "ProtectHome": "yes", "PrivateTmp": "yes",
+            "User": "torq-resident-alice", "Group": "torq-resident-alice", "ProtectHome": "yes", "PrivateTmp": "yes",
             "NoNewPrivileges": "yes", "CapabilityBoundingSet": "", "AmbientCapabilities": "", "ProtectSystem": "strict",
             "LockPersonality": "yes", "MemoryDenyWriteExecute": "yes", "RestrictNamespaces": "yes", "ProtectProc": "invisible",
             "PrivateUsers": "no", "RestrictAddressFamilies": "AF_INET AF_INET6 AF_NETLINK AF_UNIX", "StandardInput": "socket",
@@ -183,13 +183,13 @@ pkgs.testers.runNixOSTest {
         assert out.strip() == "Hello alice.", out
         machine.wait_until_succeeds(f"systemctl is-active {unit}")
         pid = prop("MainPID")
-        assert machine.succeed(f"ps -o user= -p {pid}").strip() == "torq-agent-alice"
+        assert machine.succeed(f"ps -o user= -p {pid}").strip() == "torq-resident-alice"
 
     with subtest("it remembers the conversation, where only the service writes; erasable"):
         out = as_user("alice", "torq ask 'remember?'")
         assert out.strip() == "You said hello.", out
         mem = "/var/lib/torq-agent-memory/alice"
-        assert machine.succeed(f"stat -c %a:%U {mem} {mem}/conversation.json").split() == ["700:torq-agent-alice", "600:torq-agent-alice"]
+        assert machine.succeed(f"stat -c %a:%U {mem} {mem}/conversation.json").split() == ["700:torq-resident-alice", "600:torq-resident-alice"]
         turns = json.loads(machine.succeed(f"cat {mem}/conversation.json"))
         assert [t["question"] for t in turns] == ["hello", "remember?"] and turns[0]["answer"] == "Hello alice.", turns
         # A program run as the agent (torq agent run) does not see it.
@@ -233,9 +233,30 @@ pkgs.testers.runNixOSTest {
         machine.fail("su -s /bin/sh torq-agent-alice -c 'cat /var/lib/torq/secrets/model.key'")
         as_user("alice", "torq agent run -- cat /var/lib/torq/secrets/model.key", ok=False)
         assert as_user("alice", "torq agent run -- ls -A /run/credentials").strip() == "", "the units' credentials hidden"
-        # What the agent account would see of the unit's credential outside the sandbox (an administrator's
-        # sudo -u, which is root acting): shown, for the record.
-        print(machine.execute(f"su -s /bin/sh torq-agent-alice -c 'cat /run/credentials/{unit}/model-key' 2>&1"))
+        # The agent account outside the sandbox too (su, as an administrator's sudo -u would be): the unit's
+        # credential and its state are the resident account's (ADR-051 3 amended 2026-11-11), not the agent's.
+        machine.fail(f"su -s /bin/sh torq-agent-alice -c 'cat /run/credentials/{unit}/model-key'")
+        machine.fail("sudo -u torq-agent-alice cat /run/credentials/torq-agent@alice.service/model-key")
+        mem = "/var/lib/torq-agent-memory/alice"
+        assert machine.succeed(f"stat -c %a:%U {mem} {mem}/home").split() == ["700:torq-resident-alice", "700:torq-resident-alice"]
+        for who in ["su -s /bin/sh torq-agent-alice -c", "sudo -u torq-agent-alice sh -c"]:
+            machine.fail(f"{who} 'touch {mem}/planted'")
+            machine.fail(f"{who} 'mkdir -p {mem}/home/.config/nix'")
+            machine.fail(f"{who} 'echo [] > {mem}/conversation.json'")
+        as_user("alice", f"torq agent run -- touch {mem}/planted", ok=False)
+        machine.fail(f"test -e {mem}/planted")
+        # The resident account has no way in either: no password, no login shell, no home.
+        entry = machine.succeed("getent passwd torq-resident-alice").strip().split(":")
+        assert entry[5] == "/var/empty" and entry[6].endswith("nologin") and int(entry[2]) < 1000, entry
+        machine.succeed("passwd -S torq-resident-alice | grep -q ' L '")
+        # Nor reach its processes: another uid's, so no signal, no trace, no way through /proc into its files.
+        main = prop("MainPID")
+        for who in ["su -s /bin/sh torq-agent-alice -c", "sudo -u torq-agent-alice sh -c"]:
+            machine.fail(f"{who} 'kill -0 {main}'")
+            machine.fail(f"{who} 'ls /proc/{main}/root/'")
+            machine.fail(f"{who} 'cat /proc/{main}/environ'")
+        machine.fail(f"su -s /bin/sh torq-agent-alice -c 'head -c1 /proc/{main}/mem'")
+        assert main != "0"
         # One question at a terminal runs as any program of the agent's: it cannot use the key, and says so.
         out = machine.execute("su - alice -c 'torq doctor hello' 2>&1")[1]
         assert "only your resident agent holds" in out and "torq ask" in out, out
@@ -261,14 +282,14 @@ pkgs.testers.runNixOSTest {
         assert raw("alice", {"type": "status"}) == [{"type": "status", "running": False, "turns": 3}]
         # bob's own agent is his, and runs as his agent account.
         assert as_user("bob", "torq ask hello").strip() == "Hello alice."
-        assert machine.succeed("ps -o user= -p $(systemctl show -P MainPID torq-agent@bob.service)").strip() == "torq-agent-bob"
+        assert machine.succeed("ps -o user= -p $(systemctl show -P MainPID torq-agent@bob.service)").strip() == "torq-resident-bob"
 
     with subtest("the service cannot read a home, even what is open to everyone there"):
         machine.succeed("chmod 755 /home/alice && echo open > /home/alice/open && chmod 644 /home/alice/open")
         # The control: the agent account, outside the service, can.
         machine.succeed("setpriv --reuid torq-agent-alice --regid torq-agent-alice --clear-groups cat /home/alice/open")
         pid = prop("MainPID")
-        inside = f"nsenter -t {pid} -m -- setpriv --reuid torq-agent-alice --regid torq-agent-alice --clear-groups"
+        inside = f"nsenter -t {pid} -m -- setpriv --reuid torq-resident-alice --regid torq-resident-alice --clear-groups"
         machine.fail(f"{inside} cat /home/alice/open")
         machine.fail(f"{inside} ls /home")
         machine.fail(f"{inside} ls /run/user")
@@ -279,35 +300,35 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"{inside} ls /var/lib/torq-agent-alice")
         machine.fail(f"{inside} cat /var/lib/torq-agent-alice/.config/nix/nix.conf")
         machine.succeed(f"{inside} touch /var/lib/torq-agent-memory/alice/home/mine")
-        assert machine.succeed("stat -c %a:%U /var/lib/torq-agent-memory/alice/home").strip() == "700:torq-agent-alice"
+        assert machine.succeed("stat -c %a:%U /var/lib/torq-agent-memory/alice/home").strip() == "700:torq-resident-alice"
         # Hidden from torq agent run, with the memory.
         as_user("alice", "torq agent run -- ls /var/lib/torq-agent-memory/alice/home", ok=False)
         machine.succeed("chmod 700 /home/alice")
 
     with subtest("Ctrl-C stops a task: all of it, the model's request included; the service stays"):
         machine.succeed("su - alice -c \"tmux new-session -d -s a -x 200 -y 50 'torq ask slow; echo exit=\\$?; sleep 600'\"")
-        machine.wait_until_succeeds("pgrep -u torq-agent-alice -x torq-doctor && pgrep -u torq-agent-alice -x curl", timeout=60)
+        machine.wait_until_succeeds("pgrep -u torq-resident-alice -x torq-doctor && pgrep -u torq-resident-alice -x curl", timeout=60)
         assert raw("alice", {"type": "status"}) == [{"type": "status", "running": True, "turns": 3}]
         machine.succeed("su - alice -c 'tmux send-keys -t a C-c'")
         machine.wait_until_succeeds("su - alice -c 'tmux capture-pane -p -t a' | grep -q 'exit=1'", timeout=30)
         assert "agent: stopping" in machine.succeed("su - alice -c 'tmux capture-pane -p -t a'")
-        machine.fail("pgrep -u torq-agent-alice -x torq-doctor")
-        machine.fail("pgrep -u torq-agent-alice -x curl")
+        machine.fail("pgrep -u torq-resident-alice -x torq-doctor")
+        machine.fail("pgrep -u torq-resident-alice -x curl")
         assert prop("ActiveState") == "active"
         assert raw("alice", {"type": "status"}) == [{"type": "status", "running": False, "turns": 3}]
 
     with subtest("stop ends all of a task: a program in a session of its own, and one out of sight"):
         machine.succeed("su - alice -c \"tmux new-session -d -s p -x 200 -y 50 'torq ask \\\"install slowly\\\"; echo exit=\\$?; sleep 600'\"")
-        machine.wait_until_succeeds("pgrep -u torq-agent-alice -f 'sleep 601' && pgrep -u torq-agent-alice -f 'undumpable 602' && pgrep -u torq-agent-alice -f 'sleep 603'", timeout=60)
-        hidden = machine.succeed("pgrep -n -u torq-agent-alice -f 'undumpable 602'").strip()
+        machine.wait_until_succeeds("pgrep -u torq-resident-alice -f 'sleep 601' && pgrep -u torq-resident-alice -f 'undumpable 602' && pgrep -u torq-resident-alice -f 'sleep 603'", timeout=60)
+        hidden = machine.succeed("pgrep -n -u torq-resident-alice -f 'undumpable 602'").strip()
         assert machine.succeed(f"stat -c %u /proc/{hidden}/status").strip() == "0", "undumpable: its /proc files are root's"
-        own = machine.succeed("pgrep -n -u torq-agent-alice -f 'sleep 601'").strip()
-        doctor = machine.succeed("pgrep -u torq-agent-alice -x torq-doctor").strip()
+        own = machine.succeed("pgrep -n -u torq-resident-alice -f 'sleep 601'").strip()
+        doctor = machine.succeed("pgrep -u torq-resident-alice -x torq-doctor").strip()
         assert machine.succeed(f"ps -o sid= -p {own}").strip() != machine.succeed(f"ps -o sid= -p {doctor}").strip(), "a session of its own"
         machine.succeed("su - alice -c 'tmux send-keys -t p C-c'")
         machine.wait_until_succeeds("su - alice -c 'tmux capture-pane -p -t p' | grep -q 'exit=1'", timeout=30)
         for p in ["sleep 601", "undumpable 602", "sleep 603"]:
-            machine.fail(f"pgrep -u torq-agent-alice -f '{p}'")
+            machine.fail(f"pgrep -u torq-resident-alice -f '{p}'")
         assert machine.succeed(f"cat '/sys/fs/cgroup{prop('ControlGroup')}/cgroup.procs'").split() == [prop("MainPID")], "nothing but the service left in its unit"
 
     with subtest("a frozen service cannot hold the terminal: Ctrl-C twice, or once and 5 s, gets alice out"):

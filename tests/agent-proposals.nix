@@ -91,7 +91,9 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"systemctl start {unit}")
         cg = machine.succeed(f"systemctl show -P ControlGroup {unit}").strip()
         procs = shlex.quote(f"/sys/fs/cgroup{cg}/cgroup.procs")
-        script = f"echo $$ > {procs} && exec setpriv --reuid {who} --regid {who} --init-groups -- env HOME=/var/lib/{who} sh -c {shlex.quote(cmd)}"
+        # The resident agent's own account (ADR-051 3 amended 2026-11-11): the agent account is never resident.
+        res = who.replace("torq-agent-", "torq-resident-", 1)
+        script = f"echo $$ > {procs} && exec setpriv --reuid {res} --regid {res} --init-groups -- env HOME=/tmp sh -c {shlex.quote(cmd)}"
         return machine.succeed(f"sh -c {shlex.quote(script)}")
 
     def ask(user, request, resident=False):

@@ -57,7 +57,9 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"systemctl start {unit}")
         cg = machine.succeed(f"systemctl show -P ControlGroup {unit}").strip()
         procs = shlex.quote(f"/sys/fs/cgroup{cg}/cgroup.procs")
-        script = f"echo $$ > {procs} && exec setpriv --reuid {who} --regid {who} --init-groups -- env HOME=/var/lib/{who} sh -c {shlex.quote(cmd)}"
+        # The resident agent's own account (ADR-051 3 amended 2026-11-11): the agent account is never resident.
+        res = who.replace("torq-agent-", "torq-resident-", 1)
+        script = f"echo $$ > {procs} && exec setpriv --reuid {res} --regid {res} --init-groups -- env HOME=/tmp sh -c {shlex.quote(cmd)}"
         return machine.succeed(f"sh -c {shlex.quote(script)}")
 
     def ask(user, request, resident=False):
@@ -93,6 +95,8 @@ pkgs.testers.runNixOSTest {
 
     with subtest("each person's agent: its own account, its home its own, the other's out of reach"):
         machine.succeed("jq -e '.agent.agents == {\"torq-agent-alice\": \"alice\", \"torq-agent-bob\": \"bob\"}' /etc/torq/broker.json")
+        # Each resident agent's own account, mapped too (ADR-051 3 amended 2026-11-11).
+        machine.succeed("jq -e '.residents == {\"torq-resident-alice\": \"alice\", \"torq-resident-bob\": \"bob\"}' /etc/torq/broker.json")
         for a in ["torq-agent-alice", "torq-agent-bob"]:
             machine.succeed(f"getent passwd {a} | grep -q ':/var/lib/{a}:.*nologin$'")
             machine.succeed(f"test \"$(id -u {a})\" -lt 1000 && test \"$(id -Gn {a})\" = {a}")
@@ -137,6 +141,24 @@ pkgs.testers.runNixOSTest {
         code, v = propose("torq-agent-alice", packages("alice", ["tree"]), "tree for alice", session=sa, resident=True)
         assert code == 0 and v.get("trust_applied", {}).get("approved_by") == "alice", (code, v)
         machine.succeed(f"git -C {repo} show HEAD:users/alice/packages.json | grep -q tree")
+
+    with subtest("residency from the uid, the control group a second guard"):
+        # The resident account outside its unit (as root's su makes it): tainted from its start, as any program.
+        out = machine.succeed("su -s /bin/sh torq-resident-alice -c 'cd /tmp && torqcli agent session start'").strip()
+        rec = json.loads(machine.succeed(f"cat /var/lib/torq/state/sessions/{out}.json"))
+        assert rec["tainted_by"] == ["not-the-resident-agent"] and rec["agent"] == "torq-agent-alice" and rec["resident"] is False, rec
+        # The agent account inside the unit's control group (root moves it there): never resident.
+        unit = "torq-agent@alice.service"
+        machine.succeed(f"systemctl start {unit}")
+        cg = machine.succeed(f"systemctl show -P ControlGroup {unit}").strip()
+        procs = shlex.quote(f"/sys/fs/cgroup{cg}/cgroup.procs")
+        sid = machine.succeed(f"sh -c {shlex.quote(f'echo $$ > {procs} && exec setpriv --reuid torq-agent-alice --regid torq-agent-alice --init-groups -- env HOME=/tmp torqcli agent session start')}").strip()
+        rec = json.loads(machine.succeed(f"cat /var/lib/torq/state/sessions/{sid}.json"))
+        assert rec["tainted_by"] == ["not-the-resident-agent"] and rec["resident"] is False, rec
+        # Both are the person's one agent: one count, one name in the ledger (data.agent), the caller the kernel's.
+        rs = start("torq-agent-bob")
+        code, v = propose("torq-agent-bob", packages("bob", ["fd"]), "fd for bob, resident", session=rs, resident=True)
+        assert code == 0 and v["data"]["agent"] == "torq-agent-bob" and v["data"]["caller"] == "torq-resident-bob" and v["tainted"] is False, (code, v)
 
     with subtest("torq agent run: each person their own agent, and no one else's"):
         code, out = run_as("bob", "torq agent run -- sh -c 'id -un; echo $HOME; cat /var/lib/torq-agent-alice/secret 2>/dev/null || echo NOPE'")

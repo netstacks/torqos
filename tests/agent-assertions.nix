@@ -37,6 +37,8 @@ let
     (refuses "a fragment in the endpoint" { torq.agent.doctor.endpoint = "https://api.example.org/v1#secret"; } "no query (?) or fragment (#)")
     (refuses "a person in people named as an agent" { torq.agent.people = [ "torq-agent-x" ]; users.users.torq-agent-x.isNormalUser = true; } "torq-agent-x is named as an agent account is")
     (refuses "any person named as an agent" { users.users.torq-agent-y.isNormalUser = true; } "torq-agent-y is a person named as an agent account is")
+    (refuses "a person named as a resident agent" { users.users.torq-resident-y.isNormalUser = true; } "torq-resident-y is a person named as an agent account is")
+    (refuses "too long for a resident account" { torq.agent.people = [ "dev" "abcdefghijklmnopqr" ]; users.users.abcdefghijklmnopqr.isNormalUser = true; } "at most 17 characters")
     (refuses "SETENV on the launcher's rule" ({ config, ... }: {
       security.sudo.extraRules = [{ groups = [ "wheel" ]; commands = [{ command = "${config.torq.agent.launcher}/bin/torq-agent-run"; options = [ "NOPASSWD" "SETENV" ]; }]; }];
     }) "a rule for torq-agent-run with SETENV")

@@ -110,7 +110,7 @@ pkgs.testers.runNixOSTest {
         out = in_session("torq-agent-ui --check")
         assert out.splitlines()[0] == "Idle · remembers nothing yet", out
         assert "Local model (llama-server on this machine)" in out, out
-        assert machine.succeed(f"ps -o user= -p $(systemctl show -P MainPID {unit})").strip() == "torq-agent-alice"
+        assert machine.succeed(f"ps -o user= -p $(systemctl show -P MainPID {unit})").strip() == "torq-resident-alice"
         assert in_session("torq ask hello").strip() == "Hello alice."
         assert in_session("torq-agent-ui --check").splitlines()[0] == "Idle · remembers 1 turn"
         # The Agent page's Forget is a torqcli line: through her own socket, and the count says so.
