@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "torq-broker"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "torq-wire"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
