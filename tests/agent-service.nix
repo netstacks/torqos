@@ -148,6 +148,7 @@ pkgs.testers.runNixOSTest {
             "NoNewPrivileges": "yes", "CapabilityBoundingSet": "", "AmbientCapabilities": "", "ProtectSystem": "strict",
             "LockPersonality": "yes", "MemoryDenyWriteExecute": "yes", "RestrictNamespaces": "yes", "ProtectProc": "invisible",
             "PrivateUsers": "no", "RestrictAddressFamilies": "AF_INET AF_INET6 AF_NETLINK AF_UNIX", "StandardInput": "socket",
+            "WorkingDirectory": "/var/lib/torq-agent-memory/alice", "Delegate": "no",
         }
         got = {k: prop(k) for k in want}
         assert got == want, got
@@ -200,9 +201,13 @@ pkgs.testers.runNixOSTest {
         p = [e for e in entries() if e["seq"] == int(m.group(1))][0]
         assert p["kind"] == "proposal" and p["actor"] == "agent" and p["data"]["agent"] == "torq-agent-alice" and p["data"]["agent_for"] == "alice", p
         assert p["tainted"] is False and p["data"]["session"]["tainted_by"] == [], p
-        rec = machine.succeed("ls -t /var/lib/torq-agent-alice/.local/state/torq-agent/sessions/ | head -1").strip()
-        doctor = json.loads(machine.succeed(f"cat /var/lib/torq-agent-alice/.local/state/torq-agent/sessions/{rec}"))
+        # The harness's own record: in the service's home, not the agent's (ADR-051 step 5).
+        rec = machine.succeed("ls -t /var/lib/torq-agent-memory/alice/home/.local/state/torq-agent/sessions/ | head -1").strip()
+        doctor = json.loads(machine.succeed(f"cat /var/lib/torq-agent-memory/alice/home/.local/state/torq-agent/sessions/{rec}"))
+        machine.fail("ls /var/lib/torq-agent-alice/.local/state/torq-agent/sessions/")
         assert p["data"]["session"]["id"] == doctor["brokerSession"], (p, doctor)
+        # Untainted because it came from the resident agent: the unit's own control group, which the broker reads.
+        assert prop("ControlGroup") == "/system.slice/system-torq\\x2dagent.slice/torq-agent@alice.service", prop("ControlGroup")
 
     with subtest("bob cannot connect to alice's agent; the service answers alice alone, whoever connects"):
         out = machine.fail(f"su - bob -c 'socat -t 5 - UNIX-CONNECT:{sock} </dev/null' 2>&1")
@@ -229,7 +234,16 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"{inside} cat /home/alice/open")
         machine.fail(f"{inside} ls /home")
         machine.fail(f"{inside} ls /run/user")
-        machine.succeed(f"{inside} touch /var/lib/torq-agent-alice/mine")
+        # The agent's home is out of its reach as well: what any program run as the agent leaves there (a nix.conf
+        # whose plugin-files nix would load), nothing in this unit reads; its programs' home is its own (ADR-051
+        # step 5).
+        machine.succeed("su -s /bin/sh torq-agent-alice -c 'mkdir -p ~/.config/nix && echo plugin-files = /nonexistent > ~/.config/nix/nix.conf'")
+        machine.fail(f"{inside} ls /var/lib/torq-agent-alice")
+        machine.fail(f"{inside} cat /var/lib/torq-agent-alice/.config/nix/nix.conf")
+        machine.succeed(f"{inside} touch /var/lib/torq-agent-memory/alice/home/mine")
+        assert machine.succeed("stat -c %a:%U /var/lib/torq-agent-memory/alice/home").strip() == "700:torq-agent-alice"
+        # Hidden from torq agent run, with the memory.
+        as_user("alice", "torq agent run -- ls /var/lib/torq-agent-memory/alice/home", ok=False)
         machine.succeed("chmod 700 /home/alice")
 
     with subtest("Ctrl-C stops a task: all of it, the model's request included; the service stays"):

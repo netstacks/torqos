@@ -215,11 +215,15 @@ in
         StandardError = "journal";
         User = agent;
         Group = agent;
-        WorkingDirectory = "/var/lib/${agent}";
-        # Its memory: the agent's, 0700, outside its home (every program run as the agent can write
-        # that), hidden from `torq agent run` (modules/agent-run.sh).
+        # Its memory and its programs' home (`home`, which the service makes): the agent's, 0700, outside the
+        # agent's home, hidden from `torq agent run` (modules/agent-run.sh). The agent's home itself is out of
+        # its reach (below): every program run as the agent can write there, and nothing it leaves is read by
+        # what runs in this unit — which is why the broker may take this unit for the resident agent (ADR-051
+        # step 5).
+        WorkingDirectory = "/var/lib/torq-agent-memory/${person}";
         StateDirectory = "torq-agent-memory/${person}";
         StateDirectoryMode = "0700";
+        InaccessiblePaths = [ "-/var/lib/${agent}" ];
         # The launcher's sandbox: every home (and /root, and the people's runtime directories in
         # /run/user) out of reach, /tmp its own, no privilege at all.
         ProtectHome = true;
@@ -227,10 +231,10 @@ in
         NoNewPrivileges = true;
         CapabilityBoundingSet = "";
         AmbientCapabilities = "";
-        # And more: the system read-only but its home and its memory; no other user's processes seen;
-        # the kernel's settings, modules, logs and clock, and the control groups, untouchable.
+        # And more: the system read-only but its memory; no other user's processes seen; the kernel's
+        # settings, modules, logs and clock, and the control groups, untouchable (no Delegate: a process of
+        # the agent's cannot move itself into this unit's group, whose cgroup.procs is root's).
         ProtectSystem = "strict";
-        ReadWritePaths = [ "/var/lib/${agent}" ];
         ProtectProc = "invisible";
         ProtectKernelTunables = true;
         ProtectKernelModules = true;

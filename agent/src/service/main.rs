@@ -358,11 +358,25 @@ fn agent(args: &[String]) -> Result<Agent> {
     }
     let state = std::env::var_os("STATE_DIRECTORY").context("no STATE_DIRECTORY: its memory's place (the unit's StateDirectory)")?;
     let me = std::env::current_exe().context("where this program is")?;
+    // Its programs' home (ADR-051 step 5): in its own state directory, which `torq agent run` hides — never the
+    // agent's home, where any program run as the agent could leave a file for them to read (a nix.conf whose
+    // plugin-files nix would load, a .gitconfig): what runs in this unit is TorqOS's alone, so the broker may
+    // take it for the resident agent.
+    let home = Path::new(&state).join("home");
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::DirBuilder::new().mode(0o700).create(&home) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("making {}", home.display())),
+    }
+    if !std::fs::symlink_metadata(&home).is_ok_and(|m| m.is_dir()) {
+        bail!("{}: not a directory of its own", home.display());
+    }
     Ok(Agent {
         person: person.clone(),
         uid,
         harness: me.with_file_name("torq-doctor"),
-        home: PathBuf::from(format!("/var/lib/{account}")),
+        home,
         memory: memory::Memory::new(Path::new(&state)),
         running: Mutex::new(None),
         procs: unit_procs(&format!("/torq-agent@{person}.service")),
