@@ -105,6 +105,42 @@ pub struct Setup {
     pub service: bool,
     /// The model, where doctor mode is on.
     pub brain: Option<Brain>,
+    /// The coding tools the configuration installs for the agents (`torq agent tools`, ADR-051 5).
+    pub tools: Vec<CodingTool>,
+}
+
+/// A coding tool the agents may run (ADR-051 5): what it is, and whether this person's agent has it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodingTool {
+    /// Its name in the tree (`torq agent tools`): `claude-code`.
+    pub id: String,
+    /// What it is called.
+    pub name: &'static str,
+    /// Whether the person's agent has its program (in the agent's own profile).
+    pub installed: bool,
+    /// How the person starts it: as their agent, in a folder they share.
+    pub start: String,
+}
+
+/// What the system's configuration wrote of the coding tools (modules/agent.nix).
+const TOOLS_JSON: &str = "/etc/torq/agent-tools.json";
+
+/// The coding tools TorqOS knows (only Claude Code in this step), each with its program's name.
+const KNOWN_TOOLS: &[(&str, &str, &str)] = &[("claude-code", "Claude Code", "claude")];
+
+/// The coding tools `json` (agent-tools.json) names that TorqOS knows, for `agent`'s account: installed if its
+/// program is in that account's own profile (`profile`, its `bin`), as `has` says.
+pub fn tools_of(json: &str, agent: Option<&str>, has: impl Fn(&std::path::Path) -> bool) -> Vec<CodingTool> {
+    let named: Vec<String> = serde_json::from_str::<serde_json::Value>(json).ok().and_then(|v| v["tools"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())).unwrap_or_default();
+    KNOWN_TOOLS
+        .iter()
+        .map(|(id, name, program)| CodingTool {
+            id: id.to_string(),
+            name,
+            installed: named.iter().any(|n| n == id) && agent.is_some_and(|a| has(&std::path::Path::new("/etc/profiles/per-user").join(a).join("bin").join(program))),
+            start: format!("torq agent run --share <a folder of yours> -- {program}"),
+        })
+        .collect()
 }
 
 /// The caller's own setup.
@@ -114,7 +150,8 @@ pub fn setup() -> anyhow::Result<Setup> {
     let account = super::agent_of(&me);
     let agent = passwd.lines().any(|l| l.split(':').next() == Some(account.as_str())).then_some(account);
     let service = std::path::Path::new(&torq_wire::agent::socket(&me)).exists();
-    Ok(Setup { me, agent, service, brain: brain()? })
+    let tools = tools_of(&std::fs::read_to_string(TOOLS_JSON).unwrap_or_default(), agent.as_deref(), |p| p.exists());
+    Ok(Setup { me, agent, service, brain: brain()?, tools })
 }
 
 /// How long systemd has to say whether the service runs: a look is never held longer.
@@ -172,6 +209,21 @@ mod tests {
         assert_eq!(here.place, Place::ThisMachine("127.0.0.1:8099".into()));
         assert!(!here.remote());
         assert!(brain_of("{}").is_err());
+    }
+
+    /// ADR-051 5: the coding tools the configuration chose, installed where the agent's own profile has them;
+    /// how to start each, as the agent, in a shared folder.
+    #[test]
+    fn the_coding_tools_as_the_agent_page_says_them() {
+        let has = |p: &std::path::Path| p == std::path::Path::new("/etc/profiles/per-user/torq-agent-alice/bin/claude");
+        let t = tools_of(r#"{"tools":["claude-code"]}"#, Some("torq-agent-alice"), has);
+        assert_eq!(t.len(), 1);
+        assert!(t[0].installed && t[0].id == "claude-code" && t[0].name == "Claude Code", "{t:?}");
+        assert_eq!(t[0].start, "torq agent run --share <a folder of yours> -- claude");
+        // Not chosen, no agent, another person's agent, nothing written: not installed for this person.
+        for (json, agent) in [(r#"{"tools":[]}"#, Some("torq-agent-alice")), (r#"{"tools":["claude-code"]}"#, None), (r#"{"tools":["claude-code"]}"#, Some("torq-agent-bob")), ("", Some("torq-agent-alice")), ("not json", Some("torq-agent-alice"))] {
+            assert!(!tools_of(json, agent, has)[0].installed, "{json} {agent:?}");
+        }
     }
 
     /// A systemd that does not answer never holds a look: killed at the limit.

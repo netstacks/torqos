@@ -2089,6 +2089,18 @@ impl Settings {
                 .add(settings::item::builder("The agent's window").description("Ask it, see what it called, stop it").control(widget::button::standard("Open").on_press(Message::OpenAgent)))
                 .add(settings::item::builder("What it proposed").description("Each change waiting for you, with what it does").control(widget::button::standard("Proposals").on_press(Message::Approve))),
         );
+        // The coding tools (ADR-051 5): whether this person's agent has each, and how they start it — as their
+        // agent, in a folder they share, from a terminal.
+        let mut tools = settings::section().title("Coding tools");
+        for t in &s.tools {
+            let state = if t.installed { "Installed for your agent" } else { "Not installed (below: it is unfree, so allowed first)" };
+            tools = tools.add(
+                settings::item::builder(t.name)
+                    .description(format!("Runs as your agent, never as you, in the folder you share with it. In a terminal: {}. Sign in there; what it proposes is marked tainted and waits for you.", t.start))
+                    .control(widget::text::body(state)),
+            );
+        }
+        page = page.push(tools);
         page = page.push(actions(app::AGENT_SETTINGS));
         page.push(
             settings::section().add(

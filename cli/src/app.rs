@@ -832,7 +832,7 @@ pub fn decline_line(seq: u64) -> String {
     format!("request system decline {seq}")
 }
 
-/// The Agent page's buttons (ADR-051 2): the agent's model and who has one, each a line of the tree, into the draft
+/// The Agent page's buttons (ADR-051 2 and 5): the agent's model, who has one, and its coding tools, each a line of the tree, into the draft
 /// and committed as every other change is. Its API key is not one: a file outside the repository, entered with
 /// TorqOS's secrets (ADR-052), not here.
 pub const AGENT_SETTINGS: &[Action] = &[
@@ -845,6 +845,10 @@ pub const AGENT_SETTINGS: &[Action] = &[
     // `set` adds to the list in the configuration; but until the list is written, its default (the owner) is the
     // module's, and the first `set` replaces it: the label says so.
     cf("Give someone an agent of their own… (the first time, name yourself too: the list replaces its default)", "set torq agent people "),
+    // Coding tools for the agents (ADR-051 5): Claude Code is unfree, so allowed first, said so.
+    draft("Allow Claude Code (unfree: nixpkgs' licence check)", "set torq unfree packages claude-code"),
+    draft("Install Claude Code for the agents (allow it first)", "set torq agent tools claude-code"),
+    draft("Remove the agents' coding tools", "delete torq agent tools"),
 ];
 
 pub static VIEWS: &[View] = &[
