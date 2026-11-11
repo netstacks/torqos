@@ -21,7 +21,8 @@ let
         modules = [ self.nixosModules.default base extra ];
       }).config;
     in map (a: a.message) (lib.filter (a: !a.assertion) config.assertions);
-  ours = ms: lib.filter (m: lib.hasInfix "torq.agent" m || lib.hasInfix "torq-agent" m) ms;
+  doctorOn = { enable = true; endpoint = "https://api.example.org/v1"; model = "m"; };
+  ours = ms: lib.filter (m: lib.hasInfix "torq.agent" m || lib.hasInfix "torq-agent" m || lib.hasInfix "ptrace_scope" m) ms;
   # `name` fails evaluation with a message holding `text`.
   refuses = name: extra: text:
     let ms = failing extra; in
@@ -53,6 +54,13 @@ let
       if ms == [ ] && names == [ "claude-code" ] && !(lib.any (p: lib.getName p == "claude-code") c.environment.systemPackages)
       then "claude-code allowed: the agent's alone"
       else throw "agent-assertions: claude-code allowed: ${builtins.toJSON { inherit ms names; }}")
+    # What the broker's resident rule rests on (ADR-051 step 5's review): said, where the agent is resident.
+    (refuses "a delegated resident unit" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.Delegate = true; } "no Delegate or DelegateSubgroup")
+    (refuses "a resident unit's subgroup" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.DelegateSubgroup = "x"; } "no Delegate or DelegateSubgroup")
+    (refuses "a lingering agent" { torq.agent.doctor = doctorOn; users.users.torq-agent-dev.linger = true; } "an agent account has no user manager of its own")
+    (refuses "tracing allowed" { torq.agent.doctor = doctorOn; boot.kernel.sysctl."kernel.yama.ptrace_scope" = lib.mkForce 0; } "kernel.yama.ptrace_scope")
+    (refuses "the key where the agent reads it" { torq.agent.doctor = doctorOn // { apiKeyFile = "/var/lib/torq-agent-dev/model.key"; }; } "a file only root reads")
+    (let ms = ours (failing { torq.agent.doctor = doctorOn // { apiKeyFile = "/var/lib/torq/secrets/model.key"; }; }); in if ms == [ ] then "the key root's" else throw "agent-assertions: a root-only key refused: ${builtins.toJSON ms}")
     (refuses "SETENV in sudoers text" ({ config, ... }: {
       security.sudo.extraConfig = "%wheel ALL=(root) NOPASSWD: SETENV: ${config.torq.agent.launcher}/bin/torq-agent-run";
     }) "a rule for torq-agent-run with SETENV")

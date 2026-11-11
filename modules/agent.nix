@@ -229,6 +229,24 @@ in
   # home hidden, the people's runtime directories hidden, its own /tmp, no privilege, its home its own)
   # and systemd's hardening besides. Only where doctor mode is on: the harness and its model are its.
   (lib.mkIf (cfg.service.enable && config.torq.agent.doctor.enable) {
+    # What the broker's resident rule rests on (ADR-051 step 5, broker/src/socket.rs resident_peer), each said:
+    # the unit's control group is root's to fill (nothing delegated); no agent account has a user manager of
+    # its own to make units with; a same-uid program may trace only its own descendants.
+    assertions = lib.concatLists (lib.mapAttrsToList (agent: person:
+      let sc = config.systemd.services."torq-agent@${person}".serviceConfig; in [
+        {
+          assertion = !(sc ? Delegate) && !(sc ? DelegateSubgroup);
+          message = "systemd.services.\"torq-agent@${person}\": no Delegate or DelegateSubgroup — the broker takes this unit's control group for ${person}'s resident agent, which only root may move a process into.";
+        }
+        {
+          assertion = (config.users.users.${agent}.linger or null) != true;
+          message = "users.users.${agent}.linger: an agent account has no user manager of its own (its units would be the agent's to make, outside the resident agent's control group).";
+        }
+      ]) agents)
+      ++ [{
+        assertion = (config.boot.kernel.sysctl."kernel.yama.ptrace_scope" or 0) >= 1;
+        message = "boot.kernel.sysctl.\"kernel.yama.ptrace_scope\": at least 1 where the agent is resident — a program of the agent's may trace only its own descendants, never the resident agent's harness.";
+      }];
     # Only the person may connect (the socket theirs, 0600, in a directory root's) — and the service
     # answers only them, by the kernel's word (SO_PEERCRED), root included.
     systemd.sockets = lib.mapAttrs' (agent: person: lib.nameValuePair "torq-agent@${person}" {
