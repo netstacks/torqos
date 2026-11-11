@@ -265,6 +265,9 @@ in
         StateDirectory = "torq-agent-memory/${person}";
         StateDirectoryMode = "0700";
         InaccessiblePaths = [ "-/var/lib/${agent}" ];
+        # The model's key (a file only root reads): this unit's own credential, in a place only it sees; hidden
+        # from `torq agent run` besides (modules/agent-run.sh hides /run/credentials). ADR-051 step 5, amended.
+        LoadCredential = lib.optional (config.torq.agent.doctor.apiKeyFile != null) "model-key:${toString config.torq.agent.doctor.apiKeyFile}";
         # The launcher's sandbox: every home (and /root, and the people's runtime directories in
         # /run/user) out of reach, /tmp its own, no privilege at all.
         ProtectHome = true;

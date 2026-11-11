@@ -39,6 +39,8 @@ struct Agent {
     running: Mutex<Option<Running>>,
     /// The unit's `cgroup.procs`: every process of the task is there (none outside a unit, e.g. in a test).
     procs: Option<PathBuf>,
+    /// The model's key, as this unit's credential (`$CREDENTIALS_DIRECTORY/model-key`), if it has one.
+    key: Option<PathBuf>,
 }
 
 /// The task running now: its process group, and the connection that asked for it.
@@ -212,12 +214,14 @@ impl Agent {
         // The memory read with the slot held: a `forget` before this is honoured.
         let task = Task { question: text.clone(), context, memory: self.memory.recent() };
         use std::os::unix::process::CommandExt;
-        let mut child = Command::new(&self.harness)
-            .args(["--propose", "--task"])
-            .env_clear()
-            .env("PATH", "/run/current-system/sw/bin")
-            .env("HOME", &self.home)
-            .env("LANG", "C.UTF-8")
+        let mut cmd = Command::new(&self.harness);
+        cmd.args(["--propose", "--task"]).env_clear().env("PATH", "/run/current-system/sw/bin").env("HOME", &self.home).env("LANG", "C.UTF-8");
+        // The model's key, where one is configured: this unit's credential (LoadCredential), handed to the task
+        // by its path, which only this unit sees (ADR-051 step 5, amended).
+        if let Some(k) = &self.key {
+            cmd.env("TORQ_MODEL_KEY_FILE", k);
+        }
+        let mut child = cmd
             .current_dir(&self.home)
             .process_group(0)
             .stdin(Stdio::piped())
@@ -380,6 +384,7 @@ fn agent(args: &[String]) -> Result<Agent> {
         memory: memory::Memory::new(Path::new(&state)),
         running: Mutex::new(None),
         procs: unit_procs(&format!("/torq-agent@{person}.service")),
+        key: std::env::var_os("CREDENTIALS_DIRECTORY").map(|d| PathBuf::from(d).join("model-key")).filter(|k| k.is_file()),
     })
 }
 
@@ -425,7 +430,7 @@ mod tests {
         // The harness is run with PATH the machine's: the test's own, for its script.
         std::fs::write(&h, format!("#!/bin/sh\nPATH={}\n{harness}\n", std::env::var("PATH").unwrap_or_default())).unwrap();
         std::fs::set_permissions(&h, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let a = Arc::new(Agent { person: "alice".into(), uid, harness: h, home: d.path().into(), memory: memory::Memory::new(d.path()), running: Mutex::new(None), procs: Some(d.path().join("procs")) });
+        let a = Arc::new(Agent { person: "alice".into(), uid, harness: h, home: d.path().into(), memory: memory::Memory::new(d.path()), running: Mutex::new(None), procs: Some(d.path().join("procs")), key: None });
         let sock = d.path().join("s.sock");
         let l = UnixListener::bind(&sock).unwrap();
         let served = a.clone();

@@ -30,14 +30,24 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(file: &Path, home: &Path) -> Result<Config> {
+    /// The settings in `file` (agent.json). `credential`: the model's key as the agent service's own credential
+    /// (systemd's LoadCredential, its file handed to the task): where the configuration names a key
+    /// (`apiKeyFile`, a file only root reads), it is the only way to it — so the one-shot `torq doctor` and
+    /// `torq agent propose`, which run as any program of the agent's does, say plainly that they cannot use a
+    /// keyed model (ADR-051 step 5, amended).
+    pub fn load(file: &Path, home: &Path, credential: Option<&Path>) -> Result<Config> {
         let text = std::fs::read_to_string(file).with_context(|| format!("reading {} (is doctor mode on? torq.agent.doctor.enable)", file.display()))?;
         let v: Value = serde_json::from_str(&text).with_context(|| format!("reading {}", file.display()))?;
         let s = |k: &str| v[k].as_str().with_context(|| format!("{}: no {k}", file.display()));
+        let key = match (v["apiKeyFile"].as_str(), credential) {
+            (None, _) => None,
+            (Some(_), Some(c)) => model::key(Some(c))?,
+            (Some(_), None) => bail!("this machine's model needs its API key, which only your resident agent holds: ask it there (torq ask \"…\"); torq doctor and torq agent propose cannot use a keyed model"),
+        };
         Ok(Config {
             endpoint: Endpoint::parse(s("endpoint")?)?,
             model: s("model")?.to_string(),
-            key: model::key(v["apiKeyFile"].as_str().map(Path::new))?,
+            key,
             journal: v["journal"].as_bool().unwrap_or(false),
             max_steps: v["maxSteps"].as_u64().unwrap_or(8).clamp(1, 32) as usize,
             schema: PathBuf::from("/etc/torq/nixos-schema.json"),
@@ -708,6 +718,22 @@ mod tests {
 
     /// A model that answers 2 MB: the answer is cut to its first `MAX_ANSWER` characters, and says so —
     /// one line the agent service relays whole.
+    #[test]
+    fn a_keyed_model_only_through_the_services_credential() {
+        let d = tempfile::tempdir().unwrap();
+        let settings = d.path().join("agent.json");
+        let cred = d.path().join("model-key");
+        std::fs::write(&cred, "sk-test\n").unwrap();
+        std::fs::write(&settings, r#"{"endpoint":"https://api.example.org/v1","model":"m","apiKeyFile":"/var/lib/torq/secrets/model.key"}"#).unwrap();
+        assert_eq!(Config::load(&settings, d.path(), Some(&cred)).unwrap().key.as_deref(), Some("sk-test"));
+        let e = format!("{:#}", Config::load(&settings, d.path(), None).err().unwrap());
+        assert!(e.contains("only your resident agent holds") && e.contains("torq ask"), "{e}");
+        // No key configured: none, credential or not.
+        std::fs::write(&settings, r#"{"endpoint":"https://api.example.org/v1","model":"m","apiKeyFile":null}"#).unwrap();
+        assert!(Config::load(&settings, d.path(), Some(&cred)).unwrap().key.is_none());
+        assert!(Config::load(&settings, d.path(), None).unwrap().key.is_none());
+    }
+
     #[test]
     fn the_broker_s_taint_from_the_start_is_the_session_s() {
         // ADR-051 step 5: a session the broker holds tainted from its start (not the resident agent; a model

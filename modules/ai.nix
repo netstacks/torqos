@@ -74,14 +74,16 @@ in
     apiKeyFile = lib.mkOption {
       type = lib.types.nullOr (lib.types.strMatching "/[^[:space:]]+");
       default = null;
-      example = "/var/lib/torq-agent-alice/model.key";
+      example = "/var/lib/torq/secrets/model.key";
       description = ''
-        A file holding the endpoint's API key, on one line, readable by the agent account that runs the
-        doctor (`torq-agent-<person>`) — one path for every person's agent, so with more than one, a
-        place each of them can read (KNOWN-GAPS: the key per person is ADR-051's Agent page) — never in the
-        config repo (everyone on the machine reads it, and its history keeps every value): put it
-        there yourself, e.g. `sudo install -o torq-agent-alice -g torq-agent-alice -m 600 key /var/lib/torq-agent-alice/model.key`.
-        A string, not a Nix path, so the key is never copied into the world-readable store.
+        A file holding the endpoint's API key, on one line, that only root reads — e.g.
+        `sudo install -D -o root -g root -m 600 key /var/lib/torq/secrets/model.key`. Each person's resident
+        agent (`torq-agent@<person>.service`) gets it as its own systemd credential (LoadCredential): no
+        program run as the agent under `torq agent run` — Claude Code included — can read it, and neither the
+        one-shot `torq doctor` nor `torq agent propose` can use a keyed model (they say so; `torq ask` does).
+        Never in the config repo (everyone on the machine reads it, and its history keeps every value), nor in
+        an agent's home or a person's (whatever runs as them reads it). A string, not a Nix path, so the key is
+        never copied into the world-readable store.
       '';
     };
 
@@ -168,8 +170,8 @@ in
           message = "torq.agent.doctor: the local model needs its file — torq.agent.model.url and hash, or path — or set torq.agent.doctor.endpoint.";
         }
         {
-          assertion = cfg.apiKeyFile == null || !(lib.hasPrefix "/nix/store/" cfg.apiKeyFile || lib.hasPrefix "/var/lib/torq/config" cfg.apiKeyFile);
-          message = "torq.agent.doctor.apiKeyFile: outside the store and the config repo (both are readable by everyone).";
+          assertion = cfg.apiKeyFile == null || !(lib.any (p: lib.hasPrefix p cfg.apiKeyFile) [ "/nix/store/" "/var/lib/torq/config" "/var/lib/torq-agent" "/home/" "/tmp/" "/run/user/" ]);
+          message = "torq.agent.doctor.apiKeyFile: a file only root reads, e.g. /var/lib/torq/secrets/model.key — not in the store or the config repo (everyone reads them), nor an agent's or a person's home or /tmp (whatever runs as them reads it): the resident agent gets it as its credential.";
         }
         {
           assertion = cfg.endpoint == null || !(lib.hasInfix "?" cfg.endpoint || lib.hasInfix "#" cfg.endpoint);

@@ -172,28 +172,30 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
   # each service alone, hidden from every program run here (ADR-051 3, step 2) — made first, as root,
   # so that it is there to hide.
   mkdir -p -m 0755 /var/lib/torq-agent-memory
+  # The credentials systemd gives units (the resident agent gets the model key as one): hidden as well, made
+  # first so that it is there to hide.
+  mkdir -p -m 0755 /run/credentials
+  # The sandbox, as the agent: every program the launcher runs as the agent runs in it (the link below too).
+  sandbox=(setpriv --reuid "$agent" --regid "$agent" --init-groups --no-new-privs --inh-caps=-all --bounding-set=-all --
+    bwrap --die-with-parent --unshare-pid --dev-bind / / --proc /proc
+      --tmpfs /run/user --tmpfs /tmp --tmpfs /root --tmpfs /var/lib/torq-agent-memory --tmpfs /run/credentials
+      --clearenv
+      --setenv HOME "$home" --setenv USER "$agent" --setenv LOGNAME "$agent"
+      --setenv SHELL /run/current-system/sw/bin/bash
+      --setenv PATH "/run/wrappers/bin:/etc/profiles/per-user/$agent/bin:/run/current-system/sw/bin"
+      --setenv TERM "${TERM:-dumb}")
   # TorqOS linked into the coding tools the owner chose (torq agent tools; ADR-051 5 and 7): its MCP server and
-  # skill in the settings of Claude Code, in the home of the agent — done as the agent, never as root, so
-  # nothing is written there with privilege and no link there is followed but as the agent. Advice only: it
-  # failing leaves the tool without the tools of TorqOS, and the tool runs all the same. (No apostrophe in
-  # this script: it is one single-quoted word.)
+  # skill in the settings of Claude Code, in the home of the agent — done as the agent in its sandbox (the
+  # memory of the services and the credentials hidden), never as root, so nothing is written there with
+  # privilege and no link there is followed but as the agent. Advice only: it failing leaves the tool without
+  # the tools of TorqOS, and the tool runs all the same. (No apostrophe in this script: it is one
+  # single-quoted word.)
   if jq -e ".tools | index(\"claude-code\")" /etc/torq/agent-tools.json >/dev/null 2>&1 && [ -x /run/current-system/sw/bin/torq-mcp ]; then
-    setpriv --reuid "$agent" --regid "$agent" --init-groups --no-new-privs --inh-caps=-all --bounding-set=-all -- \
-      env -i HOME="$home" PATH=/run/current-system/sw/bin /run/current-system/sw/bin/torq-mcp --link </dev/null \
+    "${sandbox[@]}" --chdir "$home" -- /run/current-system/sw/bin/torq-mcp --link </dev/null \
       || echo "torq agent run: TorqOS is not linked into the settings of Claude Code this time (it runs without them)" >&2
   fi
   rc=0
-  setpriv --reuid "$agent" --regid "$agent" --init-groups --no-new-privs \
-    --inh-caps=-all --bounding-set=-all -- \
-    bwrap --die-with-parent --unshare-pid --dev-bind / / --proc /proc \
-      --tmpfs /run/user --tmpfs /tmp --tmpfs /root --tmpfs /var/lib/torq-agent-memory \
-      --clearenv \
-      --setenv HOME "$home" --setenv USER "$agent" --setenv LOGNAME "$agent" \
-      --setenv SHELL /run/current-system/sw/bin/bash \
-      --setenv PATH "/run/wrappers/bin:/etc/profiles/per-user/$agent/bin:/run/current-system/sw/bin" \
-      --setenv TERM "${TERM:-dumb}" \
-      --chdir "${share:-$home}" \
-      -- "$@" || rc=$?
+  "${sandbox[@]}" --chdir "${share:-$home}" -- "$@" || rc=$?
   # A set-id file the agent left in the folder would run as the agent outside the sandbox, later: its bits
   # are taken off. As the agent, not as root: the files are owned by the agent, and an owner may change
   # them. The folder belongs to the person, who could swap a folder in it for a link while this runs,
