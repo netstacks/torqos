@@ -1115,13 +1115,14 @@ Its §5 lists claims without a test.
      `torqcli -c "configure; delete torq agent mayPropose users; commit comment \"before ADR-051\""`, then
      `request system update` as usual. Whoever was listed there and should have an agent of their own goes
      in `torq agent people` (the owner is there by default).
-   - **An administrator can still act as an agent.** Trust applies only a proposal the agent account sent
-     itself, over the socket (the ledger's `via` and its caller, the kernel's word) — not root's
-     `torq-broker propose --actor agent --agent …`. But outside strict mode an administrator is root, and
-     `sudo -u torq-agent-bob torqcli …` arrives at the socket as bob's agent: its proposals, under bob's trust,
-     apply. That is root acting, not the agent, and root is not what TorqOS prevents (ADR-035); strict mode
-     (`torq security strict enable true`) closes it: an administrator's sudo is then break-glass and the launcher alone, and the
-     launcher runs only the caller's own agent.
+   - **An administrator can still act as an agent, now only as root does.** Trust applies only a proposal the
+     person's resident agent's own account sent itself, over the socket, from inside its unit's control group
+     (ADR-051 3 amended 2026-11-11) — not root's `torq-broker propose --actor agent --agent …`, and no longer
+     `sudo -u torq-agent-bob torqcli …` (the agent account is never resident: tainted, waits for bob). What is
+     left: outside strict mode an administrator is root, and root can put a process in the unit's control group
+     as `torq-resident-bob` (as the VM tests do). That is root acting, not the agent, and root is not what TorqOS
+     prevents (ADR-035); strict mode (`torq security strict enable true`) closes it: an administrator's sudo is
+     then break-glass and the launcher alone, and the launcher runs only the caller's own agent account.
    - **Whose agent `torq agent run` runs is sudo's word** (its `SUDO_UID`), not the kernel's: sudo takes a
      caller's `SUDO_UID=…` as given wherever their rule has SETENV (tried in a VM, 2026-11-10). The module
      asserts no rule for the launcher has it, and tests/agents-per-person.nix checks sudo refuses bob's
@@ -1220,22 +1221,20 @@ Its §5 lists claims without a test.
 
 6zzo. **torq-mcp, Claude Code as a tool, and the broker's resident rule (ADR-051 5 and 7, step 5, built 2026-11-10,
    `tests/agent-mcp.nix`).** Open:
-   - **What the resident rule rests on.** A session is untainted only from `torq-agent@<person>.service`'s own
-     control group, read through the peer's pidfd. It holds because the unit delegates nothing (its
-     `cgroup.procs` is root's: `tests/agent-service.nix` checks the agent can write it neither as itself nor
-     under `torq agent run`), no agent account has a user manager of its own, `torq agent run`'s programs are in
-     a process namespace of their own (they cannot name a process of the service's to trace, signal, or reach
-     through `/proc/<pid>/root`), and the unit's programs no longer read the agent's home (their home is the
-     service's state directory, hidden from `torq agent run`; the agent's home is inaccessible to the unit).
-     modules/agent.nix asserts the first two and `kernel.yama.ptrace_scope` ≥ 1 (`checks.agent-assertions`).
-     Anything else that breaks one of those breaks the rule: a `torq agent run` without `--unshare-pid`, a new
-     place the harness or torqcli reads that the agent can write. **Yama does not cover the rest:** with
-     `ptrace_scope` 1 a same-uid process outside that sandbox — an administrator's `sudo -u torq-agent-<person>
-     …` in the root process namespace — still reaches the harness's `/proc/<pid>/root` (and so the service's
-     state directory: its home, its memory) though it may not trace it (checked by step 5's review). Only the
-     sandbox's process namespace keeps `torq agent run`'s programs from that; the administrator's own shell is
-     root acting (6zzk), closed by strict mode. That the state directory is the agent uid's to write at all is
-     item 2 of the review, waiting on the owner (a uid of the resident service's own).
+   - **What the resident rule rests on** (amended 2026-11-11: the resident agent's own account, ADR-051 3). A
+     session is untainted only from `torq-resident-<person>` — the broker's map's word for the uid — *and* from
+     inside `torq-agent@<person>.service`'s own control group (read through the peer's pidfd; a second guard).
+     The resident account owns the unit's state directory (its memory and its programs' home) and its
+     credential (the model's key); the agent account — under `torq agent run`, as itself through `su`, or an
+     administrator's `sudo -u` — can write neither, read neither, nor signal, trace or reach the service's
+     processes through /proc (another uid's: `tests/agent-service.nix`). That closes what this said before:
+     that an agent-uid process outside the sandbox could reach the harness's `/proc/<pid>/root` (Yama's
+     `ptrace_scope` 1 does not hide it from the same uid — only another uid or the sandbox's process namespace
+     does), write the state directory, and read the credential. Still resting on: the unit delegates nothing
+     and the resident account has no user manager (asserted, `checks.agent-assertions`); no account but root's
+     can become `torq-resident-<person>` (no password, no login shell, no home, no sudo rule names it); and the
+     resident's programs read nothing the agent or a person can write (its home is its own; /etc and the store
+     are root's; the model is judged as below). Root can be the resident; that is root acting (6zzk).
    - **A model any account here could stand in for taints the resident agent** (fixed from step 5's review,
      2026-11-10). This said, wrongly, that a TCP model could be stood in for only while its server was down:
      any account may listen on another of the machine's addresses (`[::1]` beside a server on `127.0.0.1`), and
@@ -1250,18 +1249,22 @@ Its §5 lists claims without a test.
      person who wants their local Ollama trusted gives it a unix socket in a root-owned directory; an `https`
      endpoint on this machine is believed (TLS: only who holds its key answers — if that key is readable by an
      agent or a person, it is not).
+   - **The resident agent's own account** (2026-11-11). `torq-resident-<person>`: the person sees one agent, and
+     the broker counts both accounts as it (one cap of sessions an hour, waiting proposals and refusals; one
+     `data.agent`). So a coding tool run as the agent account can still use up the shared session budget for an
+     hour (6zq), keeping the resident from starting — refused, never less careful. A machine that ran step 5
+     before this keeps the state directory's contents (systemd gives it to the resident account at the unit's
+     next start); step 5 was never released, and `torq ask --forget` erases the memory. People's names are now
+     at most 17 characters (the module refuses longer, saying so).
    - **A kernel before 6.5** has no SO_PEERPIDFD: every agent session is tainted and trust applies nothing.
    - **`torq doctor` and `torq agent propose` no longer get session trust**: they run through `torq agent run`,
      so their proposals are tainted from the start (the guide says so). `torq ask` is the untainted path.
-   - **The model's key is the resident service's credential** (fixed from step 5's review): `apiKeyFile` is a file
-     only root reads (the module refuses the store, the config repo, an agent's or a person's home, /tmp), given
-     to `torq-agent@<person>.service` by LoadCredential; `torq agent run` hides `/run/credentials`. So
-     `torq doctor` and `torq agent propose` cannot use a keyed model: they say so and send the person to `torq
-     ask` (`tests/agent-service.nix`). An agent-uid process outside the sandbox (an administrator's `sudo -u`) and
-     the credential: **it reads it** — systemd makes `/run/credentials/torq-agent@<person>.service/` the unit user's
-     to read, and that user is the agent account (seen in `tests/agent-service.nix`, printed, not asserted). Only the
-     sandbox hides it; an administrator's `sudo -u` is root acting (6zzk). A uid of the resident service's own
-     (item 2 of the review, the owner's to decide) would close this too.
+   - **The model's key is the resident service's credential** (fixed from step 5's review; its owner the resident
+     account since 2026-11-11): `apiKeyFile` is a file only root reads (the module refuses the store, the config
+     repo, an agent's or a person's home, /tmp), given to `torq-agent@<person>.service` by LoadCredential, so
+     the resident account alone reads it — not the agent account in or out of its sandbox (`tests/agent-service.nix`,
+     su and sudo -u included); `torq agent run` hides `/run/credentials` besides. So `torq doctor` and `torq agent
+     propose` cannot use a keyed model: they say so and send the person to `torq ask`.
    - **A session is cited only by its own kind of caller** (fixed from step 5's review): a program of the agent's
      citing the resident agent's session id (the ledger shows it) is refused, so its proposal is never put in
      that session's record and told to the resident agent as its own; the resident agent cites only sessions

@@ -123,8 +123,10 @@ tells the broker first, and the broker marks the agent's session **tainted** —
 the agent can do clears it. A proposal from a tainted session is marked so.
 
 Only your **resident agent** — the one `torq ask`, the panel and its window talk to — starts with a
-clean session: the broker checks, from the kernel, that the request comes from inside its service. Any
-other program run as your agent (a coding tool such as Claude Code, `torq doctor`, `torq agent propose`,
+clean session: the broker checks, from the kernel, that the request comes from its own account and from inside
+its service. It runs as an account of its own, `torq-resident-<you>`, hidden: what it remembers, its working
+files and its model key are that account's, so nothing run as `torq-agent-<you>` can change or read them. Any
+program run as your agent account (a coding tool such as Claude Code, `torq doctor`, `torq agent propose`,
 anything under `torq agent run`) is tainted from its first request, because TorqOS cannot see what such a
 program read; `request system apply` says so (`not-the-resident-agent`).
 
