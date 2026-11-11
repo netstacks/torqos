@@ -2646,6 +2646,35 @@ vouches for, that only proposes, every change ledgered and undone in one command
   state directory (its memory and its programs' home) is the agent uid's, so an agent-uid process outside the
   launcher's sandbox (an administrator's `sudo -u torq-agent-<person> …`) could write it; the likely fix, a uid
   of the resident service's own, changes decision 3.
+- **Amended: the resident agent's own account (decision 3; the owner, 2026-11-11, "Fix A").** Each person's resident
+  agent, `torq-agent@<person>.service`, runs as an account of its own, **`torq-resident-<person>`** — hidden: no
+  password, no login, no home (`/var/empty`), no group but its own (and `systemd-journal` where the doctor may
+  read the journal) — not as `torq-agent-<person>`. The person still sees one agent: `torq ask`, the panel,
+  its window and the Agent page talk to the resident; coding tools and `torq agent run` keep running as
+  `torq-agent-<person>`. Why: with one uid, any program of the agent's outside the launcher's sandbox (an
+  administrator's `sudo -u torq-agent-<person> …`) could write the service's state — its memory, its programs'
+  home, where a `nix.conf`'s plugin-files or a torqcli candidate would be read by the next resident task — and
+  read its credential (the model's key, `/run/credentials/…`, which systemd makes the unit user's). With its own
+  uid, the state directory, its home and the credential are the resident's, 0700/0400, and nothing the agent
+  uid can write is read by the resident's programs. **One identity at the broker**, settled with it:
+  - broker.json's `agent.agents` keeps mapping `torq-agent-<person>` → person; a new `agent.residents` maps
+    `torq-resident-<person>` → person. An account is the person's resident only if that map names it, its uid is
+    no person's, and the person has an agent (`agent.agents`).
+  - **Both accounts are the person's one agent.** The broker judges and records a resident's request as that
+    person's agent account: the socket adds `--agent torq-agent-<person>` for either; `data.agent` (and
+    `agent_for`) in the ledger is `torq-agent-<person>`; sessions, their caps, waiting proposals and ledgered
+    refusals are counted for that one agent; the list (`mayPropose`) is the same. Who called is still the
+    kernel's word in `data.caller`: `torq-resident-<person>` or `torq-agent-<person>`.
+  - **Residency comes from the uid; the control group is a second guard.** `--resident` is added only when the
+    caller is the person's resident account *and* its process is in `torq-agent@<person>.service`'s own control
+    group (the pidfd check, as before). The agent account is never resident, wherever it runs.
+  - **Trust applies only what the resident account itself sent** (`data.caller` is the resident account the
+    map names for that person, `via: socket`); `caller == agent` was step 1's, and an agent account's proposals
+    are always tainted now, so it never applied anything after step 5 anyway.
+  - The service checks it runs as `torq-resident-<person>`; torqcli takes both prefixes for an agent
+    (`is_agent`: a commit proposes and stops); the launcher, `--hold-frozen` and the shares are the agent
+    account's, as before (the resident gets no ACL to a shared folder: it never reaches one).
+  - Names: a person in `torq.agent.people` has at most 17 characters (`torq-resident-` and the name fit 31).
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
