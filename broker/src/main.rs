@@ -36,6 +36,8 @@ struct Cli {
     system_profile: Option<PathBuf>,
     /// The agent account a request is for (ADR-051 3): the socket adds it, from the kernel's answer.
     agent: Option<String>,
+    /// The caller is its person's resident agent (ADR-051 step 5): the socket adds it, from the peer's control group.
+    resident: bool,
     json: bool,
     cmd: Cmd,
 }
@@ -104,6 +106,7 @@ fn command_line() -> clap::Command {
     let by = || Arg::new("approved-by").long("approved-by").required(true);
     let seq = || Arg::new("seq").required(true).value_parser(value_parser!(u64));
     let agent = || Arg::new("agent").long("agent").help("The agent account this is for (torq-agent-<person>; the socket adds it, from the kernel's answer): its proposals and sessions are judged by the person it serves.");
+    let resident = || flag("resident", "The caller is its person's resident agent, torq-agent@<person>.service (the socket adds it, from the peer's control group; ADR-051 step 5): without it an agent's session starts tainted and its proposal is tainted.");
     Command::new("torq-broker")
         .version(env!("CARGO_PKG_VERSION"))
         .about("TorqOS change broker — the only writer of the system config repo.")
@@ -162,9 +165,10 @@ fn command_line() -> clap::Command {
                 .arg(flag("tainted", "The proposing session ingested untrusted content (web, email, downloads): only adds to what the broker's record of the session says."))
                 .arg(Arg::new("base").long("base").help("The commit this change was prepared against: refused if the configuration has moved on."))
                 .arg(Arg::new("session").long("session").help("The agent's session (session-start): the proposal is tainted as the broker's record of it says; an agent's proposal without one is tainted."))
-                .arg(agent()),
+                .arg(agent())
+                .arg(resident()),
         )
-        .subcommand(Command::new("session-start").about("The agent starts a session (ADR-042): its record kept by the broker (ledgered in the proposals that cite it); its id printed.").arg(agent()))
+        .subcommand(Command::new("session-start").about("The agent starts a session (ADR-042): its record kept by the broker (ledgered in the proposals that cite it); its id printed.").arg(agent()).arg(resident()))
         .subcommand(
             Command::new("session-taint")
                 .about("The agent's session read untrusted text: marked tainted for good (nothing clears it).")
@@ -343,6 +347,7 @@ fn parse_cli() -> Cli {
         current_system: p(&m, "current-system"),
         system_profile: p(&m, "system-profile"),
         agent: sub.try_get_one::<String>("agent").ok().flatten().cloned(),
+        resident: sub.try_get_one::<bool>("resident").ok().flatten().copied().unwrap_or(false),
         json: m.get_flag("json"),
         cmd,
     }
@@ -435,6 +440,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_people(&s.people)
         .with_agent_limits(&s.agent)
         .as_agent(cli.agent.as_deref())
+        .from_resident(cli.resident)
         .with_remote(s.remote.as_deref())
         .with_nix_cache(s.home.join(".cache/nix"))
         // On a real machine the rollback uses the old system's own commands (its etc/torq/broker.json).

@@ -79,6 +79,9 @@ pub struct Broker {
     nix_cache: Option<PathBuf>,
     /// The agent account this run acts for (ADR-051 3; `--agent`): None, a person or the machine.
     agent: Option<String>,
+    /// Whether that agent account calls from its person's resident agent (ADR-051 step 5; `--resident`, which
+    /// only the socket adds): only then is its session untainted at its start, and its proposal judged by it.
+    resident: bool,
     /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
     backup: backup::Backups,
     /// Where the values of the secrets are, and what encrypts them (ADR-052, secrets.rs).
@@ -691,6 +694,7 @@ impl Broker {
             releases_file: PathBuf::from(torq_wire::releases::FILE),
             nix_cache: None,
             agent: None,
+            resident: false,
             backup: backup::Backups::default(),
             secrets: secrets::Store::default(),
             remote: None,
@@ -1306,6 +1310,18 @@ impl Broker {
     pub fn as_agent(mut self, account: Option<&str>) -> Self {
         self.agent = account.map(String::from);
         self
+    }
+
+    /// Whether the acting agent calls from its person's resident agent, `torq-agent@<person>.service` (the
+    /// socket's word, from the peer's control group: ADR-051 step 5).
+    pub fn from_resident(mut self, yes: bool) -> Self {
+        self.resident = yes;
+        self
+    }
+
+    /// See `from_resident`.
+    pub fn resident(&self) -> bool {
+        self.resident
     }
 
     /// The agent account this run acts for, and the person it serves; refused if it names none, or one

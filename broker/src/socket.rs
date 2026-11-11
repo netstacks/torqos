@@ -42,6 +42,65 @@ pub struct Caller {
     pub admin: bool,
     /// A normal account (NixOS gives people uids from 1000): not a service's, which proposes nothing.
     pub person: bool,
+    /// An agent account calling from its person's resident agent, `torq-agent@<person>.service` (its
+    /// process in that unit's control group, as `serve` reads it from the peer's pidfd: ADR-051 step 5).
+    /// Never the caller's word; false unless serve found it so. Only then is its session untainted at its
+    /// start, and its proposal judged by the session it cites.
+    pub resident: bool,
+}
+
+/// What a session of an agent account's is tainted by from its start, and a proposal of one, when the
+/// caller is not its person's resident agent (ADR-051 step 5): any other program run as the agent —
+/// `torq agent run`'s, a coding tool, torq-mcp — whose reads the broker never sees.
+pub const NOT_RESIDENT: &str = "not-the-resident-agent";
+
+/// The control group of `person`'s resident agent, `torq-agent@<person>.service`, as systemd names it
+/// (an instance of a template goes in `system-<its prefix, escaped>.slice`).
+pub fn resident_cgroup(person: &str) -> String {
+    format!("/system.slice/system-torq\\x2dagent.slice/torq-agent@{person}.service")
+}
+
+/// Whether a process's `/proc/<pid>/cgroup` puts it in `person`'s resident agent's own control group —
+/// that group itself (the unit delegates nothing, so has no group below it), on the unified hierarchy.
+pub fn in_resident(cgroup: &str, person: &str) -> bool {
+    let want = resident_cgroup(person);
+    let v2: Vec<&str> = cgroup.lines().filter_map(|l| l.strip_prefix("0::")).collect();
+    policy::user_name_ok(person) && v2.len() == 1 && v2[0] == want
+}
+
+/// The pid a pidfd names, from its `/proc/self/fdinfo/<fd>` (`Pid:`); none for one that has exited (-1)
+/// or is not in this namespace (0).
+pub fn fdinfo_pid(fdinfo: &str) -> Option<i32> {
+    fdinfo.lines().find_map(|l| l.strip_prefix("Pid:")).and_then(|v| v.trim().parse::<i32>().ok()).filter(|p| *p > 0)
+}
+
+/// Whether the peer of connection `conn` — an agent account serving `person`, its pid `pid` as SO_PEERCRED
+/// says — is that person's resident agent, `torq-agent@<person>.service` (ADR-051 step 5): its process in
+/// that unit's own control group, which no process of the agent's can move itself into (the group's
+/// `cgroup.procs` is root's: the unit delegates nothing). Read without trusting the pid alone, which could
+/// be another process's by now: the peer's pidfd (SO_PEERPIDFD, fixed when it connected) must name that
+/// pid; its control group is read; then the pidfd must say the process has not exited — so the pid was
+/// still its when the group was read. Anything that does not hold, a kernel without SO_PEERPIDFD included:
+/// not resident, so tainted. Never an error: what cannot be read is a "no".
+pub fn resident_peer(conn: &impl std::os::fd::AsFd, pid: i32, person: &str) -> bool {
+    peer_in(conn, pid, |cgroup| in_resident(cgroup, person))
+}
+
+/// `resident_peer`, its control group judged by `ok`.
+fn peer_in(conn: &impl std::os::fd::AsFd, pid: i32, ok: impl Fn(&str) -> bool) -> bool {
+    use std::os::fd::AsRawFd as _;
+    let Ok(pidfd) = nix::sys::socket::getsockopt(conn, nix::sys::socket::sockopt::PeerPidfd) else { return false };
+    let named = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd())).ok().and_then(|i| fdinfo_pid(&i));
+    if named != Some(pid) {
+        return false;
+    }
+    let Ok(cgroup) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) else { return false };
+    if !ok(&cgroup) {
+        return false;
+    }
+    // A pidfd is readable once its process has exited: not readable now, it is still running.
+    let mut fds = [rustix::event::PollFd::new(&pidfd, rustix::event::PollFlags::IN)];
+    matches!(rustix::event::poll(&mut fds, Some(&rustix::event::Timespec { tv_sec: 0, tv_nsec: 0 })), Ok(0))
 }
 
 /// What a command needs from its caller.
@@ -64,7 +123,7 @@ pub struct Change {
 /// asking and who approves (the kernel's), and files (they come in the request).
 const NOT_FROM_CALLERS: &[&str] = &[
     "--repo", "--state-dir", "--rebuild-cmd", "--build-cmd", "--activate-cmd", "--boot-cmd", "--schedule-cmd",
-    "--commit-at-cmd", "--commit-at-cancel-cmd", "--current-system", "--system-profile", "--actor", "--agent", "--approved-by", "--diff", "--hash-file", "--key-file", "--value-file",
+    "--commit-at-cmd", "--commit-at-cancel-cmd", "--current-system", "--system-profile", "--actor", "--agent", "--resident", "--approved-by", "--diff", "--hash-file", "--key-file", "--value-file",
 ];
 
 /// Refuse arguments that name the caller, a file, or the broker's settings.
@@ -101,7 +160,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str, agents: &crate::agent::Limits
     });
     let person = PEOPLE_UIDS.contains(&uid);
     let agent_for = if person { None } else { agents.serves(&name).map(String::from) };
-    Ok(Caller { uid, agent_for, person, name, admin })
+    Ok(Caller { uid, agent_for, person, name, admin, resident: false })
 }
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
@@ -244,11 +303,22 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
                 Some(_) => a.extend(["--actor".into(), "agent".into(), "--agent".into(), who.name.clone()]),
                 None => a.extend(["--actor".into(), "user".into()]),
             }
+            // From the resident agent alone is it judged by its session (ADR-051 step 5); else tainted.
+            if who.agent_for.is_some() && who.resident {
+                a.push("--resident".into());
+            }
             a.extend(["--diff".into(), diff.context("a proposal needs its diff, in the request")?.into()]);
         }
         // A session is its agent account's own: no other agent starts, reports into or cites it.
-        // (Anyone else's is refused by the gate: a session is an agent's.)
-        "session-start" | "session-taint" if who.agent_for.is_some() => a.extend(["--agent".into(), who.name.clone()]),
+        // (Anyone else's is refused by the gate: a session is an agent's.) Untainted at its start only
+        // from the resident agent (ADR-051 step 5).
+        "session-start" if who.agent_for.is_some() => {
+            a.extend(["--agent".into(), who.name.clone()]);
+            if who.resident {
+                a.push("--resident".into());
+            }
+        }
+        "session-taint" if who.agent_for.is_some() => a.extend(["--agent".into(), who.name.clone()]),
         "password" => {
             a.extend(["--hash-file".into(), hash.context("a password needs its hash, in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
@@ -356,8 +426,8 @@ mod tests {
 
     #[test]
     fn the_caller_is_the_uid() {
-        assert_eq!(who(1000), Caller { uid: 1000, name: "viper".into(), agent_for: None, admin: true, person: true });
-        assert_eq!(who(1001), Caller { uid: 1001, name: "sam".into(), agent_for: None, admin: false, person: true });
+        assert_eq!(who(1000), Caller { uid: 1000, name: "viper".into(), agent_for: None, admin: true, person: true, resident: false });
+        assert_eq!(who(1001), Caller { uid: 1001, name: "sam".into(), agent_for: None, admin: false, person: true, resident: false });
         assert!(!who(65534).person && !who(998).person && !who(990).person);
         assert!(who(990).agent_for.as_deref() == Some("viper") && !who(990).admin);
         assert!(caller(4242, PASSWD, GROUP, &agents()).is_err(), "no account");
@@ -389,6 +459,110 @@ mod tests {
         assert_eq!(with_identity(&["session-start".into()], "session-start", &who(1000), None, None, None).unwrap(), ["session-start"], "a person names no agent");
         assert!(matches!(gate(&who(1000), "session-start", None, None), Gate::Refused(_)));
         assert!(check_args(&["propose".into(), "--agent=torq-agent-viper".into()]).is_err(), "no caller names its agent");
+    }
+
+    /// ADR-051 step 5: the resident agent is a process in its person's `torq-agent@<person>.service`'s own
+    /// control group — no other group, no group below it, no look-alike name, nothing on the old hierarchy.
+    #[test]
+    fn the_resident_agent_is_its_units_control_group() {
+        let cg = |p: &str| format!("0::{p}\n");
+        let unit = "/system.slice/system-torq\\x2dagent.slice/torq-agent@viper.service";
+        assert_eq!(resident_cgroup("viper"), unit);
+        assert!(in_resident(&cg(unit), "viper"));
+        for not in [
+            "/system.slice/system-torq\\x2dagent.slice/torq-agent@sam.service",
+            "/system.slice/system-torq\\x2dagent.slice/torq-agent@viper.service/sub",
+            "/system.slice/system-torq\\x2dagent.slice/torq-agent@viper.service.d",
+            "/system.slice/torq-agent@viper.service",
+            "/user.slice/user-1000.slice/session-3.scope",
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/torq-agent@viper.service",
+            "/system.slice/run-u12.service",
+            "",
+        ] {
+            assert!(!in_resident(&cg(not), "viper"), "{not}");
+        }
+        assert!(!in_resident(&cg(unit), "sam"), "another person's agent");
+        assert!(!in_resident(&format!("1:name=systemd:{unit}\n"), "viper"), "only the unified hierarchy says");
+        assert!(!in_resident(&format!("0::{unit}\n0::/other\n"), "viper"), "one group, or none");
+        assert!(!in_resident("", "viper"));
+        assert!(!in_resident(&cg(&resident_cgroup("../x")), "../x"), "not a person's name");
+    }
+
+    /// The peer read through its pidfd: a live peer whose pid SO_PEERCRED named, its group as judged; a pid
+    /// that is not the pidfd's, or a peer that has exited, is not resident — and a connection with no peer
+    /// (not a socket) never is.
+    #[test]
+    fn the_peer_is_read_by_its_pidfd() {
+        let me = std::process::id() as i32;
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        // This process is the peer of its own pair.
+        assert!(peer_in(&a, me, |_| true), "a live peer, as SO_PEERCRED named it");
+        assert!(!peer_in(&a, me, |_| false), "its group judged");
+        assert!(!peer_in(&a, me + 1, |_| true), "a pid that is not the pidfd's");
+        assert!(!resident_peer(&a, me, "viper"), "a test is no unit's");
+        let f = tempfile::tempfile().unwrap();
+        assert!(!peer_in(&f, me, |_| true), "not a socket: no peer");
+        // A peer that has gone: a child connects, and exits.
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("s");
+        let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "socket::tests::helper_connects", "--ignored", "--test-threads=1"])
+            .env("TORQ_TEST_CONNECT", &path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let (c, _) = l.accept().unwrap();
+        // Exited, not yet reaped (a zombie): its pid is still its own and named, but the pidfd says it ended.
+        let t = std::time::Instant::now();
+        while !std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap().rsplit_once(") ").is_some_and(|(_, r)| r.starts_with('Z')) {
+            assert!(t.elapsed() < std::time::Duration::from_secs(20), "the helper never ended");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!peer_in(&c, pid, |_| true), "it exited: its pid could soon be anyone's");
+        child.wait().unwrap();
+        assert!(!peer_in(&c, pid, |_| true), "reaped: gone");
+    }
+
+    /// Not a test: the peer of `the_peer_is_read_by_its_pidfd`, which connects and ends.
+    #[test]
+    #[ignore]
+    fn helper_connects() {
+        if let Some(p) = std::env::var_os("TORQ_TEST_CONNECT") {
+            let s = std::os::unix::net::UnixStream::connect(p).unwrap();
+            std::mem::forget(s);
+        }
+    }
+
+    #[test]
+    fn a_pidfds_pid() {
+        assert_eq!(fdinfo_pid("pos:\t0\nflags:\t02000002\nmnt_id:\t15\nino:\t1057\nPid:\t4242\nNSpid:\t4242\n"), Some(4242));
+        assert_eq!(fdinfo_pid("Pid:\t-1\nNSpid:\t-1\n"), None, "exited");
+        assert_eq!(fdinfo_pid("Pid:\t0\n"), None, "not in this namespace");
+        assert_eq!(fdinfo_pid("pos:\t0\n"), None);
+    }
+
+    /// The broker is told the caller is the resident agent only by serve, never by the caller; and only for
+    /// an agent's proposal and session start.
+    #[test]
+    fn resident_is_added_never_taken() {
+        assert!(check_args(&["session-start".into(), "--resident".into()]).is_err());
+        assert!(check_args(&["propose".into(), "--resident=true".into()]).is_err());
+        let mut a = who(990);
+        let p = |a: &Caller| with_identity(&["propose".into(), "--base=c".into()], "propose", a, Some("/run/d"), None, None).unwrap();
+        let s = |a: &Caller| with_identity(&["session-start".into()], "session-start", a, None, None, None).unwrap();
+        assert!(!p(&a).contains(&"--resident".to_string()) && !s(&a).contains(&"--resident".to_string()), "not found so: not resident");
+        a.resident = true;
+        assert_eq!(p(&a), ["propose", "--base=c", "--actor", "agent", "--agent", "torq-agent-viper", "--resident", "--diff", "/run/d"]);
+        assert_eq!(s(&a), ["session-start", "--agent", "torq-agent-viper", "--resident"]);
+        let t = with_identity(&["session-taint".into(), "x".into()], "session-taint", &a, None, None, None).unwrap();
+        assert_eq!(t, ["session-taint", "x", "--agent", "torq-agent-viper"]);
+        // A person is never resident, whatever were set.
+        let mut v = who(1000);
+        v.resident = true;
+        assert!(!p(&v).contains(&"--resident".to_string()));
     }
 
     #[test]

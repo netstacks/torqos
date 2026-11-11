@@ -14,8 +14,12 @@
 //!
 //! What the broker can vouch for is what was reported to it: it cannot see what a program of the
 //! agent's reads. So a record is the agent's own word, kept where the agent cannot change it — a
-//! report cannot be taken back, but a program that never reports (any tool run as the agent other than
-//! TorqOS's own) has an untainted session (KNOWN-GAPS 6zq). Hence the default: no session, tainted.
+//! report cannot be taken back. A program that would never report (any tool run as the agent other than
+//! TorqOS's own) is why only the person's resident agent — its process in `torq-agent@<person>.service`'s
+//! control group, as serve reads it from the peer's pidfd (ADR-051 step 5) — starts a session untainted
+//! and has its proposals judged by it: every other caller of an agent account starts tainted
+//! (`not-the-resident-agent`), and its proposals are tainted whatever session they cite. Hence the
+//! defaults: no session, tainted; not resident, tainted.
 //!
 //! **Trust.** A person grants, with their password, "for the next N minutes (at most 60), my agent's
 //! user-tier proposals in my own folder apply without asking": `trust_granted`, the ledger the only
@@ -176,7 +180,10 @@ pub fn start(b: &Broker) -> Result<Record> {
     if read(b, &id)?.is_some() {
         bail!("a session {id} exists already");
     }
-    let r = Record { id, started: now(), tainted: false, tainted_by: vec![], agent: agent.into(), proposals: vec![] };
+    // Untainted at its start only from the resident agent (ADR-051 step 5): any other program of the agent's
+    // reads what the broker never sees.
+    let (tainted, tainted_by) = if b.resident() { (false, vec![]) } else { (true, vec![socket::NOT_RESIDENT.to_string()]) };
+    let r = Record { id, started: now(), tainted, tainted_by, agent: agent.into(), proposals: vec![] };
     write(b, &r)?;
     Ok(r)
 }
@@ -224,7 +231,13 @@ pub fn judge(b: &Broker, actor: Actor, flag: bool, session: Option<&str>) -> Res
             if r.agent != agent {
                 bail!("refused: session {id} is not {agent}'s");
             }
-            Ok((flag || r.tainted, Some(json!({ "id": r.id, "started": r.started, "tainted_by": r.tainted_by }))))
+            // Judged by its session only when it comes from the resident agent (ADR-051 step 5): a session's id
+            // is in the ledger for anyone to read, so another program of the agent's could cite one.
+            let mut by = r.tainted_by.clone();
+            if !b.resident() && !by.iter().any(|s| s == socket::NOT_RESIDENT) {
+                by.push(socket::NOT_RESIDENT.into());
+            }
+            Ok((flag || r.tainted || !b.resident(), Some(json!({ "id": r.id, "started": r.started, "tainted_by": by }))))
         }
     }
 }

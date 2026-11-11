@@ -245,8 +245,10 @@ fn as_agent(dir: &Path, agent: &str, people: &[&str]) -> Broker {
     by_socket(Broker::new(dir.join("config"), dir.join("state"), "true").with_agent_limits(&Limits { agents: agents(people), settings: vec![] }).as_agent(Some(agent)), agent)
 }
 
-/// What the ledger records of a call that came over the socket from `caller` (serve.rs sets it so).
-fn by_socket(mut b: Broker, caller: &str) -> Broker {
+/// What the ledger records of a call that came over the socket from `caller`, from its person's resident
+/// agent (serve.rs sets both so: ADR-051 step 5).
+fn by_socket(b: Broker, caller: &str) -> Broker {
+    let mut b = b.from_resident(true);
     b.ledger.set_via(Some("socket".into()), Some(caller.into()));
     b
 }
@@ -260,7 +262,7 @@ fn trust_applies_only_what_the_agent_itself_sent() {
     session::grant(&b, "casey", 30).unwrap();
     let s = session::start(&b).unwrap();
     for (via, caller) in [(None, None), (Some("sudo"), None), (Some("socket"), Some("dev")), (Some("socket"), Some("torq-agent-sam"))] {
-        let mut root = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey"));
+        let mut root = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey")).from_resident(true);
         root.ledger.set_via(via.map(String::from), caller.map(String::from));
         let p = propose(&root, &diff(dir.path(), "r.diff", "users/casey/packages.json", "[\"nmap\"]"), Actor::Agent, false, Some(&s.id)).unwrap();
         assert!(session::apply_trusted(&root, &p).unwrap().is_none(), "{via:?} {caller:?}");
@@ -443,4 +445,37 @@ fn trust_never_applies_a_declined_proposal() {
     let r = session::apply_trusted(&b, &p);
     assert!(r.as_ref().map_or_else(|e| format!("{e:#}").contains("declined"), |a| a.is_none()), "{r:?}");
     assert_eq!(kinds(&b, "applied"), 1, "only the one before");
+}
+
+/// ADR-051 step 5 (KNOWN-GAPS 6zq): only the person's resident agent starts a session untainted and has
+/// its proposals judged by it. Any other program of the agent account's — Claude Code under `torq agent run`,
+/// torq-mcp, `torq doctor` — starts tainted (`not-the-resident-agent`), and its proposal is tainted whatever
+/// session it cites, the resident agent's own clean one included (its id is in the ledger); under the
+/// person's trust, none of it applies.
+#[test]
+fn only_the_resident_agent_is_untainted() {
+    let (dir, b) = setup(&[]);
+    session::grant(&b, "casey", 30).unwrap();
+    // The same account, over the socket, from outside the resident agent's control group.
+    let mut other = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey"));
+    other.ledger.set_via(Some("socket".into()), Some("torq-agent-casey".into()));
+    assert!(!other.resident());
+    let s = session::start(&other).unwrap();
+    assert!(s.tainted && s.tainted_by == ["not-the-resident-agent"], "{s:?}");
+    let p = propose(&other, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    assert!(p.body.tainted && p.body.data["session"]["tainted_by"] == json!(["not-the-resident-agent"]), "{:?}", p.body);
+    assert!(session::apply_trusted(&other, &p).unwrap().is_none(), "not applied under trust");
+    // Citing the resident agent's untainted session: tainted all the same.
+    let clean = session::start(&b).unwrap();
+    assert!(!clean.tainted && clean.tainted_by.is_empty());
+    let p = propose(&other, &diff(dir.path(), "j.diff", "users/casey/packages.json", "[\"jq\"]"), Actor::Agent, false, Some(&clean.id)).unwrap();
+    assert!(p.body.tainted && p.body.data["session"]["tainted_by"] == json!(["not-the-resident-agent"]), "{:?}", p.body);
+    assert!(session::apply_trusted(&other, &p).unwrap().is_none());
+    assert!(session::apply_trusted(&b, &p).unwrap().is_none(), "nor by the resident agent's broker run: the proposal is tainted on the record");
+    assert!(!session::read(&b, &clean.id).unwrap().unwrap().tainted, "its record untouched: only the proposal is tainted");
+    assert_eq!(kinds(&b, "applied"), 0);
+    // The resident agent's own, on that session: applied under trust.
+    let p = propose(&b, &diff(dir.path(), "t.diff", "users/casey/packages.json", "[\"tree\"]"), Actor::Agent, false, Some(&clean.id)).unwrap();
+    assert!(!p.body.tainted && p.body.data["session"]["tainted_by"] == json!([]), "{:?}", p.body);
+    assert!(session::apply_trusted(&b, &p).unwrap().is_some());
 }
