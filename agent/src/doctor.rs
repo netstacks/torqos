@@ -77,7 +77,7 @@ const CALLS_PER_ROUND: usize = 8;
 pub const TAINTED: &str = "[This answer came from a session that read untrusted text";
 
 /// A session's id at the broker: 32 lowercase hex digits.
-fn session_id_ok(s: &str) -> bool {
+pub fn session_id_ok(s: &str) -> bool {
     s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
@@ -249,7 +249,7 @@ fn cut_answer(answer: &str) -> String {
 
 /// The proposals the broker's record of session `broker` names that are not in `seen` (then added
 /// to it), each in words: its number, and the change it became if a person's trust applied it.
-fn broker_said(host: &dyn Host, broker: &str, seen: &mut std::collections::BTreeSet<u64>) -> Result<Vec<(u64, String)>> {
+pub fn broker_said(host: &dyn Host, broker: &str, seen: &mut std::collections::BTreeSet<u64>) -> Result<Vec<(u64, String)>> {
     let record: Value = serde_json::from_str(host.session(&["show", broker]).context("asking the broker what was proposed")?.trim()).context("reading the broker's record of the session")?;
     let mut out = Vec::new();
     for c in record["proposals"].as_array().into_iter().flatten() {

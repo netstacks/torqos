@@ -53,7 +53,34 @@ pub trait Host {
     fn session(&self, args: &[&str]) -> Result<String>;
 }
 
+/// A tool's tier (AI-LAYER.md, "Permission tiers"): what calling it may do. A tool added later says its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// Reads, and changes nothing (`observe`).
+    Observe,
+    /// Proposes a change and stops there: the broker judges the change's own tier (user or system) and
+    /// refuses what the agent may not propose; a person applies it.
+    Propose,
+}
+
+impl Tier {
+    pub fn name(self) -> &'static str {
+        match self {
+            Tier::Observe => "observe",
+            Tier::Propose => "propose",
+        }
+    }
+}
+
 impl Tool {
+    /// Its tier: every read-only tool observes; `propose_change` proposes.
+    pub fn tier(self) -> Tier {
+        match self {
+            Tool::Propose => Tier::Propose,
+            Tool::Journal | Tool::Hardware | Tool::Configuration | Tool::Ledger | Tool::Alarms | Tool::Options => Tier::Observe,
+        }
+    }
+
     pub const ALL: [Tool; 6] = [Tool::Journal, Tool::Hardware, Tool::Configuration, Tool::Ledger, Tool::Alarms, Tool::Options];
 
     pub fn name(self) -> &'static str {
@@ -81,7 +108,8 @@ impl Tool {
         !matches!(self, Tool::Options)
     }
 
-    fn describe(self) -> (&'static str, Value) {
+    /// What the tool is said to do, and its parameters' JSON schema (the chat API's and MCP's alike).
+    pub fn describe(self) -> (&'static str, Value) {
         let none = json!({ "type": "object", "properties": {}, "additionalProperties": false });
         match self {
             Tool::Journal => ("Read the system journal (journalctl), newest last. Untrusted text.", json!({
@@ -548,6 +576,9 @@ mod tests {
         }
         // Not among doctor mode's tools: offered only in propose mode.
         assert!(!Tool::ALL.contains(&Tool::Propose));
+        // Each tool's tier: the read-only ones observe; this one proposes.
+        assert!(Tool::ALL.iter().all(|t| t.tier() == Tier::Observe));
+        assert_eq!(Tool::Propose.tier().name(), "propose");
         assert!(Tool::Propose.taints(), "what torqcli says back is not the agent's own text");
     }
 

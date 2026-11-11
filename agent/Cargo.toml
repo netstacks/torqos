@@ -5,6 +5,11 @@ edition = "2021"
 description = "TorqOS agent (unprivileged, run as a person's agent account, torq-agent-<person>): doctor mode, read-only tools, proposes nothing"
 license = "Apache-2.0"
 
+# What the three programs share: the tools, the cleaning, the session (ADR-051 step 5).
+[lib]
+name = "torq_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "torq-doctor"
 path = "src/main.rs"
@@ -13,6 +18,11 @@ path = "src/main.rs"
 [[bin]]
 name = "torq-agent-service"
 path = "src/service/main.rs"
+
+# TorqOS's tools for a coding tool (ADR-051 7): an MCP server on standard input and output, run as the agent.
+[[bin]]
+name = "torq-mcp"
+path = "src/mcp/main.rs"
 
 [dependencies]
 anyhow = "1"

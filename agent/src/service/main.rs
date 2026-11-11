@@ -14,8 +14,7 @@
 #![cfg_attr(not(test), forbid(dead_code))]
 #![cfg_attr(test, deny(dead_code))]
 
-#[path = "../clean.rs"]
-mod clean;
+use torq_agent::clean;
 mod memory;
 
 use anyhow::{bail, Context, Result};
