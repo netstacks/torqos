@@ -49,7 +49,7 @@ command can be abbreviated to a unique beginning, and `?` or `help` works anywhe
 | `request system secret set <name>` | give a secret's value (typed, or `file <path>`): kept encrypted, outside the configuration, never in the ledger |
 | `request system secret allow <name> https <host>` or `ssh <host>` or `agent` | let a secret be used for that host (a token in an HTTPS header, or an SSH key), or by the agent, which uses it without reading it |
 | `request system secret disallow <name> …` | take a use back |
-| `request system secret approve <name> each-use`, `first-use` or `never` | when a person is asked before the agent uses it (a session that read untrusted text is always asked) |
+| `request system secret approve <name> each-use`, `first-use` or `never` | when a person is asked before the agent uses it (a session that read untrusted text is always asked). The approval step itself is not built yet: until it is, the agent may use only a secret that asks for no approval, from an untainted session |
 | `request system secret show <name>` | print its value here (asks your password) |
 | `request system secret delete <name>` | delete its value and its rule |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
