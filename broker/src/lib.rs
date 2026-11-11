@@ -1786,6 +1786,7 @@ impl Broker {
                     "refused: {path} must be a regular file holding {} of at most {} KiB",
                     match leaf {
                         "packages.json" => format!("a JSON list of package names (at most {})", policy::MAX_USER_PACKAGES),
+                        "desktop.json" => "COSMIC's own settings (com.system76.*) as JSON, no other program's".to_string(),
                         _ => "JSON data".to_string(),
                     },
                     policy::user_leaf_max(leaf) / 1024

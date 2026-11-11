@@ -3428,6 +3428,23 @@ fn a_schedules_refusal_does_not_hide_applys_own() {
 
 /// A person's desktop, saved every few minutes, does not build and switch the machine: only the first save
 /// (which may make their folder, checked by the build) and anything else does.
+/// A person's saved desktop is COSMIC's own settings only: another program's (a weather applet's location)
+/// is refused, by whoever proposes it, so it never reaches a repository every account can read.
+#[test]
+fn a_saved_desktop_with_another_programs_settings_is_refused() {
+    let (cfg, b) = setup("true");
+    let before = b.ledger.read_all().unwrap().len();
+    let d = write_diff(
+        cfg.path(),
+        "tempest.diff",
+        "--- /dev/null\n+++ b/users/casey/desktop.json\n@@ -0,0 +1 @@\n+{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"M\", \"com.vintagetechie.CosmicExtAppletTempest/v1/latitude\": \"45.1\"}}\n",
+    );
+    let e = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Desktop: panel", Actor::User, false).unwrap_err();
+    assert!(format!("{e:#}").contains("COSMIC's own settings"), "{e:#}");
+    assert_eq!(b.ledger.read_all().unwrap().len(), before, "nothing recorded");
+    assert!(!b.repo.root().join("users/casey/desktop.json").exists());
+}
+
 #[test]
 fn a_saved_desktop_builds_nothing_after_the_first() {
     let dir = tempfile::tempdir().unwrap();

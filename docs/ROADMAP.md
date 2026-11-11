@@ -248,7 +248,8 @@ Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, 
 - [x] **The person's COSMIC settings, saved** (ADR-045 4, amended 2026-11-10): `request system desktop save`
       and `request system desktop saving automatic|manual`, `show system desktop`; kept in
       `users/<name>/desktop.json`, the panel applet saving every 15 minutes by default (`cli/src/desktop.rs`).
-      Open problems with it: KNOWN-GAPS 6zx, 6zy.
+      COSMIC's own settings only, and a save only when the person changed one (KNOWN-GAPS 6zx, 6zy, fixed
+      2026-11-11; what was saved before stays in the history).
 - [ ] **The person's COSMIC settings, the rest** (ADR-045 4): tree defaults, drift in `show | compare`; the
       tree's COSMIC words generated from cosmic-config's keys.
 - [x] **Applications** (2026-11-09: the Apps page, per person, remembered in `users <name> flatpaks`; ADR-037 amended).

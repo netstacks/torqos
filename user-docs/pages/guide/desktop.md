@@ -66,16 +66,20 @@ its repository looks the same, and an undo or a pull puts your desktop back as i
 - `request system desktop saving manual` stops that; `request system desktop save` then saves when
   you ask. `request system desktop saving automatic` turns it back on. `show system desktop` says
   what is saved and what is not yet.
+- Only COSMIC's own settings are saved. Applets and programs from anyone else that keep their
+  settings in COSMIC's folder (a weather applet's location, a token) are left out, and TorqOS
+  refuses them if anything tries to save them. Their settings stay where they are, in your home.
 - Settings that belong to the machine rather than to you (which display the panel is on, when the
-  machine sleeps) are left out.
+  machine sleeps) are left out, and so is what COSMIC writes by itself (the screenshot tool's last
+  area). A save happens only when you changed something.
 
-!!! warning "What is saved is readable by every account"
+!!! warning "Saved before 0.4.0-rc1: other programs' settings stay in the history"
     The configuration repository can be read by every account on the machine, and by a remote if you
-    set one up. The saved desktop includes the settings of third-party applets, whatever they
-    contain (a weather applet's location, for example), and nothing filters them. An applet that
-    rewrites its own settings all the time can also make TorqOS save every 15 minutes, filling the
-    history. If either matters to you, set saving to manual. Both are listed as open in
-    KNOWN-GAPS (6zx and 6zy).
+    set one up. Before this release, the save also took other applets' settings. The next save takes
+    them out of `desktop.json` (with saving manual, run `request system desktop save` once), but the
+    earlier commits still hold them, on this machine and on a
+    remote that received them. If that matters (a location, a token), change what you can, such as
+    the token, and see KNOWN-GAPS 6zy in the repository for what can be done about the history.
 
 ## Limits
 

@@ -335,26 +335,37 @@ Its §5 lists claims without a test.
    finding the dialog in under 4 s; the laptop always does. The dialog's restart after polkit took 52 s there (5 s
    on the laptop), so the test waits up to 120 s.
 
-6zx. **The desktop's automatic save can commit every 15 minutes for good (found by the review of 2026-11-11,
-   open).** The panel applet (`settings/src/applet.rs`, every 15 minutes) calls `cli/src/desktop.rs`'s sync,
-   which saves whenever anything under `~/.config/cosmic` differs from what was last saved. An applet that
-   rewrites its own state on a timer (seen: a weather applet's `last_updated`) makes every sync differ, so
-   the machine commits a change to `users/<name>/desktop.json` every 15 minutes for as long as the applet runs:
-   a proposal and an applied change in the ledger (two entries) and a git commit each time, and nothing is
-   ever pruned (the ledger and the repository only grow). The change's label (`desktop::what`) takes the first
-   dotted segment of an id that is not System76's, so such a save reads "Desktop: com" in the ledger and the
-   history, which says nothing of what changed. Set saving to manual (`request system desktop saving manual`)
-   to stop it. A fix would leave out settings that only the applet's own state changes, or save only when a
-   value the person set has changed, and give the label the applet's name.
-6zy. **The desktop save copies third-party applets' settings into the configuration repository (found by the
-   review of 2026-11-11, open).** The same save writes every setting COSMIC's folder holds, the settings of
-   applets from anyone included, into `users/<name>/desktop.json` in the configuration repository (seen: a
-   latitude, a longitude and a location name; a field holding a token). Nothing filters by key or by vendor:
-   only the panel's output and the idle suspend times are left out (`machine_specific`). That repository is
-   readable by every account on the machine (6r), and a remote (ADR-036) would receive it and keep it, in
-   history that cannot be taken back. Saving manually does not help for what a manual save writes; the
-   file's contents are the only protection. A fix would save only an allow-list of COSMIC's own components,
-   or let the person choose which.
+6zx. ~~**The desktop's automatic save can commit every 15 minutes for good.**~~ Fixed (2026-11-11, for
+   0.4.0-rc1). Found by the review of that day: a third-party weather applet rewrote its `last_updated` at each
+   refresh, so every sync differed, and the machine committed `users/<name>/desktop.json` every 15 minutes
+   (two ledger entries and a git commit each; 68 such on the owner's laptop). Now a save is made only when a
+   setting the person can choose has changed (`cli/src/desktop.rs`, test
+   `a_sync_with_nothing_the_person_changed_saves_nothing`): other programs' settings are not kept at all (6zy),
+   and what a COSMIC program writes of its own accord is left out, `desktop::programs_own`. That list is **by
+   observation**, of the owner's laptop over three days on 2026-11-11: only the screenshot tool's last area and
+   display (`com.system76.CosmicPortal/v1/screenshot`) was found. A COSMIC release that starts rewriting
+   another of its settings by itself would bring the repeated saves back for that setting, and the setting
+   would go on the list. The history's label names the component ("Desktop: panel", "Desktop: other programs'
+   settings taken out"), never "Desktop: com". Old entries are not pruned: the ledger and the repository only
+   grow, by design.
+6zy. ~~**The desktop save copied third-party applets' settings into the configuration repository.**~~ Fixed
+   (2026-11-11, for 0.4.0-rc1), except for what was already saved. Only COSMIC's own components
+   (`com.system76.*`) are saved now. torqcli leaves the others out, and the broker refuses a `desktop.json`
+   holding any other name, from whoever proposes it (`broker/src/policy.rs` `cosmic_key_ok`; tests
+   `a_persons_desktop_is_cosmics_settings_and_nothing_else`,
+   `a_saved_desktop_with_another_programs_settings_is_refused`, mutation-checked), so the two cannot drift. A
+   `desktop.json` saved before keeps other programs' settings until its next save, which takes them out ("Desktop:
+   other programs' settings taken out"; with saving manual, `request system desktop save` once). An undo of that
+   save puts them back (the broker's undo does not judge a person's file again, for any user leaf), and the
+   sync after takes them out again. **What was saved before stays in the history:** each
+   earlier commit of `desktop.json` still holds the values (seen: a latitude, a longitude, a location name, a
+   field for a token), in the machine's configuration repository, which every account can read (6r), and on a
+   remote that received them (ADR-036). TorqOS does not rewrite the repository or the ledger to remove them: the
+   ledger names each commit, and a rewritten history would no longer verify. What a person can do: change what
+   can be changed (a new token; a location cannot be). Deleting a remote repository at its host removes the copy
+   there, but any new remote the machine is given receives the whole history again, since the history is the
+   machine's; only a machine set up again from scratch, not from its repository, starts without it. A way to
+   start a person's desktop history afresh is not built.
 
 ## Dev host quirks (not TorqOS bugs)
 - **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test
