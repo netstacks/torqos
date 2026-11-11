@@ -61,33 +61,48 @@ fn within(mut cmd: Command, limit: std::time::Duration) -> Result<std::process::
     use std::process::Stdio;
     let mut child = cmd.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let group = rustix::process::Pid::from_child(&child);
-    let read = |p: Option<Box<dyn Read + Send>>| {
+    // Each output read on a thread of its own, sent back when it ends — waited for by the same deadline as the
+    // program, so a descendant in a session of its own (setsid, out of the group's kill) holding an output open
+    // cannot keep this waiting (step 5's second review).
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, Vec<u8>)>();
+    for (is_out, pipe) in [(true, child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>)), (false, child.stderr.take().map(|e| Box::new(e) as Box<dyn Read + Send>))] {
+        let tx = tx.clone();
         std::thread::spawn(move || {
             let mut b = Vec::new();
-            if let Some(p) = p {
+            if let Some(p) = pipe {
                 let _ = p.take(tools::MAX_PROGRAM_BYTES as u64).read_to_end(&mut b);
             }
-            b
-        })
-    };
-    let out = read(child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>));
-    let err = read(child.stderr.take().map(|e| Box::new(e) as Box<dyn Read + Send>));
+            let _ = tx.send((is_out, b));
+        });
+    }
+    drop(tx);
     let deadline = std::time::Instant::now() + limit;
+    let gone = |child: &mut std::process::Child| {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        let _ = child.kill();
+        let _ = child.wait();
+    };
     let status = loop {
         if let Some(s) = child.try_wait()? {
             break s;
         }
         if std::time::Instant::now() >= deadline {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-            let _ = child.kill();
-            let _ = child.wait();
+            gone(&mut child);
             bail!("no answer within {} s", limit.as_secs());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    // Nothing it left behind holds its output open.
+    // Nothing it left behind in its group holds its output open.
     let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-    Ok(std::process::Output { status, stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default() })
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    for _ in 0..2 {
+        match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Ok((true, b)) => stdout = b,
+            Ok((false, b)) => stderr = b,
+            Err(_) => bail!("its output was still held open {} s after it began (by something it left running)", limit.as_secs()),
+        }
+    }
+    Ok(std::process::Output { status, stdout, stderr })
 }
 
 #[cfg(test)]
@@ -109,5 +124,11 @@ mod tests {
         assert!(e.to_string().contains("no answer within"), "{e}");
         assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
         assert_eq!(SESSION_TIMEOUT.as_secs(), 30);
+        // A descendant in a session of its own, out of the group's kill, holding the output: still bounded.
+        let t = std::time::Instant::now();
+        let setsid = format!("{}/setsid", option_env!("TORQ_DOCTOR_BIN").unwrap_or("/run/current-system/sw/bin"));
+        let e = within(sh(&format!("{setsid} sleep 60 & echo id")), std::time::Duration::from_millis(500)).unwrap_err();
+        assert!(e.to_string().contains("still held open"), "{e}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
     }
 }
