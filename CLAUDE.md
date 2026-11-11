@@ -168,8 +168,8 @@ doctor mode, proposals and session trust.
   and session trust exist on `main`. Doctor is off by default, no model ships, and no real model has
   ever been tried (the tests use a scripted endpoint). The default allow-list is the owner's own
   packages. Anything beyond that is on `work/agents`, parked (above).
-- **Tests.** Unit tests are `#[test]` functions: broker 248, torqcli 336, agent 28, secrets 12, wire
-  10 (counted with grep; `cargo test` in `nix develop` runs them). VM tests are `checks` in
+- **Tests.** Unit tests are `#[test]` functions: broker 250, torqcli 340, agent 28, secrets 12, wire
+  11 (broker, torqcli and wire as `cargo test` in `nix develop` ran them on 2026-11-11). VM tests are `checks` in
   `flake.nix`, one file each in `tests/`. `tests/doctor.nix`, `tests/agent-proposals.nix` and
   `tests/commit-at.nix` ran green in CI in the v0.3.2 release run. CI's `test` workflow runs on pull
   requests, by hand and inside each release, **not on pushes to `main`**: the commits on `main` after
@@ -181,8 +181,8 @@ doctor mode, proposals and session trust.
   x86_64 ESXi VM with KVM. On the laptop use one job at a time. Session worktrees live beside
   `~/torq`; do not edit in another session's.
 - **Known limits** are in `docs/KNOWN-GAPS.md`; the review of 2026-11-11 added three desktop and
-  launcher items: 6zx and 6zy (the desktop save) fixed for 0.4.0-rc1 (follow-ups: 6zza to 6zzc), 6zz (`torq agent run`'s
-  set-id sweep) open.
+  launcher items: 6zx and 6zy (the desktop save) fixed for 0.4.0-rc1 (follow-ups: 6zza to 6zzc), and 6zz (`torq agent run`'s
+  set-id sweep) fixed too.
 
 ## Working here
 
