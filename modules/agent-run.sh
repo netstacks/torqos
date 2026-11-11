@@ -8,7 +8,8 @@
 # the caller's own agent, torq-agent-<person> (setpriv: its uid and group, no capabilities, no new privileges) and runs the program in
 # bubblewrap, in a process namespace of its own (nothing it starts outlives it): the people's runtime
 # directories (their sockets: ssh-agent, D-Bus) hidden, /tmp its own,
-# its home the agent's, the agent services' memory hidden. Nothing the person asked for runs as root; the agent
+# its home the agent's, the agent services' memory and their own home hidden, the agent's own profile (its coding
+# tools, `torq agent tools`) on its PATH, TorqOS linked into those tools first, as the agent. Nothing the person asked for runs as root; the agent
 # has no way into the home. `--hold-frozen` holds the agent still while torqcli shares a directory (below).
 set -euo pipefail
 if [ "$(id -u)" != 0 ]; then
@@ -171,6 +172,16 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
   # each service alone, hidden from every program run here (ADR-051 3, step 2) — made first, as root,
   # so that it is there to hide.
   mkdir -p -m 0755 /var/lib/torq-agent-memory
+  # TorqOS linked into the coding tools the owner chose (torq agent tools; ADR-051 5 and 7): its MCP server and
+  # skill in the settings of Claude Code, in the home of the agent — done as the agent, never as root, so
+  # nothing is written there with privilege and no link there is followed but as the agent. Advice only: it
+  # failing leaves the tool without the tools of TorqOS, and the tool runs all the same. (No apostrophe in
+  # this script: it is one single-quoted word.)
+  if jq -e ".tools | index(\"claude-code\")" /etc/torq/agent-tools.json >/dev/null 2>&1 && [ -x /run/current-system/sw/bin/torq-mcp ]; then
+    setpriv --reuid "$agent" --regid "$agent" --init-groups --no-new-privs --inh-caps=-all --bounding-set=-all -- \
+      env -i HOME="$home" PATH=/run/current-system/sw/bin /run/current-system/sw/bin/torq-mcp --link </dev/null \
+      || echo "torq agent run: TorqOS is not linked into the settings of Claude Code this time (it runs without them)" >&2
+  fi
   rc=0
   setpriv --reuid "$agent" --regid "$agent" --init-groups --no-new-privs \
     --inh-caps=-all --bounding-set=-all -- \
@@ -179,7 +190,7 @@ exec unshare --mount --propagation private -- bash -euo pipefail -c '
       --clearenv \
       --setenv HOME "$home" --setenv USER "$agent" --setenv LOGNAME "$agent" \
       --setenv SHELL /run/current-system/sw/bin/bash \
-      --setenv PATH /run/wrappers/bin:/run/current-system/sw/bin \
+      --setenv PATH "/run/wrappers/bin:/etc/profiles/per-user/$agent/bin:/run/current-system/sw/bin" \
       --setenv TERM "${TERM:-dumb}" \
       --chdir "${share:-$home}" \
       -- "$@" || rc=$?

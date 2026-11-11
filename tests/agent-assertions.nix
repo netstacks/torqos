@@ -10,6 +10,10 @@ let
     boot.loader.grub.enable = false;
     fileSystems."/" = { device = "/dev/disk/by-label/root"; fsType = "ext4"; };
   };
+  configOf = extra: (import (pkgs.path + "/nixos/lib/eval-config.nix") {
+    system = pkgs.stdenv.hostPlatform.system;
+    modules = [ self.nixosModules.default base extra ];
+  }).config;
   failing = extra:
     let
       config = (import (pkgs.path + "/nixos/lib/eval-config.nix") {
@@ -35,6 +39,20 @@ let
     (refuses "SETENV on the launcher's rule" ({ config, ... }: {
       security.sudo.extraRules = [{ groups = [ "wheel" ]; commands = [{ command = "${config.torq.agent.launcher}/bin/torq-agent-run"; options = [ "NOPASSWD" "SETENV" ]; }]; }];
     }) "a rule for torq-agent-run with SETENV")
+    # torq agent tools (ADR-051 5): Claude Code is unfree, so refused until `torq unfree` allows it — and then nothing
+    # unfree is put in the agent's packages; allowed, it is there, in the agent's own profile, not the system's.
+    (refuses "claude-code not allowed" { torq.agent.tools = [ "claude-code" ]; } "claude-code is unfree")
+    (let c = configOf { torq.agent.tools = [ "claude-code" ]; }; in
+      if c.users.users.torq-agent-dev.packages == [ ] then "claude-code not allowed: not installed" else throw "agent-assertions: claude-code put in the agent's packages unallowed")
+    (let
+      extra = { torq.agent.tools = [ "claude-code" ]; torq.unfree.packages = [ "claude-code" ]; };
+      c = configOf extra;
+      names = map lib.getName c.users.users.torq-agent-dev.packages;
+      ms = ours (failing extra);
+    in
+      if ms == [ ] && names == [ "claude-code" ] && !(lib.any (p: lib.getName p == "claude-code") c.environment.systemPackages)
+      then "claude-code allowed: the agent's alone"
+      else throw "agent-assertions: claude-code allowed: ${builtins.toJSON { inherit ms names; }}")
     (refuses "SETENV in sudoers text" ({ config, ... }: {
       security.sudo.extraConfig = "%wheel ALL=(root) NOPASSWD: SETENV: ${config.torq.agent.launcher}/bin/torq-agent-run";
     }) "a rule for torq-agent-run with SETENV")

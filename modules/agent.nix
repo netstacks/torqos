@@ -18,6 +18,11 @@ let
     ++ lib.filter (l: lib.hasInfix "torq-agent-run" l && lib.hasInfix "SETENV" l) (lib.splitString "\n" config.security.sudo.extraConfig);
   personsLikeAgents = lib.attrNames (lib.filterAttrs (n: u: u.isNormalUser && lib.hasPrefix "torq-agent" n) config.users.users);
   agents = lib.listToAttrs (map (p: lib.nameValuePair (agentOf p) p) (lib.filter fits cfg.people));
+  # Claude Code for the agents (ADR-051 5, `torq agent tools`): the version dev mode pins (modules/dev.nix), unfree,
+  # so only where `torq unfree` allows it — else the assertion below says so, and nothing unfree is evaluated.
+  claudeChosen = builtins.elem "claude-code" cfg.tools;
+  claudeAllowed = config.torq.unfree.all || builtins.elem "claude-code" config.torq.unfree.packages;
+  claudeCode = pkgs.claude-code.override { manifest = lib.importJSON ./claude-code-manifest.json; };
   # `torq agent run` (ADR-041, 5): a person starts a program as their own agent. This runs as root
   # (through sudo), hides every home and the people's runtime directories, gives a private /tmp,
   # binds in only the directory shared with it, and drops to the caller's agent for good.
@@ -60,6 +65,28 @@ in
       default. Each must be a person of this machine (a normal user), with a name of at most 20
       characters (NixOS takes an account's and a group's name of at most 31).
     '';
+  };
+
+  options.torq.agent.tools = lib.mkOption {
+    type = lib.types.listOf (lib.types.enum [ "claude-code" ]);
+    default = [ ];
+    example = [ "claude-code" ];
+    description = ''
+      The coding tools installed for each person's agent account (ADR-051 5): `claude-code`, Claude Code — in
+      the agent accounts' own profiles, on no person's PATH. It runs as the person's agent, never as the person:
+      `torq agent run --share <folder> -- claude`, its sign-in (a subscription's too) kept in the agent's home.
+      At each start the launcher links TorqOS's MCP server (torq-mcp) and skill into its settings there; what it
+      proposes is tainted and waits for the person (ADR-051 7). Claude Code is unfree: allow it first
+      (`set torq unfree packages claude-code`).
+    '';
+  };
+
+  options.torq.agent.claudeCode = lib.mkOption {
+    type = lib.types.package;
+    internal = true;
+    default = claudeCode;
+    defaultText = lib.literalExpression "pkgs.claude-code, the version modules/claude-code-manifest.json pins";
+    description = "Claude Code, as `torq agent tools` installs it for the agents (a VM test puts a stand-in here: the real one is unfree, and large).";
   };
 
   options.torq.agent.service.enable = lib.mkOption {
@@ -144,6 +171,11 @@ in
       # agent by its name (cli/src/agent.rs, is_agent), and would take such a person for one.
       assertion = personsLikeAgents == [ ];
       message = "users.users: ${lib.concatStringsSep ", " personsLikeAgents} is a person named as an agent account is (torq-agent…): a person's name never begins so.";
+    }
+    {
+      # ADR-039: nothing unfree in an image, and nothing unfree unasked. Claude Code is unfree in nixpkgs.
+      assertion = !claudeChosen || claudeAllowed;
+      message = "torq.agent.tools: claude-code is unfree (nixpkgs' licence), and nothing unfree is installed unless allowed: allow it first with `set torq unfree packages claude-code` (or `set torq unfree all true`), then `set torq agent tools claude-code`.";
     }];
 
     # Static system users: the broker names its caller from /etc/passwd, where a DynamicUser is not.
@@ -159,6 +191,9 @@ in
       createHome = true;
       homeMode = "700";
       hashedPassword = "!";
+      # The coding tools chosen (ADR-051 5, `torq agent tools`), in the agent's own profile
+      # (/etc/profiles/per-user/torq-agent-<person>, on the launcher's PATH): on no person's PATH.
+      packages = lib.optional (claudeChosen && claudeAllowed) cfg.claudeCode;
     }) agents;
     users.groups = lib.mapAttrs (_: _: { }) agents;
 
@@ -166,7 +201,13 @@ in
     # it binds the one shared directory as root, then drops to the caller's agent for good before
     # running anything (modules/agent-run.sh). No password: administrators have root already, and the
     # program runs with less than they have.
-    environment.systemPackages = [ agentRun pkgs.acl ];
+    environment.systemPackages = [ agentRun pkgs.acl ]
+      # torq-mcp, where a coding tool run as the agent finds it (/run/current-system/sw/bin/torq-mcp).
+      ++ lib.optional (cfg.tools != [ ]) config.torq.agent.doctor.package;
+    # The coding tools chosen (the launcher links TorqOS into them at each start; the Agent page shows them),
+    # and TorqOS's skill, linked into each (ADR-051 7): advice, which the tool may rewrite.
+    environment.etc."torq/agent-tools.json".text = builtins.toJSON { inherit (cfg) tools; };
+    environment.etc."torq/skills/torqos/SKILL.md".source = ./agent-skill.md;
     # Where the launcher binds a shared directory first, as root, before checking it (root's alone).
     systemd.tmpfiles.settings."10-torq-agent"."/run/torq-agent-stage".d = { mode = "0700"; user = "root"; group = "root"; };
     security.sudo.extraRules = [{
