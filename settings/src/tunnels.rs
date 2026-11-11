@@ -302,19 +302,24 @@ impl cosmic::Application for Applet {
                 self.error = None;
             }
             Message::Edit => match tunnels::ensure_file() {
-                // COSMIC's own editor; whatever opens text files, where it is not there.
+                // COSMIC's own editor; whatever opens text files, where it is not there. Waited for on a thread of
+                // its own, so neither is left a zombie (step 5's second review).
                 Ok(path) => {
-                    if std::process::Command::new("cosmic-edit").arg(&path).spawn().is_err() {
-                        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
-                    }
+                    std::thread::spawn(move || match std::process::Command::new("cosmic-edit").arg(&path).spawn() {
+                        Ok(mut c) => {
+                            let _ = c.wait();
+                        }
+                        Err(_) => {
+                            if let Ok(mut c) = std::process::Command::new("xdg-open").arg(&path).spawn() {
+                                let _ = c.wait();
+                            }
+                        }
+                    });
                 }
                 Err(e) => self.error = Some(format!("{e:#}")),
             },
-            Message::AskAgent(h) => {
-                if let Err(e) = handoff::open_window(&h) {
-                    self.error = Some(format!("{e:#}"));
-                }
-            }
+            // Off the panel's thread (step 5's second review): systemd-run is waited for, bounded.
+            Message::AskAgent(h) => return act(move || handoff::open_window(&h)),
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;

@@ -428,7 +428,13 @@ impl cosmic::Application for Applet {
             Message::Restart => app::ask_restart(),
             Message::Open(page) => app::open_settings(page),
             Message::AskAgent(alarm) => {
-                let _ = torq::agent::handoff::open_window(&torq::agent::handoff::About::Alarm(&alarm).handoff());
+                // Off the panel's thread (step 5's second review): systemd-run is waited for, bounded.
+                let h = torq::agent::handoff::About::Alarm(&alarm).handoff();
+                std::thread::spawn(move || {
+                    if let Err(e) = torq::agent::handoff::open_window(&h) {
+                        eprintln!("torq-applet: opening the agent's window: {e:#}");
+                    }
+                });
             }
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {

@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// The most of a question kept.
-pub const MAX_QUESTION: usize = 2_000;
+/// The most of a handed-over question kept: about one line of the window's box, so that what the person asks is
+/// what they see before they ask (the review of step 5: a 2 000-character question hid most of itself in one
+/// line). What an entry point has more to say goes in what is attached, shown in full above the box.
+pub const MAX_QUESTION: usize = 200;
 /// The most of what is attached kept (a crash's backtrace, an alarm, a failed commit's output).
 pub const MAX_CONTEXT: usize = 16_000;
 /// The largest handoff file read.
@@ -24,7 +26,7 @@ const MAX_FILE: u64 = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Handoff {
-    /// One line: the window's box shows all of it.
+    /// One line of at most `MAX_QUESTION` characters: the window's box shows it.
     pub question: String,
     #[serde(default)]
     pub context: Option<String>,
@@ -144,11 +146,13 @@ pub fn take(path: &Path) -> Result<Handoff> {
 
 /// The window's command line for a handoff: `torq-agent-ui --ask <file>`, started as a unit of the person's
 /// own user manager (`systemd-run --user`, both by absolute path) — so it lives in a unit of its own, with the
-/// session's environment, not in whatever started it (the crash watcher's service, the launcher's plugin),
-/// and what started it waits only for systemd-run, which returns at once.
+/// user manager's environment (its session's as the session's start gave it), not in whatever started it (the
+/// crash watcher's service, the launcher's plugin). `--service-type=exec`: systemd-run returns once the window's
+/// program has been started — and fails, said, if it could not be (step 5's second review); what happens to the
+/// window after that is the window's (its journal).
 pub fn window_command(file: &Path) -> std::process::Command {
     let mut c = std::process::Command::new(crate::app::system_program("systemd-run"));
-    c.args(["--user", "--collect", "--quiet", "--"]).arg(crate::app::system_program("torq-agent-ui")).arg("--ask").arg(file);
+    c.args(["--user", "--collect", "--quiet", "--service-type=exec", "--"]).arg(crate::app::system_program("torq-agent-ui")).arg("--ask").arg(file);
     c
 }
 
@@ -156,11 +160,12 @@ pub fn window_command(file: &Path) -> std::process::Command {
 pub fn open_window(h: &Handoff) -> Result<()> {
     let file = write_in(&dir()?, h)?;
     // Waited for (bounded): nothing of it is left behind.
-    match super::setup::output_within(window_command(&file), std::time::Duration::from_secs(10)) {
+    let c = window_command(&file);
+    match super::setup::output_within(c, std::time::Duration::from_secs(10)) {
         Some(_) => Ok(()),
         None => {
             let _ = std::fs::remove_file(&file);
-            bail!("could not start torq-agent-ui (systemd-run --user)")
+            bail!("could not start the agent's window (torq-agent-ui, through systemd-run --user): see `journalctl --user -n 20`")
         }
     }
 }
@@ -228,7 +233,7 @@ mod tests {
     fn the_window_is_given_a_file() {
         let c = window_command(Path::new("/run/user/1000/torq-agent/ask-1.json"));
         assert_eq!(c.get_program(), "/run/current-system/sw/bin/systemd-run");
-        assert_eq!(c.get_args().collect::<Vec<_>>(), ["--user", "--collect", "--quiet", "--", "/run/current-system/sw/bin/torq-agent-ui", "--ask", "/run/user/1000/torq-agent/ask-1.json"]);
+        assert_eq!(c.get_args().collect::<Vec<_>>(), ["--user", "--collect", "--quiet", "--service-type=exec", "--", "/run/current-system/sw/bin/torq-agent-ui", "--ask", "/run/user/1000/torq-agent/ask-1.json"]);
     }
 
     /// Each button's question, and the thing attached: tainting, the person asks, bounded.

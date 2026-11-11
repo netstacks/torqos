@@ -1,6 +1,8 @@
 //! A crash, offered to the agent only when the person says so (ADR-051 4, step 4). `torq-crash-watch`, a user
 //! service of the person's own, follows the journal for systemd-coredump's entries (`journalctl -f`, as the
-//! person: what they may read) and keeps only their own crashes (`COREDUMP_UID`). Each gives a notification,
+//! person: what they may read) and keeps only their own crashes: those journald's own fields say systemd-coredump
+//! logged, as the person (`_SYSTEMD_UNIT`, `_SYSTEMD_SLICE`, `_UID`, `_TRANSPORT`), and whose `COREDUMP_UID`
+//! — the sender's word — is the person too. Each gives a notification,
 //! **Ask the agent about this crash**; nothing is read of the crash and nothing goes anywhere until it is
 //! clicked. Then its summary — `coredumpctl info <pid>` as the person (program, signal, backtrace), bounded —
 //! opens the agent's window, attached: the person reads it and asks, and the session that reads it is tainted.
@@ -19,8 +21,10 @@ pub struct Crash {
     pub pid: u32,
     pub program: String,
     pub signal: String,
-    /// The systemd-coredump unit that logged it: one per crash, so it names exactly this one.
+    /// The systemd-coredump unit that logged it: one per crash on a boot, so with `boot` it names exactly this one.
     pub unit: String,
+    /// The boot it was logged in (`_BOOT_ID`, journald's own): a unit's name can come again on another boot.
+    pub boot: String,
 }
 
 /// A journal field as text (journalctl's JSON gives a string, or bytes as numbers for what is not UTF-8).
@@ -63,7 +67,8 @@ pub fn crash_of(line: &str, uid: u32) -> Option<Crash> {
     }
     let program = field(&v, "COREDUMP_EXE").or_else(|| field(&v, "COREDUMP_COMM")).unwrap_or_else(|| "a program".into());
     let signal = field(&v, "COREDUMP_SIGNAL_NAME").or_else(|| field(&v, "COREDUMP_SIGNAL").map(|n| format!("signal {n}"))).unwrap_or_else(|| "a signal".into());
-    Some(Crash { pid: field(&v, "COREDUMP_PID")?.parse().ok()?, program: crate::history::one_line(&program, 200), signal: crate::history::one_line(&signal, 40), unit })
+    let boot = field(&v, "_BOOT_ID").filter(|b| b.len() == 32 && b.bytes().all(|c| c.is_ascii_hexdigit()))?;
+    Some(Crash { pid: field(&v, "COREDUMP_PID")?.parse().ok()?, program: crate::history::one_line(&program, 200), signal: crate::history::one_line(&signal, 40), unit, boot })
 }
 
 /// What follows the journal for new crashes: everything the person may read, from now on.
@@ -90,11 +95,12 @@ impl Crash {
         (format!("{} crashed", self.name()), format!("{} ({}). Your agent can look at it with you: nothing is sent unless you ask.", markup(&self.program), markup(&self.signal)))
     }
 
-    /// `coredumpctl info` as the person, by absolute path: exactly this crash — its pid, its owner and the
-    /// systemd-coredump unit that logged it, together (a pid alone may be an earlier crash's, reused).
+    /// `coredumpctl info` as the person, by absolute path: this crash — its pid, its owner, the boot and the
+    /// systemd-coredump unit that logged it, together (a pid alone may be an earlier crash's, reused; a unit's
+    /// name another boot's). Matches, not the entry's cursor: coredumpctl takes none (KNOWN-GAPS 6zzn).
     pub fn info_command(&self, uid: u32) -> std::process::Command {
         let mut c = std::process::Command::new(crate::app::system_program("coredumpctl"));
-        c.args(["info", "--no-pager", &format!("COREDUMP_PID={}", self.pid), &format!("COREDUMP_UID={uid}"), &format!("_SYSTEMD_UNIT={}", self.unit)]);
+        c.args(["info", "--no-pager", &format!("COREDUMP_PID={}", self.pid), &format!("COREDUMP_UID={uid}"), &format!("_SYSTEMD_UNIT={}", self.unit), &format!("_BOOT_ID={}", self.boot)]);
         c
     }
 
@@ -112,6 +118,34 @@ impl Crash {
         };
         Handoff::new(CRASH_QUESTION, Some(&context))
     }
+}
+
+/// What a notification daemon's signal says of the crash offer `id`: asked (its own action, on it), closed, or
+/// nothing of it (another notification's, another action, another signal).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Heard {
+    Ask,
+    Closed,
+    Nothing,
+}
+
+/// The signal `member` about notification `of` (with its action, for `ActionInvoked`), as it bears on offer `id`.
+pub fn heard(member: &str, id: u32, of: u32, action: Option<&str>) -> Heard {
+    match (member, action) {
+        ("ActionInvoked", Some(a)) if of == id && a == ASK_ACTION => Heard::Ask,
+        ("NotificationClosed", _) if of == id => Heard::Closed,
+        _ => Heard::Nothing,
+    }
+}
+
+/// The notification's action that asks the agent: only it asks (no default action: a click on the body asks nothing).
+pub const ASK_ACTION: &str = "ask";
+
+/// When the watcher gives up on an offer sent at `sent` whatever the daemon says: its expiry and a margin. Waited
+/// for with a timeout, not only as signals come (step 5's second review): a daemon that never says it closed one
+/// leaves nothing waiting past this.
+pub fn give_up_at(sent: std::time::Instant) -> std::time::Instant {
+    sent + EXPIRES + std::time::Duration::from_secs(30)
 }
 
 /// The question a crash opens the window with: the same for every crash.
@@ -170,7 +204,7 @@ mod tests {
             "MESSAGE_ID": COREDUMP_MESSAGE, "COREDUMP_UID": uid.to_string(), "COREDUMP_PID": pid,
             "COREDUMP_EXE": "/run/current-system/sw/bin/bash", "COREDUMP_SIGNAL_NAME": "SIGSEGV",
             "_UID": uid.to_string(), "_TRANSPORT": "journal", "_COMM": "systemd-coredum",
-            "_SYSTEMD_UNIT": unit, "_SYSTEMD_SLICE": COREDUMP_SLICE,
+            "_SYSTEMD_UNIT": unit, "_SYSTEMD_SLICE": COREDUMP_SLICE, "_BOOT_ID": BOOT,
         });
         if let (Value::Object(base), Value::Object(over)) = (&mut v, with) {
             base.extend(over);
@@ -179,6 +213,7 @@ mod tests {
     }
 
     const UNIT: &str = "systemd-coredump@16-61455-4242_4242-0.service";
+    const BOOT: &str = "0123456789abcdef0123456789abcdef";
 
     fn line(uid: u32) -> String {
         entry(uid, "4242", UNIT, json!({}))
@@ -186,12 +221,12 @@ mod tests {
 
     #[test]
     fn only_ones_own_crashes() {
-        assert_eq!(crash_of(&line(1000), 1000), Some(Crash { pid: 4242, program: "/run/current-system/sw/bin/bash".into(), signal: "SIGSEGV".into(), unit: UNIT.into() }));
+        assert_eq!(crash_of(&line(1000), 1000), Some(Crash { pid: 4242, program: "/run/current-system/sw/bin/bash".into(), signal: "SIGSEGV".into(), unit: UNIT.into(), boot: BOOT.into() }));
         assert_eq!(crash_of(&line(1001), 1000), None, "someone else's crash");
         assert_eq!(crash_of(&line(1000).replace(COREDUMP_MESSAGE, "0123"), 1000), None, "not a coredump");
         assert_eq!(crash_of("junk", 1000), None);
         let bytes = entry(1000, "7", UNIT, json!({ "COREDUMP_EXE": null, "COREDUMP_SIGNAL_NAME": null, "COREDUMP_COMM": [115, 104], "COREDUMP_SIGNAL": "11" }));
-        assert_eq!(crash_of(&bytes, 1000), Some(Crash { pid: 7, program: "sh".into(), signal: "signal 11".into(), unit: UNIT.into() }));
+        assert_eq!(crash_of(&bytes, 1000), Some(Crash { pid: 7, program: "sh".into(), signal: "signal 11".into(), unit: UNIT.into(), boot: BOOT.into() }));
     }
 
     /// What anyone can write to the journal (`logger --journald`, sd_journal_send) is not a crash: only what
@@ -208,6 +243,14 @@ mod tests {
             entry(1000, "4242", UNIT, json!({ "_UID": "1001" })),
             // No trusted fields at all.
             json!({ "MESSAGE_ID": COREDUMP_MESSAGE, "COREDUMP_UID": "1000", "COREDUMP_PID": "4242" }).to_string(),
+            // Each trusted check on its own: another transport (syslog, stdout), a unit that is not a service, no boot.
+            entry(1000, "4242", UNIT, json!({ "_TRANSPORT": "syslog" })),
+            entry(1000, "4242", UNIT, json!({ "_TRANSPORT": "stdout" })),
+            entry(1000, "4242", "systemd-coredump@16-61455-4242_4242-0.socket", json!({})),
+            entry(1000, "4242", "systemd-coredump@16-61455-4242_4242-0.service.d", json!({})),
+            entry(1000, "4242", UNIT, json!({ "_BOOT_ID": null })),
+            // Every trusted field right, its COREDUMP_UID another's: the sender's word, which must be the person too.
+            entry(1000, "4242", UNIT, json!({ "COREDUMP_UID": "1001" })),
             // A unit name that is not one.
             entry(1000, "4242", "systemd-coredump@x;rm.service", json!({})),
         ];
@@ -222,7 +265,9 @@ mod tests {
         let first = crash_of(&line(1000), 1000).unwrap();
         let again = crash_of(&entry(1000, "4242", "systemd-coredump@17-61500-4242_4242-0.service", json!({})), 1000).unwrap();
         let args = |c: &Crash| c.info_command(1000).get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
-        assert_eq!(args(&first), ["info", "--no-pager", "COREDUMP_PID=4242", "COREDUMP_UID=1000", &format!("_SYSTEMD_UNIT={UNIT}")]);
+        assert_eq!(args(&first), ["info", "--no-pager", "COREDUMP_PID=4242", "COREDUMP_UID=1000", &format!("_SYSTEMD_UNIT={UNIT}"), &format!("_BOOT_ID={BOOT}")]);
+        let later = crash_of(&entry(1000, "4242", UNIT, json!({ "_BOOT_ID": "fedcba9876543210fedcba9876543210" })), 1000).unwrap();
+        assert_ne!(args(&first), args(&later), "the same unit's name, another boot");
         assert_ne!(args(&first), args(&again), "the same pid, another crash");
         assert_eq!(first.info_command(1000).get_program(), "/run/current-system/sw/bin/coredumpctl");
     }
@@ -267,5 +312,20 @@ mod tests {
         assert!(!o.admit(&crash("/bin/f"), t), "PER_MINUTE in a minute");
         assert!(o.admit(&crash("/bin/f"), t + std::time::Duration::from_secs(61)), "a minute later");
         assert!(o.admit(&crash("/bin/a"), t + SAME_PROGRAM + std::time::Duration::from_secs(1)), "the same program, much later: offered again");
+    }
+
+    /// Only the offer's own action on it asks; only its own close ends it; nothing else counts (step 5's second
+    /// review: `notify()`'s checks).
+    #[test]
+    fn only_its_own_ask_asks() {
+        assert_eq!(heard("ActionInvoked", 7, 7, Some(ASK_ACTION)), Heard::Ask);
+        assert_eq!(heard("ActionInvoked", 7, 8, Some(ASK_ACTION)), Heard::Nothing, "another notification's");
+        assert_eq!(heard("ActionInvoked", 7, 7, Some("default")), Heard::Nothing, "another action (the body clicked)");
+        assert_eq!(heard("ActionInvoked", 7, 7, None), Heard::Nothing);
+        assert_eq!(heard("NotificationClosed", 7, 7, None), Heard::Closed);
+        assert_eq!(heard("NotificationClosed", 7, 9, None), Heard::Nothing, "another's close");
+        assert_eq!(heard("ActivationToken", 7, 7, Some(ASK_ACTION)), Heard::Nothing);
+        let t = std::time::Instant::now();
+        assert_eq!(give_up_at(t) - t, EXPIRES + std::time::Duration::from_secs(30));
     }
 }

@@ -59,9 +59,15 @@ let
     # What the broker's resident rule rests on (ADR-051 step 5's review): said, where the agent is resident.
     (refuses "a delegated resident unit" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.Delegate = true; } "no Delegate or DelegateSubgroup")
     (refuses "a resident unit's subgroup" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.DelegateSubgroup = "x"; } "no Delegate or DelegateSubgroup")
+    (refuses "a delegated template" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@".serviceConfig.Delegate = true; } "in any torq-agent@ unit")
     (refuses "a lingering agent" { torq.agent.doctor = doctorOn; users.users.torq-agent-dev.linger = true; } "an agent account has no user manager of its own")
     (refuses "tracing allowed" { torq.agent.doctor = doctorOn; boot.kernel.sysctl."kernel.yama.ptrace_scope" = lib.mkForce 0; } "kernel.yama.ptrace_scope")
     (refuses "the key where the agent reads it" { torq.agent.doctor = doctorOn // { apiKeyFile = "/var/lib/torq-agent-dev/model.key"; }; } "a file only root reads")
+    (refuses "the key in /var/tmp" { torq.agent.doctor = doctorOn // { apiKeyFile = "/var/tmp/model.key"; }; } "a file only root reads")
+    (refuses "the key in /dev/shm" { torq.agent.doctor = doctorOn // { apiKeyFile = "/dev/shm/model.key"; }; } "a file only root reads")
+    (refuses "the key named another way (//)" { torq.agent.doctor = doctorOn // { apiKeyFile = "//home/dev/model.key"; }; } "named plainly")
+    (refuses "the key named another way (/./)" { torq.agent.doctor = doctorOn // { apiKeyFile = "/./tmp/model.key"; }; } "named plainly")
+    (refuses "the key named another way (..)" { torq.agent.doctor = doctorOn // { apiKeyFile = "/srv/../home/dev/k"; }; } "named plainly")
     (let ms = ours (failing { torq.agent.doctor = doctorOn // { apiKeyFile = "/var/lib/torq/secrets/model.key"; }; }); in if ms == [ ] then "the key root's" else throw "agent-assertions: a root-only key refused: ${builtins.toJSON ms}")
     (refuses "SETENV in sudoers text" ({ config, ... }: {
       security.sudo.extraConfig = "%wheel ALL=(root) NOPASSWD: SETENV: ${config.torq.agent.launcher}/bin/torq-agent-run";

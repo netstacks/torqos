@@ -23,12 +23,31 @@ let
   agents = lib.listToAttrs (map (p: lib.nameValuePair (agentOf p) p) (lib.filter fits cfg.people));
   # Where the resident service runs (its socket, its unit): the resident accounts, and the broker's map of them.
   resident = cfg.service.enable && config.torq.agent.doctor.enable;
+  # Any torq-agent@ unit (an instance, the template, a drop-in) whose text delegates its control group.
+  delegatedUnits = lib.attrNames (lib.filterAttrs (n: u: lib.hasPrefix "torq-agent@" n && lib.hasInfix "Delegate" (if u.text or null == null then "" else u.text)) config.systemd.units);
   residents = lib.optionalAttrs resident (lib.listToAttrs (map (p: lib.nameValuePair (residentOf p) p) (lib.filter fits cfg.people)));
   # Claude Code for the agents (ADR-051 5, `torq agent tools`): the version dev mode pins (modules/dev.nix), unfree,
   # so only where `torq unfree` allows it — else the assertion below says so, and nothing unfree is evaluated.
   claudeChosen = builtins.elem "claude-code" cfg.tools;
   claudeAllowed = config.torq.unfree.all || builtins.elem "claude-code" config.torq.unfree.packages;
   claudeCode = pkgs.claude-code.override { manifest = lib.importJSON ./claude-code-manifest.json; };
+  # The model key, checked where it is read, at each start of a resident agent, as root (`+`): a plain file, root's,
+  # that no one else may read (step 5's second review: the configuration can only check the path's name). Otherwise
+  # the unit does not start, and its journal says why.
+  modelKey = config.torq.agent.doctor.apiKeyFile;
+  keyCheck = pkgs.writeShellScript "torq-agent-key-check" ''
+    f=${lib.escapeShellArg (toString modelKey)}
+    if [ -L "$f" ] || [ ! -f "$f" ]; then
+      echo "torq-agent: the model's key, $f, is not a plain file (a link is not followed): the resident agent is not started" >&2
+      exit 1
+    fi
+    owner=$(${pkgs.coreutils}/bin/stat -c %u -- "$f")
+    mode=$(${pkgs.coreutils}/bin/stat -c %a -- "$f")
+    if [ "$owner" != 0 ] || [ $(( 0$mode & 077 )) -ne 0 ]; then
+      echo "torq-agent: the model's key, $f, must be root's and readable by no one else (sudo chown root:root $f; sudo chmod 600 $f): the resident agent is not started" >&2
+      exit 1
+    fi
+  '';
   # `torq agent run` (ADR-041, 5): a person starts a program as their own agent. This runs as root
   # (through sudo), hides every home and the people's runtime directories, gives a private /tmp,
   # binds in only the directory shared with it, and drops to the caller's agent for good.
@@ -243,23 +262,29 @@ in
   # home hidden, the people's runtime directories hidden, its own /tmp, no privilege, its home its own)
   # and systemd's hardening besides. Only where doctor mode is on: the harness and its model are its.
   (lib.mkIf (cfg.service.enable && config.torq.agent.doctor.enable) {
-    # What the broker's resident rule rests on (ADR-051 step 5, broker/src/socket.rs resident_peer), each said:
-    # the unit's control group is root's to fill (nothing delegated); no agent account has a user manager of
-    # its own to make units with; a same-uid program may trace only its own descendants.
+    # What the broker's resident rule rests on (ADR-051 3 amended 2026-11-11, socket::found_resident), each said.
+    # The primary defence is the uid: the resident's own account, which nothing run as the agent account is. The
+    # second lines: the unit's control group is root's to fill (nothing delegated, in any torq-agent@ unit — an
+    # instance, the template, or a drop-in); no agent or resident account has a user manager to make units with;
+    # a same-uid program may trace only its own descendants.
     assertions = lib.concatLists (lib.mapAttrsToList (agent: person:
       let sc = config.systemd.services."torq-agent@${person}".serviceConfig; in [
         {
           assertion = !(sc ? Delegate) && !(sc ? DelegateSubgroup);
-          message = "systemd.services.\"torq-agent@${person}\": no Delegate or DelegateSubgroup — the broker takes this unit's control group for ${person}'s resident agent, which only root may move a process into.";
+          message = "systemd.services.\"torq-agent@${person}\": no Delegate or DelegateSubgroup — a second line behind the resident account's uid: the broker also takes this unit's control group for ${person}'s resident agent, which only root may move a process into.";
         }
         {
           assertion = (config.users.users.${agent}.linger or null) != true && (config.users.users.${residentOf person}.linger or null) != true;
-          message = "users.users.${agent}.linger, users.users.${residentOf person}.linger: an agent account has no user manager of its own (its units would be the agent's to make, outside the resident agent's control group).";
+          message = "users.users.${agent}.linger, users.users.${residentOf person}.linger: neither account has a user manager of its own (a second line behind the uids: its units would be its own to make, outside the resident agent's control group).";
         }
       ]) agents)
       ++ [{
+        assertion = delegatedUnits == [ ];
+        message = "systemd.units ${lib.concatStringsSep ", " delegatedUnits}: no Delegate or DelegateSubgroup in any torq-agent@ unit, its template or a drop-in — a second line behind the resident account's uid (the unit's control group, root's to fill).";
+      }
+      {
         assertion = (config.boot.kernel.sysctl."kernel.yama.ptrace_scope" or 0) >= 1;
-        message = "boot.kernel.sysctl.\"kernel.yama.ptrace_scope\": at least 1 where the agent is resident — a program of the agent's may trace only its own descendants, never the resident agent's harness.";
+        message = "boot.kernel.sysctl.\"kernel.yama.ptrace_scope\": at least 1 where the agent is resident — a second line behind the uids: a program of the agent's may trace only its own descendants.";
       }];
     # Only the person may connect (the socket theirs, 0600, in a directory root's) — and the service
     # answers only them, by the kernel's word (SO_PEERCRED), root included.
@@ -313,7 +338,8 @@ in
         InaccessiblePaths = [ "-/var/lib/${agent}" ];
         # The model's key (a file only root reads): this unit's own credential, in a place only it sees; hidden
         # from `torq agent run` besides (modules/agent-run.sh hides /run/credentials). ADR-051 step 5, amended.
-        LoadCredential = lib.optional (config.torq.agent.doctor.apiKeyFile != null) "model-key:${toString config.torq.agent.doctor.apiKeyFile}";
+        LoadCredential = lib.optional (modelKey != null) "model-key:${toString modelKey}";
+        ExecStartPre = lib.optional (modelKey != null) "+${keyCheck}";
         # The launcher's sandbox: every home (and /root, and the people's runtime directories in
         # /run/user) out of reach, /tmp its own, no privilege at all.
         ProtectHome = true;

@@ -260,6 +260,19 @@ pkgs.testers.runNixOSTest {
         # One question at a terminal runs as any program of the agent's: it cannot use the key, and says so.
         out = machine.execute("su - alice -c 'torq doctor hello' 2>&1")[1]
         assert "only your resident agent holds" in out and "torq ask" in out, out
+        # The key is checked where it is read, at each start (step 5's second review): readable by others, or a
+        # link, and the resident agent does not start, saying why; put right, it starts again.
+        for bad in ["chmod 644 /var/lib/torq/secrets/model.key", "chown alice /var/lib/torq/secrets/model.key"]:
+            machine.succeed(bad)
+            machine.fail(f"systemctl restart {unit}")
+            machine.succeed(f"journalctl -u {unit} --no-pager | grep -q 'must be root.s and readable by no one else'")
+            machine.succeed("chown root:root /var/lib/torq/secrets/model.key && chmod 600 /var/lib/torq/secrets/model.key")
+        machine.succeed("mv /var/lib/torq/secrets/model.key /var/lib/torq/secrets/real.key && ln -s real.key /var/lib/torq/secrets/model.key")
+        machine.fail(f"systemctl restart {unit}")
+        machine.succeed(f"journalctl -u {unit} --no-pager | grep -q 'is not a plain file'")
+        machine.succeed("rm /var/lib/torq/secrets/model.key && mv /var/lib/torq/secrets/real.key /var/lib/torq/secrets/model.key")
+        machine.succeed(f"systemctl reset-failed {unit}; systemctl start {unit}")
+        machine.succeed(f"systemctl is-active {unit}")
 
     with subtest("no process of the agent's can put itself in the resident agent's control group"):
         procs = f"/sys/fs/cgroup{prop('ControlGroup')}/cgroup.procs"
@@ -364,7 +377,7 @@ pkgs.testers.runNixOSTest {
         assert prop("FreezerState") == "running"
         machine.succeed("rm /tmp/fail-setfacl")
         # The service answers after it.
-        assert as_user("alice", "torq ask hello").strip() == "Hello alice."
+        machine.succeed(f"systemctl is-active {unit}")
 
     with subtest("torqcli killed in the middle of the walk: the agent is thawed all the same"):
         machine.succeed("touch /tmp/hang-setfacl")

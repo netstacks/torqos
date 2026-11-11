@@ -20,7 +20,7 @@ use torq::agent::crash::{self, Crash, Offers};
 use torq::agent::handoff;
 
 /// The notification's action that asks the agent.
-const ASK: &str = "ask";
+const ASK: &str = crash::ASK_ACTION;
 
 fn main() {
     // Whose crashes: this process's own uid (its /proc entry's owner).
@@ -84,31 +84,45 @@ fn notify(c: &Crash, uid: u32) -> zbus::Result<()> {
     let hints = std::collections::HashMap::<&str, zbus::zvariant::Value>::new();
     let expires = i32::try_from(crash::EXPIRES.as_millis()).unwrap_or(i32::MAX);
     let id: u32 = bus.call("Notify", &("TorqOS", 0u32, "torqos", summary.as_str(), body.as_str(), vec![ASK, "Ask the agent about this crash"], hints, expires))?;
-    let deadline = Instant::now() + crash::EXPIRES + std::time::Duration::from_secs(30);
-    for signal in signals {
-        let header = signal.header();
-        let member = header.member().map(|m| m.to_string()).unwrap_or_default();
-        if member == "ActionInvoked" {
-            let (of, action): (u32, String) = signal.body().deserialize()?;
-            // Its own action on its own notification: nothing else asks.
-            if of == id && action == ASK {
-                // The person said so: only now is the crash read, and attached.
-                eprintln!("torq-crash-watch: asked about pid {}", c.pid);
-                if let Err(e) = handoff::open_window(&c.handoff(c.info(uid).as_deref())) {
-                    eprintln!("torq-crash-watch: opening the agent's window: {e:#}");
+    let deadline = crash::give_up_at(Instant::now());
+    // The signals read on a thread of their own and waited for here with a timeout (step 5's second review): a
+    // daemon that never says it closed the offer leaves nothing waiting past its deadline.
+    let (tx, rx) = std::sync::mpsc::channel::<(String, u32, Option<String>)>();
+    std::thread::spawn(move || {
+        for signal in signals {
+            let member = signal.header().member().map(|m| m.to_string()).unwrap_or_default();
+            let heard = match member.as_str() {
+                "ActionInvoked" => signal.body().deserialize::<(u32, String)>().ok().map(|(of, a)| (of, Some(a))),
+                "NotificationClosed" => signal.body().deserialize::<(u32, u32)>().ok().map(|(of, _)| (of, None)),
+                _ => None,
+            };
+            if let Some((of, action)) = heard {
+                if tx.send((member, of, action)).is_err() {
+                    break;
                 }
-                break;
-            }
-        } else if member == "NotificationClosed" {
-            let (of, _why): (u32, u32) = signal.body().deserialize()?;
-            if of == id {
-                break;
             }
         }
-        // A daemon that never says it closed: given up on after its expiry (checked as signals come).
-        if Instant::now() > deadline {
-            break;
+    });
+    loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok((member, of, action)) => match crash::heard(&member, id, of, action.as_deref()) {
+                // Its own action on its own notification: nothing else asks.
+                crash::Heard::Ask => {
+                    // The person said so: only now is the crash read, and attached.
+                    eprintln!("torq-crash-watch: asked about pid {}", c.pid);
+                    if let Err(e) = handoff::open_window(&c.handoff(c.info(uid).as_deref())) {
+                        eprintln!("torq-crash-watch: opening the agent's window: {e:#}");
+                    }
+                    return Ok(());
+                }
+                crash::Heard::Closed => return Ok(()),
+                crash::Heard::Nothing => {}
+            },
+            Err(_) => {
+                // Past its deadline: taken down, which also wakes the reader with the daemon's close.
+                let _: zbus::Result<()> = bus.call("CloseNotification", &(id,));
+                return Ok(());
+            }
         }
     }
-    Ok(())
 }

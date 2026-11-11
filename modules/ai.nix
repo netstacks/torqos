@@ -22,6 +22,10 @@ let
   cfg = config.torq.agent.doctor;
   m = config.torq.agent.model;
   local = cfg.endpoint == null;
+  # The model key's path, plainly written (step 5's second review: a text test is fooled by `//home/x`, `/./tmp/x`).
+  keyPlain = p: lib.hasPrefix "/" p && !(lib.hasSuffix "/" p) && lib.all (c: c != "" && c != "." && c != "..") (lib.tail (lib.splitString "/" p));
+  # Where no key may be: places everyone, a person or an agent can read or write.
+  keyRefused = [ "/nix/store" "/var/lib/torq/config" "/home" "/root" "/tmp" "/var/tmp" "/dev/shm" "/run/user" "/proc" "/sys" ];
   socket = "/run/llama-cpp/llama.sock";
   modelFile =
     if m.path != null then m.path
@@ -170,8 +174,11 @@ in
           message = "torq.agent.doctor: the local model needs its file — torq.agent.model.url and hash, or path — or set torq.agent.doctor.endpoint.";
         }
         {
-          assertion = cfg.apiKeyFile == null || !(lib.any (p: lib.hasPrefix p cfg.apiKeyFile) [ "/nix/store/" "/var/lib/torq/config" "/var/lib/torq-agent" "/home/" "/tmp/" "/run/user/" ]);
-          message = "torq.agent.doctor.apiKeyFile: a file only root reads, e.g. /var/lib/torq/secrets/model.key — not in the store or the config repo (everyone reads them), nor an agent's or a person's home or /tmp (whatever runs as them reads it): the resident agent gets it as its credential.";
+          # A path as written, in its plain form only (no `//`, `.` or `..` component, no trailing `/`), so that the
+          # places below cannot be named another way; and none of them. Who owns the file, and who may read it, is
+          # checked where it is read: at each start of the resident agent (its ExecStartPre, modules/agent.nix).
+          assertion = cfg.apiKeyFile == null || (keyPlain cfg.apiKeyFile && !(lib.hasPrefix "/var/lib/torq-agent" cfg.apiKeyFile) && !(lib.any (p: cfg.apiKeyFile == p || lib.hasPrefix "${p}/" cfg.apiKeyFile) keyRefused));
+          message = "torq.agent.doctor.apiKeyFile: a file only root reads, named plainly (no //, . or .. in it), e.g. /var/lib/torq/secrets/model.key — not in the store or the config repo (everyone reads them), nor an agent's or a person's home, /tmp, /var/tmp, /dev/shm or a runtime directory (whatever runs as them reads it): the resident agent gets it as its credential.";
         }
         {
           assertion = cfg.endpoint == null || !(lib.hasInfix "?" cfg.endpoint || lib.hasInfix "#" cfg.endpoint);

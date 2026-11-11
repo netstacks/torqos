@@ -318,6 +318,8 @@ pub enum Message {
     OpenAgent,
     /// Open the agent's window about something (ADR-051 4): a question, that thing attached.
     AskAgent(Handoff),
+    /// What became of opening the agent's window (an error, said on the page).
+    AskedAgent(Result<(), String>),
     Forget,
     ForgetAnswer(bool),
 }
@@ -1031,9 +1033,11 @@ impl cosmic::Application for Settings {
             }
             Message::AgentLoaded(r) => self.agent = r.into(),
             Message::OpenAgent => app::open_agent(),
-            Message::AskAgent(h) => {
-                if let Err(e) = handoff::open_window(&h) {
-                    self.note = Some((app::said(&e), true));
+            // Off the window's thread (step 5's second review): systemd-run is waited for, bounded.
+            Message::AskAgent(h) => return cosmic::task::future(async move { Message::AskedAgent(blocking(move || handoff::open_window(&h)).await) }),
+            Message::AskedAgent(r) => {
+                if let Err(e) = r {
+                    self.note = Some((e, true));
                 }
             }
             Message::Forget => self.forgetting = true,
