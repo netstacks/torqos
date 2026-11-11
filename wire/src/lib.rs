@@ -7,5 +7,6 @@
 #![forbid(unsafe_code)]
 #![forbid(dead_code)]
 
+pub mod desktop;
 pub mod secrets;
 pub mod socket;

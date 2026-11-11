@@ -121,23 +121,8 @@ fn desktop_ok(value: &serde_json::Value) -> bool {
         && save_ok
         && cosmic.len() <= 2000
         && total <= 1024 * 1024
-        && cosmic.iter().all(|(k, v)| cosmic_key_ok(k) && v.as_str().is_some_and(|t| t.len() <= 64 * 1024 && !t.contains('\0')))
-}
-
-/// A COSMIC setting's name as it lays them out, `<component>/v<n>/<key>`, of one of COSMIC's own components
-/// (`com.system76.*`): never a path anywhere else, since a person's session writes it under their
-/// ~/.config/cosmic; and never another program's settings (a weather applet's location, a token), which are
-/// no setting of the person's desktop and would sit in a repository every account can read.
-fn cosmic_key_ok(k: &str) -> bool {
-    let word = |s: &str| !s.is_empty() && s.len() <= 128 && !s.starts_with('-') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    let mut parts = k.split('/');
-    let (Some(component), Some(version), Some(key), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return false };
-    let dotted: Vec<&str> = component.split('.').collect();
-    component.starts_with("com.system76.")
-        && dotted.len() >= 3
-        && dotted.iter().all(|p| word(p))
-        && version.strip_prefix('v').is_some_and(|n| !n.is_empty() && n.len() <= 4 && n.bytes().all(|b| b.is_ascii_digit()))
-        && word(key)
+        // COSMIC's own settings only, named as COSMIC lays them out: torqcli's rule too (torq_wire::desktop).
+        && cosmic.iter().all(|(k, v)| torq_wire::desktop::key_ok(k) && v.as_str().is_some_and(|t| t.len() <= 64 * 1024 && !t.contains('\0')))
 }
 
 /// The form of a package name, mirroring modules/packages.nix (`isAttrName`, depth): a top-level

@@ -1822,3 +1822,8 @@ pub fn desktop_saving(how: Saving) -> Result<String> {
 pub fn desktop_words(keys: &[String]) -> String {
     crate::desktop::what(keys.iter().cloned())
 }
+
+/// What the next save takes out that an earlier TorqOS kept, in a sentence (None: nothing).
+pub fn desktop_taking_out(keys: &[String]) -> Option<String> {
+    crate::desktop::taking_out(keys)
+}

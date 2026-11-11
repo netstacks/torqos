@@ -1705,7 +1705,10 @@ impl Settings {
         if s.to_apply > 0 {
             page = page.push(widget::text::caption(format!("{} settings from your configuration are still to be put on this desktop: at your next login, or now with Save now.", s.to_apply)));
         }
-        page.push(widget::text::caption("Left out, as this machine's rather than yours: which display the panel and dock are on, and when the machine sleeps.")).into()
+        if let Some(t) = app::desktop_taking_out(&s.to_take_out) {
+            page = page.push(widget::text::caption(format!("{t} Save now does it now.")));
+        }
+        page.push(widget::text::caption("Left out: other programs' settings (only COSMIC's own are kept), and what is this machine's rather than yours: which display the panel and dock are on, and when the machine sleeps.")).into()
     }
 
     fn apps_page(&self) -> Element<'_, Message> {

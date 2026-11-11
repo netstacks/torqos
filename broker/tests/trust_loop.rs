@@ -3445,6 +3445,36 @@ fn a_saved_desktop_with_another_programs_settings_is_refused() {
     assert!(!b.repo.root().join("users/casey/desktop.json").exists());
 }
 
+/// A desktop saved by an older TorqOS, with another program's settings in it, cleaned by the next save: an undo
+/// of that save would put them back, so it is refused (an undo of a person's own change needs no approval, so it
+/// would otherwise be the way around the rule), and nothing is recorded.
+#[test]
+fn an_undo_cannot_put_another_programs_settings_back() {
+    let (dir, repo) = config_dir();
+    let old = "{\"cosmic\": {\"com.system76.CosmicPanel.Panel/v1/size\": \"M\", \"com.vintagetechie.CosmicExtAppletTempest/v1/latitude\": \"45.1\"}}\n";
+    fs::create_dir_all(repo.join("users/casey")).unwrap();
+    fs::write(repo.join("users/casey/desktop.json"), old).unwrap();
+    let b = Broker::new(&repo, dir.path().join("state"), "true");
+    b.init().unwrap();
+    let d = write_diff(
+        dir.path(),
+        "clean.diff",
+        &format!("--- a/users/casey/desktop.json\n+++ b/users/casey/desktop.json\n@@ -1 +1 @@\n-{}+{{\"cosmic\": {{\"com.system76.CosmicPanel.Panel/v1/size\": \"M\"}}}}\n", old),
+    );
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Desktop: other programs' settings taken out", Actor::User, false).unwrap();
+    let a = b.apply(p.body.seq, "casey", false).unwrap();
+    let (head, before) = (b.repo.head().unwrap(), kinds(&b));
+    let e = b.revert(a.body.seq, "casey").unwrap_err();
+    assert!(format!("{e:#}").contains("COSMIC's own settings"), "{e:#}");
+    assert_eq!(b.repo.head().unwrap(), head, "the undo's commit is reset");
+    assert_eq!(kinds(&b), before, "nothing recorded");
+    assert!(!fs::read_to_string(repo.join("users/casey/desktop.json")).unwrap().contains("Tempest"));
+    // The broker is left as it was: another change goes through.
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Night light", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+}
+
 #[test]
 fn a_saved_desktop_builds_nothing_after_the_first() {
     let dir = tempfile::tempdir().unwrap();

@@ -1757,41 +1757,67 @@ impl Broker {
     /// NixOS module reading the file is still the authority on what the data means; this makes sure
     /// it is the right kind of data, refused now rather than failing the rebuild.
     fn check_user_data(&self, diff_path: &Path, files: &[String]) -> Result<()> {
-        // The system's secrets' rules (ADR-052): their daemon reads them, so they are checked as a person's are.
-        let rules = torq_wire::secrets::SYSTEM_RULES.to_string();
-        if files.contains(&rules) {
-            for (path, file) in self.repo.proposed_files(diff_path, std::slice::from_ref(&rules), torq_wire::secrets::MAX_FILE)? {
-                let Some(f) = file else { continue };
-                if f.mode != "100644" {
-                    bail!("refused: {path} must be a regular file");
-                }
-                torq_wire::secrets::parse(&f.content).map_err(|why| anyhow::anyhow!("refused: {path}: {why}"))?;
-            }
-        }
-        let user: Vec<String> = files.iter().filter(|f| policy::is_user_data(f)).cloned().collect();
-        if user.is_empty() {
+        let (paths, most) = Self::data_files(files);
+        if paths.is_empty() {
             return Ok(());
         }
-        let most = user.iter().map(|p| policy::user_leaf_max(p.rsplit('/').next().unwrap_or_default())).max().unwrap_or(USER_DATA_MAX);
-        for (path, file) in self.repo.proposed_files(diff_path, &user, most)? {
-            let Some(f) = file else { continue };
-            let leaf = path.rsplit('/').next().unwrap_or_default();
-            let data = f.mode == "100644"
-                && f.size <= policy::user_leaf_max(leaf)
-                && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| policy::user_leaf_ok(leaf, &v))
-                // A person's secrets' rules as every reader takes them, from the bytes: a name twice is refused (ADR-052).
-                && (leaf != torq_wire::secrets::PERSON_RULES || torq_wire::secrets::parse_person(&f.content).is_ok());
-            if !data {
-                bail!(
-                    "refused: {path} must be a regular file holding {} of at most {} KiB",
-                    match leaf {
-                        "packages.json" => format!("a JSON list of package names (at most {})", policy::MAX_USER_PACKAGES),
-                        "desktop.json" => "COSMIC's own settings (com.system76.*) as JSON, no other program's".to_string(),
-                        _ => "JSON data".to_string(),
-                    },
-                    policy::user_leaf_max(leaf) / 1024
-                );
+        for (path, file) in self.repo.proposed_files(diff_path, &paths, most)? {
+            if let Some(f) = file {
+                Self::data_ok(&path, &f)?;
             }
+        }
+        Ok(())
+    }
+
+    /// The same, of `files` as HEAD has them: what an undo leaves, which git writes, not a diff (an undo
+    /// of a person's own change needs no one's approval, so it is no way around these rules either).
+    fn check_user_data_at_head(&self, files: &[String]) -> Result<()> {
+        let (paths, most) = Self::data_files(files);
+        for path in &paths {
+            if let Some(f) = self.repo.file_at("HEAD", path, most)? {
+                Self::data_ok(path, &f)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Which of `files` are data checked by `data_ok`, and the most bytes one of them may be.
+    fn data_files(files: &[String]) -> (Vec<String>, u64) {
+        let rules = torq_wire::secrets::SYSTEM_RULES;
+        let paths: Vec<String> = files.iter().filter(|f| f.as_str() == rules || policy::is_user_data(f)).cloned().collect();
+        let most = paths
+            .iter()
+            .map(|p| if p == rules { torq_wire::secrets::MAX_FILE } else { policy::user_leaf_max(p.rsplit('/').next().unwrap_or_default()) })
+            .max()
+            .unwrap_or(USER_DATA_MAX);
+        (paths, most)
+    }
+
+    /// One data file as a change would leave it: the system's secrets' rules, or a person's file.
+    fn data_ok(path: &str, f: &repo::ProposedFile) -> Result<()> {
+        // The system's secrets' rules (ADR-052): their daemon reads them, so they are checked as a person's are.
+        if path == torq_wire::secrets::SYSTEM_RULES {
+            if f.mode != "100644" {
+                bail!("refused: {path} must be a regular file");
+            }
+            return torq_wire::secrets::parse(&f.content).map(drop).map_err(|why| anyhow::anyhow!("refused: {path}: {why}"));
+        }
+        let leaf = path.rsplit('/').next().unwrap_or_default();
+        let data = f.mode == "100644"
+            && f.size <= policy::user_leaf_max(leaf)
+            && serde_json::from_slice::<serde_json::Value>(&f.content).is_ok_and(|v| policy::user_leaf_ok(leaf, &v))
+            // A person's secrets' rules as every reader takes them, from the bytes: a name twice is refused (ADR-052).
+            && (leaf != torq_wire::secrets::PERSON_RULES || torq_wire::secrets::parse_person(&f.content).is_ok());
+        if !data {
+            bail!(
+                "refused: {path} must be a regular file holding {} of at most {} KiB",
+                match leaf {
+                    "packages.json" => format!("a JSON list of package names (at most {})", policy::MAX_USER_PACKAGES),
+                    "desktop.json" => "COSMIC's own settings (com.system76.*) as JSON, no other program's".to_string(),
+                    _ => "JSON data".to_string(),
+                },
+                policy::user_leaf_max(leaf) / 1024
+            );
         }
         Ok(())
     }
@@ -3128,11 +3154,14 @@ impl Broker {
             attempts: 0,
         };
         self.write_pending(&pending)?;
-        let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg))?;
+        let files: Vec<String> = a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
+        // What the undo leaves must be what a change could: a person's file of the shape it takes now (a desktop
+        // saved by an older TorqOS, with another program's settings, is not put back). Refused before anything is
+        // recorded, the commit kept for the audit and reset, as a commit that failed.
+        let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg).and_then(|c| self.check_user_data_at_head(&files).map(|()| c)))?;
         pending.commit = Some(new_commit.clone());
         let snapshot = self.take_snapshot(&lock, &a.body.tier);
         self.write_pending(&pending)?;
-        let files: Vec<String> = a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
         let rebuilt = if self.builds_nothing(&files, &before, &new_commit) { Ok(()) } else { self.rebuild(&lock, &new_commit) };
         if let Err(e) = rebuilt {
             let restored = self.restore(&before, &lock)?;

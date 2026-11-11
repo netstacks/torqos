@@ -51,22 +51,9 @@ impl Saved {
     }
 }
 
-/// COSMIC's own components, the only ones kept: an applet or program from anyone else keeps what it likes in
-/// its folder there (a location, a token, a time it last looked), none of it a setting of the person's desktop.
-pub const COSMIC: &str = "com.system76.";
-
-/// A setting's name as COSMIC lays it out: one of COSMIC's own components, its version, a key.
-pub fn key_ok(k: &str) -> bool {
-    let word = |s: &str| !s.is_empty() && s.len() <= 128 && !s.starts_with('-') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    let mut parts = k.split('/');
-    let (Some(component), Some(version), Some(key), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return false };
-    let dotted: Vec<&str> = component.split('.').collect();
-    component.starts_with(COSMIC)
-        && dotted.len() >= 3
-        && dotted.iter().all(|p| word(p))
-        && version.strip_prefix('v').is_some_and(|n| !n.is_empty() && n.len() <= 4 && n.bytes().all(|b| b.is_ascii_digit()))
-        && word(key)
-}
+/// The settings kept: COSMIC's own components only, named as COSMIC lays them out. One rule with the broker's,
+/// which refuses the rest (torq_wire::desktop).
+pub use torq_wire::desktop::{key_ok, COSMIC};
 
 pub fn value_ok(v: &str) -> bool {
     v.len() <= MAX_VALUE && !v.contains('\0')
@@ -286,9 +273,12 @@ fn saved_of(repo: &Repo, me: &str) -> Result<(Option<Vec<u8>>, Result<Saved, Str
 pub fn what(keys: impl Iterator<Item = String>) -> String {
     let word = |k: &str| {
         let component = k.split('/').next().unwrap_or_default();
-        // Another program's: no longer kept, and only ever named as taken out.
+        // No longer kept, and only ever named as taken out: another program's, or a COSMIC program's own state.
         if !component.starts_with(COSMIC) {
             return "other programs' settings".to_string();
+        }
+        if programs_own(k) {
+            return "the screenshot tool's last area".to_string();
         }
         let c = component.strip_prefix(COSMIC).unwrap_or(component);
         let c = c.strip_prefix("Cosmic").unwrap_or(c);
@@ -301,7 +291,11 @@ pub fn what(keys: impl Iterator<Item = String>) -> String {
             "AppList" => "dock's apps".to_string(),
             "Settings" if c.ends_with("Shortcuts") => "shortcuts".to_string(),
             "Comp" => "windows and input".to_string(),
-            other => other.trim_start_matches("Applet").to_lowercase(),
+            // An applet by its name ("AppletAudio": audio); one named only "Applet", by that.
+            other => match other.trim_start_matches("Applet") {
+                "" => other.to_lowercase(),
+                name => name.to_lowercase(),
+            },
         }
     };
     let words: BTreeSet<String> = keys.map(|k| word(&k)).collect();
@@ -312,6 +306,21 @@ pub fn what(keys: impl Iterator<Item = String>) -> String {
         list.push(format!("{n} more"));
     }
     list.join(", ")
+}
+
+/// A save's label: what the person changed, and what an earlier TorqOS kept that is taken out, both named.
+fn label(changed: &[String], gone: &[String]) -> String {
+    let out = || format!("{} taken out (only COSMIC's own settings are kept)", what(gone.iter().cloned()));
+    match (changed.is_empty(), gone.is_empty()) {
+        (_, true) => format!("Desktop: {}", what(changed.iter().cloned())),
+        (true, false) => format!("Desktop: {}", out()),
+        (false, false) => format!("Desktop: {}; {}", what(changed.iter().cloned()), out()),
+    }
+}
+
+/// What of a saved file is no longer kept: another program's settings, a COSMIC program's own state.
+fn not_kept(saved: &Saved) -> Vec<String> {
+    saved.cosmic.keys().filter(|k| !keepable(k)).cloned().collect()
 }
 
 /// Commit `me`'s new `desktop.json`: their own folder, no question.
@@ -358,7 +367,7 @@ fn sync_by(repo: &Repo, me: &str, paths: &Paths, save_now: bool, save: &mut dyn 
     };
     // Saved by an earlier TorqOS, and no longer kept (another program's settings, a program's own state): taken
     // out of the saved file at the next save, and never put back on the desktop.
-    let dropped = saved.cosmic.keys().any(|k| !keepable(k));
+    let dropped = not_kept(&saved);
     saved.cosmic.retain(|k, _| keepable(k));
     before.retain(|k, _| keepable(k));
     let here = local(&paths.cosmic);
@@ -376,7 +385,7 @@ fn sync_by(repo: &Repo, me: &str, paths: &Paths, save_now: bool, save: &mut dyn 
         };
     }
     let mut now = saved.clone();
-    if (!p.save.is_empty() || repairing || dropped) && (save_now || saved.save == Saving::Automatic) {
+    if (!p.save.is_empty() || repairing || !dropped.is_empty()) && (save_now || saved.save == Saving::Automatic) {
         for (k, v) in &p.save {
             match v {
                 Some(v) => now.cosmic.insert(k.clone(), v.clone()),
@@ -385,10 +394,8 @@ fn sync_by(repo: &Repo, me: &str, paths: &Paths, save_now: bool, save: &mut dyn 
         }
         let reason = if repairing {
             "Desktop: saved again (the saved file could not be read)".to_string()
-        } else if p.save.is_empty() {
-            "Desktop: other programs' settings taken out (only COSMIC's own are kept)".to_string()
         } else {
-            format!("Desktop: {}", what(p.save.keys().cloned()))
+            label(&p.save.keys().cloned().collect::<Vec<_>>(), &dropped)
         };
         out.saved = Some(save(bytes.as_deref(), &now, &reason)?);
     } else {
@@ -401,15 +408,26 @@ fn sync_by(repo: &Repo, me: &str, paths: &Paths, save_now: bool, save: &mut dyn 
 
 /// Save automatically, or only when asked.
 pub fn set_saving(machine: &dyn Machine, repo: &Repo, me: &str, how: Saving) -> Result<String> {
+    set_saving_by(repo, me, how, &mut |old, new, reason| commit(machine, repo, me, old, new, reason))
+}
+
+/// `set_saving`, with how the change is committed given (as `sync_by`).
+fn set_saving_by(repo: &Repo, me: &str, how: Saving, save: &mut dyn FnMut(Option<&[u8]>, &Saved, &str) -> Result<u64>) -> Result<String> {
     let (bytes, read) = saved_of(repo, me)?;
     let mut saved = read.map_err(anyhow::Error::msg)?;
-    // What the broker no longer takes leaves with this change, as it would with the next save.
-    saved.cosmic.retain(|k, _| keepable(k));
     if saved.save == how {
         return Ok(format!("Your desktop is already saved {}.\n", words(how)));
     }
+    // What the broker no longer takes leaves with this change (it would refuse the file otherwise), and the label
+    // says so.
+    let gone = not_kept(&saved);
+    saved.cosmic.retain(|k, _| keepable(k));
     saved.save = how;
-    let seq = commit(machine, repo, me, bytes.as_deref(), &saved, &format!("Desktop: saved {}", words(how)))?;
+    let reason = match gone.is_empty() {
+        true => format!("Desktop: saved {}", words(how)),
+        false => format!("Desktop: saved {}; {} taken out (only COSMIC's own settings are kept)", words(how), what(gone.into_iter())),
+    };
+    let seq = save(bytes.as_deref(), &saved, &reason)?;
     Ok(format!("Your desktop is saved {} from now on (change #{seq}).\n", words(how)))
 }
 
@@ -429,19 +447,31 @@ pub struct Status {
     pub unsaved: Vec<String>,
     /// The configuration's values still to be put on the desktop.
     pub to_apply: usize,
+    /// What an earlier TorqOS saved that is no longer kept (another program's settings): taken out by the next save.
+    pub to_take_out: Vec<String>,
 }
 
 pub fn status(repo: &Repo, me: &str, paths: &Paths) -> Result<Status> {
     let (_, read) = saved_of(repo, me)?;
     let mut saved = read.map_err(anyhow::Error::msg)?;
-    // Settings no longer kept are still to be taken out, by the next save (as sync does).
-    let dropped: Vec<String> = saved.cosmic.keys().filter(|k| !keepable(k)).cloned().collect();
+    let to_take_out = not_kept(&saved);
     saved.cosmic.retain(|k, _| keepable(k));
     let mut applied = read_applied(&paths.state);
     applied.retain(|k, _| keepable(k));
     let here = local(&paths.cosmic);
     let p = plan(&saved.cosmic, &applied, &here.values, |k| here.manages(k));
-    Ok(Status { saving: saved.save, saved: saved.cosmic.len(), unsaved: p.save.keys().cloned().chain(dropped).collect(), to_apply: p.apply.len() })
+    Ok(Status { saving: saved.save, saved: saved.cosmic.len(), unsaved: p.save.keys().cloned().collect(), to_apply: p.apply.len(), to_take_out })
+}
+
+/// For `show system desktop` and TorqOS Settings: what the next save takes out, in a sentence.
+pub fn taking_out(keys: &[String]) -> Option<String> {
+    (!keys.is_empty()).then(|| {
+        format!(
+            "Saved by an earlier TorqOS and no longer kept: {} ({} settings). The next save takes them out of your configuration; they stay on this desktop, and in the history.",
+            what(keys.iter().cloned()),
+            keys.len()
+        )
+    })
 }
 
 pub fn shown(s: &Status) -> String {
@@ -450,6 +480,9 @@ pub fn shown(s: &Status) -> String {
         out.push_str("  Everything you changed is saved.\n");
     } else {
         out.push_str(&format!("  Not saved yet: {} ({} settings). request system desktop save saves them.\n", what(s.unsaved.iter().cloned()), s.unsaved.len()));
+    }
+    if let Some(t) = taking_out(&s.to_take_out) {
+        out.push_str(&format!("  {t} request system desktop save does it now.\n"));
     }
     if s.to_apply > 0 {
         out.push_str(&format!("  {} settings from your configuration are still to be put on this desktop (at the next login, or request system desktop save).\n", s.to_apply));
@@ -606,6 +639,55 @@ mod tests {
     fn sh(dir: &Path, script: &str) {
         let st = std::process::Command::new("sh").arg("-c").arg(script).current_dir(dir).env("GIT_CONFIG_GLOBAL", "/dev/null").status().unwrap();
         assert!(st.success(), "{script}");
+    }
+
+    /// A configuration repository holding `old` as `users/dev/desktop.json`, and a desktop's paths beside it.
+    fn configured(old: &Saved) -> (tempfile::TempDir, PathBuf, Paths) {
+        let d = tempfile::tempdir().unwrap();
+        let (root, home) = (d.path().join("config"), d.path().join("home"));
+        std::fs::create_dir_all(root.join("users/dev")).unwrap();
+        std::fs::write(root.join("users/dev/desktop.json"), old.render().unwrap()).unwrap();
+        sh(&root, "git init -q -b main && git config user.name t && git config user.email t@t && git add -A && git commit -qm one");
+        let paths = Paths { cosmic: home.join("cosmic"), state: home.join("state/desktop-applied.json") };
+        (d, root, paths)
+    }
+
+    /// Saving manual, a desktop.json from an earlier TorqOS: nothing is saved by a sync; what will be taken out is
+    /// said as that, not as "not saved yet"; turning saving on takes it out, and the label says so.
+    #[test]
+    fn what_an_earlier_torqos_kept_is_said_as_taken_out() {
+        let old = Saved { save: Saving::Manual, cosmic: map(&[(K, "M"), (TEMPEST, "45.1")]) };
+        let (_d, root, paths) = configured(&old);
+        write_atomically(&paths.cosmic.join(K), b"M").unwrap();
+        let repo = Repo::new(&root);
+        let mut never = |_: Option<&[u8]>, _: &Saved, r: &str| -> Result<u64> { panic!("saved while manual: {r}") };
+        sync_by(&repo, "dev", &paths, false, &mut never).unwrap();
+        let s = status(&repo, "dev", &paths).unwrap();
+        assert_eq!((s.unsaved.len(), s.to_take_out.clone(), s.saved), (0, vec![TEMPEST.to_string()], 1), "{s:?}");
+        let text = shown(&s);
+        assert!(text.contains("Everything you changed is saved.") && text.contains("no longer kept: other programs' settings (1 settings)"), "{text}");
+        assert!(!text.contains("Not saved yet"), "{text}");
+        let mut got = vec![];
+        let mut save = |_: Option<&[u8]>, new: &Saved, r: &str| -> Result<u64> {
+            check(new)?;
+            got.push((r.to_string(), new.clone()));
+            Ok(1)
+        };
+        set_saving_by(&repo, "dev", Saving::Automatic, &mut save).unwrap();
+        let (reason, new) = got.pop().unwrap();
+        assert_eq!(reason, "Desktop: saved automatically; other programs' settings taken out (only COSMIC's own settings are kept)");
+        assert_eq!((new.save, new.cosmic), (Saving::Automatic, map(&[(K, "M")])));
+    }
+
+    /// Each save's label is true: an applet named only "Applet", a cleanup of COSMIC's own state, a cleanup with a
+    /// change of the person's.
+    #[test]
+    fn a_saves_label_names_what_it_does() {
+        let s = |v: &[&str]| v.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        assert_eq!(what(["com.system76.CosmicApplet/v1/x".to_string()].into_iter()), "applet");
+        assert_eq!(label(&[], &s(&[SHOT])), "Desktop: the screenshot tool's last area taken out (only COSMIC's own settings are kept)");
+        assert_eq!(label(&s(&[K]), &s(&[TEMPEST])), "Desktop: panel; other programs' settings taken out (only COSMIC's own settings are kept)");
+        assert_eq!(label(&s(&[K]), &[]), "Desktop: panel");
     }
 
     /// The configuration repository with `desktop.json` as an earlier TorqOS saved it, and a desktop: a sync saves
