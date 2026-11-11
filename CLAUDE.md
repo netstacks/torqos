@@ -116,9 +116,10 @@ virtualisation). Without it QEMU falls back to TCG and they take minutes.
 Released so far: `v0.1.0` to `v0.3.2` (v0.3.2 on 2026-11-09). `0.4.0-rc1` is not released and no
 version number has been bumped for it. Its goal is that the **desktop** (the COSMIC line, already on
 `main`) and **secrets** (ADR-052 steps 1 to 3: a program uses a token or key and never reads it; on
-`work/secrets`, which `main` is about to take) both work. **Feature freeze until the tag**: only
-fixes, tests and documents. The agent's further work (ADR-051, the resident agent, torq-mcp) is
-parked on `work/agents` until after rc1; do not build on it before then.
+`main` since `acc59e5`) both work. **Feature freeze until the tag**: only fixes, tests and documents.
+The agent's further work (ADR-051, the resident agent, torq-mcp) is parked, by the owner's decision,
+on `work/agents` (`20db80e`, tag `park/agents-known-good` at `eef8e57`), local to the owner's laptop
+only and not on GitHub, until after rc1; do not build on it before then.
 
 Milestones as built (`docs/ROADMAP.md`'s checkboxes are the most current record): M1, M1.5, M2 and M3
 are done. M3.5 (the install on real hardware) is partly done: the offline first build, network-first
@@ -155,17 +156,18 @@ doctor mode, proposals and session trust.
 
 - **What is released:** `v0.1.0` to `v0.3.2`, x86_64 only (images: qcow2, VMDK; the ISO installer
   since v0.2.0). No aarch64 downloads exist for 0.3.x, and nothing builds or tests aarch64.
-- **What `main` holds beyond v0.3.2** (55 commits, not yet through CI): the desktop. COSMIC through
+- **What `main` holds beyond v0.3.2:** the desktop line, secrets and the docs pass, none of it through
+  CI yet. The desktop: COSMIC through
   NixOS's modules, TorqOS Settings, a panel applet, an SSH-tunnels applet, approval through a polkit
   dialog (`modules/desktop.nix`, `settings/`, off by default). Setup now has a network/Wi-Fi step and
   a "new machine or from a repository" question. The desktop has run on exactly one physical
   machine, the owner's ASUS Zenbook S 16.
-- **What `work/secrets` holds** (`main` is about to take it): `torq-secrets` (`secrets/`,
-  `modules/secrets.nix`, ADR-052 steps 1 to 3).
+- **Secrets** (on `main` since `acc59e5`): `torq-secrets` (`secrets/`, `modules/secrets.nix`, ADR-052
+  steps 1 to 3).
 - **The agent is experimental.** The `torq-agent` account, `torq agent run`, doctor mode, proposals
   and session trust exist on `main`. Doctor is off by default, no model ships, and no real model has
   ever been tried (the tests use a scripted endpoint). The default allow-list is the owner's own
-  packages. Anything beyond that is on `work/agents`.
+  packages. Anything beyond that is on `work/agents`, parked (above).
 - **Tests.** Unit tests are `#[test]` functions: broker 248, torqcli 336, agent 28, secrets 12, wire
   10 (counted with grep; `cargo test` in `nix develop` runs them). VM tests are `checks` in
   `flake.nix`, one file each in `tests/`. `tests/doctor.nix`, `tests/agent-proposals.nix` and
@@ -178,8 +180,9 @@ doctor mode, proposals and session trust.
   builds (`nix flake check`, VM tests, the images) go to the second machine, "the check host", an
   x86_64 ESXi VM with KVM. On the laptop use one job at a time. Session worktrees live beside
   `~/torq`; do not edit in another session's.
-- **Known limits** are in `docs/KNOWN-GAPS.md`; the review of 2026-11-11 added three open desktop and
-  launcher items (6zx, 6zy, 6zz).
+- **Known limits** are in `docs/KNOWN-GAPS.md`; the review of 2026-11-11 added three desktop and
+  launcher items: 6zx and 6zy (the desktop save) fixed on `work/autosave`, 6zz (`torq agent run`'s
+  set-id sweep) open.
 
 ## Working here
 
