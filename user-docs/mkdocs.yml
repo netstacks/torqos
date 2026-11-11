@@ -84,6 +84,8 @@ nav:
       - Commit and roll back: guide/commit.md
       - Users, passwords and SSH: guide/users-ssh.md
       - SSH tunnels: guide/ssh-tunnels.md
+      - The remote: guide/remote.md
+      - The desktop: guide/desktop.md
       - Updates: guide/updates.md
       - History and health: guide/history.md
       - The agent: guide/agent.md
