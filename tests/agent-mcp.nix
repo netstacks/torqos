@@ -200,7 +200,7 @@ pkgs.testers.runNixOSTest {
         def resident(reason):
             inner = "TORQ_AGENT_SESSION=$(torqcli agent session start) torqcli -c " + shlex.quote(f'configure; set users alice packages htop; commit comment "{reason}"')
             # Root moves this shell into the unit's group (root may; no process of the agent's can), then becomes the agent.
-            machine.succeed(f"sh -c {shlex.quote(f'echo $$ > {procs} && exec setpriv --reuid torq-resident-alice --regid torq-resident-alice --init-groups -- env HOME=/tmp sh -c {shlex.quote(inner)}')}")
+            machine.succeed(f"sh -c {shlex.quote(f'echo $$ > {procs} && exec setpriv --reuid torq-resident-alice --regid torq-resident-alice --init-groups -- env HOME=/var/lib/torq-agent-memory/alice/home sh -c {shlex.quote(inner)}')}")
             return proposal(reason)
 
         assert json.loads(machine.succeed("cat /etc/torq/broker.json"))["model"] == "http://127.0.0.1:9/v1"

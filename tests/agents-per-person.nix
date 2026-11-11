@@ -59,7 +59,7 @@ pkgs.testers.runNixOSTest {
         procs = shlex.quote(f"/sys/fs/cgroup{cg}/cgroup.procs")
         # The resident agent's own account (ADR-051 3 amended 2026-11-11): the agent account is never resident.
         res = who.replace("torq-agent-", "torq-resident-", 1)
-        script = f"echo $$ > {procs} && exec setpriv --reuid {res} --regid {res} --init-groups -- env HOME=/tmp sh -c {shlex.quote(cmd)}"
+        script = f"echo $$ > {procs} && exec setpriv --reuid {res} --regid {res} --init-groups -- env HOME=/var/lib/torq-agent-memory/{who.removeprefix('torq-agent-')}/home sh -c {shlex.quote(cmd)}"
         return machine.succeed(f"sh -c {shlex.quote(script)}")
 
     def ask(user, request, resident=False):
@@ -143,16 +143,16 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"git -C {repo} show HEAD:users/alice/packages.json | grep -q tree")
 
     with subtest("residency from the uid, the control group a second guard"):
+        unit = "torq-agent@alice.service"
+        machine.succeed(f"systemctl start {unit}")
         # The resident account outside its unit (as root's su makes it): tainted from its start, as any program.
-        out = machine.succeed("su -s /bin/sh torq-resident-alice -c 'cd /tmp && torqcli agent session start'").strip()
+        out = machine.succeed("su -s /bin/sh torq-resident-alice -c 'cd /tmp && HOME=/var/lib/torq-agent-memory/alice/home torqcli agent session start'").strip()
         rec = json.loads(machine.succeed(f"cat /var/lib/torq/state/sessions/{out}.json"))
         assert rec["tainted_by"] == ["not-the-resident-agent"] and rec["agent"] == "torq-agent-alice" and rec["resident"] is False, rec
         # The agent account inside the unit's control group (root moves it there): never resident.
-        unit = "torq-agent@alice.service"
-        machine.succeed(f"systemctl start {unit}")
         cg = machine.succeed(f"systemctl show -P ControlGroup {unit}").strip()
         procs = shlex.quote(f"/sys/fs/cgroup{cg}/cgroup.procs")
-        sid = machine.succeed(f"sh -c {shlex.quote(f'echo $$ > {procs} && exec setpriv --reuid torq-agent-alice --regid torq-agent-alice --init-groups -- env HOME=/tmp torqcli agent session start')}").strip()
+        sid = machine.succeed(f"sh -c {shlex.quote(f'echo $$ > {procs} && exec setpriv --reuid torq-agent-alice --regid torq-agent-alice --init-groups -- env HOME=/var/lib/torq-agent-alice torqcli agent session start')}").strip()
         rec = json.loads(machine.succeed(f"cat /var/lib/torq/state/sessions/{sid}.json"))
         assert rec["tainted_by"] == ["not-the-resident-agent"] and rec["resident"] is False, rec
         # Both are the person's one agent: one count, one name in the ledger (data.agent), the caller the kernel's.
