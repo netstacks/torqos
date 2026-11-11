@@ -2606,7 +2606,11 @@ vouches for, that only proposes, every change ledgered and undone in one command
   `only_the_resident_agent_is_untainted`), the pidfd poll (fails `the_peer_is_read_by_its_pidfd`), torq-mcp's
   report before returning and its `coding-tool` report at start, the line bound. **Not in this step:** "Start
   Claude Code" from the agent's window; Codex and opencode; the screen tools (step 6); the rest of torqcli's
-  `show` tree as tools (phase 2); a short form of `torq agent run … claude`. Open: KNOWN-GAPS 6zzo.
+  `show` tree as tools (phase 2); a short form of `torq agent run … claude`. Run on 2026-11-10 (the laptop, one at
+  a time): the broker, agent, torqcli and torq-wire suites, `agent-assertions`, and the VM tests `agent-mcp`,
+  `agent-proposals`, `agents-per-person`, `agent-service` (systemd-analyze security still 1.8), `doctor`,
+  `agent-run`, `agent` and `desktop-agent` (which builds torq-settings), all green; not a whole `nix flake
+  check`. Open: KNOWN-GAPS 6zzo.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
