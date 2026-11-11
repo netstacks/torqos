@@ -178,6 +178,8 @@
         doctor = import ./tests/doctor.nix { inherit pkgs self; };
         agent-proposals = import ./tests/agent-proposals.nix { inherit pkgs self; };
         agent-service = import ./tests/agent-service.nix { inherit pkgs self; };
+        # torq-mcp and Claude Code as a tool (ADR-051 5 and 7): a stand-in client, its proposal tainted, the broker's resident rule.
+        agent-mcp = import ./tests/agent-mcp.nix { inherit pkgs self; };
         remote = import ./tests/remote.nix { inherit pkgs self; };
         adopt = import ./tests/adopt.nix { inherit pkgs self; };
         strict = import ./tests/strict.nix { inherit pkgs self; };

@@ -128,7 +128,9 @@ pkgs.testers.runNixOSTest {
         held = f"/var/lib/torq/state/sessions/{sid}.json"
         machine.succeed(f"test \"$(stat -c %a:%U {held})\" = 600:root")
         b = json.loads(machine.succeed(f"cat {held}"))
-        assert b["tainted"] is True and sorted(b["tainted_by"]) == sorted(r["taintedBy"]), (b, r)
+        # What it read, and before that what it is: torq doctor runs through torq agent run, not the resident service
+        # (ADR-051 step 5), so its session is tainted from its start.
+        assert b["tainted"] is True and b["tainted_by"][0] == "not-the-resident-agent" and sorted(b["tainted_by"][1:]) == sorted(r["taintedBy"]), (b, r)
         machine.fail(f"su -s /bin/sh torq-agent-dev -c 'cat {held}'")
         machine.succeed("torq-broker verify")
   '';

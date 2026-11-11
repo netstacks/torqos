@@ -3,7 +3,9 @@
 # never as the caller says, and without a session it is tainted; the real doctor reports what it read;
 # a person applies a tainted proposal told why; what could cut the machine off is applied only as a
 # commit confirmed; and a person's trust — their password, their own folder, at most 60 minutes —
-# applies the agent's clean user-tier proposals there at once, ledgered, until it is revoked or ends.
+# applies the agent's clean user-tier proposals there at once, ledgered, until it is revoked or ends — only the
+# resident agent's (its service's control group, ADR-051 step 5): any other program of the agent account's starts
+# tainted, and its proposals are tainted whatever session they cite.
 #
 # (The doctor's own propose step, torqcli's commit as the agent, is covered by the agent crate's
 # tests: a VM cannot evaluate a configuration for torqcli to commit — KNOWN-GAPS 6zn.)
@@ -67,10 +69,23 @@ pkgs.testers.runNixOSTest {
     machine.succeed("torq-broker init")
     PASSWORD = "Torq-sock-2210"
 
-    def ask(user, request):
+    def as_agent(who, cmd, resident):
+        # As the agent account `who`. `resident`: from inside its person's torq-agent@<person>.service's control
+        # group, as TorqOS's resident agent is (ADR-051 step 5) — root moves this shell there first, which root may
+        # and no process of the agent's can; otherwise from su, as any other program of the agent's is.
+        if not resident:
+            return machine.succeed(f"su -s /bin/sh {who} -c {shlex.quote(cmd)}")
+        unit = f"torq-agent@{who.removeprefix('torq-agent-')}.service"
+        machine.succeed(f"systemctl start {unit}")
+        cg = machine.succeed(f"systemctl show -P ControlGroup {unit}").strip()
+        procs = shlex.quote(f"/sys/fs/cgroup{cg}/cgroup.procs")
+        script = f"echo $$ > {procs} && exec setpriv --reuid {who} --regid {who} --init-groups -- env HOME=/var/lib/{who} sh -c {shlex.quote(cmd)}"
+        return machine.succeed(f"sh -c {shlex.quote(script)}")
+
+    def ask(user, request, resident=False):
         cmd = f"printf '%s\\n' {shlex.quote(json.dumps(request))} | socat -t 30 - UNIX-CONNECT:/run/torq/broker.sock"
         code, out = None, ""
-        for l in machine.succeed(f"su -s /bin/sh {user} -c {shlex.quote(cmd)}").splitlines():
+        for l in as_agent(user, cmd, resident).splitlines():
             f = json.loads(l)
             out += f.get("out", "")
             code = f.get("exit", code)
@@ -87,11 +102,12 @@ pkgs.testers.runNixOSTest {
             return f"--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{new}\n"
         return f"--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{cur.strip()}\n+{new}\n"
 
-    def propose(diff, reason, session=None, tainted=False, who="torq-agent-dev"):
+    # dev's agent speaks as the resident agent unless told otherwise; sam's as any other program of an agent's.
+    def propose(diff, reason, session=None, tainted=False, who="torq-agent-dev", resident=None):
         args = ["--json", "propose", f"--base={head()}", f"--reason={reason}"]
         args += [f"--session={session}"] if session else []
         args += ["--tainted"] if tainted else []
-        return ask(who, {"args": args, "diff": diff})
+        return ask(who, {"args": args, "diff": diff}, resident=(who == "torq-agent-dev") if resident is None else resident)
 
     def entries():
         return [json.loads(l) for l in machine.succeed("torq-broker log --json --brief").splitlines()]
@@ -99,8 +115,8 @@ pkgs.testers.runNixOSTest {
     def kinds(k):
         return [e for e in entries() if e["kind"] == k]
 
-    def start(who="torq-agent-dev"):
-        sid = machine.succeed(f"su -s /bin/sh {who} -c 'torqcli agent session start'").strip()
+    def start(who="torq-agent-dev", resident=None):
+        sid = as_agent(who, "torqcli agent session start", (who == "torq-agent-dev") if resident is None else resident).strip()
         assert len(sid) == 32, sid
         return sid
 
@@ -144,9 +160,10 @@ pkgs.testers.runNixOSTest {
         rec = machine.succeed("cat /var/lib/torq-agent-dev/.local/state/torq-agent/sessions/*.json")
         doctor = json.loads(rec)["brokerSession"]
         held = json.loads(machine.succeed(f"cat {state}/sessions/{doctor}.json"))
-        assert doctor != sid and held["tainted_by"] == ["read_journal"], held
+        # torq doctor runs through torq agent run, not the resident service: tainted from its start (ADR-051 step 5).
+        assert doctor != sid and held["tainted_by"] == ["not-the-resident-agent", "read_journal"], held
         code, jq = propose(packages("dev", ["jq"]), "jq for dev", session=doctor)
-        assert code == 0 and jq["tainted"] is True and jq["data"]["session"]["tainted_by"] == ["read_journal"], jq
+        assert code == 0 and jq["tainted"] is True and jq["data"]["session"]["tainted_by"] == ["not-the-resident-agent", "read_journal"], jq
         # What the agent is told it proposed is the broker's record of the session.
         told = json.loads(machine.succeed(f"su -s /bin/sh torq-agent-dev -c 'torqcli agent session show {doctor}'"))
         assert told["proposals"] == [{"proposal": jq["seq"], "applied": None}], told
@@ -225,6 +242,30 @@ pkgs.testers.runNixOSTest {
         assert head() == before
         code, v = propose(packages("sam", ["bat"]), "sam's agent, dev's agent's session", session=s3, who="torq-agent-sam")
         assert code == 1 and "not torq-agent-sam's" in v["error"], (code, v)
+
+    with subtest("the agent account outside its resident service: tainted from its start, never applied under trust"):
+        # ADR-051 step 5 (KNOWN-GAPS 6zq): any program run as dev's agent — Claude Code under torq agent run,
+        # or this shell — can reach the broker's socket. Under dev's trust, still holding, none of it applies.
+        assert any(t["person"] == "dev" for t in json.loads(machine.succeed("torq-broker trust"))["trust"])
+        outside = start(resident=False)
+        rec = json.loads(machine.succeed(f"cat {state}/sessions/{outside}.json"))
+        assert rec["tainted"] is True and rec["tainted_by"] == ["not-the-resident-agent"], rec
+        before = head()
+        code, v = propose(packages("dev", ["ripgrep"]), "outside, its own session", session=outside, resident=False)
+        assert code == 0 and v["tainted"] is True and "trust_applied" not in v, (code, v)
+        # Citing the resident agent's own clean session, whose id the ledger shows anyone: tainted all the same.
+        inside = start()
+        code, v = propose(packages("dev", ["ripgrep"]), "outside, the resident agent's session", session=inside, resident=False)
+        assert code == 0 and v["tainted"] is True and v["data"]["session"]["tainted_by"] == ["not-the-resident-agent"] and "trust_applied" not in v, (code, v)
+        assert json.loads(machine.succeed(f"cat {state}/sessions/{inside}.json"))["tainted"] is False, "its record untouched"
+        assert head() == before, "nothing applied"
+        # No caller says it is the resident agent: the broker's word alone.
+        code, v = ask("torq-agent-dev", {"args": ["--json", "session-start", "--resident"]})
+        assert code != 0 and "not taken from a caller" in v["error"], (code, v)
+        # The resident agent itself, on that session, under the same trust: applied.
+        code, v = propose(packages("dev", ["ripgrep"]), "the resident agent", session=inside)
+        assert code == 0 and v.get("trust_applied", {}).get("approved_by") == "dev", (code, v)
+        machine.succeed(f"git -C {repo} show HEAD:users/dev/packages.json | grep -q ripgrep")
 
     with subtest("revoked, it ends; and its time ends it, on the record"):
         machine.succeed("su - dev -c 'torqcli request system agent trust revoke' | grep -q 'ended'")

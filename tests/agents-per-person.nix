@@ -26,6 +26,9 @@ pkgs.testers.runNixOSTest {
     # A person who is not an administrator, with no agent: for who may decline (ADR-051, amended).
     users.users.erin = { isNormalUser = true; hashedPasswordFile = lib.mkForce null; hashedPassword = hash; };
     torq.agent.people = [ "alice" "bob" ];
+    # Doctor mode on, for its resident service: the trust subtest speaks from that service's control group, as
+    # TorqOS's resident agent does (ADR-051 step 5). No model is ever asked here.
+    torq.agent.doctor = { enable = true; endpoint = "http://127.0.0.1:9/v1"; model = "none"; };
     # Named like an agent account, made by hand, not in torq.agent.people: no agent.
     users.users.torq-agent-carol = { isSystemUser = true; group = "torq-agent-carol"; home = "/var/lib/torq-agent-carol"; createHome = true; };
     users.groups.torq-agent-carol = { };
@@ -41,10 +44,23 @@ pkgs.testers.runNixOSTest {
     machine.succeed(f"mkdir -p {repo} && echo '{{}}' > {repo}/desktop.json && touch {repo}/flake.nix && torq-broker init")
     PASSWORD = "Torq-sock-2210"
 
-    def ask(user, request):
+    def as_agent(who, cmd, resident):
+        # As the agent account `who`. `resident`: from inside its person's torq-agent@<person>.service's control
+        # group, as TorqOS's resident agent is (ADR-051 step 5) — root moves this shell there first, which root may
+        # and no process of the agent's can; otherwise from su, as any other program of the agent's is.
+        if not resident:
+            return machine.succeed(f"su -s /bin/sh {who} -c {shlex.quote(cmd)}")
+        unit = f"torq-agent@{who.removeprefix('torq-agent-')}.service"
+        machine.succeed(f"systemctl start {unit}")
+        cg = machine.succeed(f"systemctl show -P ControlGroup {unit}").strip()
+        procs = shlex.quote(f"/sys/fs/cgroup{cg}/cgroup.procs")
+        script = f"echo $$ > {procs} && exec setpriv --reuid {who} --regid {who} --init-groups -- env HOME=/var/lib/{who} sh -c {shlex.quote(cmd)}"
+        return machine.succeed(f"sh -c {shlex.quote(script)}")
+
+    def ask(user, request, resident=False):
         cmd = f"printf '%s\\n' {shlex.quote(json.dumps(request))} | socat -t 30 - UNIX-CONNECT:/run/torq/broker.sock"
         code, out = None, ""
-        for l in machine.succeed(f"su -s /bin/sh {user} -c {shlex.quote(cmd)}").splitlines():
+        for l in as_agent(user, cmd, resident).splitlines():
             f = json.loads(l)
             out += f.get("out", "")
             code = f.get("exit", code)
@@ -56,12 +72,13 @@ pkgs.testers.runNixOSTest {
     def packages(person, names):
         return f"--- /dev/null\n+++ b/users/{person}/packages.json\n@@ -0,0 +1 @@\n+{json.dumps(names)}\n"
 
-    def propose(who, diff, reason, session=None):
+    def propose(who, diff, reason, session=None, resident=False):
         args = ["--json", "propose", f"--base={head()}", f"--reason={reason}"] + ([f"--session={session}"] if session else [])
-        return ask(who, {"args": args, "diff": diff})
+        return ask(who, {"args": args, "diff": diff}, resident)
 
+    # As the resident agent, which alone starts a session untainted (ADR-051 step 5).
     def start(who):
-        sid = machine.succeed(f"su -s /bin/sh {who} -c 'torqcli agent session start'").strip()
+        sid = as_agent(who, "torqcli agent session start", True).strip()
         assert len(sid) == 32, sid
         return sid
 
@@ -104,17 +121,17 @@ pkgs.testers.runNixOSTest {
         assert code == 0 and g["kind"] == "trust_granted" and g["data"]["person"] == "alice", (code, g)
         sb = start("torq-agent-bob")
         before = head()
-        code, v = propose("torq-agent-bob", packages("bob", ["jq"]), "jq for bob, under alice's trust", session=sb)
+        code, v = propose("torq-agent-bob", packages("bob", ["jq"]), "jq for bob, under alice's trust", session=sb, resident=True)
         assert code == 0 and "trust_applied" not in v, (code, v)
         assert head() == before, "bob's agent's proposal was applied under alice's trust"
         # bob's agent cannot cite alice's agent's session, nor report into it.
         sa = start("torq-agent-alice")
-        code, v = propose("torq-agent-bob", packages("bob", ["fd"]), "on alice's agent's session", session=sa)
+        code, v = propose("torq-agent-bob", packages("bob", ["fd"]), "on alice's agent's session", session=sa, resident=True)
         assert code == 1 and "not torq-agent-bob's" in v["error"], (code, v)
         machine.fail(f"su -s /bin/sh torq-agent-bob -c 'torqcli agent session taint {sa} read_journal'")
         machine.succeed(f"jq -e '.tainted == false and .agent == \"torq-agent-alice\"' /var/lib/torq/state/sessions/{sa}.json")
         # alice's own agent, under her trust: applied (the trust works; it is bob's agent it does not cover).
-        code, v = propose("torq-agent-alice", packages("alice", ["tree"]), "tree for alice", session=sa)
+        code, v = propose("torq-agent-alice", packages("alice", ["tree"]), "tree for alice", session=sa, resident=True)
         assert code == 0 and v.get("trust_applied", {}).get("approved_by") == "alice", (code, v)
         machine.succeed(f"git -C {repo} show HEAD:users/alice/packages.json | grep -q tree")
 
