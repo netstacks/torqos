@@ -563,19 +563,21 @@ Its §5 lists claims without a test.
    - **A refusal's hash is of the request's file as the broker re-reads it**: over the socket that is
      the broker's own copy (root's 0700 directory); under sudo, root's word.
 
-6zz. **`torq agent run` clears set-id bits as root over a folder the person owns (found by the review of
-   2026-11-11, open).** After the sandbox ends, `modules/agent-run.sh` (run as root through the administrators'
-   passwordless sudo rule for the launcher) runs `find "$share" -xdev -user torq-agent -perm /6000 -type f
-   -exec chmod ug-s {} +` over the shared directory, which the person who ran it owns, so that a set-id file the
-   agent left cannot run later. `find` tests a file and `chmod` acts on the names it collected afterwards, and
-   `chmod` follows links. The agent's processes are gone by then, but the person can still rename things in
-   their own directory: if they swap a path component for a link between `find`'s test and `chmod`, root clears
-   the set-id bit of a file that is not the agent's, such as sudo's wrapper in `/run/wrappers`. The effect is a
-   denial of service (sudo and the other wrappers stop working until the wrappers are made again, by a switch or a restart), not a
-   way to gain privilege: the command only removes bits. Only an administrator can start the launcher, and one
-   already has the means to harm the machine. Not exercised by a test. A fix would act on a descriptor of each
-   file (`chmod` through `/proc/self/fd`, or `find -exec` with a check that the file is still the agent's), not
-   on a name.
+6zz. ~~**`torq agent run` clears set-id bits as root over a folder the person owns.**~~ Fixed (2026-11-11, for
+   0.4.0-rc1). Found by the review of that day: after the sandbox ended, `modules/agent-run.sh` ran, as root,
+   `find "$share" -xdev -user torq-agent -perm /6000 -type f -exec chmod ug-s {} +` over the shared directory,
+   which the person owns. `find` tests a file and `chmod` acts later on its name, following links, so a person
+   swapping a folder in it for a link between the two made root clear the set-id bits of whatever the link led
+   to, such as sudo's wrapper in `/run/wrappers` (a denial of service, not a gain of privilege). Now the sweep
+   runs as `torq-agent` (setpriv: its uid and group, no capabilities, no new privileges), inside the launcher's
+   own mount namespace, where the shared directory is mounted and reachable. The files it is for are the
+   agent's own, and their owner may clear their bits. Whatever link the person or the agent puts in the way, the
+   sweep can change only what the agent could change anyway, so no descriptor-by-descriptor walk is needed, and
+   no check for other processes of the agent's either (they could do nothing to it the agent cannot do itself).
+   `tests/agent-run.nix` races it: a folder with many files, swapped for a link to `/run/wrappers/bin` the moment
+   the sweep starts, leaves sudo's wrapper as it was (the old root sweep fails the test). **What remains:** a
+   person who swaps a folder during the sweep can make it miss a set-id file the agent left in that folder,
+   which keeps its bits, in the person's own directory; that is the person working against their own sweep.
 
 6zh. **The remote's open ends (ADR-036, the push and the anchor; its review, 2026-11-05).** Fixed
    from it: a merge in the remote's ledger history is refused (a rewrite set beside it passed a
