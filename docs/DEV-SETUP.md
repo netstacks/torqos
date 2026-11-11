@@ -48,7 +48,7 @@ bugs in it show up on the dev machine first.
 ### 3. Get the repo
 
 ```bash
-git clone https://github.com/netstacks/torqos.git ~/torq
+git clone https://github.com/torqosorg/torqos.git ~/torq
 ```
 
 `~/torq` whatever the repository is called: the docs, the `torq` input below and the commands in

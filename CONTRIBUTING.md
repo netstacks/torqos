@@ -33,7 +33,7 @@ test that would fail if it broke; `docs/` changes with the behaviour it describe
 
 A release is a tag on `main`; `.github/workflows/release.yml` does the rest (ADR-028): it checks the
 tag is the source's version, runs every test, builds the images and the ISO for both architectures,
-and only then publishes the source to `netstacks/torqos-releases` (signed, tagged, `stable` moved)
+and only then publishes the source to `torqosorg/torqos-releases` (signed, tagged, `stable` moved)
 and a GitHub Release with the files and their signed checksums.
 
 ```sh

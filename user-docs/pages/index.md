@@ -12,7 +12,7 @@ whole machine the way you configure a router: in a private candidate, compared b
 recorded in a tamper-evident ledger, and reversible with one command.</p>
 
 [Install TorqOS](start/install.md){ .md-button .md-button--primary }
-[Download the latest release](https://github.com/netstacks/torqos-releases/releases/latest){ .md-button }
+[Download the latest release](https://github.com/torqosorg/torqos-releases/releases/latest){ .md-button }
 
 </div>
 

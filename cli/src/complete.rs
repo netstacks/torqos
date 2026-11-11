@@ -237,7 +237,7 @@ fn tree_choices(k: &Know, rest: &[String], cmd: &str) -> Vec<Choice> {
     match sw.as_slice() {
         ["system", "software"] => return vec![Choice::new("torq", "TorqOS: where it comes from (its version: `request system update`)")],
         ["system", "software", "torq"] => return vec![Choice::new("source", "Where TorqOS comes from: github:<owner>/<repo>[/<ref>], path:/<folder>, …")],
-        ["system", "software", "torq", "source"] if cmd != "show" => return vec![Choice::new("<source>", "github:netstacks/torqos, a tag (…/v0.1.0), or path:/<folder> while developing")],
+        ["system", "software", "torq", "source"] if cmd != "show" => return vec![Choice::new("<source>", "github:torqosorg/torqos, a tag (…/v0.1.0), or path:/<folder> while developing")],
         _ => {}
     }
     if let Some(hand) = crate::whole::hand_words(rest) {

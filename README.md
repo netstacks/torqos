@@ -14,8 +14,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/netstacks/torqos-releases/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/netstacks/torqos-releases?label=release&color=FF7A1A&labelColor=101216"></a>
-  <a href="https://github.com/netstacks/torqos/actions/workflows/test.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/netstacks/torqos/test.yml?branch=main&label=tests&labelColor=101216"></a>
+  <a href="https://github.com/torqosorg/torqos-releases/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/torqosorg/torqos-releases?label=release&color=FF7A1A&labelColor=101216"></a>
+  <a href="https://github.com/torqosorg/torqos/actions/workflows/test.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/torqosorg/torqos/test.yml?branch=main&label=tests&labelColor=101216"></a>
   <a href="LICENSE"><img alt="Licence: Apache 2.0" src="https://img.shields.io/badge/licence-Apache%202.0-5B6270?labelColor=101216"></a>
   <img alt="Platform: x86_64" src="https://img.shields.io/badge/platform-x86__64-8A93A3?labelColor=101216">
   <img alt="Built on NixOS 26.05" src="https://img.shields.io/badge/built%20on-NixOS%2026.05-7EE2A8?labelColor=101216">
@@ -24,7 +24,7 @@
 <p align="center">
   <a href="https://torqos.org"><strong>torqos.org</strong></a> &nbsp;·&nbsp;
   <a href="https://docs.torqos.org">Documentation</a> &nbsp;·&nbsp;
-  <a href="https://github.com/netstacks/torqos-releases/releases/latest">Download</a> &nbsp;·&nbsp;
+  <a href="https://github.com/torqosorg/torqos-releases/releases/latest">Download</a> &nbsp;·&nbsp;
   <a href="docs/INSTALL.md">Install</a> &nbsp;·&nbsp;
   <a href="docs/ROADMAP.md">Roadmap</a> &nbsp;·&nbsp;
   <a href="branding/README.md">Brand</a>
@@ -146,7 +146,7 @@ The full design is in [docs/CLI-DESIGN.md](docs/CLI-DESIGN.md), the tree in
 
 TorqOS is installed from an image: download it, check it, boot it, answer a few questions.
 
-**1. Download** from the [latest release](https://github.com/netstacks/torqos-releases/releases/latest):
+**1. Download** from the [latest release](https://github.com/torqosorg/torqos-releases/releases/latest):
 
 | File | For |
 |---|---|
@@ -183,7 +183,7 @@ Step by step, for each hypervisor and for real hardware: [docs/INSTALL.md](docs/
 
 ## Updates
 
-Releases are published to [netstacks/torqos-releases](https://github.com/netstacks/torqos-releases):
+Releases are published to [torqosorg/torqos-releases](https://github.com/torqosorg/torqos-releases):
 each a git commit signed with the TorqOS release key, with `stable` moved forward only to releases
 that passed the tests. On a machine:
 

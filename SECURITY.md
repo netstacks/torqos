@@ -7,7 +7,7 @@ around a claim that is not already listed there is a vulnerability — please re
 
 ## Reporting
 
-Report privately, through GitHub: **[Report a vulnerability](https://github.com/netstacks/torqos/security/advisories/new)**
+Report privately, through GitHub: **[Report a vulnerability](https://github.com/torqosorg/torqos/security/advisories/new)**
 (the repository's Security tab). Please do not open a public issue or pull request for it.
 
 Say what you did, what you expected, and what happened — the TorqOS version

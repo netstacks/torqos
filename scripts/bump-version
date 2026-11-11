@@ -161,7 +161,7 @@ fi
 git tag -a "$tag" -m "TorqOS $tag"
 [ -z "$bumped" ] || git push -q origin main
 git push -q origin "$tag"
-repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo netstacks/torqos)
+repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo torqosorg/torqos)
 cat <<EOF
 Pushed $tag. The release workflow is running:
   gh run watch \$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')

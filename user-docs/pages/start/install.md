@@ -6,7 +6,7 @@ Nothing needs to be built.
 ## 1. Download
 
 Get the image for your platform from the
-[latest release](https://github.com/netstacks/torqos-releases/releases/latest):
+[latest release](https://github.com/torqosorg/torqos-releases/releases/latest):
 
 | File | For |
 |---|---|

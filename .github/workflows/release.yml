@@ -1,13 +1,13 @@
 # A release (docs/DECISIONS.md, ADR-028), on a `v*` tag pushed here: the tests, the images of
 # both architectures, then, only if all of that passed, the release itself in the public
-# netstacks/torqos-releases:
+# torqosorg/torqos-releases:
 #   - the tagged source as one commit there, signed with the release key, tagged, and `stable`
 #     moved to it (never for a pre-release, `v1.2.0-rc1`): what machines update to;
 #   - a GitHub Release with the images and the ISO installer (the VMDK gzipped: a release file is at
 #     most 2 GiB),
 #     SHA256SUMS, its signature, and the key to check it with.
 # Secrets: TORQOS_RELEASE_KEY (the release key's private half), TORQOS_RELEASES_TOKEN (a person's
-# token for netstacks/torqos-releases, allowed this repository too for the weekly bump: ADR-028).
+# token for torqosorg/torqos-releases, allowed this repository too for the weekly bump: ADR-028).
 name: release
 
 on:
@@ -92,7 +92,7 @@ jobs:
         env:
           TOKEN: ${{ secrets.TORQOS_RELEASES_TOKEN }}
         run: |
-          git clone -q "https://x-access-token:${TOKEN}@github.com/netstacks/torqos-releases.git" "$RUNNER_TEMP/releases"
+          git clone -q "https://x-access-token:${TOKEN}@github.com/torqosorg/torqos-releases.git" "$RUNNER_TEMP/releases"
           cd "$RUNNER_TEMP/releases"
           # What was tested is what is signed: the tag still names the commit this run tested.
           test "$(git -C "$GITHUB_WORKSPACE" rev-parse "$TAG^{commit}")" = "$GITHUB_SHA" \
@@ -153,18 +153,18 @@ jobs:
           release was signed with the key it was installed with.
 
           **Source.** These images are built from the tag \`$TAG\` of
-          [netstacks/torqos-releases](https://github.com/netstacks/torqos-releases/tree/$TAG), with
+          [torqosorg/torqos-releases](https://github.com/torqosorg/torqos-releases/tree/$TAG), with
           nixpkgs at commit [\`$nixpkgs\`](https://github.com/NixOS/nixpkgs/tree/$nixpkgs) and every
           other input at the commit its \`flake.lock\` pins. Every package's source, the GPL'd ones
           among them (the kernel, git, bash, coreutils and the rest), is pinned there by hash, in
-          nixpkgs. \`nix --extra-experimental-features 'nix-command flakes' build "git+https://github.com/netstacks/torqos-releases?ref=refs/tags/$TAG#image"\`
+          nixpkgs. \`nix --extra-experimental-features 'nix-command flakes' build "git+https://github.com/torqosorg/torqos-releases?ref=refs/tags/$TAG#image"\`
           builds the same system from the same sources (\`#image-vmdk\`, \`#iso\` the others); not the
           same bytes, since an image carries its own copy of its source, and the releases'
           copy has no CI files. TorqOS is a NixOS derivative, not NixOS (docs/DECISIONS.md, ADR-029).
           EOF
           pre=()
           case "$TAG" in *-*) pre=(--prerelease) ;; esac
-          gh release create "$TAG" -R netstacks/torqos-releases "${pre[@]}" --verify-tag \
+          gh release create "$TAG" -R torqosorg/torqos-releases "${pre[@]}" --verify-tag \
             --title "TorqOS $TAG" --notes-file "$RUNNER_TEMP/notes.md" files/*
 
       - name: Forget the key

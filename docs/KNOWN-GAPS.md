@@ -315,7 +315,7 @@ Its §5 lists claims without a test.
    SLA, and the cache's cost is a recurring Foundation concern. The *code* cannot be withdrawn (MIT,
    pinned, and the nixpkgs tree is inside every image); the services can change for everyone. If
    the cache went away, Nix builds from source — slowly. Answer when there are users: a nixpkgs
-   mirror under `netstacks`, a caching proxy, a source mirror. Not yet: the release's source
+   mirror under `torqosorg`, a caching proxy, a source mirror. Not yet: the release's source
    statement and CI's unfree check (ROADMAP M2).
 
 ## Desktop (off in the base; the torqos-desktop configuration's, ADR-034, M4)

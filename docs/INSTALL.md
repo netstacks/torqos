@@ -9,7 +9,7 @@ boot.
 1. **The project builds a release** (ADR-028): the images (`torqos-<arch>.qcow2`,
    `torqos-<arch>.vmdk.gz`, and the installer `torqos-<arch>.iso`), their checksums (`SHA256SUMS`), and a signature of that
    file made with the TorqOS release key (`SHA256SUMS.sig`), with the key (`allowed_signers`).
-   Plain files on the release page of `netstacks/torqos-releases`: no service.
+   Plain files on the release page of `torqosorg/torqos-releases`: no service.
 2. **Someone downloads and (optionally) checks it**, with OpenSSH and coreutils:
    ```
    ssh-keygen -Y verify -f allowed_signers -I torqos-release -n file -s SHA256SUMS.sig < SHA256SUMS
@@ -107,7 +107,7 @@ machine starts from the TorqOS **inside the image**: its own source, in the read
 hash in the config repo's `flake.lock` — so setup needs no network for TorqOS itself. A `path:`
 source is allowed outside dev mode only there, in the store: nothing can change it (a folder anyone
 can write to stays a dev-mode source). The first `request system update` moves the machine to
-TorqOS's releases (`git+https://github.com/netstacks/torqos-releases?ref=stable`, ADR-028); every
+TorqOS's releases (`git+https://github.com/torqosorg/torqos-releases?ref=stable`, ADR-028); every
 update after takes the newest release on `stable`, and only one signed with the release key the
 machine was installed with (`/etc/torq/release-signers`): anything else is refused before it is
 loaded.
@@ -158,7 +158,7 @@ logs in, change #1 is in the history and `show system alarms` is clean):
 Next:
 
 6. The release (ADR-028): built and signed by CI on a tag, published in
-   `netstacks/torqos-releases`; machines update to it, signature checked. *Built 2026-11-02.*
+   `torqosorg/torqos-releases`; machines update to it, signature checked. *Built 2026-11-02.*
 7. A VM test (tests/image.nix, 2026-11-02): the image boots to setup with nothing listening; setup,
    typed on the console, records change #1; the first update moves the machine to signed
    releases, served over HTTPS; a release the key did not sign is refused. (Commits and

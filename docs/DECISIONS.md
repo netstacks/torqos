@@ -410,6 +410,13 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     date, not its version, and the machine does not refuse an older release by itself. The check
     is torqcli's, at update: a person who edits the lock by hand is past it (as they are past any
     check, being able to commit).
+- **Amended 2026-11-11 — the releases moved:** the owner moved both repositories to the `torqosorg`
+  organisation, and `torq.releases.url` names `torqosorg/torqos-releases`. Changed outright, because no
+  machine took TorqOS from the releases then (the two in use took it from a `path:` folder). Once machines
+  track the releases, a move must not be done this way: a release's signature is checked only for a lock
+  at *that* address (`broker/src/inputs.rs` `is_release`, torqcli's `release_commit`), so a machine still
+  locked at the old one would update unchecked. The old address has to stay a release address, signature
+  required, and `request system update` move the machine to the new one.
 
 ## ADR-029 — TorqOS names itself, as a NixOS derivative
 - **Context:** A TorqOS machine said it was NixOS everywhere it names itself: `/etc/os-release`
