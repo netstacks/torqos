@@ -73,9 +73,16 @@ its repository looks the same, and an undo or a pull puts your desktop back as i
   machine sleeps) are left out, and so is what COSMIC writes by itself (the screenshot tool's last
   area). A save happens only when you changed something.
 
-!!! warning "Saved before 0.4.0-rc1: other programs' settings stay in the history"
+!!! warning "What is saved is readable by every account"
     The configuration repository can be read by every account on the machine, and by a remote if you
-    set one up. Before this release, the save also took other applets' settings. The next save takes
+    set one up. COSMIC's own settings can say something about you: your wallpaper's path, your custom
+    shortcuts (the commands you typed), the panel's applets and the dock's favourites (what is
+    installed), and, when you have set them, Files' favourites (network places), the terminal's
+    profiles (commands and hosts), wallpaper folders and window rules. They are saved, as your
+    desktop. If that matters, set saving to manual and save when you choose.
+
+!!! warning "Saved before 0.4.0-rc1: other programs' settings stay in the history"
+    Before this release, the save also took other applets' settings. The next save takes
     them out of `desktop.json` (with saving manual, run `request system desktop save` once), but the
     earlier commits still hold them, on this machine and on a
     remote that received them. If that matters (a location, a token), change what you can, such as

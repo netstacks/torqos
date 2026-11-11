@@ -181,7 +181,7 @@ doctor mode, proposals and session trust.
   x86_64 ESXi VM with KVM. On the laptop use one job at a time. Session worktrees live beside
   `~/torq`; do not edit in another session's.
 - **Known limits** are in `docs/KNOWN-GAPS.md`; the review of 2026-11-11 added three desktop and
-  launcher items: 6zx and 6zy (the desktop save) fixed on `work/autosave`, 6zz (`torq agent run`'s
+  launcher items: 6zx and 6zy (the desktop save) fixed for 0.4.0-rc1 (follow-ups: 6zza to 6zzc), 6zz (`torq agent run`'s
   set-id sweep) open.
 
 ## Working here
