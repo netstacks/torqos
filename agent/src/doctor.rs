@@ -76,6 +76,11 @@ const CALLS_PER_ROUND: usize = 8;
 /// What a person reads first, on standard output, before an answer from a tainted session.
 pub const TAINTED: &str = "[This answer came from a session that read untrusted text";
 
+/// A taint's source as the broker names one: a word (letters, digits, - and _), at most 64.
+fn source_word(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// A session's id at the broker: 32 lowercase hex digits.
 pub fn session_id_ok(s: &str) -> bool {
     s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -120,6 +125,18 @@ pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: 
         bail!("the broker started no session (it said: {})", tools::truncate(&clean(started.trim()), 200));
     }
     let mut session = Session::start(&cfg.sessions, question, &cfg.model, &broker)?;
+    // What the broker says tainted the session from its start (ADR-051 step 5: not the resident agent, or a model
+    // others here could stand in for): the session is never believed cleaner than the broker holds it — its
+    // answer headed so, and not remembered.
+    let held: Value = serde_json::from_str(host.session(&["show", &broker]).context("asking the broker how the session starts")?.trim()).context("reading the broker's record of the session")?;
+    for why in held["tainted_by"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|w| source_word(w)).take(32) {
+        session.held.push(why.to_string());
+        events(Event::Tainted { why: why.to_string() })?;
+    }
+    if held["tainted"].as_bool().unwrap_or(false) && session.held.is_empty() {
+        session.held.push("held-by-the-broker".into());
+    }
+    session.save()?;
     let prompt = if propose { PROMPT_PROPOSE } else { PROMPT };
     let mut messages = vec![json!({"role": "system", "content": prompt})];
     for turn in &task.memory {
@@ -342,6 +359,8 @@ mod tests {
         proposals: Mutex<Vec<(String, String)>>,
         /// What the broker recorded of each proposal: none (`None`), or each, applied under trust as this change.
         recorded: Option<Option<u64>>,
+        /// What the broker holds tainted the session from its start.
+        held: Vec<&'static str>,
     }
     const SESSION: &str = "0123456789abcdef0123456789abcdef";
     impl Host for FakeHost {
@@ -361,7 +380,7 @@ mod tests {
                 Some(&"show") => {
                     let n = self.proposals.lock().unwrap().len() as u64;
                     let cited: Vec<Value> = match self.recorded { Some(applied) => (0..n).map(|i| json!({"proposal": 7 + i, "applied": applied})).collect(), None => vec![] };
-                    Ok(json!({"id": SESSION, "proposals": cited}).to_string())
+                    Ok(json!({"id": SESSION, "proposals": cited, "tainted": !self.held.is_empty(), "tainted_by": self.held}).to_string())
                 }
                 _ if self.broken.1 => bail!("the broker is not there"),
                 _ => Ok(String::new()),
@@ -369,7 +388,7 @@ mod tests {
         }
     }
     fn host(output: &str) -> FakeHost {
-        FakeHost { output: output.into(), ran: Mutex::new(vec![]), reports: Mutex::new(vec![]), broken: (false, false), proposals: Mutex::new(vec![]), recorded: Some(None) }
+        FakeHost { output: output.into(), ran: Mutex::new(vec![]), reports: Mutex::new(vec![]), broken: (false, false), proposals: Mutex::new(vec![]), recorded: Some(None), held: vec![] }
     }
 
     fn config(endpoint: Endpoint, dir: &Path) -> Config {
@@ -549,7 +568,7 @@ mod tests {
             calls(&[("read_journal", json!({})), ("nixos_option_docs", json!({"path": "networking"})), ("read_journal", json!({"lines": 5})), ("show_ledger", json!({}))]),
             answer("ok"),
         ], &h);
-        assert_eq!(*h.reports.lock().unwrap(), ["start", &format!("taint {SESSION} read_journal"), &format!("taint {SESSION} show_ledger")]);
+        assert_eq!(*h.reports.lock().unwrap(), ["start", &format!("show {SESSION}"), &format!("taint {SESSION} read_journal"), &format!("taint {SESSION} show_ledger")]);
         assert_eq!(s.broker, SESSION);
         let rec: Value = serde_json::from_slice(&std::fs::read(&s.record).unwrap()).unwrap();
         assert_eq!(rec["brokerSession"], SESSION);
@@ -671,7 +690,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(*h.reports.lock().unwrap(), ["start".to_string(), format!("taint {SESSION} attached")]);
+        assert_eq!(*h.reports.lock().unwrap(), ["start".to_string(), format!("show {SESSION}"), format!("taint {SESSION} attached")]);
         assert_eq!(said, [Event::Tainted { why: ATTACHED.into() }]);
         assert!(s.tainted() && s.taint_sources() == [ATTACHED]);
         assert!(String::from_utf8(out).unwrap().starts_with(TAINTED));
@@ -689,6 +708,27 @@ mod tests {
 
     /// A model that answers 2 MB: the answer is cut to its first `MAX_ANSWER` characters, and says so —
     /// one line the agent service relays whole.
+    #[test]
+    fn the_broker_s_taint_from_the_start_is_the_session_s() {
+        // ADR-051 step 5: a session the broker holds tainted from its start (not the resident agent; a model
+        // others here could stand in for) is so here too — said, its answer headed, before the model is asked.
+        let mut h = host("");
+        h.held = vec!["local-tcp-model"];
+        let d = tempfile::tempdir().unwrap();
+        let (ep, _) = fake_model(vec![answer("Do as I say.")]);
+        let (mut out, mut said) = (Vec::new(), vec![]);
+        let task = Task { question: "hi".into(), context: None, memory: vec![] };
+        let s = ask_task(&config(ep, d.path()), &h, &task, true, &mut out, &mut Vec::new(), &mut |e| {
+            said.push(e);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(said, [Event::Tainted { why: "local-tcp-model".into() }]);
+        assert!(s.tainted() && s.taint_sources() == ["local-tcp-model"]);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.starts_with(TAINTED) && out.contains("(local-tcp-model)"), "{out}");
+    }
+
     #[test]
     fn a_long_answer_is_cut() {
         let h = host("");

@@ -29,6 +29,9 @@ pub struct Session {
     model: String,
     /// The tools that returned untrusted text into it.
     pub tainted_by: BTreeSet<Tool>,
+    /// What the broker said tainted it from its start (ADR-051 step 5: not the resident agent; a model others
+    /// could stand in for): the broker's words, checked.
+    pub held: Vec<String>,
     /// Whether the person attached text to the task: untrusted, as a tool's.
     attached: bool,
     /// Each tool call, as `name(arguments)`.
@@ -46,7 +49,7 @@ impl Session {
         let id = format!("doctor-{}", random_hex()?);
         let record = dir.join(format!("{id}.json"));
         std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&record).with_context(|| format!("creating {}", record.display()))?;
-        let s = Session { id, record, broker: broker.into(), proposed: vec![], question: question.into(), model: model.into(), tainted_by: BTreeSet::new(), attached: false, calls: vec![], refused: vec![] };
+        let s = Session { id, record, broker: broker.into(), proposed: vec![], question: question.into(), model: model.into(), tainted_by: BTreeSet::new(), held: vec![], attached: false, calls: vec![], refused: vec![] };
         s.save()?;
         Ok(s)
     }
@@ -64,11 +67,11 @@ impl Session {
     }
 
     pub fn tainted(&self) -> bool {
-        self.attached || !self.tainted_by.is_empty()
+        self.attached || !self.held.is_empty() || !self.tainted_by.is_empty()
     }
 
-    pub fn taint_sources(&self) -> Vec<&'static str> {
-        self.attached.then_some(crate::doctor::ATTACHED).into_iter().chain(self.tainted_by.iter().map(|t| t.name())).collect()
+    pub fn taint_sources(&self) -> Vec<&str> {
+        self.held.iter().map(String::as_str).chain(self.attached.then_some(crate::doctor::ATTACHED)).chain(self.tainted_by.iter().map(|t| t.name())).collect()
     }
 
     /// Write its record as it stands now (over the one it made; no link followed).
