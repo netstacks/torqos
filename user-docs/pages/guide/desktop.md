@@ -59,7 +59,10 @@ the repository).
 
 COSMIC keeps your panel, theme, wallpaper and shortcut settings as many small files. TorqOS saves
 them in your own part of the configuration (`users/<you>/desktop.json`), so a machine rebuilt from
-its repository looks the same, and an undo or a pull puts your desktop back as it was.
+its repository looks the same, and an undo or a pull puts your desktop back as it was. Two undos
+are refused: one that would put other programs' settings back (the save that took them out), and,
+while your saved desktop still holds settings an earlier TorqOS kept, any undo of a desktop change.
+For the second, `request system desktop save` first, then undo.
 
 - By default this happens automatically, checked about every 15 minutes while the panel applet runs.
   Each save is a commit in your configuration and appears in the history as `Desktop: …`.

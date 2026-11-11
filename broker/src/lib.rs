@@ -3158,7 +3158,21 @@ impl Broker {
         // What the undo leaves must be what a change could: a person's file of the shape it takes now (a desktop
         // saved by an older TorqOS, with another program's settings, is not put back). Refused before anything is
         // recorded, the commit kept for the audit and reset, as a commit that failed.
-        let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg).and_then(|c| self.check_user_data_at_head(&files).map(|()| c)))?;
+        // Two cases, each said with what to do: the file is already one TorqOS no longer takes (a desktop an earlier
+        // TorqOS saved, with another program's settings, not yet saved again), or the undo would make it one.
+        let already = self.check_user_data_at_head(&files).is_err();
+        let checked = |c: String| match self.check_user_data_at_head(&files) {
+            Ok(()) => Ok(c),
+            Err(e) if already => Err(e.context(
+                "refused: this undo leaves a file of yours that TorqOS no longer takes as it is (a desktop saved by an earlier \
+                 TorqOS still holds other programs' settings): `request system desktop save` first, which takes them out, then undo",
+            )),
+            Err(e) => Err(e.context(
+                "refused: this undo would put back what TorqOS no longer takes (another program's settings, in a desktop): \
+                 the change it undoes took them out, and they may not come back",
+            )),
+        };
+        let new_commit = self.undo_failed_commit(&pending, self.repo.revert_and_commit(&commit, &msg).and_then(checked))?;
         pending.commit = Some(new_commit.clone());
         let snapshot = self.take_snapshot(&lock, &a.body.tier);
         self.write_pending(&pending)?;

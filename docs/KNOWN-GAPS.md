@@ -351,20 +351,27 @@ Its §5 lists claims without a test.
    changed and what was taken out ("Desktop: panel; other programs' settings taken out …"), never "Desktop:
    com". Old entries are not pruned: the ledger and the repository only grow, by design.
 6zy. ~~**The desktop save copied third-party applets' settings into the configuration repository.**~~ Fixed
-   (2026-11-11, for 0.4.0-rc1), except for what was already saved and for adopt. Only COSMIC's own components
+   (2026-11-11, for 0.4.0-rc1), except for what was already saved and three writers not checked (below). Only COSMIC's own components
    (`com.system76.*`) are saved now. torqcli leaves the others out, and the broker refuses a `desktop.json`
    holding any other name, by one rule shared by both (`torq_wire::desktop::key_ok`), so the two cannot drift.
-   The broker refuses it whoever proposes it, whatever way the change comes: a proposal, its apply (a trusted
-   one, a scheduled one, a pull's, all through the one apply), and an undo, whose result is checked as a
-   change's would be (an undo of a person's own change needs no approval; tests
-   `a_persons_desktop_is_cosmics_settings_and_nothing_else`,
+   The broker refuses it whoever proposes it, by a proposal, its apply (a trusted one, a scheduled one, a
+   pull's, all through the one apply), and an undo, whose result is checked as a change's would be (an undo of
+   a person's own change needs no approval; tests `a_persons_desktop_is_cosmics_settings_and_nothing_else`,
    `a_saved_desktop_with_another_programs_settings_is_refused`, `an_undo_cannot_put_another_programs_settings_back`,
-   mutation-checked). **Adopt is not checked:** a machine adopting a repository (ADR-036) takes its history
-   whole, a `desktop.json` saved by an earlier TorqOS included; refusing it would make the person's own older
-   repository impossible to adopt, and its history holds the same values anyway. The first save after takes
-   them out. A `desktop.json` saved before keeps other programs' settings until its next save, which takes them
-   out ("… other programs' settings taken out"; `show system desktop` and TorqOS Settings say they will be):
-   by itself with saving automatic, with `request system desktop save` (or Save now) once with saving manual.
+   mutation-checked). An undo is refused in two cases, each said with what to do: the undo would put other
+   programs' settings back (the save that took them out), or the person's file already holds them, not yet
+   saved again (`request system desktop save` first, then undo). The undo check judges every person's file the
+   undo touches (`packages.json` and `secrets.json` too), so an undo can be refused for a rule its result fails
+   that the undo itself did not cause. **Three writers are not checked:** adopt, which takes a repository's
+   history whole (ADR-036), a `desktop.json` saved by an earlier TorqOS included (refusing it would make the
+   person's own older repository impossible to adopt, and its history holds the same values anyway); the first
+   commit of a new machine's configuration (`Repo::init`, empty ledger only); and a return to an earlier
+   ledgered commit (`restore_anchor`, as when a confirmed commit expires), which can bring back a `desktop.json`
+   saved before. The next save takes such settings out. A `desktop.json` saved before keeps other programs'
+   settings until its next save, which takes them out ("… other programs' settings taken out"; `show system
+   desktop` and TorqOS Settings say they will be): by itself with saving automatic, with `request system
+   desktop save` (or Save now) once with saving manual. Switching between automatic and manual saving takes
+   them out too, and its history entry says so.
    **What was saved before stays in the history:** each earlier commit of `desktop.json` still holds the values
    (seen: a latitude, a longitude, a location name, a field for a token), in the machine's configuration
    repository, which every account can read (6r), and on a remote that received them (ADR-036). TorqOS does not

@@ -3464,10 +3464,12 @@ fn an_undo_cannot_put_another_programs_settings_back() {
     let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Desktop: other programs' settings taken out", Actor::User, false).unwrap();
     let a = b.apply(p.body.seq, "casey", false).unwrap();
     let (head, before) = (b.repo.head().unwrap(), kinds(&b));
-    let e = b.revert(a.body.seq, "casey").unwrap_err();
-    assert!(format!("{e:#}").contains("COSMIC's own settings"), "{e:#}");
+    let e = format!("{:#}", b.revert(a.body.seq, "casey").unwrap_err());
+    assert!(e.contains("this undo would put back what TorqOS no longer takes") && e.contains("COSMIC's own settings"), "{e}");
     assert_eq!(b.repo.head().unwrap(), head, "the undo's commit is reset");
     assert_eq!(kinds(&b), before, "nothing recorded");
+    assert!(!dir.path().join("state/pending.json").exists(), "nothing left in flight");
+    assert!(!git(&b, &["for-each-ref", "refs/torq/discarded/"]).is_empty(), "the undo's commit is kept for the audit");
     assert!(!fs::read_to_string(repo.join("users/casey/desktop.json")).unwrap().contains("Tempest"));
     // The broker is left as it was: another change goes through.
     let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);

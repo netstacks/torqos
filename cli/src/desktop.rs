@@ -463,13 +463,18 @@ pub fn status(repo: &Repo, me: &str, paths: &Paths) -> Result<Status> {
     Ok(Status { saving: saved.save, saved: saved.cosmic.len(), unsaved: p.save.keys().cloned().collect(), to_apply: p.apply.len(), to_take_out })
 }
 
+/// "1 setting", "3 settings".
+fn settings(n: usize) -> String {
+    if n == 1 { "1 setting".to_string() } else { format!("{n} settings") }
+}
+
 /// For `show system desktop` and TorqOS Settings: what the next save takes out, in a sentence.
 pub fn taking_out(keys: &[String]) -> Option<String> {
     (!keys.is_empty()).then(|| {
         format!(
-            "Saved by an earlier TorqOS and no longer kept: {} ({} settings). The next save takes them out of your configuration; they stay on this desktop, and in the history.",
+            "Saved by an earlier TorqOS and no longer kept: {} ({}). The next save takes them out of your configuration; they stay on this desktop, and in the history.",
             what(keys.iter().cloned()),
-            keys.len()
+            settings(keys.len())
         )
     })
 }
@@ -479,7 +484,7 @@ pub fn shown(s: &Status) -> String {
     if s.unsaved.is_empty() {
         out.push_str("  Everything you changed is saved.\n");
     } else {
-        out.push_str(&format!("  Not saved yet: {} ({} settings). request system desktop save saves them.\n", what(s.unsaved.iter().cloned()), s.unsaved.len()));
+        out.push_str(&format!("  Not saved yet: {} ({}). request system desktop save saves them.\n", what(s.unsaved.iter().cloned()), settings(s.unsaved.len())));
     }
     if let Some(t) = taking_out(&s.to_take_out) {
         out.push_str(&format!("  {t} request system desktop save does it now.\n"));
@@ -665,7 +670,7 @@ mod tests {
         let s = status(&repo, "dev", &paths).unwrap();
         assert_eq!((s.unsaved.len(), s.to_take_out.clone(), s.saved), (0, vec![TEMPEST.to_string()], 1), "{s:?}");
         let text = shown(&s);
-        assert!(text.contains("Everything you changed is saved.") && text.contains("no longer kept: other programs' settings (1 settings)"), "{text}");
+        assert!(text.contains("Everything you changed is saved.") && text.contains("no longer kept: other programs' settings (1 setting)"), "{text}");
         assert!(!text.contains("Not saved yet"), "{text}");
         let mut got = vec![];
         let mut save = |_: Option<&[u8]>, new: &Saved, r: &str| -> Result<u64> {
