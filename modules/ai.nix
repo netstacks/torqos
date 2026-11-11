@@ -191,7 +191,7 @@ in
         inherit (cfg) model apiKeyFile journal maxSteps;
       };
       # Every agent account (ADR-051 3): each person's agent runs the doctor for them.
-      users.users = lib.mapAttrs (_: _: { extraGroups = lib.optional cfg.journal "systemd-journal"; }) config.torq.agent.agents;
+      users.users = lib.mapAttrs (_: _: { extraGroups = lib.optional cfg.journal "systemd-journal"; }) (config.torq.agent.agents // config.torq.agent.residents);
     })
 
     (lib.mkIf (cfg.enable && local) {

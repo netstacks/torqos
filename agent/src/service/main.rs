@@ -356,9 +356,11 @@ fn agent(args: &[String]) -> Result<Agent> {
     }
     let passwd = std::fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
     let uid = uid_of(&passwd, person).filter(|u| *u >= 1000).with_context(|| format!("{person} is not a person of this machine"))?;
-    let account = format!("torq-agent-{person}");
+    // Its own account (ADR-051 3 amended 2026-11-11): never the agent account, which any program run as the agent
+    // has — so nothing they can write is this service's.
+    let account = format!("torq-resident-{person}");
     if uid_of(&passwd, &account) != Some(rustix::process::getuid().as_raw()) {
-        bail!("this runs as {account}, {person}'s agent, and as no one else");
+        bail!("this runs as {account}, {person}'s resident agent, and as no one else");
     }
     let state = std::env::var_os("STATE_DIRECTORY").context("no STATE_DIRECTORY: its memory's place (the unit's StateDirectory)")?;
     let me = std::env::current_exe().context("where this program is")?;

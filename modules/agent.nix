@@ -11,13 +11,19 @@ let
   agentOf = person: "torq-agent-${person}";
   # Each agent account, and the person it serves: the broker's map (broker.json), and the accounts below.
   # (Only names that fit: one too long is the assertion's to say, below, not NixOS's abort.)
-  fits = p: lib.stringLength (agentOf p) <= 31;
+  # Each person's resident agent's own account (ADR-051 3, amended 2026-11-11): its service runs as it, never as
+  # the agent account any program run as the agent has.
+  residentOf = person: "torq-resident-${person}";
+  fits = p: lib.stringLength (residentOf p) <= 31;
   # The launcher's sudo rules that would let its caller set the environment (SETENV), as text or as rules.
   isLauncher = c: lib.hasInfix "torq-agent-run" (if builtins.isString c then c else c.command);
   launcherSetenv = lib.filter (c: isLauncher c && !(builtins.isString c) && builtins.elem "SETENV" c.options) (lib.concatMap (r: r.commands) config.security.sudo.extraRules)
     ++ lib.filter (l: lib.hasInfix "torq-agent-run" l && lib.hasInfix "SETENV" l) (lib.splitString "\n" config.security.sudo.extraConfig);
-  personsLikeAgents = lib.attrNames (lib.filterAttrs (n: u: u.isNormalUser && lib.hasPrefix "torq-agent" n) config.users.users);
+  personsLikeAgents = lib.attrNames (lib.filterAttrs (n: u: u.isNormalUser && (lib.hasPrefix "torq-agent" n || lib.hasPrefix "torq-resident" n)) config.users.users);
   agents = lib.listToAttrs (map (p: lib.nameValuePair (agentOf p) p) (lib.filter fits cfg.people));
+  # Where the resident service runs (its socket, its unit): the resident accounts, and the broker's map of them.
+  resident = cfg.service.enable && config.torq.agent.doctor.enable;
+  residents = lib.optionalAttrs resident (lib.listToAttrs (map (p: lib.nameValuePair (residentOf p) p) (lib.filter fits cfg.people)));
   # Claude Code for the agents (ADR-051 5, `torq agent tools`): the version dev mode pins (modules/dev.nix), unfree,
   # so only where `torq unfree` allows it — else the assertion below says so, and nothing unfree is evaluated.
   claudeChosen = builtins.elem "claude-code" cfg.tools;
@@ -62,7 +68,7 @@ in
       password, no login, no group but its own, its home /var/lib/torq-agent-<name> its own. Each
       person's agent proposes packages only for that person (`users <name> packages`), and settings
       only as `mayPropose.settings` allows; that person's trust covers it and no other. The owner, by
-      default. Each must be a person of this machine (a normal user), with a name of at most 20
+      default. Each must be a person of this machine (a normal user), with a name of at most 17
       characters (NixOS takes an account's and a group's name of at most 31).
     '';
   };
@@ -99,6 +105,14 @@ in
       at a time. Only where doctor mode is on (`torq.agent.doctor.enable`): its harness and its model are
       the doctor's. Not tied to the desktop: `torq ask` works on a server's terminal too.
     '';
+  };
+
+  options.torq.agent.residents = lib.mkOption {
+    type = lib.types.attrsOf lib.types.str;
+    internal = true;
+    readOnly = true;
+    default = residents;
+    description = "Each resident agent's own account and the person it serves (the broker's map, /etc/torq/broker.json; ADR-051 3 amended 2026-11-11).";
   };
 
   options.torq.agent.agents = lib.mkOption {
@@ -148,7 +162,7 @@ in
       }
       {
         assertion = fits p;
-        message = "torq.agent.people: ${agentOf p} is longer than an account's and its group's name may be (31 characters on NixOS): ${p} is too long a name for an agent of its own.";
+        message = "torq.agent.people: ${residentOf p} (its resident agent's account) is longer than an account's and its group's name may be (31 characters on NixOS): ${p} is too long a name for an agent of its own (at most 17 characters).";
       }
       {
         assertion = !(lib.hasPrefix "torq-agent" p);
@@ -239,8 +253,8 @@ in
           message = "systemd.services.\"torq-agent@${person}\": no Delegate or DelegateSubgroup — the broker takes this unit's control group for ${person}'s resident agent, which only root may move a process into.";
         }
         {
-          assertion = (config.users.users.${agent}.linger or null) != true;
-          message = "users.users.${agent}.linger: an agent account has no user manager of its own (its units would be the agent's to make, outside the resident agent's control group).";
+          assertion = (config.users.users.${agent}.linger or null) != true && (config.users.users.${residentOf person}.linger or null) != true;
+          message = "users.users.${agent}.linger, users.users.${residentOf person}.linger: an agent account has no user manager of its own (its units would be the agent's to make, outside the resident agent's control group).";
         }
       ]) agents)
       ++ [{
@@ -249,6 +263,19 @@ in
       }];
     # Only the person may connect (the socket theirs, 0600, in a directory root's) — and the service
     # answers only them, by the kernel's word (SO_PEERCRED), root included.
+    # Each person's resident agent's own account (ADR-051 3, amended 2026-11-11): hidden — no password, no login,
+    # no home, no group but its own — so that what its service keeps (its memory, its programs' home, the model's
+    # key as its credential) is its own, and nothing any program run as the agent account can write is read by
+    # it. The broker counts it as the person's one agent (broker.json's `residents`).
+    users.users = lib.mapAttrs (account: person: {
+      isSystemUser = true;
+      group = account;
+      description = "${person}'s TorqOS agent, resident (its service's own account; proposes, a person applies)";
+      home = "/var/empty";
+      createHome = false;
+      hashedPassword = "!";
+    }) residents;
+    users.groups = lib.mapAttrs (_: _: { }) residents;
     systemd.sockets = lib.mapAttrs' (agent: person: lib.nameValuePair "torq-agent@${person}" {
       description = "${person}'s TorqOS agent: its socket";
       wantedBy = [ "sockets.target" ];
@@ -272,8 +299,9 @@ in
         StandardInput = "socket";
         StandardOutput = "journal";
         StandardError = "journal";
-        User = agent;
-        Group = agent;
+        # Its own account, never the agent's (ADR-051 3 amended 2026-11-11).
+        User = residentOf person;
+        Group = residentOf person;
         # Its memory and its programs' home (`home`, which the service makes): the agent's, 0700, outside the
         # agent's home, hidden from `torq agent run` (modules/agent-run.sh). The agent's home itself is out of
         # its reach (below): every program run as the agent can write there, and nothing it leaves is read by

@@ -334,6 +334,8 @@ in
         # The model the harness asks (ADR-051 step 5, amended): a resident session starts clean only with one no
         # account here can stand in for — a TCP model on this machine never (broker/src/agent.rs, model_taint).
         model = config.torq.agent.doctor.modelEndpoint;
+        # Each resident agent's own account and its person (ADR-051 3 amended 2026-11-11): the person's one agent too.
+        residents = config.torq.agent.residents;
         # The config repo's remote (ADR-036): none, or an SSH URL.
         remote = config.torq.remote.url;
         # The backups the configuration declares, each with its restic (ADR-038, modules/backup.nix).

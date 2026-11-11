@@ -36,12 +36,17 @@ pub(crate) fn agent_of(person: &str) -> String {
     format!("{AGENT_PREFIX}{person}")
 }
 
-/// Whether `name` is named as an agent account is (`torq-agent-<someone>`). Convenience only: torqcli
+/// What each person's resident agent's own account's name begins with: `torq-resident-<person>` (ADR-051 3,
+/// amended 2026-11-11). It runs the person's agent service; to torqcli it is an agent as the agent account is.
+const RESIDENT_PREFIX: &str = "torq-resident-";
+
+/// Whether `name` is named as an agent account is (`torq-agent-<someone>`, or a resident agent's own
+/// `torq-resident-<someone>`). Convenience only: torqcli
 /// runs unprivileged, as whoever runs it, and what it decides here is how it behaves (a commit that
 /// proposes and stops, no `torq agent run` from inside one) — never what is allowed. The broker is the
 /// authority: it knows an agent by its map (/etc/torq/broker.json) and the kernel's uid, not by a name.
 pub(crate) fn is_agent(name: &str) -> bool {
-    name.strip_prefix(AGENT_PREFIX).is_some_and(|p| !p.is_empty())
+    [AGENT_PREFIX, RESIDENT_PREFIX].iter().any(|pre| name.strip_prefix(pre).is_some_and(|p| !p.is_empty()))
 }
 
 const SUDO: &str = "/run/wrappers/bin/sudo";
@@ -512,8 +517,8 @@ mod tests {
     #[test]
     fn whose_agent_by_name() {
         assert_eq!(agent_of("alice"), "torq-agent-alice");
-        assert!(is_agent("torq-agent-alice") && is_agent(&agent_of("bob")));
-        for not in ["torq-agent", "torq-agent-", "alice", "xtorq-agent-alice"] {
+        assert!(is_agent("torq-agent-alice") && is_agent(&agent_of("bob")) && is_agent("torq-resident-alice"));
+        for not in ["torq-agent", "torq-agent-", "torq-resident-", "torq-resident", "alice", "xtorq-agent-alice"] {
             assert!(!is_agent(not), "{not}");
         }
     }
