@@ -174,11 +174,14 @@ impl Broker {
                 .stderr(Stdio::piped())
                 .spawn()
                 .context("running systemd-creds")?;
-            child.stdin.take().context("systemd-creds' input")?.write_all(value.as_bytes())?;
+            // A systemd-creds that fails early (no TPM, no host key) may exit before it reads the value: its own
+            // word, then, not the broken pipe that writing to it gave.
+            let written = child.stdin.take().context("systemd-creds' input")?.write_all(value.as_bytes());
             let out = child.wait_with_output()?;
             if !out.status.success() {
                 bail!("systemd-creds could not encrypt it: {}", said(String::from_utf8_lossy(&out.stderr).trim()));
             }
+            written.context("giving systemd-creds the value")?;
             // systemd-creds may write its output anew, with modes of its own: private again before it is in place.
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&part, fs::Permissions::from_mode(0o600))?;
