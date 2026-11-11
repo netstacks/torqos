@@ -287,7 +287,7 @@ The audit of 2026-11-04 (end of M2, `docs/AUDIT-2026-11-04.md`), kept as written
 | # | What | Status |
 |---|---|---|
 | A1 | The release check accepted an OpenPGP- or X.509-signed commit (git handed it to gpg and the caller's keyring) | fixed: only an SSH signature, checked before git verifies; gpg's and X.509's programs `false`, no caller's home (cli/src/release.rs, a test with a PGP-signed commit) |
-| A2 | A lock's content hash, not its signed `rev`, decides what is built: a lock someone else wrote can pair the newest signed rev with older source in the store | open — the broker re-fetching each changed input as root and checking its hash and signature (M3, with the socket broker); SECURITY-MODEL says what is not covered |
+| A2 | A lock's content hash, not its signed `rev`, decides what is built: a lock someone else wrote can pair the newest signed rev with older source in the store | fixed: the broker re-fetches each changed input as root and checks its hash, and TorqOS's own releases' signatures (`broker/src/inputs.rs`, `tests/release-path.nix`); two ways round it were closed after the audit of 2026-11-08 (6zs) |
 | A3 | `stable` could move to an older release; `show \| compare` shows dates, not versions | mostly fixed: CI refuses a release not newer than `stable`'s version (release.yml); torqcli names TorqOS by version in `show \| compare` and at `commit` (`torq 0.2.1 (2026-11-05) -> 0.2.2 (2026-11-07)`: the running one from /etc/os-release, the release's from the commit fetched to check its signature, no second fetch: its number from `cli/Cargo.toml`, its tag, a pre-release included, from the signed message) and says an older number is a downgrade, whatever the dates (a pre-release and its release: by date, as the running side never says a pre-release) (cli/src/release.rs, session.rs `software_is_shown_as_versions`); a source other than the releases, or one without a version, still by date. Open: refusing an older version or a pre-release on `stable` unless the person confirms |
 | A4 | First-boot setup ledgered change #1 when the switch failed before the new system took, leaving the image with no account | fixed: ledgered only if the new system runs or is the boot default; otherwise nothing set up, setup asks again (broker/src/lib.rs `set_up`, its test) |
 | A5 | Release authority wider than the key: the releases token in the bump job's environment, any `v*` tag published | open — a protected environment for release, the token in the step that needs it (GitHub settings) |
@@ -310,7 +310,7 @@ Its §5 lists claims without a test.
    is not built into the kernel either, so "signed modules only" (SECURITY-MODEL.md) is not true.
 
 ## Upstreams (ADR-039)
-6u. **`cache.nixos.org` and `github.com/NixOS/nixpkgs` are a bet, not a right.** Every machine
+6zv. **`cache.nixos.org` and `github.com/NixOS/nixpkgs` are a bet, not a right.** Every machine
    fetches from the Foundation's cache (ADR-023) and `flake.lock` points at GitHub; neither has an
    SLA, and the cache's cost is a recurring Foundation concern. The *code* cannot be withdrawn (MIT,
    pinned, and the nixpkgs tree is inside every image); the services can change for everyone. If
@@ -334,6 +334,27 @@ Its §5 lists claims without a test.
    before COSMIC's dialog has registered with polkit (answered in 3 s, no dialog): once in three runs, the others
    finding the dialog in under 4 s; the laptop always does. The dialog's restart after polkit took 52 s there (5 s
    on the laptop), so the test waits up to 120 s.
+
+6zx. **The desktop's automatic save can commit every 15 minutes for good (found by the review of 2026-11-11,
+   open).** The panel applet (`settings/src/applet.rs`, every 15 minutes) calls `cli/src/desktop.rs`'s sync,
+   which saves whenever anything under `~/.config/cosmic` differs from what was last saved. An applet that
+   rewrites its own state on a timer (seen: a weather applet's `last_updated`) makes every sync differ, so
+   the machine commits a change to `users/<name>/desktop.json` every 15 minutes for as long as the applet runs:
+   a proposal and an applied change in the ledger (two entries) and a git commit each time, and nothing is
+   ever pruned (the ledger and the repository only grow). The change's label (`desktop::what`) takes the first
+   dotted segment of an id that is not System76's, so such a save reads "Desktop: com" in the ledger and the
+   history, which says nothing of what changed. Set saving to manual (`request system desktop saving manual`)
+   to stop it. A fix would leave out settings that only the applet's own state changes, or save only when a
+   value the person set has changed, and give the label the applet's name.
+6zy. **The desktop save copies third-party applets' settings into the configuration repository (found by the
+   review of 2026-11-11, open).** The same save writes every setting COSMIC's folder holds, the settings of
+   applets from anyone included, into `users/<name>/desktop.json` in the configuration repository (seen: a
+   latitude, a longitude and a location name; a field holding a token). Nothing filters by key or by vendor:
+   only the panel's output and the idle suspend times are left out (`machine_specific`). That repository is
+   readable by every account on the machine (6r), and a remote (ADR-036) would receive it and keep it, in
+   history that cannot be taken back. Saving manually does not help for what a manual save writes; the
+   file's contents are the only protection. A fix would save only an allow-list of COSMIC's own components,
+   or let the person choose which.
 
 ## Dev host quirks (not TorqOS bugs)
 - **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test
@@ -499,6 +520,20 @@ Its §5 lists claims without a test.
      ("N more not recorded") would close it.
    - **A refusal's hash is of the request's file as the broker re-reads it**: over the socket that is
      the broker's own copy (root's 0700 directory); under sudo, root's word.
+
+6zz. **`torq agent run` clears set-id bits as root over a folder the person owns (found by the review of
+   2026-11-11, open).** After the sandbox ends, `modules/agent-run.sh` (run as root through the administrators'
+   passwordless sudo rule for the launcher) runs `find "$share" -xdev -user torq-agent -perm /6000 -type f
+   -exec chmod ug-s {} +` over the shared directory, which the person who ran it owns, so that a set-id file the
+   agent left cannot run later. `find` tests a file and `chmod` acts on the names it collected afterwards, and
+   `chmod` follows links. The agent's processes are gone by then, but the person can still rename things in
+   their own directory: if they swap a path component for a link between `find`'s test and `chmod`, root clears
+   the set-id bit of a file that is not the agent's, such as sudo's wrapper in `/run/wrappers`. The effect is a
+   denial of service (sudo and the other wrappers stop working until the wrappers are made again, by a switch or a restart), not a
+   way to gain privilege: the command only removes bits. Only an administrator can start the launcher, and one
+   already has the means to harm the machine. Not exercised by a test. A fix would act on a descriptor of each
+   file (`chmod` through `/proc/self/fd`, or `find -exec` with a check that the file is still the agent's), not
+   on a name.
 
 6zh. **The remote's open ends (ADR-036, the push and the anchor; its review, 2026-11-05).** Fixed
    from it: a merge in the remote's ledger history is refused (a rewrite set beside it passed a
@@ -697,7 +732,7 @@ Its §5 lists claims without a test.
      is later.
    - **With a remote endpoint the configuration leaves the machine**, a wifi network's key in it
      included, as well as anything else a tool returns.
-   - **`tests/doctor.nix` has not been run** yet (amended on `work/w5` for the broker's sessions), and no real model has been tried: the unit tests and
+   - **`tests/doctor.nix` ran green in CI** (the v0.3.2 release run, 2026-11-09; amended on `work/w5` for the broker's sessions), but no real model has ever been tried: the unit tests and
      the VM test use a scripted endpoint. Whether a given local model calls tools well is untested.
    - **Anyone on the machine can use the local model** (its socket is 0666); restricting it to the
      agent's group needs the service off DynamicUser.
@@ -711,8 +746,8 @@ Its §5 lists claims without a test.
    boot no longer stops the others; one long past its time is settled by the next `commit at`; its
    approver may cancel their own; apply's own refusal of a proposal is not hidden by a schedule's.
    Open:
-   - **`tests/commit-at.nix` is written and registered, not yet run** (the branch's worker may not build
-     VM tests); the broker's unit tests stub the timer.
+   - **`tests/commit-at.nix` ran green in CI** (the v0.3.2 release run); it was written on a branch whose worker could not build
+     VM tests. The broker's unit tests stub the timer.
    - **A scheduled proposal is still listed** by `show system proposals`, and `request system apply` of
      it before its time applies it; the schedule is then refused at its time (already applied).
    - **Local times are read by `date`** when the commit is made (`HH:MM`, `"YYYY-MM-DD HH:MM"`): the
@@ -788,7 +823,7 @@ Its §5 lists claims without a test.
      confirm or not. A setting not on it that a network or a login still depends on (another VPN's,
      a `systemd.sockets` or `systemd.user` unit, `security.pam`) is not caught; NixOS's other aliases
      of a listed option are caught only where listed.
-   - **`tests/agent-proposals.nix` is written and registered, not yet run.** No VM test runs the
+   - **`tests/agent-proposals.nix` ran green in CI** (the v0.3.2 release run). No VM test runs the
      doctor's own propose step (torqcli's commit as the agent evaluates the configuration, which the
      test VM cannot): it is covered by the agent crate's tests, with torqcli stubbed.
    - **Sessions share one budget.** At most 600 are started an hour and 2000 records kept (the oldest
@@ -853,7 +888,7 @@ Its §5 lists claims without a test.
      (`register_carried`) and builds as the broker would; tests/image.nix's setup still switches to a
      prebuilt specialisation.
 
-6zs. **Approval on the desktop is the dialog, not a trusted path (ADR-045 5, 2026-11-09).** A password sent to the
+6zw. **Approval on the desktop is the dialog, not a trusted path (ADR-045 5, 2026-11-09).** A password sent to the
    broker from the desktop is refused, so one a lookalike window took cannot be replayed there. It can still be used
    from a text console, or by `ssh localhost` where SSH accepts passwords: a program of the person's that has their
    password can reach a session the broker treats as a terminal. And a lookalike of the dialog is still possible: no
