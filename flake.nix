@@ -248,7 +248,7 @@
             echo "Nothing lets an unfree package into the image or the ISO, ${lib.concatStringsSep " or " linuxSystems} (ADR-039); each of ${toString (lib.length planted)} ways planted is caught." > $out
           '';
       } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
-        # The ISO installer (ADR-031): installed and booted on x86_64 only; aarch64's ISO is built, not run.
+        # The ISO installer (ADR-031): installed and booted on x86_64 only. aarch64's is neither built nor run, here or in CI (ADR-030).
         installer = import ./tests/installer.nix { inherit pkgs self; };
         # A first boot needs no network (ADR-048 5): machines none of the first configurations are — the
         # owner's Zenbook as setup made it, other mixes of answers, a VM — build change #1 from the image
@@ -260,7 +260,7 @@
         }).check self.nixosConfigurations.image-x86_64-linux.config.system.build.toplevel;
         # Thin, kept so (ADR-032): a new machine's own system — the image's, what everyone installs —
         # stays within its budget. Lowered as TorqOS sheds what it does not need, never raised to
-        # make a change fit without saying why in docs/DECISIONS.md. x86_64's; aarch64's is CI's.
+        # make a change fit without saying why in docs/DECISIONS.md. x86_64's only: nothing builds aarch64 (ADR-030).
         size =
           let
             budget = 1280;
