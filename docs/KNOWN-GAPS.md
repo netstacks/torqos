@@ -544,11 +544,13 @@ Its §5 lists claims without a test.
    which TorqOS, allowing no unfree packages, then fails to evaluate at first-boot setup; untested
    on such hardware. (Found by review of the installer, 2026-11-03.)
    Smaller, from the second review (2026-11-03), not fixed: a stick blkid cannot probe (copied to
-   RAM, a read error) is offered, since only its label says it is the installer's; the hardware is
-   detected after the write, so a detection failure costs the disk's contents (detecting first
-   would wipe nothing); disk model strings are printed as the disk reports them (an escape
-   sequence in a USB disk's INQUIRY string could redraw the list); a cciss disk's `cciss!c0d0`
-   name is not mapped to its `/dev/cciss/c0d0`. And the installer does not ignore SIGINT, SIGQUIT
+   RAM, a read error) is offered, since only its label says it is the installer's; a cciss disk's
+   `cciss!c0d0` name is not mapped to its `/dev/cciss/c0d0`. (Two more of that review are fixed,
+   2026-11-12: the hardware is detected before the write, so a detection that fails writes nothing
+   — `tests/installer.nix`, a subtest written and not run yet; leaving the file on the new disk can
+   still fail after the write, which clears the disk as before. And a disk's model is shown without
+   control characters or direction overrides, so an escape sequence in a USB disk's INQUIRY string
+   cannot redraw the list: `install.rs` `a_model_cannot_redraw_the_console`.) And the installer does not ignore SIGINT, SIGQUIT
    or SIGTERM itself (Rust has no safe way without a new crate): with the console's signal keys
    off and logind ignoring the power, reboot, suspend and hibernate keys and the lid (since
    2026-11-03: before, the power key was a poweroff that stopped the installer between the write

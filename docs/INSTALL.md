@@ -89,9 +89,10 @@ UEFI machines only, as the image does (turn off Secure Boot: ROADMAP, later).
    never the stick it started from — each with its size, how it is attached and what is on it now.
    Choose one, then type its name again (`nvme0n1`, `sda`): **everything on that disk is erased**.
    Nothing is written before the name is typed.
-4. It writes TorqOS to the disk, reads it all back to check it, and detects the machine's hardware
+4. It detects the machine's hardware
    (NixOS's own `nixos-generate-config`: the drivers, firmware and microcode this machine needs),
-   leaving that on the new disk.
+   and if that fails writes nothing. Then it writes TorqOS to the disk, reads it all back to check
+   it, and leaves the detected hardware on the new disk.
 5. Remove the stick and restart. The disk grows to its full size and first-boot setup runs, as on
    the image; change #1 records the detected hardware as the machine's `hardware-configuration.nix`.
 

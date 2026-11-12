@@ -153,6 +153,9 @@ pub fn disks(sys: &Path, busy: &BTreeSet<String>) -> Result<Vec<Disk>> {
         // "ATA" is a SATA disk's vendor as Linux reads it: not the maker.
         let vendor = read("device/vendor");
         let model = [if vendor == "ATA" { String::new() } else { vendor }, read("device/model")].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" ");
+        // The disk's own words, shown on the console: without what could redraw the list or the
+        // warning there (an escape sequence in a USB disk's name for itself).
+        let model: String = model.chars().filter(|c| !crate::history::hidden(*c)).collect();
         let bus = bus(&std::fs::canonicalize(&d).unwrap_or(d.clone()));
         let (seq, dev) = (read("diskseq"), read("dev"));
         let mut parts: Vec<String> = parts.iter().filter_map(|p| p.file_name().map(|f| f.to_string_lossy().into_owned())).collect();
@@ -357,7 +360,7 @@ impl Shown {
     }
 }
 
-/// The installer's console: check its own copy of TorqOS, then choose, write, detect; again from
+/// The installer's console: check its own copy of TorqOS, then choose, detect, write; again from
 /// the start if anything fails.
 pub fn run() -> Result<()> {
     if !rustix::process::geteuid().is_root() {
@@ -444,8 +447,13 @@ fn install(image: &Path, bytes: u64, sha: &str) -> Result<String> {
         bail!("Not confirmed: nothing was written.");
     }
     others_labelled(d)?;
+    // Before the write: hardware that cannot be detected then costs the disk nothing.
+    println!("  Detecting this machine's hardware ...");
+    let hardware = tool("nixos-generate-config", &["--show-hardware-config", "--no-filesystems"])
+        .and_then(|detected| hardware_file(&detected, &found(Path::new("/sys")), &read_meta("file-systems.nix")?))
+        .with_context(|| format!("detecting this machine's hardware (nothing was written to {})", d.name))?;
     write(image, bytes, sha, d)?;
-    if let Err(e) = detect(d) {
+    if let Err(e) = leave(d, &hardware) {
         // Without the detected hardware, setup would take the image's (a VM's): no half-installed
         // system left to start from.
         // The disk the name still means, checked as it was before writing (`by_name`).
@@ -678,9 +686,9 @@ fn kept(src: &mut impl Read, bytes: u64, sha: &str, mut progress: impl FnMut(u64
     Ok(n == bytes && hex(h) == sha)
 }
 
-/// Detect this machine's hardware and leave it in the new disk's root, for setup.
-fn detect(d: &Disk) -> Result<()> {
-    println!("  Detecting this machine's hardware ...");
+/// Leave this machine's hardware file (`file`, detected before the write) on the new disk, for setup,
+/// with what its first build needs.
+fn leave(d: &Disk, file: &str) -> Result<()> {
     // The kernel reads the new partition table: once udev, which reads it too when a written disk
     // is closed, is done with it (until then the disk is busy).
     // A device elsewhere that never settles only delays this (as it does the installer's start,
@@ -713,8 +721,6 @@ fn detect(d: &Disk) -> Result<()> {
             .with_context(|| format!("TorqOS's {what} is not on {} after writing it", d.name))
     };
     let record = own(TORQ_LABEL, "record file system")?;
-    let detected = tool("nixos-generate-config", &["--show-hardware-config", "--no-filesystems"])?;
-    let file = hardware_file(&detected, &found(Path::new("/sys")), &read_meta("file-systems.nix")?)?;
     // What a first boot builds from (ADR-048 5), where this installer carries it; none on a platform
     // it is not computed for.
     let first = Path::new(FIRST_BUILD);
@@ -1058,6 +1064,16 @@ mod tests {
         let busy = busy(sys, "30 22 253:0 / /mnt rw - ext4 /dev/dm-0 rw\n");
         assert!(busy.contains("sda") && busy.contains("dm-0"), "{busy:?}");
         assert!(disks(sys, &busy).unwrap().is_empty());
+    }
+
+    /// A disk's name for itself is shown without what would draw on the console: escape sequences'
+    /// control characters, text-direction overrides (KNOWN-GAPS 6zc).
+    #[test]
+    fn a_model_cannot_redraw_the_console() {
+        let t = tempfile::tempdir().unwrap();
+        disk(t.path(), "pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0", "sdb", 60_000_000, "Stick\x1b[2J\x1b[H\r 1  nvme0n1\u{202e}", &[], "8:16");
+        let d = disks(t.path(), &BTreeSet::new()).unwrap();
+        assert_eq!(d[0].model, "Stick[2J[H 1  nvme0n1");
     }
 
     #[test]

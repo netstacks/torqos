@@ -556,7 +556,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      last: the disk's start and end (an earlier table and its backup) are zeroed first and
      everything else written and synced before it, so whatever stops the write — a power cut, a
      reset, the process killed — the disk has no partition table, and no half-written system to
-     start from. A failure once writing began — writing, reading back, or detecting the hardware
+     start from. A failure once writing began — writing, reading back, or leaving the hardware file
      below — clears the disk's partition tables (its start, the image's backup, the disk's end).
      No key stops it mid-write: the terminal's signal keys are off (or nothing is offered),
      Ctrl-Alt-Del starts nothing on the installer, and the power, reboot, suspend and hibernate
@@ -567,7 +567,8 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
      cannot be looked for (blkid failing), nothing is
      written. Disks with sectors larger than 512 bytes are not offered: the image's partition
      table is in 512-byte sectors;
-  5. detects this machine's hardware (`nixos-generate-config --show-hardware-config
+  5. detects this machine's hardware (before step 4's write since 2026-11-12, so a detection that
+     fails writes nothing; `nixos-generate-config --show-hardware-config
      --no-filesystems`, on the ISO only — installed machines have no installer tools, 37bed79) and
      writes it, with the image's file systems, into the new disk's root as
      `/var/lib/torq/install/hardware-configuration.nix`;

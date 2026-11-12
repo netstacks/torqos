@@ -150,6 +150,18 @@ pkgs.testers.runNixOSTest {
         # Not a byte of the disk: written and cleared again would leave its start zeros, not the rest.
         installer.succeed("cmp -n $(blockdev --getsize64 /dev/vda) /dev/vda /dev/zero", timeout=600)
 
+    with subtest("hardware that cannot be detected writes nothing"):
+        on_console(installer, "Starting over.")
+        # NixOS's detection failing, for this try: a program that fails, bound over it.
+        tool = installer.succeed("readlink -f /run/current-system/sw/bin/nixos-generate-config").strip()
+        installer.succeed(f"printf '#!/bin/sh\\nexit 1\\n' > /tmp/fails && chmod +x /tmp/fails && mount --bind /tmp/fails {tool}")
+        answer(installer, "1")
+        retry(lambda _: "Type its name, vda" in [r for r in rows(installer) if r.strip()][-1], timeout_seconds=60)
+        answer(installer, "vda")
+        on_console(installer, "nothing was written to vda")
+        installer.succeed("cmp -n $(blockdev --getsize64 /dev/vda) /dev/vda /dev/zero", timeout=600)
+        installer.succeed(f"umount {tool}")
+
     with subtest("the right name writes the image, reads it back and leaves the detected hardware"):
         on_console(installer, "Starting over.")
         answer(installer, "1")

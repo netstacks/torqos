@@ -92,7 +92,8 @@ The image is a single EFI disk. Whatever your hypervisor:
        stick it started from), with each one's size and what is on it. Choose one, then type its name
        again (`nvme0n1`, `sda`). **Everything on that disk is erased.** Nothing is written before
        you type the name.
-    4. It writes TorqOS to the disk, reads it back to check it, and detects the machine's hardware.
+    4. It detects the machine's hardware (if that fails, nothing is written), writes TorqOS to the
+       disk and reads it back to check it.
     5. Remove the stick and restart. First-boot setup runs on the console.
 
     Not yet possible: installing beside another system or onto one partition, disk encryption, and
