@@ -158,8 +158,13 @@ pkgs.testers.runNixOSTest {
         assert code == 1 and "no session the broker holds" in v["error"], (code, v)
         assert kinds("refused")[-1]["actor"] == "agent"
         # Reported: tainted for good; nothing the agent can send clears it; the ledger says so where a proposal cites it.
-        machine.succeed(f"su -s /bin/sh torq-agent-dev -c 'torqcli agent session taint {sid} read_journal'")
-        machine.succeed(f"su -s /bin/sh torq-agent-dev -c 'torqcli agent session taint {sid} show_ledger'")
+        # Reported by its own kind of caller, the resident agent: another program of the agent account is refused,
+        # the session left as it was.
+        code, out = machine.execute(f"su -s /bin/sh torq-agent-dev -c 'torqcli agent session taint {sid} read_journal' 2>&1")
+        assert code != 0 and "the resident agent's" in out, (code, out)
+        assert json.loads(machine.succeed(f"cat {state}/sessions/{sid}.json"))["tainted"] is False
+        as_agent("torq-agent-dev", f"torqcli agent session taint {sid} read_journal", True)
+        as_agent("torq-agent-dev", f"torqcli agent session taint {sid} show_ledger", True)
         code, v = propose(packages("dev", ["htop"]), "htop, after", session=sid)
         assert code == 0 and v["tainted"] is True and v["data"]["session"]["tainted_by"] == ["read_journal", "show_ledger"], v
         for args in [["session-start", "--clear"], ["session-clear", sid], ["session-taint", sid, "--source=x;y"]]:
