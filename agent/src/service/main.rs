@@ -472,13 +472,22 @@ fn run(args: &[String]) -> Result<()> {
 /// Each connection in a thread of its own.
 fn serve(agent: Arc<Agent>, listener: UnixListener) -> Result<()> {
     let mut id = 0u64;
+    // Connections refused in a row, for how often it is said.
+    let mut failing = 0u32;
     loop {
         let conn = match listener.accept() {
-            Ok((conn, _)) => conn,
+            Ok((conn, _)) => {
+                failing = 0;
+                conn
+            }
             // A connection given up before it was taken, a signal, or too many files open for now: the next one, a
-            // moment later; anything else ends the service, which its socket starts again (the review's C6).
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted) || matches!(e.raw_os_error(), Some(23 | 24)) => {
-                eprintln!("torq-agent-service: taking a connection: {e} (again, a moment later)");
+            // moment later, said the first time and then every 10 s while it lasts; anything else ends the service,
+            // which its socket starts again.
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted) || matches!(rustix::io::Errno::from_io_error(&e), Some(rustix::io::Errno::MFILE | rustix::io::Errno::NFILE)) => {
+                if failing % 100 == 0 {
+                    eprintln!("torq-agent-service: taking a connection: {e} (again, a moment later)");
+                }
+                failing = failing.wrapping_add(1);
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
