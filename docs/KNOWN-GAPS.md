@@ -1146,7 +1146,9 @@ Its §5 lists claims without a test.
      may be stopped as timed out after the thaw (failing the task, never doing more).
    - **The memory keeps the person's questions** (the last 8, each at most 2 000 characters) and only
      untainted answers, in `/var/lib/torq-agent-memory/<person>` — the agent's, hidden from `torq agent run`'s
-     programs; root reads it. `torq ask --forget` erases it; showing it is the Agent page's (ADR-051 9).
+     programs; root reads it. Each task also leaves its own record there (`home/.local/state/torq-agent/sessions/`:
+     its whole question and every call), the last 32 kept. `torq ask --forget` erases the memory and those records
+     (before the review of the rebased branch, B1, it left the records); showing them is the Agent page's (ADR-051 9).
      **Not written by the service alone:** the harness and its tools run as the same uid in the same unit,
      so they could write it too. None of them runs code a model or another program chose (the harness, its
      closed set of fixed read-only tools, torqcli), so in effect only TorqOS's own programs do; making it the

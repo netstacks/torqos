@@ -51,7 +51,7 @@ impl Config {
             journal: v["journal"].as_bool().unwrap_or(false),
             max_steps: v["maxSteps"].as_u64().unwrap_or(8).clamp(1, 32) as usize,
             schema: PathBuf::from("/etc/torq/nixos-schema.json"),
-            sessions: home.join(".local/state/torq-agent/sessions"),
+            sessions: crate::session::records_dir(home),
         })
     }
 

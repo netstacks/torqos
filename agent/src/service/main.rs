@@ -185,7 +185,8 @@ impl Agent {
                 Ok(Request::Forget) => {
                     // Under the task slot's lock: a task starting now reads the memory after this.
                     let slot = self.running.lock().unwrap_or_else(|p| p.into_inner());
-                    let forgot = if slot.is_some() { Err(anyhow::anyhow!("a task is running: stop it first, or wait")) } else { self.memory.forget() };
+                    // The memory and every task's own record (each a whole question, the review's B1): both forgotten.
+                    let forgot = if slot.is_some() { Err(anyhow::anyhow!("a task is running: stop it first, or wait")) } else { self.memory.forget().and_then(|()| torq_agent::session::forget_all(&torq_agent::session::records_dir(&self.home))) };
                     drop(slot);
                     match forgot {
                         Ok(()) => out.send(&Event::Forgotten),
@@ -738,5 +739,16 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
     #[test]
     fn the_sweep_is_the_units_alone() {
         assert_eq!(unit_procs("/torq-agent@alice.service"), None);
+    }
+
+    /// `forget` erases the tasks' own records too, each a whole question (the review of the rebased branch, B1).
+    #[test]
+    fn forget_erases_the_tasks_records() {
+        let (_a, sock, d) = agent("true", me());
+        let dir = torq_agent::session::records_dir(d.path());
+        let s = torq_agent::session::Session::start(&dir, "my whole question", "m", "0").unwrap();
+        assert!(s.record.exists());
+        assert_eq!(talk(&sock, &[Request::Forget], |e| matches!(e, Event::Forgotten)), [Event::Forgotten]);
+        assert!(!s.record.exists(), "forgotten with the memory");
     }
 }

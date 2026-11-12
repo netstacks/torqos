@@ -3,7 +3,8 @@
 //! 0700) — not in the agent's home, which every program run as the agent (`torq agent run`) can
 //! write, and hidden from them (modules/agent-run.sh). Bounded: the last `MAX_TURNS` turns, each
 //! question and answer cut to `MAX_CHARS`; a file larger than `MAX_FILE`, or not one this wrote, is
-//! taken as no memory. Erasable: `forget` removes it (`torq ask --forget`).
+//! taken as no memory. Erasable: `forget` removes it (`torq ask --forget`), and with it each task's own record
+//! (`torq_agent::session::records_dir`, the last `RECORDS_KEPT` kept).
 //!
 //! A turn keeps the agent's answer only when the session it came from read nothing untrusted: a
 //! tainted answer is never carried into a later session as the agent's own words.

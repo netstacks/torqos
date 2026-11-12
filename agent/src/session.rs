@@ -15,6 +15,44 @@ use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+/// How many task records are kept in their directory: past it, the oldest go as a session starts (the review of
+/// the rebased branch, B1). Each holds a whole question and every call.
+pub const RECORDS_KEPT: usize = 32;
+
+/// Where a harness run with home `home` keeps its task records.
+pub fn records_dir(home: &Path) -> PathBuf {
+    home.join(".local/state/torq-agent/sessions")
+}
+
+/// The task records in `dir`, oldest first: only files this writes (`doctor-<32 hex>.json`, regular, no link).
+fn records(dir: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    let mut found = Vec::new();
+    for e in entries {
+        let e = e.with_context(|| format!("reading {}", dir.display()))?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        let ours = name.strip_prefix("doctor-").and_then(|n| n.strip_suffix(".json")).is_some_and(|h| h.len() == 32 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+        let m = std::fs::symlink_metadata(e.path()).with_context(|| format!("reading {}", e.path().display()))?;
+        if ours && m.is_file() {
+            found.push((m.modified().with_context(|| format!("reading {}", e.path().display()))?, e.path()));
+        }
+    }
+    found.sort();
+    Ok(found.into_iter().map(|(_, p)| p).collect())
+}
+
+/// Erase every task record in `dir` (`torq ask --forget`, with the memory): none there is none.
+pub fn forget_all(dir: &Path) -> Result<()> {
+    for r in records(dir)? {
+        std::fs::remove_file(&r).with_context(|| format!("removing {}", r.display()))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct Session {
     /// Random: no two sessions share an id (inside the launcher's sandbox every pid is the same).
@@ -46,6 +84,11 @@ impl Session {
     pub fn start(dir: &Path, question: &str, model: &str, broker: &str) -> Result<Session> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
+        // Bounded: room for this one, the oldest gone.
+        let old = records(dir)?;
+        for r in &old[..old.len().saturating_sub(RECORDS_KEPT - 1)] {
+            std::fs::remove_file(r).with_context(|| format!("removing {}", r.display()))?;
+        }
         let id = format!("doctor-{}", random_hex()?);
         let record = dir.join(format!("{id}.json"));
         std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&record).with_context(|| format!("creating {}", record.display()))?;
@@ -118,5 +161,25 @@ mod tests {
         assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 2);
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&a.record).unwrap()).unwrap();
         assert_eq!(v["tainted"], false, "written at once, before anything is read");
+    }
+    /// The records are bounded: past `RECORDS_KEPT` the oldest go when a session starts. And `forget_all` erases them,
+    /// and nothing else in the directory (the review of the rebased branch, B1: each holds a whole question, and
+    /// `torq ask --forget` left them all).
+    #[test]
+    fn records_are_bounded_and_forgotten() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("notes.txt"), "not a record").unwrap();
+        let mut first = None;
+        for i in 0..RECORDS_KEPT + 3 {
+            let s = Session::start(d.path(), &format!("q{i}"), "m", "0").unwrap();
+            first.get_or_insert(s.record);
+        }
+        let records = || std::fs::read_dir(d.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("doctor-")).count();
+        assert_eq!(records(), RECORDS_KEPT);
+        assert!(!first.unwrap().exists(), "the oldest went first");
+        forget_all(d.path()).unwrap();
+        assert_eq!(records(), 0);
+        assert!(d.path().join("notes.txt").exists(), "only its records");
+        forget_all(&d.path().join("none")).unwrap();
     }
 }
