@@ -119,4 +119,5 @@ update is (answer no, and `configure`, `show | compare`, `commit` does it as abo
 alice@torq> show version
 ```
 
-shows TorqOS (and where it comes from), NixOS, the kernel and `torqcli`.
+shows TorqOS (its version number, and the dates of the software it comes from), NixOS, the kernel
+and `torqcli`.

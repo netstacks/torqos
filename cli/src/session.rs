@@ -1145,6 +1145,12 @@ impl<'a> Session<'a> {
             Op::ShowVersion => {
                 let head = self.repo.head()?;
                 let software = self.software(&head)?.unwrap_or_else(|| "(its flake.lock names no inputs)".into());
+                // The number is the running system's own (its os-release), so a machine made from an image says
+                // it before any update; the lock's inputs give only dates (KNOWN-GAPS 6zzf).
+                let software = match self.machine.running_version() {
+                    Some(v) => format!("{v} ({software})"),
+                    None => software,
+                };
                 Ok(crate::facts::version(&self.machine.facts()?, &software, &self.ui()))
             }
             Op::ShowUptime => {
@@ -3433,6 +3439,20 @@ mod tests {
         // `all`: every input.
         let out = s.exec("run request system update all").unwrap();
         assert!(out.contains(&format!("+   torq {};", crate::pkg::ymd(NEWER_ALL))) && out.ends_with("Loaded into the candidate: `commit` (in configuration mode) installs it.\n"), "{out}");
+    }
+
+    /// KNOWN-GAPS 6zzf: `show version` names the running TorqOS's number, an image's before any update, and the
+    /// lock's dates beside it; without a number (no os-release version), the dates alone.
+    #[test]
+    fn show_version_names_the_running_number() {
+        let d = repo_with_software();
+        let now = crate::pkg::ymd(NOW);
+        let m = Fake { running: Some("0.4.0-rc1".into()), ..Default::default() };
+        let out = session(d.path(), None, &m).exec("show version").unwrap();
+        assert!(out.lines().next().unwrap().ends_with(&format!("0.4.0-rc1 (torq {now})")), "{out}");
+        let m = Fake::default();
+        let out = session(d.path(), None, &m).exec("show version").unwrap();
+        assert!(out.lines().next().unwrap().ends_with(&format!("  torq {now}")), "{out}");
     }
 
     /// Audit A3: the software is shown as versions — the running one, and the release's, read from the

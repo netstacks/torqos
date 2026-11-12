@@ -333,10 +333,13 @@ Its §5 lists claims without a test.
    not the releases: any other source a person sets, the development repository at the same tag included, or the
    releases under some other spelling, is taken as that person's choice, with no signature asked. The compare shows
    it under `[edit system software torq]`, and committing it needs a person at a terminal like any system change.
-6zzf. **An image shows no version number on its TorqOS line until its first update.** `show version` on a
-   machine set up from an image reads "TorqOS torq <date>": its TorqOS is the image's own copy (a `path:` in the
-   store), not a release whose version was checked. torqcli's own line ("torqcli 0.4.0") says the version; the
-   first update to the releases brings the number.
+6zzf. ~~**An image shows no version number on its TorqOS line until its first update.**~~ Fixed (2026-11-12,
+   test `show_version_names_the_running_number`). `show version`'s TorqOS line was only the lock's inputs and
+   their dates ("torq <date>"), on any machine: not only an image, whose TorqOS is its own copy (a `path:` in the
+   store), but after an update too (the earlier wording, that the first update brings the number, was wrong).
+   It now leads with the running system's number, from its `/etc/os-release` (`VERSION_ID`, TorqOS's version
+   file): "0.4.0-rc1 (torq <date>, nixpkgs <date>)". That is the system running now; the dates are the
+   configuration's, which differ from it only until a change that waits for a restart is started.
 6zzg. **On 0.3.2: update as usual; do NOT set `torqosorg/torqos-releases` by hand.** 0.3.2 counts only its own
    address, `netstacks/torqos-releases`, as the releases, and 0.3.2 cannot be changed. Its default path,
    `request system update` on that address (GitHub redirects it), is checked, and 0.4.0 then keeps that address

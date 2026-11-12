@@ -517,7 +517,7 @@ process) and returns to the prompt. Scripts (`-c`, piped input) still stop at th
 | `show system rollback <n> [compare <m>]` | commit <n>'s configuration, or what going from <n> to <m> changes (<n> is the base, as on a network device) |
 | `show system alarms` | is this machine exactly as its history says? (and any pending confirmed commit) |
 | `show system ledger [<count>]` | every change as the ledger has it (`#85`, who made it), refused and failed ones too |
-| `show version` | what this machine runs: TorqOS (and where it comes from, from the lock), NixOS, the kernel, torqcli |
+| `show version` | what this machine runs: TorqOS (the running number, from os-release, and where it comes from, from the lock), NixOS, the kernel, torqcli |
 | `show system uptime` | how long the machine has run, its load, and its last change |
 | `show interfaces [<interface>]` | each network interface's (or one's) state, addresses and hardware address; `?` offers the machine's |
 | `show system storage` | each disk's size and use, and the system versions kept |
