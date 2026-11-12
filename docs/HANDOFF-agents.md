@@ -12,7 +12,7 @@ base. The branch is local only; the owner chose not to push it.
   - This note.
 - **Cargo at the WIP tip (2026-11-11, `nix develop`, `-j 8`):** all pass — broker 268, torqcli 370, agent 62, wire 6.
   The settings crate (libcosmic) was **not** built, and **no** VM test was run after `eef8e57`.
-- **Based on** `2ad0c75` (= main as of 2026-11-11).
+- **Based on** `21d91fa` (main, 2026-11-12), rebased from `2ad0c75`: below, To resume 1. The hashes above are the parked branch's; rebased, they are new (the commits' subjects are unchanged).
 
 ## Done, independently reviewed and fixed
 
@@ -108,15 +108,22 @@ See KNOWN-GAPS 6zq, 6zzk and 6zzo.
 
 ## To resume
 
-1. Rebase onto main once secrets has landed. That brings in the org move (`d7ec76d`: links, docs, release.yml,
-   templates, branding, user-docs and torqcli's hints moved to torqosorg; `torq.releases.url` deliberately not moved,
-   KNOWN-GAPS 6v).
-   - The last rebase (onto 2ad0c75) had no conflicts.
-   - **Expect a conflict in modules/agent-run.sh.** The branch rewrites it heavily (per-person accounts, `--link` in the
-     sandbox, `/run/credentials` hidden, `--hold-frozen`), and main is fixing its chmod race separately.
-   - The race is not fixed here: after the sandbox ends, root's `find … -exec chmod ug-s {} +` can be pointed by
-     another process of that uid at a file of its choosing through a symlink swap (a denial of service, such as
-     sudo's wrapper losing its bits). The branch only changed `-user torq-agent` to `-user "$agent"`; take main's fix.
+1. **Rebased onto main `21d91fa` (2026-11-12)**, as `work/agents-rebase` (the parked `work/agents` and its tag are
+   kept as they were). Before replaying, the branch's own KNOWN-GAPS entries were renamed in every commit,
+   messages included: 6zv–6zz became 6zzk–6zzo, since main had taken 6zv–6zzj meanwhile. Main's org move came in
+   with it, `torq.releases.url` included: its default is now torqosorg's releases, and the old address is a
+   `former` one that the next update moves a machine off (modules/releases.nix).
+   - Conflicts, all resolved by keeping both sides, except for these:
+     - modules/agent-run.sh takes main's fix of the set-id sweep (it runs as the agent, through `setpriv`) with
+       `"$agent"`, and keeps the branch's one sandbox.
+     - CLAUDE.md is main's throughout. The branch's edits to it wait for the owner's word.
+     - The guide's paragraph saying another program can look untainted was dropped, because step 5 makes every
+       program but the resident agent start tainted.
+   - **Open:** secrets (ADR-052) still name the agent as one account, `torq-agent` (`actors`, `wire::secrets::AGENT`,
+     their tests). Here every person has their own agent, plus a resident account, so a rule naming `torq-agent`
+     matches no one. Two broker tests in tests/secrets.rs fail on it: a session is now an agent account's own. Who
+     a secret's `actors` mean is part of step 4's design (the person's own agent, the approver), so it waits for
+     that.
 2. Finish the second review's batch, as above.
 3. Run the full check on .52, then land as a fast-forward with the owner (the lead session's plan).
 
