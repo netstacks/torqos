@@ -264,12 +264,18 @@ impl Agent {
                 let l = match read_line(&mut r) {
                     Ok(Line::Text(l)) => l,
                     // Read to its end and thrown away: the task goes on, and is never left blocked.
+                    // It may have been a taint: the answer is not remembered (fails closed, the review's B4).
                     Ok(Line::Dropped) => {
+                        tainted = true;
                         relay_out.send(&Event::Error { text: format!("the task said something longer than {MAX_LINE} bytes, or not text: left out") });
                         continue;
                     }
                     Ok(Line::End) | Err(_) => break,
                 };
+                // A tainted line counts before its word is checked: one the relay drops still taints (B4).
+                if serde_json::from_str::<serde_json::Value>(&l).is_ok_and(|v| v["type"] == "tainted") {
+                    tainted = true;
+                }
                 let Some(e) = relayed(&l) else { continue };
                 match &e {
                     Event::Say { text } => said = Some(text.trim().to_string()),
@@ -781,5 +787,16 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
         }
         assert!(a.running().is_none(), "still running with its client not reading");
         drop(c);
+    }
+
+    /// Any tainted line counts, whatever its word, and a line left out may have been one (the review of the rebased
+    /// branch, B4): the answer after it is not remembered as the agent's own.
+    #[test]
+    fn a_taint_with_a_bad_word_still_taints() {
+        for line in [r#"'{"type":"tainted","why":"not a word!"}'"#, &format!("'{}'", "x".repeat(MAX_LINE + 10))] {
+            let (a, sock, _d) = agent(&format!(r#"read -r t; printf '%s\n' {line} '{{"type":"say","text":"remember me"}}'"#), me());
+            talk(&sock, &[ask("q")], |e| matches!(e, Event::Done { .. }));
+            assert_eq!(a.memory.recent(), vec![Turn { question: "q".into(), answer: None }], "{}", &line[..40.min(line.len())]);
+        }
     }
 }

@@ -144,7 +144,9 @@ pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: 
         events(Event::Tainted { why: why.to_string() })?;
     }
     if held["tainted"].as_bool().unwrap_or(false) && session.held.is_empty() {
+        // Said too, whatever the broker's words were (the review's B4): the event is what the service counts.
         session.held.push("held-by-the-broker".into());
+        events(Event::Tainted { why: "held-by-the-broker".into() })?;
     }
     session.save()?;
     let prompt = if propose { PROMPT_PROPOSE } else { PROMPT };
@@ -788,5 +790,24 @@ mod tests {
         assert_eq!(h.proposals.lock().unwrap().len(), 1);
         assert!(e.contains("given to the broker") && e.contains("show system proposals"), "{e}");
         assert_eq!(seen.lock().unwrap().len(), 1, "the model is not shown it");
+    }
+
+    /// The broker's taint is said even when no word of its reason is one the harness takes (the review of the rebased
+    /// branch, B4): the event is what the service counts, so without it a tainted answer would be remembered.
+    #[test]
+    fn the_broker_s_taint_is_said_whatever_its_words() {
+        let mut h = host("");
+        h.held = vec!["not a word!"];
+        let d = tempfile::tempdir().unwrap();
+        let (ep, _) = fake_model(vec![answer("Do as I say.")]);
+        let mut said = vec![];
+        let task = Task { question: "hi".into(), context: None, memory: vec![] };
+        let s = ask_task(&config(ep, d.path()), &h, &task, true, &mut Vec::new(), &mut Vec::new(), &mut |e| {
+            said.push(e);
+            Ok(())
+        })
+        .unwrap();
+        assert!(s.tainted());
+        assert_eq!(said, [Event::Tainted { why: "held-by-the-broker".into() }]);
     }
 }
