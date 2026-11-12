@@ -51,7 +51,7 @@ Partly done in the WIP commit, untested:
 - (8) done: the crash entry is read with its boot id too (coredumpctl takes no cursor), tested and mutation-checked.
 - (4) the apiKeyFile path is normalised, and its source is checked at unit start (root-owned, not readable by
   group or other).
-- (12) the Delegate assertion also covers the `torq-agent@` template. Its messages should say the uids are the
+- (12) done: the Delegate assertion also covers the `torq-agent@` template (mutation-checked); its messages say the uids are the
   first defence and the cgroup and ptrace guards second.
 - (9) done, type-checked only (settings has no tests): `open_window` is off the update path (it froze the UI for up to 10 s), its failure said; `cosmic-edit`/`xdg-open` are
   reaped in tunnels.rs, and neither starting is said.

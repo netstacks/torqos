@@ -23,7 +23,8 @@ let
   agents = lib.listToAttrs (map (p: lib.nameValuePair (agentOf p) p) (lib.filter fits cfg.people));
   # Where the resident service runs (its socket, its unit): the resident accounts, and the broker's map of them.
   resident = cfg.service.enable && config.torq.agent.doctor.enable;
-  # Any torq-agent@ unit (an instance, the template, a drop-in) whose text delegates its control group.
+  # Any torq-agent@ unit this configuration writes (an instance or the template) whose text delegates its control
+  # group. A unit file a package brings (systemd.packages) is not in systemd.units, so not seen: KNOWN-GAPS 6zzo.
   delegatedUnits = lib.attrNames (lib.filterAttrs (n: u: lib.hasPrefix "torq-agent@" n && lib.hasInfix "Delegate" (if u.text or null == null then "" else u.text)) config.systemd.units);
   residents = lib.optionalAttrs resident (lib.listToAttrs (map (p: lib.nameValuePair (residentOf p) p) (lib.filter fits cfg.people)));
   # Claude Code for the agents (ADR-051 5, `torq agent tools`): the version dev mode pins (modules/dev.nix), unfree,
@@ -264,8 +265,8 @@ in
   (lib.mkIf (cfg.service.enable && config.torq.agent.doctor.enable) {
     # What the broker's resident rule rests on (ADR-051 3 amended 2026-11-11, socket::found_resident), each said.
     # The primary defence is the uid: the resident's own account, which nothing run as the agent account is. The
-    # second lines: the unit's control group is root's to fill (nothing delegated, in any torq-agent@ unit — an
-    # instance, the template, or a drop-in); no agent or resident account has a user manager to make units with;
+    # second lines: the unit's control group is root's to fill (nothing delegated, in any torq-agent@ unit this configuration writes — an
+    # instance or the template); no agent or resident account has a user manager to make units with;
     # a same-uid program may trace only its own descendants.
     assertions = lib.concatLists (lib.mapAttrsToList (agent: person:
       let sc = config.systemd.services."torq-agent@${person}".serviceConfig; in [
@@ -280,7 +281,7 @@ in
       ]) agents)
       ++ [{
         assertion = delegatedUnits == [ ];
-        message = "systemd.units ${lib.concatStringsSep ", " delegatedUnits}: no Delegate or DelegateSubgroup in any torq-agent@ unit, its template or a drop-in — a second line behind the resident account's uid (the unit's control group, root's to fill).";
+        message = "systemd.units ${lib.concatStringsSep ", " delegatedUnits}: no Delegate or DelegateSubgroup in any torq-agent@ unit, an instance or the template — a second line behind the resident account's uid (the unit's control group, root's to fill).";
       }
       {
         assertion = (config.boot.kernel.sysctl."kernel.yama.ptrace_scope" or 0) >= 1;

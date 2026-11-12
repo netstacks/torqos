@@ -1228,7 +1228,7 @@ Its §5 lists claims without a test.
    `tests/agent-mcp.nix`).** Open:
    - **What the resident rule rests on** (amended 2026-11-11: the resident agent's own account, ADR-051 3). A
      session is untainted only from `torq-resident-<person>` — the broker's map's word for the uid — *and* from
-     inside `torq-agent@<person>.service`'s own control group (read through the peer's pidfd; a second guard).
+     inside `torq-agent@<person>.service`'s own control group (read through the peer's pidfd; a second guard). That the unit delegates nothing is checked in what this configuration writes, an instance or the template (`tests/agent-assertions.nix`); a unit file or drop-in a package brings (`systemd.packages`) is not seen by that check.
      The resident account owns the unit's state directory (its memory and its programs' home) and its
      credential (the model's key); the agent account — under `torq agent run`, as itself through `su`, or an
      administrator's `sudo -u` — can write neither, read neither, nor signal, trace or reach the service's
