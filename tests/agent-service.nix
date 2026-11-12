@@ -123,7 +123,7 @@ pkgs.testers.runNixOSTest {
     torq.agent.doctor = { enable = true; endpoint = "unix:/run/fake-model/model.sock"; model = "fake"; journal = true; maxSteps = 2; apiKeyFile = "/var/lib/torq/secrets/model.key"; };
     systemd.tmpfiles.rules = [ "d /var/lib/torq/secrets 0700 root root -" "f /var/lib/torq/secrets/model.key 0600 root root - sk-test-key" ];
     systemd.services.fake-model = { wantedBy = [ "multi-user.target" ]; serviceConfig = { ExecStart = fakeModel; RuntimeDirectory = "fake-model"; }; };
-    environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.tmux pkgs.procps (lib.hiPrio torqcli) (lib.hiPrio setfacl) ];
+    environment.systemPackages = [ pkgs.socat pkgs.jq pkgs.tmux pkgs.procps pkgs.strace (lib.hiPrio torqcli) (lib.hiPrio setfacl) ];
   };
 
   testScript = ''
@@ -226,6 +226,25 @@ pkgs.testers.runNixOSTest {
         # Untainted because it came from the resident agent: the unit's own control group, which the broker reads.
         assert prop("ControlGroup") == "/system.slice/system-torq\\x2dagent.slice/torq-agent@alice.service", prop("ControlGroup")
 
+    with subtest("the resident account itself proposes, and nothing more: no apply, decline, trust or revert, nor another's folder"):
+        # The review of the rebased branch, B14: the agent account is tested so in agents-per-person; the resident
+        # account, the person's same agent, here (and in broker/src/socket.rs's the_resident_account_is_the_persons_one_agent).
+        def broker(user, request):
+            cmd = f"printf '%s\\n' {shlex.quote(json.dumps(request))} | socat -t 30 - UNIX-CONNECT:/run/torq/broker.sock"
+            frames = [json.loads(l) for l in machine.succeed(f"su -s /bin/sh {user} -c {shlex.quote(cmd)}").splitlines()]
+            return next((f["exit"] for f in frames if "exit" in f), None), " ".join(f.get("err", "") + f.get("out", "") for f in frames)
+        seq = p["seq"]
+        for args in [["apply", str(seq)], ["decline", str(seq)], ["revert", str(seq)], ["trust-grant", "10"]]:
+            code, said = broker("torq-resident-alice", {"args": ["--json"] + args})
+            assert code not in (0, None), (args, code, said)
+        assert not [e for e in entries() if e["kind"] in ("applied", "declined") and e["data"].get("proposal") == seq], "nothing done to it"
+        assert not [e for e in entries() if e["kind"] == "trust_granted" and e.get("approved_by") == "torq-resident-alice"], "no trust from it"
+        head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+        bobs = '--- /dev/null\n+++ b/users/bob/packages.json\n@@ -0,0 +1 @@\n+["htop"]\n'
+        code, said = broker("torq-resident-alice", {"args": ["--json", "propose", f"--base={head}", "--reason=htop for bob"], "diff": bobs})
+        assert code not in (0, None) and "bob" in said, (code, said)
+        assert [e for e in entries() if e["kind"] == "refused"][-1]["data"].get("caller") == "torq-resident-alice", "refused on the record, as its caller"
+
     with subtest("the model's key: the resident agent's credential; nothing run as the agent elsewhere reads it"):
         auth = machine.succeed("cat /run/fake-model/auth").split("\n")
         assert "Bearer sk-test-key" in auth and "none" not in [a for a in auth if a], auth
@@ -273,6 +292,20 @@ pkgs.testers.runNixOSTest {
         machine.succeed("rm /var/lib/torq/secrets/model.key && mv /var/lib/torq/secrets/real.key /var/lib/torq/secrets/model.key")
         machine.succeed(f"systemctl reset-failed {unit}; systemctl start {unit}")
         machine.succeed(f"systemctl is-active {unit}")
+
+    with subtest("what the resident rule rests on, at run time: tracing only one's own descendants, no user manager for either account"):
+        # The review of the rebased branch, B16: agent-assertions checks the configuration; this, the running machine.
+        assert machine.succeed("sysctl -n kernel.yama.ptrace_scope").strip() in ("1", "2", "3")
+        sibling = machine.succeed("setpriv --reuid torq-agent-alice --regid torq-agent-alice --clear-groups -- sleep 600 >/dev/null 2>&1 & echo $!").strip()
+        # Same uid, not its descendant: Yama refuses the attach (with scope 0 it would be taken).
+        machine.fail(f"setpriv --reuid torq-agent-alice --regid torq-agent-alice --clear-groups -- strace -p {sibling} -e trace=none -o /dev/null")
+        machine.succeed(f"kill {sibling}")
+        for account in ["torq-agent-alice", "torq-resident-alice"]:
+            uid = machine.succeed(f"id -u {account}").strip()
+            machine.fail(f"test -e /var/lib/systemd/linger/{account}")
+            machine.fail(f"systemctl is-active user@{uid}.service")
+        # Not testable here: that the broker reads the peer's pidfd rather than a bare pid (it would take a pid reused
+        # between a connect and the broker's read). broker/src/socket.rs's a_pidfds_pid reads the fdinfo it takes.
 
     with subtest("no process of the agent's can put itself in the resident agent's control group"):
         procs = f"/sys/fs/cgroup{prop('ControlGroup')}/cgroup.procs"
@@ -345,19 +378,28 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed(f"cat '/sys/fs/cgroup{prop('ControlGroup')}/cgroup.procs'").split() == [prop("MainPID")], "nothing but the service left in its unit"
 
     with subtest("a frozen service cannot hold the terminal: Ctrl-C twice, or once and 5 s, gets alice out"):
+        # Each key sent once torq ask reads keys (its terminal out of canonical mode), and the second once the first
+        # is taken (it says it is stopping): waited for, not slept (the review of the rebased branch, B18).
+        def reading_keys(s):
+            tty = machine.succeed(f"su - alice -c 'tmux display -p -t {s} \"#{{pane_tty}}\"'").strip()
+            machine.wait_until_succeeds(f"stty -F {tty} -a | grep -q -- -icanon", timeout=30)
+        def pane_says(s, text, timeout):
+            machine.wait_until_succeeds(f"su - alice -c 'tmux capture-pane -p -t {s}' | grep -q {shlex.quote(text)}", timeout=timeout)
         machine.succeed(f"systemctl freeze {unit}")
         machine.succeed("su - alice -c \"tmux new-session -d -s f -x 200 -y 50 'torq ask hello; echo exit=\\$?; sleep 600'\"")
-        machine.sleep(1)
+        reading_keys("f")
         machine.succeed("su - alice -c 'tmux send-keys -t f C-c'")
-        machine.sleep(1)
+        pane_says("f", "agent: stopping", 10)
         machine.succeed("su - alice -c 'tmux send-keys -t f C-c'")
-        machine.wait_until_succeeds("su - alice -c 'tmux capture-pane -p -t f' | grep -q 'exit=130'", timeout=10)
+        pane_says("f", "exit=130", 10)
         machine.succeed("su - alice -c \"tmux new-session -d -s g -x 200 -y 50 'torq ask hello; echo exit=\\$?; sleep 600'\"")
-        machine.sleep(1)
+        reading_keys("g")
         machine.succeed("su - alice -c 'tmux send-keys -t g C-c'")
+        pane_says("g", "agent: stopping", 10)
+        # Not at once: it waits GIVE_UP (5 s) for the stop. That much is time, by its nature.
         machine.sleep(3)
         machine.fail("su - alice -c 'tmux capture-pane -p -t g' | grep -q 'exit='")
-        machine.wait_until_succeeds("su - alice -c 'tmux capture-pane -p -t g' | grep -q 'exit=130'", timeout=15)
+        pane_says("g", "exit=130", 15)
         machine.succeed(f"systemctl thaw {unit}")
         machine.wait_until_succeeds("test \"$(su - alice -c 'torq ask hello')\" = 'Hello alice.'", timeout=60)
 

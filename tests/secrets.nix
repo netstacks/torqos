@@ -253,6 +253,11 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"su -s /bin/sh torq-agent-dev -c '{ssh} git@git.example.test echo signed-in'")
         journal = machine.succeed("journalctl -u torq-secrets --no-pager")
         assert "torq-agent-dev: " in journal and "untrusted" in journal, journal
+        # Refused by the broker for this secret, as tainted, and on the record (the review of the rebased branch, B17: a
+        # failed ssh alone could be anything).
+        refused = [json.loads(l) for l in machine.succeed("torq-broker log --json --brief").splitlines()]
+        refused = [e for e in refused if e["kind"] == "secret_use_refused" and e["data"].get("secret") == "deploy" and e["data"].get("user") == "dev"]
+        assert len(refused) == 1 and "untrusted" in refused[0]["data"].get("error", ""), refused
         ledger = machine.succeed("torq-broker log")
         assert "dev's secret deploy for the first time" not in ledger and "PRIVATE KEY" not in ledger, ledger
         # The socket answers its own account alone; it takes no key, nor gives one.

@@ -205,6 +205,26 @@ pkgs.testers.runNixOSTest {
         assert code == 0 and d["kind"] == "declined" and d["approved_by"] == "bob", (code, d)
         machine.succeed("torq-broker verify")
 
+    with subtest("an agent's proposals waiting at once are bounded, each agent its own count; a decline frees one"):
+        # The review of the rebased branch, B15: the cap at the running broker, not only in trust_loop. 20 waiting
+        # (AGENT_WAITING_MAX); the 100 not done (AGENT_WAITING_LOOK) needs proposals that no longer wait and were
+        # never done, which only a hand-written ledger makes: trust_loop's the_not_done_limit_is_exactly_its_number.
+        seqs, refused = [], None
+        for i in range(25):
+            code, p = propose("torq-agent-bob", packages("bob", [f"cap{i}"]), f"cap {i}")
+            if code != 0:
+                refused = p
+                break
+            seqs.append(str(p["seq"]))
+        assert refused is not None and "waiting" in refused["error"] and len(seqs) <= 20, (len(seqs), refused)
+        # Alice's agent is not held up by bob's.
+        code, p = propose("torq-agent-alice", "--- a/users/alice/packages.json\n+++ b/users/alice/packages.json\n@@ -1 +1 @@\n-[\"tree\"]\n+[\"tree\", \"figlet\"]\n", "figlet for alice")
+        assert code == 0 and p["kind"] == "proposal", (code, p)
+        code, d = ask("bob", {"args": ["--json", "decline", seqs[0]]})
+        assert code == 0 and d["kind"] == "declined", (code, d)
+        code, p = propose("torq-agent-bob", packages("bob", ["one-more"]), "one more, now")
+        assert code == 0 and p["kind"] == "proposal", (code, p)
+
     with subtest("a person with no agent account is told so; a look-alike account is no agent"):
         # dave has no agent account at all: torqcli says so before anything runs.
         code, out = run_as("dave", "torq agent run -- id -un")
