@@ -300,13 +300,16 @@ acceptance tests, each a VM test.
 - [ ] **Step 4**: approvals and taint (a person asked before the agent uses a secret; until then the
       agent may use only a secret that asks for no approval, from an untainted session).
 - [x] **Step 5**: the Secrets page in TorqOS Settings (built 2026-11-12, after v0.4.0-rc1; deferred on
-      2026-11-11, reversed by the owner the next day). What the command line does and nothing more: the list
-      (`show system secrets`), each `request system secret` line as a button (allow, disallow, approve,
-      delete), and a value typed twice in masked fields, sent to the broker as torqcli sends it and part of
-      no command or log. Not there: a value shown back, a value from a file (both stay a terminal's), and
-      the asking of step 4. Secrets stay the narrow store for the agent and programs; everyday passwords are
-      for apps such as 1Password. The page has no test of its own (KNOWN-GAPS 6zzk to 6zzm); the
-      `tests/secrets.nix` subtest for its way of keeping a value is written and not yet run.
+      2026-11-11, reversed by the owner the next day). What the command line does and nothing more: the
+      secrets `show system secrets` lists, one a row to choose; for the one chosen, what it is allowed now and
+      each `request system secret` line as a button (allow, disallow, approve, and delete in two presses);
+      and a value typed twice in masked fields, sent to the broker as torqcli sends it and part of no command
+      or log. Not there: a value shown back, a value from a file (both stay a terminal's, and typed on the
+      window's Command Line page `set` and `show` open one), and the asking of step 4. Secrets stay the narrow
+      store for the agent and programs; everyday passwords are for apps such as 1Password. The page has no
+      test of its own (KNOWN-GAPS 6zzp to 6zzr); the `tests/secrets.nix` subtest for its way of keeping a
+      value, and the `tests/desktop.nix` check that a non-dumpable program still gets the approval dialog,
+      are written and not yet run.
 
 ## After 0.3.0: in the next cycle
 

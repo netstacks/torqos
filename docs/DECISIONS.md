@@ -2152,7 +2152,7 @@ off many times a day.
      as built: this said "to the daemon over its socket", written before "Who holds what" below gave the
      values to the broker; the daemon takes no value from anyone. It also named `app::needs_terminal`: the
      Secrets page is the window's way, and `request system secret set` typed on the window's Command Line page
-     is still answered "typed at a terminal".)
+     opens a terminal, as a password does.)
 - **Consequences:** New code: the `torq-secrets` daemon (store, rules, the proxy, the SSH agent, the log), the
   `secrets` tree in the schema, its entry on the agent's deny list, the commands above, and a Secrets page in
   TorqOS Settings. Reused: `systemd-creds`, curl, OpenSSH's agent and its destination constraints, the
@@ -2285,12 +2285,19 @@ off many times a day.
     manager, and the page says so. Step 4 is still not built.
 - **Step 5 built (2026-11-12): the Secrets page in TorqOS Settings** (`settings/src/window/secrets.rs`), what the
   command line does and nothing more.
-  - **The list** is `show system secrets`, as torqcli prints it. **Each action is torqcli's own line**, shown on
-    its row and run by torqcli's session in the window (`Message::Act`): `allow` and `disallow` (`https <host>`,
-    `ssh <host>`, `agent`), `approve` (`never`, `first-use`, `each-use`) and `delete`, each ending
-    `user <person>` for a person's own. The broker asks what it asks of torqcli: nothing for a person's own, an
-    administrator's approval in COSMIC's dialog for the system's. The approve rule is offered as the command
-    line offers it, and the page says that the asking itself (step 4) is not built.
+  - **The list** is what `show system secrets` reads, each secret a row (`torq::app::secrets_status`, over
+    `secrets::listed`, which `show system secrets` itself now prints from): its name, whose it is, and the
+    command line's own words for what it is and what it may be used for. Never a value: nothing in that reading
+    has one. A row is chosen, and the rest of the page is about that secret; "A new secret" takes a name typed.
+  - **Each action is torqcli's own line**, shown on its row and run by torqcli's session in the window
+    (`Message::Act`): `allow` and `disallow` (`https <host>`, `ssh <host>`, `agent`), `approve` (`never`,
+    `first-use`, `each-use`) and `delete`, each ending `user <person>` for a person's own. What the chosen
+    secret is allowed now is shown, each use with the line that takes it back. The broker asks what it asks of
+    torqcli: nothing for a person's own, an administrator's approval in COSMIC's dialog for the system's. The
+    approve rule is offered as the command line offers it, and the page says that the asking itself (step 4)
+    is not built. **Delete takes two presses:** the first only asks ("Really delete …?"), and anything else
+    done on the page takes the question back; the window has no other confirmation of its own to reuse (a
+    command's own question is asked in its dialog, and `delete` asks none).
   - **A value is the one thing that is not a line.** It is typed twice in masked fields (dots, no way to show
     it, nothing to copy or cut) and goes through `torq::app::secret_set` to `Real::keep_secret`, the same code
     torqcli's `set` ends in: a private file in memory (the session's runtime directory, else `/dev/shm`), read into the socket
@@ -2300,19 +2307,30 @@ off many times a day.
     same, more than 16 KiB, a name that is not one. Who may set what is the broker's to say, from the caller
     the kernel names, unchanged: the broker was not changed for this step.
   - **In the window's memory.** The window is made non-dumpable (as torqcli is while it holds a password or a
-    value, ADR-040) the first time the page takes anything typed, and stays so until it is closed. Both
-    fields are emptied when Keep is pressed, kept or refused, and the two strings are dropped when the broker
-    has answered. Not promised: COSMIC's text field keeps its own copy of what it shows until it is next
-    drawn empty, and memory given back is not overwritten (no zeroing type; none was added). A value pasted
-    stays in the clipboard. KNOWN-GAPS 6zzk, 6zzl.
+    value, ADR-040) the first time a person does anything on the page (the list arriving is not that), and
+    stays so until it is closed. Both fields are emptied when Keep is pressed, kept or refused, and the two
+    strings are dropped when the broker has answered. Not promised: COSMIC's text field keeps its own copy of
+    what it shows until it is next drawn empty, and memory given back is not overwritten (no zeroing type;
+    none was added). A value pasted stays in the clipboard. KNOWN-GAPS 6zzp, 6zzq.
+  - **A non-dumpable window and the approval dialog.** Every later approval the window asks is asked of polkit
+    about a non-dumpable process. Read and measured (KNOWN-GAPS 6zzr has the detail): the broker names the
+    caller by pid, start time and uid, from the socket's peer and `/proc/<pid>` (its folder's owner, `cgroup`,
+    `stat`); polkit reads `stat`, `status` and `cgroup`; COSMIC's agent reads nothing of it. For a
+    non-dumpable process those files become root's and stay readable by all, and the folder stays the
+    person's. polkit 127 answered the same for a non-dumpable process as for an ordinary one. The dialog
+    itself, end to end, is a check in `tests/desktop.nix`, written and not yet run.
   - **Left to the terminal:** reading a value back (`request system secret show`), and a value from a file
     (`set <name> file <path>`, an SSH key of several lines): the window has no file chooser, and one was not
-    added for this.
+    added for this. On the window's Command Line page, `request system secret set <name>` and `show <name>`
+    open a terminal, as a password does (`app::needs_terminal`): before, the first was answered "typed at a
+    terminal" and the second would have printed the value in the window.
   - **Tested:** torqcli's unit tests (a stand-in broker is given the value in its private file, and it is in
-    no argument, environment, log or answer, kept or refused; the refusals), each seen to fail with its guard
-    broken. `tests/secrets.nix` has a subtest that keeps a value through `app::secret_set` (an example program
-    built for the test alone), uses it, and looks for it in every file of the machine: written, not yet run.
-    The page itself has no test: nothing drives the window (KNOWN-GAPS 6zzm).
+    no argument, environment, log or answer, kept or refused; the refusals; the list's reading, a rules file
+    that cannot be read among it; what goes to a terminal), each seen to fail with its guard broken.
+    `tests/secrets.nix` has a subtest that keeps a value through `app::secret_set` (an example program built
+    for the tests alone), uses it, and looks for it in every file of the machine; `tests/desktop.nix` has the
+    non-dumpable client's approval. Both written, not yet run. The page itself has no test: nothing drives
+    the window (KNOWN-GAPS 6zzr).
 
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 

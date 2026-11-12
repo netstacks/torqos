@@ -91,17 +91,22 @@ not try to be one.
 After 0.4.0-rc1, TorqOS Settings has a **Secrets** page that does what those commands do, and shows
 each command beside its button:
 
-- It lists the secrets as `show system secrets` does: names, whose they are, whether each has a value,
-  and what each may be used for. It never shows a value.
-- It allows and takes back a use (a host over HTTPS or SSH, or the agent), sets when a person is asked
-  before the agent uses a secret, and deletes one. A secret of your own needs no password; a system
-  secret needs an administrator, who approves in COSMIC's dialog, as for any system change.
+- It lists the secrets `show system secrets` lists, one on each row: its name, whose it is, whether it
+  has a value, and what it may be used for. It never shows a value. You choose a row, or "A new
+  secret" and type a name, and the rest of the page is about that secret.
+- For the secret you chose, it shows what is allowed now, and allows or takes back a use (a host over
+  HTTPS or SSH, or the agent) and sets when a person is asked before the agent uses it. A secret of
+  your own needs no password; a system secret needs an administrator, who approves in COSMIC's
+  dialog, as for any system change.
+- It deletes a secret, after asking once more: a deleted value cannot be brought back.
 - It takes a value, typed twice in fields that show dots. The value goes to the broker the way
   `torqcli` sends it. It is not part of any command, log or history entry.
 
 What the page does not do:
 
-- **It does not show a value back.** `request system secret show <name>`, in a terminal, does.
+- **It does not show a value back.** `request system secret show <name>`, in a terminal, does. Typed
+  on the Command Line page of TorqOS Settings, that command and `request system secret set <name>`
+  open a terminal.
 - **It does not read a value from a file.** For an SSH key (several lines), use
   `request system secret set <name> file <path>` in a terminal.
 - **It does not clear your clipboard.** A value you paste into the page stays in the clipboard, where
