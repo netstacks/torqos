@@ -161,30 +161,36 @@ impl Applet {
         self.core.applet.popup_container(col).into()
     }
 
-    /// A program of the person's, raised if it runs: with an activation token when the compositor gives one.
-    fn launch(&self, exec: &str) {
-        match &self.tokens {
-            Some(tx) => {
-                let _ = tx.send(TokenRequest { app_id: <Self as cosmic::Application>::APP_ID.to_string(), exec: exec.to_string() });
-            }
-            None => spawn(exec, None),
+    /// A program of the person's, raised if it runs: with an activation token when the compositor gives one. One that
+    /// cannot start is said in the popup (the review of the rebased branch, B12).
+    fn launch(&mut self, exec: &str) {
+        let asked = self.tokens.as_ref().is_some_and(|tx| tx.send(TokenRequest { app_id: <Self as cosmic::Application>::APP_ID.to_string(), exec: exec.to_string() }).is_ok());
+        // No token to be had (none asked for, or its subscription gone): started without one.
+        if !asked {
+            self.said_if_not(spawn(exec, None));
+        }
+    }
+
+    fn said_if_not(&mut self, r: std::io::Result<()>) {
+        if let Err(e) = r {
+            self.note = Some(format!("could not start it: {e}"));
         }
     }
 }
 
 /// `exec` (a program and its words, none with spaces), with the token that lets it raise its window.
-fn spawn(exec: &str, token: Option<String>) {
+fn spawn(exec: &str, token: Option<String>) -> std::io::Result<()> {
     let mut words = exec.split(' ');
-    let Some(program) = words.next() else { return };
+    let Some(program) = words.next() else { return Err(std::io::Error::other("nothing to start")) };
     let mut c = std::process::Command::new(program);
     c.args(words);
     if let Some(t) = token {
         c.env("XDG_ACTIVATION_TOKEN", &t).env("DESKTOP_STARTUP_ID", &t);
     }
     // Waited for on a thread of its own: it leaves no zombie behind.
-    if let Ok(mut child) = c.spawn() {
-        std::thread::spawn(move || child.wait());
-    }
+    let mut child = c.spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 impl cosmic::Application for Applet {
@@ -301,7 +307,7 @@ impl cosmic::Application for Applet {
             Message::Settings => self.launch(&format!("{} agent", torq::app::system_program("torq-settings"))),
             Message::Token(TokenUpdate::Init(tx)) => self.tokens = Some(tx),
             Message::Token(TokenUpdate::Finished) => self.tokens = None,
-            Message::Token(TokenUpdate::ActivationToken { token, exec }) => spawn(&exec, token),
+            Message::Token(TokenUpdate::ActivationToken { token, exec }) => self.said_if_not(spawn(&exec, token)),
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;

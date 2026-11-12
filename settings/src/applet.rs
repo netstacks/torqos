@@ -142,7 +142,10 @@ fn send(summary: &str, body: &str, page: &str) -> zbus::Result<()> {
         if member == "ActionInvoked" {
             let (of, _action): (u32, String) = signal.body().deserialize()?;
             if of == id {
-                app::open_settings(page);
+                if let Err(e) = app::open_settings(page) {
+                    eprintln!("torq-applet: opening TorqOS Settings from a notification: {e:#}");
+                    notify(SETTINGS_UNOPENED.to_string(), app::said(&e), "overview");
+                }
                 break;
             }
         } else if member == "NotificationClosed" {
@@ -420,15 +423,15 @@ impl cosmic::Application for Applet {
                 return cosmic::task::future(async move {
                     let confirmed = blocking(app::confirm).await.is_ok();
                     if restart && confirmed {
-                        app::ask_restart();
+                        told(app::ask_restart());
                     }
                     Message::Closed
                 });
             }
             Message::Closed => return self.update(Message::Ask),
-            Message::LogOut => app::ask_log_out(),
-            Message::Restart => app::ask_restart(),
-            Message::Open(page) => app::open_settings(page),
+            Message::LogOut => told(app::ask_log_out()),
+            Message::Restart => told(app::ask_restart()),
+            Message::Open(page) => told(app::open_settings(page)),
             Message::AskAgent(alarm) => {
                 // Off the panel's thread (step 5's second review): systemd-run is waited for, bounded.
                 let h = torq::agent::handoff::About::Alarm(&alarm).handoff();
@@ -500,6 +503,15 @@ const UNAPPLIED: &str = "Not put on your desktop";
 const APPS: &str = "Your apps were not brought back";
 /// What a notification says when an Ask the agent button opened nothing.
 const AGENT_UNOPENED: &str = "The agent's window did not open";
+/// What a notification says when TorqOS Settings, a log-out or a restart could not be started from the panel.
+const SETTINGS_UNOPENED: &str = "TorqOS could not open that";
+
+/// A program the panel starts that could not start: said in a notification (the review of the rebased branch, B12).
+fn told(r: anyhow::Result<()>) {
+    if let Err(e) = r {
+        notify(SETTINGS_UNOPENED.to_string(), app::said(&e), "overview");
+    }
+}
 
 /// Bring the person's desktop and configuration together, and answer what could not be put on the desktop, or why
 /// the sync (a save among it) failed or was refused.

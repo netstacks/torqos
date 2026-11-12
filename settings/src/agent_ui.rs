@@ -139,6 +139,13 @@ enum Message {
 }
 
 impl Window {
+    /// TorqOS Settings, from a button here, that could not start: said in the window (the review's B12).
+    fn said_if_not(&mut self, r: anyhow::Result<()>) {
+        if let Err(e) = r {
+            self.note = Some((torq::app::said(&e), true));
+        }
+    }
+
     fn working(&self) -> bool {
         self.talk.working() || matches!(self.reach, Ok(Some(Status { running: true, .. })))
     }
@@ -342,7 +349,7 @@ impl cosmic::Application for Window {
                 });
                 return self.update(Message::Look);
             }
-            Message::Review => torq::app::open_settings("proposals"),
+            Message::Review => self.said_if_not(torq::app::open_settings("proposals")),
             Message::Unattach => self.attached = None,
             Message::Decline(seq) => {
                 if self.decline_seq.is_some() {
@@ -370,7 +377,7 @@ impl cosmic::Application for Window {
                 // Its row then says "declined", from the ledger.
                 return self.update(Message::Look);
             }
-            Message::Settings => torq::app::open_settings("agent"),
+            Message::Settings => self.said_if_not(torq::app::open_settings("agent")),
         }
         Task::none()
     }

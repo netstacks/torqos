@@ -1094,13 +1094,13 @@ pub fn configurations(shown: &str) -> Vec<(u32, String)> {
 }
 
 /// COSMIC's own dialog for restarting: it asks first, and counts down.
-pub fn ask_restart() {
-    spawn("cosmic-osd", &["restart"]);
+pub fn ask_restart() -> Result<()> {
+    spawn("cosmic-osd", &["restart"])
 }
 
 /// COSMIC's own dialog for logging out: it asks first, and counts down.
-pub fn ask_log_out() {
-    spawn("cosmic-osd", &["log-out"]);
+pub fn ask_log_out() -> Result<()> {
+    spawn("cosmic-osd", &["log-out"])
 }
 
 /// Why something the panel does by itself last failed (a save of the person's desktop, putting the configuration's
@@ -1125,13 +1125,13 @@ impl Told {
 }
 
 /// The person's agent's window (ADR-051 4): one a person, so this raises it if it is open.
-pub fn open_agent() {
-    spawn("torq-agent-ui", &[]);
+pub fn open_agent() -> Result<()> {
+    spawn("torq-agent-ui", &[])
 }
 
 /// TorqOS Settings, at a page (`VIEWS`' ids, or overview, configuration, changes, history, proposals, secrets, agent, commands).
-pub fn open_settings(page: &str) {
-    spawn("torq-settings", &[page]);
+pub fn open_settings(page: &str) -> Result<()> {
+    spawn("torq-settings", &[page])
 }
 
 /// Where the system's programs are. The desktop's programs start TorqOS's own and COSMIC's from here, by
@@ -1150,11 +1150,13 @@ fn command(program: &str, args: &[&str]) -> std::process::Command {
     c
 }
 
-fn spawn(program: &str, args: &[&str]) {
-    // Waited for on a thread of its own: it leaves no zombie behind.
-    if let Ok(mut child) = command(program, args).spawn() {
-        std::thread::spawn(move || child.wait());
-    }
+fn spawn(program: &str, args: &[&str]) -> Result<()> {
+    // Waited for on a thread of its own: it leaves no zombie behind. One that cannot start is said, where the
+    // button was pressed (the review of the rebased branch, B12).
+    use anyhow::Context as _;
+    let mut child = command(program, args).spawn().with_context(|| format!("could not start {program}"))?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// A `torq-settings` planted earlier on PATH is not what starts.
@@ -1539,10 +1541,9 @@ pub fn remove_app(id: &str) -> Result<()> {
     flatpak(&["uninstall", "--user", "--noninteractive", id]).map(drop)
 }
 
-pub fn open_app(id: &str) {
-    if checked(id).is_ok() {
-        spawn("flatpak", &["run", id]);
-    }
+pub fn open_app(id: &str) -> Result<()> {
+    checked(id)?;
+    spawn("flatpak", &["run", id])
 }
 
 /// What to do to bring what is installed, what the configuration names, and what TorqOS last knew it named
@@ -1823,10 +1824,11 @@ pub fn host() -> String {
 }
 
 /// Open a web page in the person's browser. Only https: what is opened is built here.
-pub fn open_url(url: &str) {
-    if url.starts_with("https://") {
-        spawn("xdg-open", &[url]);
+pub fn open_url(url: &str) -> Result<()> {
+    if !url.starts_with("https://") {
+        anyhow::bail!("only an https page is opened");
     }
+    spawn("xdg-open", &[url])
 }
 
 #[cfg(test)]

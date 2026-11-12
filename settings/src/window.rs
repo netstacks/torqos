@@ -562,7 +562,7 @@ impl cosmic::Application for Settings {
                     Err(e) => (e, true),
                 });
                 if restart && self.note.as_ref().is_some_and(|(_, failed)| !failed) {
-                    app::ask_restart();
+                    self.said_if_not(app::ask_restart());
                 }
                 return self.load();
             }
@@ -574,14 +574,14 @@ impl cosmic::Application for Settings {
             }
             Message::ConfirmDone(r) => {
                 self.busy = None;
-                let restart = std::mem::take(&mut self.restart_after);
-                if restart && r.is_ok() {
-                    app::ask_restart();
-                }
+                let restart = std::mem::take(&mut self.restart_after) && r.is_ok();
                 self.note = Some(match r {
                     Ok(out) => (out.trim().to_string(), false),
                     Err(e) => (e, true),
                 });
+                if restart {
+                    self.said_if_not(app::ask_restart());
+                }
                 return self.load();
             }
             Message::Asked(question, reply) => self.questions.push_back((question, reply)),
@@ -590,8 +590,8 @@ impl cosmic::Application for Settings {
                     reply.send(yes);
                 }
             }
-            Message::Restart => app::ask_restart(),
-            Message::LogOut => app::ask_log_out(),
+            Message::Restart => self.said_if_not(app::ask_restart()),
+            Message::LogOut => self.said_if_not(app::ask_log_out()),
             Message::Review => {
                 self.go(Page::Configuration);
                 let id = self.cfg_tabs.iter().find(|&i| self.cfg_tabs.data::<Tab>(i) == Some(&Tab::Changes));
@@ -804,7 +804,7 @@ impl cosmic::Application for Settings {
                     Message::AppDone(shown, blocking(move || app::remove_app(&id)).await)
                 });
             }
-            Message::OpenApp(id) => app::open_app(&id),
+            Message::OpenApp(id) => self.said_if_not(app::open_app(&id)),
             Message::AppDone(id, r) => {
                 self.app_work = None;
                 if let Err(e) = r {
@@ -886,7 +886,7 @@ impl cosmic::Application for Settings {
                 self.machine_key = Some(r);
             }
             Message::CopyKey(key) => return cosmic::iced::clipboard::write(key),
-            Message::OpenUrl(url) => app::open_url(&url),
+            Message::OpenUrl(url) => self.said_if_not(app::open_url(&url)),
 
             Message::GhStart => {
                 self.gh_attempt += 1;
@@ -1032,7 +1032,7 @@ impl cosmic::Application for Settings {
                 .map(cosmic::Action::App);
             }
             Message::AgentLoaded(r) => self.agent = r.into(),
-            Message::OpenAgent => app::open_agent(),
+            Message::OpenAgent => self.said_if_not(app::open_agent()),
             // Off the window's thread (step 5's second review): systemd-run is waited for, bounded.
             Message::AskAgent(h) => return cosmic::task::future(async move { Message::AskedAgent(blocking(move || handoff::open_window(&h, None)).await) }),
             Message::AskedAgent(r) => {
@@ -1117,6 +1117,13 @@ fn words_of(c: &[Choice]) -> impl Iterator<Item = &Choice> {
 
 
 impl Settings {
+    /// A program the page starts that could not start, said on the page (the review of the rebased branch, B12).
+    fn said_if_not(&mut self, r: anyhow::Result<()>) {
+        if let Err(e) = r {
+            self.note = Some((app::said(&e), true));
+        }
+    }
+
     fn page(&self) -> Page {
         self.nav.active_data::<Page>().copied().unwrap_or(Page::Overview)
     }
