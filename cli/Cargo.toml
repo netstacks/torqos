@@ -20,6 +20,9 @@ regex = { version = "1", default-features = false, features = ["std", "unicode-p
 sha-crypt = "0.5"
 # The ISO installer: the image it writes, checked as it is written and read back (ADR-031).
 sha2 = "0.10"
+# torq ask: SIGTERM, SIGHUP and the like read from a signalfd, so the terminal is put back before it ends (the review's
+# B8). Already built for rustyline, with these features.
+nix = { version = "0.30", default-features = false, features = ["signal"] }
 tempfile = "3"
 # A person's SSH tunnels file, ~/.config/torq/tunnels.toml (ADR-050).
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }

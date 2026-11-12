@@ -324,11 +324,50 @@ impl Interrupt {
 
 /// Ctrl-C, while an answer comes: the terminal's keys read as keys (no signal, no echo), the first
 /// Ctrl-C a `stop` sent, a second — or no end within `GIVE_UP` — the terminal as it was and exit 130;
-/// the terminal as it was, too, when this ends.
-struct Keys(rustix::termios::Termios);
+/// the terminal as it was, too, when this ends, and when a signal would end it (`Signals`).
+struct Keys {
+    was: rustix::termios::Termios,
+    /// Whether the person stopped the task (Ctrl-C): `torq ask` then ends 130, as when they leave.
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// The signals that would end `torq ask` with the terminal still in its key mode (the review of the rebased
+/// branch, B8): blocked before any thread starts, so that every later thread has them blocked too, and read from a
+/// signalfd instead. One that comes puts the terminal back and ends as its signal would (128 + its number).
+struct Signals(nix::sys::signalfd::SignalFd);
+
+impl Signals {
+    fn hold() -> Option<Signals> {
+        use nix::sys::signal::{SigSet, Signal};
+        let mut set = SigSet::empty();
+        for s in [Signal::SIGTERM, Signal::SIGHUP, Signal::SIGINT, Signal::SIGQUIT] {
+            set.add(s);
+        }
+        set.thread_block().ok()?;
+        nix::sys::signalfd::SignalFd::new(&set).ok().map(Signals)
+    }
+
+    /// The next of them (blocking), its number.
+    fn next(&self) -> Option<i32> {
+        self.0.read_signal().ok().flatten().map(|i| i.ssi_signo as i32)
+    }
+}
+
+/// Held and then not watched (the terminal could not be read): let go again, so the signals end it as they would.
+impl Drop for Signals {
+    fn drop(&mut self) {
+        use nix::sys::signal::{SigSet, Signal};
+        let mut set = SigSet::empty();
+        for s in [Signal::SIGTERM, Signal::SIGHUP, Signal::SIGINT, Signal::SIGQUIT] {
+            set.add(s);
+        }
+        // Nothing to do if it fails: the signals stay held, read by no one, as they were.
+        let _ = set.thread_unblock();
+    }
+}
 
 impl Keys {
-    fn watch(agent: client::Client) -> Option<Keys> {
+    fn watch(agent: client::Client, signals: Option<Signals>) -> Option<Keys> {
         use rustix::termios::{tcgetattr, tcsetattr, LocalModes, OptionalActions, SpecialCodeIndex};
         let stdin = std::io::stdin();
         let was = tcgetattr(&stdin).ok()?;
@@ -337,7 +376,20 @@ impl Keys {
         keys.special_codes[SpecialCodeIndex::VMIN] = 1;
         keys.special_codes[SpecialCodeIndex::VTIME] = 0;
         tcsetattr(&stdin, OptionalActions::Now, &keys).ok()?;
+        if let Some(signals) = signals {
+            let restore = was.clone();
+            std::thread::spawn(move || {
+                if let Some(n) = signals.next() {
+                    // Putting it back may fail (the terminal gone, as at a hangup): then there is nothing to put back.
+                    let _ = rustix::termios::tcsetattr(std::io::stdin(), rustix::termios::OptionalActions::Now, &restore);
+                    eprintln!("agent: ended by signal {n}, without its answer (it may still be running: torq ask stops nothing by itself)");
+                    std::process::exit(128 + n);
+                }
+            });
+        }
         let restore = was.clone();
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let said_stop = stopped.clone();
         std::thread::spawn(move || {
             use rustix::event::{poll, PollFd, PollFlags, Timespec};
             let (mut i, mut open) = (Interrupt::default(), true);
@@ -358,10 +410,15 @@ impl Keys {
                 }
                 if does == KeyDoes::Stop {
                     eprintln!("agent: stopping (Ctrl-C again to leave now)");
+                    said_stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     // On a thread of its own: the service answers a stop once the task is over, and a second
-                    // Ctrl-C must be read meanwhile.
+                    // Ctrl-C must be read meanwhile. A stop not taken is said (B8).
                     let agent = agent.clone();
-                    std::thread::spawn(move || agent.stop());
+                    std::thread::spawn(move || {
+                        if let Err(e) = agent.stop() {
+                            eprintln!("agent: the stop was not taken: {e:#}");
+                        }
+                    });
                 }
                 if does == KeyDoes::Leave || i.given_up(std::time::Instant::now()) {
                     let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &restore);
@@ -370,13 +427,13 @@ impl Keys {
                 }
             }
         });
-        Some(Keys(was))
+        Some(Keys { was, stopped })
     }
 }
 
 impl Drop for Keys {
     fn drop(&mut self) {
-        let _ = rustix::termios::tcsetattr(std::io::stdin(), rustix::termios::OptionalActions::Now, &self.0);
+        let _ = rustix::termios::tcsetattr(std::io::stdin(), rustix::termios::OptionalActions::Now, &self.was);
     }
 }
 
@@ -437,18 +494,23 @@ pub(crate) fn ask(args: &[String]) -> Result<i32> {
             question_from(&mut std::io::stdin().lock())?
         }
     };
-    let answer = agent.ask(&text, None)?;
+    // Held before any thread starts (a thread started earlier would take them, and end with the terminal raw), and
+    // only now: at the question's prompt, Ctrl-C ends torq ask as it always does.
     use std::io::IsTerminal;
-    let _keys = if std::io::stdin().is_terminal() { Keys::watch(agent.clone()) } else { None };
+    let signals = std::io::stdin().is_terminal().then(Signals::hold).flatten();
+    let answer = agent.ask(&text, None)?;
+    let keys = if std::io::stdin().is_terminal() { Keys::watch(agent.clone(), signals) } else { None };
+    // Stopped by the person (Ctrl-C): 130, as when they leave, whatever the task's own end (B8).
+    let stopped = || keys.as_ref().is_some_and(|k| k.stopped.load(std::sync::atomic::Ordering::Relaxed));
     let mut failed = false;
     for e in answer {
         // An error, then the end: said already, so only the code (as the service closed without its `done`).
         let e = match e {
-            Err(_) if failed => return Ok(1),
+            Err(_) if failed => return Ok(if stopped() { 130 } else { 1 }),
             e => e?,
         };
         if let Some(code) = show(e, false, &mut failed, &mut std::io::stdout(), &mut std::io::stderr())? {
-            return Ok(code);
+            return Ok(if stopped() { 130 } else { code });
         }
     }
     bail!("your agent's service ended before it answered (journalctl -u torq-agent@<you>.service, an administrator's)")
@@ -640,5 +702,18 @@ mod tests {
         assert!(i.given_up(t + GIVE_UP), "no end in time: leave");
         assert_eq!(i.key(b'y', t), KeyDoes::Nothing);
         assert_eq!(i.key(0x03, t), KeyDoes::Leave, "the second Ctrl-C");
+    }
+
+    /// The signals that would end `torq ask` with the terminal raw are held and read instead (the review of the
+    /// rebased branch, B8): a SIGTERM sent to this thread is read from the signalfd as its number, and the thread is
+    /// let go of them after (Drop). Sent to this thread alone, so the test's other threads are untouched.
+    #[test]
+    fn a_signal_is_read_not_taken() {
+        use nix::sys::signal::{raise, SigSet, Signal};
+        let s = Signals::hold().expect("held");
+        raise(Signal::SIGTERM).unwrap();
+        assert_eq!(s.next(), Some(15));
+        drop(s);
+        assert!(!SigSet::thread_get_mask().unwrap().contains(Signal::SIGTERM), "let go again");
     }
 }
