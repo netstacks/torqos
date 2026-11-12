@@ -1144,12 +1144,13 @@ impl<'a> Session<'a> {
             }
             Op::ShowVersion => {
                 let head = self.repo.head()?;
-                let software = self.software(&head)?.unwrap_or_else(|| "(its flake.lock names no inputs)".into());
                 // The number is the running system's own (its os-release), so a machine made from an image says
                 // it before any update; the lock's inputs give only dates (KNOWN-GAPS 6zzf).
-                let software = match self.machine.running_version() {
-                    Some(v) => format!("{v} ({software})"),
-                    None => software,
+                let software = match (self.machine.running_version(), self.software(&head)?) {
+                    (Some(v), Some(inputs)) => format!("{v} ({inputs})"),
+                    (Some(v), None) => format!("{v} (its flake.lock names no inputs)"),
+                    (None, Some(inputs)) => inputs,
+                    (None, None) => "(its flake.lock names no inputs)".into(),
                 };
                 Ok(crate::facts::version(&self.machine.facts()?, &software, &self.ui()))
             }
@@ -3453,6 +3454,11 @@ mod tests {
         let m = Fake::default();
         let out = session(d.path(), None, &m).exec("show version").unwrap();
         assert!(out.lines().next().unwrap().ends_with(&format!("  torq {now}")), "{out}");
+        // A lock that names no inputs: said once, in one pair of brackets.
+        let d = repo();
+        let m = Fake { running: Some("0.4.0".into()), ..Default::default() };
+        let out = session(d.path(), None, &m).exec("show version").unwrap();
+        assert!(out.lines().next().unwrap().ends_with("  0.4.0 (its flake.lock names no inputs)"), "{out}");
     }
 
     /// Audit A3: the software is shown as versions — the running one, and the release's, read from the
