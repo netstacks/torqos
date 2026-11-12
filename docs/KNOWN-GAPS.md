@@ -183,10 +183,15 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 6t. **A power cut mid-build can damage Nix's caches** (`/root/.cache/nix`, the broker's HOME): Nix
    writes them without waiting for the disk, and then every later build fails with "database disk
    image is malformed". Found by cutting the power during first-boot setup, which now clears them
-   when it starts over (nothing else uses them before change #1). On a set-up machine it stays
-   manual: remove `/root/.cache/nix` (only a cache; rebuilt as needed). The broker could do that
-   itself when a build fails that way, with a test that damages the cache.
-   (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
+   when it starts over (nothing else uses them before change #1). On a set-up machine the broker now
+   does it itself (2026-11-12): a build or switch that fails with Nix saying one of those databases is
+   damaged ("database disk image is malformed" or "file is not a database", in a file under that folder)
+   has the folder removed and runs once more, said in the broker's log (test
+   `a_build_failing_on_a_damaged_nix_cache_clears_it_and_builds_again`; Nix 2.34's own message checked by
+   hand against a damaged copy of a fetcher cache). The same message about any other file, the store's
+   database included, is left alone and the change fails as before. Not covered: a cache damaged so that
+   Nix fails without one of those messages, and damage in a person's own `~/.cache/nix` (their `nix`, not
+   the broker's). (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
 6u. **Packages cannot be found by the command they install** (`rg` → ripgrep, `nvim` → neovim).
    `show packages <words>` searches names and descriptions (`nix search` on this machine's
    nixpkgs); which package holds a command needs an index that is not on the machine (nixpkgs'

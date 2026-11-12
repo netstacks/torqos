@@ -426,6 +426,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         .with_people(&s.people)
         .with_agent_limits(&s.agent)
         .with_remote(s.remote.as_deref())
+        .with_nix_cache(s.home.join(".cache/nix"))
         // On a real machine the rollback uses the old system's own commands (its etc/torq/broker.json).
         .with_anchor_settings(config::running_as_root());
     b.ledger.set_via(via, caller);

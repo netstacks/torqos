@@ -75,6 +75,8 @@ pub struct Broker {
     agent_limits: agent::Limits,
     /// Which repositories are the releases (/etc/torq/releases.json, modules/releases.nix; tests: their own).
     releases_file: PathBuf,
+    /// Nix's own caches under the broker's HOME (`.cache/nix`), removed when Nix says one is damaged (None: never).
+    nix_cache: Option<PathBuf>,
     /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
     backup: backup::Backups,
     /// Where the values of the secrets are, and what encrypts them (ADR-052, secrets.rs).
@@ -233,6 +235,29 @@ fn fill(template: &str, vars: &[(&str, &str)]) -> String {
         cmd = cmd.replace(&format!("{{{k}}}"), &shell_quote(v));
     }
     cmd
+}
+
+/// Run `c` with its stderr passed on to the broker's own as it comes, and whether Nix said there that a database of
+/// its own under `cache` is damaged. Nix names the file in its SQLite errors ("… (in '/root/.cache/nix/…')"), so
+/// a damaged store database (/nix/var/nix/db) is never taken for a cache.
+fn watched(c: &mut Command, cache: Option<&Path>) -> std::io::Result<(std::process::Output, bool)> {
+    let mut child = c.stderr(Stdio::piped()).spawn()?;
+    let err = child.stderr.take();
+    let within = cache.map(|p| format!("(in '{}/", p.display()));
+    let passed = std::thread::spawn(move || {
+        let mut damaged = false;
+        let mut to = std::io::stderr();
+        for line in err.into_iter().flat_map(|e| std::io::BufRead::split(std::io::BufReader::new(e), b'\n')).map_while(Result::ok) {
+            // The broker's own stderr: if it is gone, there is nowhere left to say so.
+            let _ = to.write_all(&line).and_then(|()| to.write_all(b"\n"));
+            let line = String::from_utf8_lossy(&line);
+            damaged |= within.as_deref().is_some_and(|w| line.contains(w)) && (line.contains("database disk image is malformed") || line.contains("file is not a database"));
+        }
+        damaged
+    });
+    let out = child.wait_with_output()?;
+    // A reader that panicked saw no damage it could report.
+    Ok((out, passed.join().unwrap_or(false)))
 }
 
 /// Another broker operation holds the lock: try again later. Its own type, so the CLI can say
@@ -622,6 +647,7 @@ impl Broker {
             people: Vec::new(),
             agent_limits: agent::Limits::default(),
             releases_file: PathBuf::from(torq_wire::releases::FILE),
+            nix_cache: None,
             backup: backup::Backups::default(),
             secrets: secrets::Store::default(),
             remote: None,
@@ -1216,6 +1242,12 @@ impl Broker {
     /// Where the releases' setting is read from (a test's own; a machine's is /etc/torq/releases.json).
     pub fn with_releases_file(mut self, path: impl Into<PathBuf>) -> Self {
         self.releases_file = path.into();
+        self
+    }
+
+    /// Where Nix keeps its own caches for the broker's builds (`<HOME>/.cache/nix`; the broker clears XDG_*).
+    pub fn with_nix_cache(mut self, path: impl Into<PathBuf>) -> Self {
+        self.nix_cache = Some(path.into());
         self
     }
 
@@ -2634,12 +2666,16 @@ impl Broker {
         }
         // stdout carries the broker's result (one JSON line with --json): the command's own output
         // (activation scripts print to stdout via systemd-run --pipe) goes to stderr.
-        let status = c
-            .stdout(Stdio::from(std::io::stderr().as_fd().try_clone_to_owned()?))
-            .status()
-            .with_context(|| format!("running {what}"))?;
-        if !status.success() {
-            bail!("{what} command failed ({status}): {cmd}");
+        let out = self.run_again_if_cache_damaged(what, || {
+            let mut c = self.shell(lock, &cmd)?;
+            if let Some(p) = path {
+                c.env("PATH", p);
+            }
+            c.stdout(Stdio::from(std::io::stderr().as_fd().try_clone_to_owned()?));
+            Ok(c)
+        })?;
+        if !out.status.success() {
+            bail!("{what} command failed ({}): {cmd}", out.status);
         }
         Ok(())
     }
@@ -2647,11 +2683,28 @@ impl Broker {
     /// The same, returning what the command prints on stdout.
     fn run_command_output(&self, lock: &Lock, what: &str, template: &str, vars: &[(&str, &str)]) -> Result<String> {
         let cmd = fill(template, vars);
-        let out = self.shell(lock, &cmd)?.stderr(Stdio::inherit()).output().with_context(|| format!("running {what}"))?;
+        let out = self.run_again_if_cache_damaged(what, || {
+            let mut c = self.shell(lock, &cmd)?;
+            c.stdout(Stdio::piped());
+            Ok(c)
+        })?;
         if !out.status.success() {
             bail!("{what} command failed ({}): {cmd}", out.status);
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Run a command; if it failed because Nix found one of its own caches damaged, remove them and run it once
+    /// more (KNOWN-GAPS 6t). Nix writes those caches (the broker's HOME's `.cache/nix`) without waiting for the
+    /// disk, so a power cut mid-build can leave one damaged, and every build after would fail on it. They are
+    /// only caches: Nix makes them again. The store's own database is never touched.
+    fn run_again_if_cache_damaged(&self, what: &str, command: impl Fn() -> Result<Command>) -> Result<std::process::Output> {
+        let cache = self.nix_cache.as_deref();
+        let (out, damaged) = watched(&mut command()?, cache).with_context(|| format!("running {what}"))?;
+        let Some(cache) = cache.filter(|_| damaged && !out.status.success()) else { return Ok(out) };
+        eprintln!("torq-broker: Nix's cache {} is damaged (a power cut during a build can do that): removing it and running {what} again", cache.display());
+        fs::remove_dir_all(cache).with_context(|| format!("removing Nix's damaged cache {}", cache.display()))?;
+        Ok(watched(&mut command()?, None).with_context(|| format!("running {what} again"))?.0)
     }
 
     fn run_shell(&self, lock: &Lock, what: &str, cmd: &str) -> Result<()> {

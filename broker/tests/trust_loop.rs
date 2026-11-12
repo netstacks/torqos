@@ -3661,3 +3661,24 @@ fn a_persons_secrets_rules_are_theirs_alone_at_the_broker() {
     let d = write_diff(cfg.path(), "3.diff", &format!("--- a/users/alice/secrets.json\n+++ b/users/alice/secrets.json\n@@ -1 +1 @@\n-{first}\n+{{\"t\": {{\"kind\": \"token\"}}, \"t\": {{\"kind\": \"ssh-key\"}}}}\n"));
     assert!(b.propose_on(Some(&b.repo.head().unwrap()), &d, "twice", Actor::User, false).is_err());
 }
+
+/// KNOWN-GAPS 6t: a build that fails because Nix found its own cache damaged (as a power cut mid-build leaves it)
+/// is run again once with the cache removed. A damaged database elsewhere (the store's) is left alone, and the
+/// change fails as before.
+#[test]
+fn a_build_failing_on_a_damaged_nix_cache_clears_it_and_builds_again() {
+    for (db, clears) in [("CACHE/fetcher-cache-v4.sqlite", true), ("/nix/var/nix/db/db.sqlite", false)] {
+        let (dir, repo) = config_dir();
+        let cache = dir.path().join("home/.cache/nix");
+        fs::create_dir_all(&cache).unwrap();
+        let db = db.replace("CACHE", &cache.display().to_string());
+        let said = format!("error: executing SQLite statement 'pragma synchronous = off': database disk image is malformed, database disk image is malformed (in '{db}')");
+        let rebuild = format!("if [ -d '{}' ]; then echo \"{said}\" >&2; exit 1; fi", cache.display());
+        let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_nix_cache(&cache);
+        b.init().unwrap();
+        let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+        let p = b.propose(&d, "night light", Actor::User, false).unwrap();
+        assert_eq!(b.apply(p.body.seq, "casey", false).is_ok(), clears, "{db}");
+        assert_eq!(cache.exists(), !clears, "{db}");
+    }
+}
