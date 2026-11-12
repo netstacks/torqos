@@ -1,7 +1,9 @@
 # Design: approving what a person's agent does (ADR-051 and ADR-052 step 4)
 
-**Status:** proposed, 2026-11-12, for the reviewer and the owner. Not decided, not built. Once the owner says
-yes, it becomes an amendment to ADR-051 and ADR-052 in docs/DECISIONS.md, and this file goes.
+**Status:** decided by the owner, 2026-11-12 ("use your rec", for taint: both of the recommendation and
+Alternative 2, below); part 1 built on `work/agents`. Parts 2 to 5 are built after the branch merges, on main, in
+this note's order, each step read by the reviewer. Built, it becomes an amendment to ADR-051 and ADR-052 in
+docs/DECISIONS.md, and this file goes.
 
 **Fixed points (the owner's words):**
 - "one agent per user".
@@ -127,8 +129,10 @@ A person using a coding tool, which is always tainted, would grant again every 8
 - A host or operation the rule doesn't name, or one not on ADR-052 3's closed list.
 - `secret show` (reading a value back), and setting or deleting one.
 
-**Taint, the owner's to decide:**
-- **Recommended (amends ADR-052 4):** a grant holds in a tainted session only when it says so. A grant on
+**Taint, decided by the owner (2026-11-12): both the recommendation and Alternative 2, never for `all`.**
+The rest of this note stands as written (the 2-minute wait, only the person the agent serves is asked, the flood
+limits, the agent's text shown as the agent's). Alternative 1 is not taken.
+- **Decided, 1 (amends ADR-052 4):** a grant holds in a tainted session only when it says so. A grant on
   **one named secret** can be made with `tainted-too`. The dialog shows that in red, the ledger records it, and
   `all` can never be tainted-too.
   - Why: every coding tool is tainted from its first request. Without this, "bypass" never reaches Claude Code's
@@ -136,9 +140,9 @@ A person using a coding tool, which is always tainted, would grant again every 8
   - What still holds: the value goes only to the rule's hosts, and it is never in the agent's hands. A prompt
     injection can spend the credential only at those hosts, and only as far as the credential reaches there.
     So it stays on the person to keep the credential narrow (ADR-052 3).
-- **Alternative 1 (ADR-052 4 as accepted):** taint always asks, whatever the grant. That is safer against
+- **Not taken, Alternative 1 (ADR-052 4 as accepted):** taint always asks, whatever the grant. That is safer against
   injection, but under it a coding tool's secret uses can never be blanket-approved.
-- **Alternative 2, standing:** a per-secret `approve never-even-tainted` in the person's own rules: a commit to
+- **Decided, 2, standing:** a per-secret `approve never-even-tainted` in the person's own rules: a commit to
   their rules, asking their password, and shown in red wherever the secret is listed (`show system secrets`,
   the Secrets page, the dialog's history). It holds until they change it, so there is no regrant every 8 hours.
   It is never available for `all`. The host binding still holds, as above.
