@@ -57,7 +57,11 @@ command can be abbreviated to a unique beginning, and `?` or `help` works anywhe
 | <code>help [&lt;command&gt; &#124; &lt;words&gt;]</code> | the commands, one command, or a search of commands and settings |
 
 Secrets are only for the tokens and keys that programs use and never read: see
-[Security → Secrets](security.md#secrets-for-the-agent-and-programs).
+[Security → Secrets](security.md#secrets-for-the-agent-and-programs). After 0.4.0-rc1, the Secrets
+page of TorqOS Settings runs these same commands, except two that stay in a terminal:
+`request system secret show <name>` (the page never shows a value) and
+`request system secret set <name> file <path>`. On the page a value is typed twice in masked fields
+instead; a value pasted there stays in your clipboard.
 
 ## Configuration mode
 

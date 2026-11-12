@@ -481,6 +481,26 @@ Its §5 lists claims without a test.
    silent (2026-11-12), nor are settings it could not put on the desktop or apps it could not bring back: the
    applet says why in a notification, once for each reason (again after a try worked),
    and in its popup until a try works.
+6zzk. **A value typed on the Secrets page is not wiped from the window's memory** (ADR-052 step 5, 2026-11-12;
+   open). The page empties both fields when Keep is pressed and drops its two strings when the broker has
+   answered, and the window is non-dumpable from the first thing typed on the page (no core, no reading by
+   another program of the same account). But nothing is overwritten: each keystroke makes a new string and
+   frees the old one, COSMIC's text field keeps its own copy of what it shows until it is next drawn empty, and
+   the value passes through a private file in memory (the runtime directory, which can be swapped out where
+   there is swap) and the request's line, as torqcli's does. There is no zeroing string type in the code, and
+   none was added. Root, and a debugger root runs, can read all of it, as ADR-035 says of root.
+6zzl. **A value pasted into the Secrets page stays in the clipboard** (2026-11-12; open, said on the page and
+   in the user guide). Every program of the person's session can read the clipboard, a clipboard manager
+   keeps its history, and the page does not clear it (it would clear whatever else the person copied since).
+   Nothing can be copied or cut out of the masked fields.
+6zzm. **The Secrets page itself has no test, and has not been tried on a desktop** (2026-11-12; open). What it
+   calls is tested in torqcli (`app::secret_tests`, `secrets::tests`); the page's own wiring is not: that the
+   fields are masked, that both empty at Keep, that the window is non-dumpable by then, and that a system
+   secret set from the window brings up COSMIC's dialog (the window is non-dumpable when the broker asks polkit
+   about it, as torqcli is in a desktop terminal). Nothing drives the window in `tests/desktop.nix`. The
+   `tests/secrets.nix` subtest for the same library call was written with the page and has not been run yet.
+   The page also has no file chooser (`set <name> file <path>` stays a terminal's), and a line typed on the
+   Command Line page as `request system secret set <name>` is still answered "typed at a terminal".
 
 ## Dev host quirks (not TorqOS bugs)
 - **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test

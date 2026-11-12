@@ -2119,7 +2119,7 @@ off many times a day.
      What a use can do is what the credential can do at that host: a token with full `repo` scope used on
      `api.github.com` can delete repositories there. The rule limits where the secret goes, not what the
      remote end lets it do, so a narrow credential (a fine-grained token, a deploy key) is the person's
-     lever, and TorqOS Settings says so when one is added (Settings' part deferred: the 2026-11-11 amendment).
+     lever, and TorqOS Settings says so when one is added (on its Secrets page, since 2026-11-12: step 5 below).
   4. **Approval, and taint.** `approve` in the rule sets when a person confirms a use: never, the first use in
      each agent session, or each use. Confirming happens in COSMIC's dialog or at a terminal (ADR-045's
      approvals), showing the secret's name, the operation, the target, the session and its reason. **A tainted
@@ -2147,8 +2147,12 @@ off many times a day.
      session that touched a secret even when its rule asks no approval. Every later use goes only to the
      daemon's log.
   4. **Values can be entered in TorqOS Settings** ("yes"), in a masked field. The value goes from the window
-     to the daemon over its socket and is held nowhere else. Entering one is then no longer a terminal-only
-     step (`app::needs_terminal`).
+     to the broker over its socket, as torqcli's own does (the request's own field), and the window holds it
+     no longer than that. Entering one is then no longer a terminal-only step. (Wording corrected 2026-11-12,
+     as built: this said "to the daemon over its socket", written before "Who holds what" below gave the
+     values to the broker; the daemon takes no value from anyone. It also named `app::needs_terminal`: the
+     Secrets page is the window's way, and `request system secret set` typed on the window's Command Line page
+     is still answered "typed at a terminal".)
 - **Consequences:** New code: the `torq-secrets` daemon (store, rules, the proxy, the SSH agent, the log), the
   `secrets` tree in the schema, its entry on the agent's deny list, the commands above, and a Secrets page in
   TorqOS Settings. Reused: `systemd-creds`, curl, OpenSSH's agent and its destination constraints, the
@@ -2276,6 +2280,39 @@ off many times a day.
   deferred, and every part of TorqOS Settings this ADR names above (Decision 4's values entered there,
   what it says when a secret is added, the commands it shares, the Secrets page) waits with it. Step 4 (approvals and taint) is unchanged: still to build, after rc1. Nothing
   is renamed: the commands, the `secrets` tree and `torq-secrets` stay as built.
+  - **2026-11-12: the owner reversed the deferral of step 5.** The Secrets page is built (below). The scope
+    stands as this amendment says: the narrow store for the tokens and keys that programs use, not a password
+    manager, and the page says so. Step 4 is still not built.
+- **Step 5 built (2026-11-12): the Secrets page in TorqOS Settings** (`settings/src/window/secrets.rs`), what the
+  command line does and nothing more.
+  - **The list** is `show system secrets`, as torqcli prints it. **Each action is torqcli's own line**, shown on
+    its row and run by torqcli's session in the window (`Message::Act`): `allow` and `disallow` (`https <host>`,
+    `ssh <host>`, `agent`), `approve` (`never`, `first-use`, `each-use`) and `delete`, each ending
+    `user <person>` for a person's own. The broker asks what it asks of torqcli: nothing for a person's own, an
+    administrator's approval in COSMIC's dialog for the system's. The approve rule is offered as the command
+    line offers it, and the page says that the asking itself (step 4) is not built.
+  - **A value is the one thing that is not a line.** It is typed twice in masked fields (dots, no way to show
+    it, nothing to copy or cut) and goes through `torq::app::secret_set` to `Real::keep_secret`, the same code
+    torqcli's `set` ends in: a private file in memory (the session's runtime directory, else `/dev/shm`), read into the socket
+    request's own field. It is part of no command, argument, environment, log, notification or message; the
+    page shows `request system secret set <name>` without it, and the ledger records the set without it, as
+    before. Refused before anything is sent, in words that repeat nothing typed: no value, the two not the
+    same, more than 16 KiB, a name that is not one. Who may set what is the broker's to say, from the caller
+    the kernel names, unchanged: the broker was not changed for this step.
+  - **In the window's memory.** The window is made non-dumpable (as torqcli is while it holds a password or a
+    value, ADR-040) the first time the page takes anything typed, and stays so until it is closed. Both
+    fields are emptied when Keep is pressed, kept or refused, and the two strings are dropped when the broker
+    has answered. Not promised: COSMIC's text field keeps its own copy of what it shows until it is next
+    drawn empty, and memory given back is not overwritten (no zeroing type; none was added). A value pasted
+    stays in the clipboard. KNOWN-GAPS 6zzk, 6zzl.
+  - **Left to the terminal:** reading a value back (`request system secret show`), and a value from a file
+    (`set <name> file <path>`, an SSH key of several lines): the window has no file chooser, and one was not
+    added for this.
+  - **Tested:** torqcli's unit tests (a stand-in broker is given the value in its private file, and it is in
+    no argument, environment, log or answer, kept or refused; the refusals), each seen to fail with its guard
+    broken. `tests/secrets.nix` has a subtest that keeps a value through `app::secret_set` (an example program
+    built for the test alone), uses it, and looks for it in every file of the machine: written, not yet run.
+    The page itself has no test: nothing drives the window (KNOWN-GAPS 6zzm).
 
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 

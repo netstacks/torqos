@@ -85,8 +85,30 @@ A secret is a token or key that a program, such as the agent, may use and never 
 encrypted and outside the configuration; the ledger records each change and first use, never the
 value. It is for that and nothing more.
 
-Secrets are managed only from the command line (`request system secret …`). For your everyday passwords, use a password manager such as 1Password: TorqOS does
+Secrets are managed from the command line (`request system secret …`). For your everyday passwords, use a password manager such as 1Password: TorqOS does
 not try to be one.
+
+After 0.4.0-rc1, TorqOS Settings has a **Secrets** page that does what those commands do, and shows
+each command beside its button:
+
+- It lists the secrets as `show system secrets` does: names, whose they are, whether each has a value,
+  and what each may be used for. It never shows a value.
+- It allows and takes back a use (a host over HTTPS or SSH, or the agent), sets when a person is asked
+  before the agent uses a secret, and deletes one. A secret of your own needs no password; a system
+  secret needs an administrator, who approves in COSMIC's dialog, as for any system change.
+- It takes a value, typed twice in fields that show dots. The value goes to the broker the way
+  `torqcli` sends it. It is not part of any command, log or history entry.
+
+What the page does not do:
+
+- **It does not show a value back.** `request system secret show <name>`, in a terminal, does.
+- **It does not read a value from a file.** For an SSH key (several lines), use
+  `request system secret set <name> file <path>` in a terminal.
+- **It does not clear your clipboard.** A value you paste into the page stays in the clipboard, where
+  other programs of yours can read it, until you copy something else.
+- **It does not ask before the agent uses a secret.** That step is not built yet, on the page or on
+  the command line. Until it is, the agent may use only a secret set to `never`, from a session that
+  has read no untrusted text.
 
 ## Checking a release yourself
 
