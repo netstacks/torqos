@@ -327,7 +327,9 @@ Its §5 lists claims without a test.
    2026-11-12). The releases are exactly `torq.releases.url` and `torq.releases.former` (today
    `torqosorg/torqos-releases` and `netstacks/torqos-releases` on GitHub), compared without scheme, user
    information, default port, `www.`, `.git`, a final `/` or case, percent-escapes decoded. A git lock there must
-   be a commit the release key signed; a tarball of them (`github:`, an archive URL) is refused. Anything else is
+   be a commit the release key signed; a tarball of them is refused, exactly as ADR-028's amendment lists (`github:`,
+   `gitlab:`, `sourcehut:` naming them; an archive under their address or `.git/`; GitHub's `codeload` and `api` tarball
+   hosts for a GitHub address). A tarball of them from any other host is another address. Anything else is
    not the releases: any other source a person sets, the development repository at the same tag included, or the
    releases under some other spelling, is taken as that person's choice, with no signature asked. The compare shows
    it under `[edit system software torq]`, and committing it needs a person at a terminal like any system change.
@@ -352,6 +354,20 @@ Its §5 lists claims without a test.
    again and its hash compared; the release key's signature). What it restores was checked when it was first
    applied, by the TorqOS of that time: on a machine that took an update unchecked (6zzh), an undo can bring that
    lock back unchecked again. Checking on revert as on apply is the fix, for later.
+6zzj. **A lock-only change can replace the nixpkgs TorqOS builds with, unsigned** (the second review of
+   work/release-alias, 2026-11-12; open, and as old as the releases: 0.3.2 and 0.4.0-rc1 have it too). What the
+   release key signs is TorqOS's own tree. The machine's lock also pins the inputs TorqOS takes (`nixpkgs`, which the
+   machine follows as `nixpkgs.follows = "torq/nixpkgs"`, and `nixpkgs-cosmic`), and a change to those nodes, or to
+   the `torq` node's `inputs`, is checked only for its hash (the rev fetched again), never for where it comes from.
+   Shown with Nix on 2026-11-12: with `torq` at its locked commit and `flake.nix` as it was, a lock whose `nixpkgs`
+   node's `locked` alone is rewritten builds the other nixpkgs. So the source reads as the releases and TorqOS's
+   commit is signed, while almost all of the system comes from a nixpkgs nobody chose. It needs a person's approval at
+   a terminal. torqcli's compare shows such a change as `[edit system software] - nixpkgs <date>; + nixpkgs <date>`
+   (dates, no address); a change proposed to the socket shows its diff, the URL in it. The fix proposed, not built:
+   the broker reads the signed TorqOS commit's own `flake.lock` and requires the nodes the machine takes through
+   `torq` (its `inputs`, and what the machine follows from it) to be what that lock pins. A change to them is allowed
+   only as the declared `request system update all`, and only from the same `original` (the same nixpkgs branch on
+   GitHub), the address checked as the releases' is.
 
 ## Desktop (off in the base; the torqos-desktop configuration's, ADR-034, M4)
 7. ~~niri runs its stock config.~~ Moot: the desktop is COSMIC (ADR-045); `modules/desktop.nix`

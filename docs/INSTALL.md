@@ -127,7 +127,8 @@ downgrade: KNOWN-GAPS 6zzd). The releases' earlier address (`netstacks/torqos-re
 `torq.releases.former`) is still the releases as git, checked the same, and an update moves a
 `git+https://` source there to the address now (`request system update`, `configure`, `show | compare`,
 `commit`); the releases as a tarball (`github:`) are refused at either address. On 0.3.2 update as
-usual; on 0.4.0-rc1 with the old address, set the new one by hand first (KNOWN-GAPS 6zzg, 6zzh;
+usual; on 0.4.0-rc1 with the old address, set the new one by hand first, at the rc's tag
+(`?ref=refs/tags/v0.4.0-rc1`; `?ref=stable` only once 0.4.0 is on it) (KNOWN-GAPS 6zzg, 6zzh;
 ADR-028, amended 2026-11-12).
 
 NixOS's own software (the kernel, services, applications) comes signed from NixOS's binary cache, as

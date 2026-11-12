@@ -432,15 +432,32 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     Any other spelling is another address, not the releases.
   - **As git only:** a git lock at either address is the releases. Its commit must be signed by the release key,
     checked at lock (torqcli) and at apply (the broker), against the releases at their address now. A tarball of
-    them (`github:` in any form, with or without a `host`; an archive URL) is refused at lock and at apply: a
-    tarball is not bound to the commit whose signature is checked, as a git lock's tree is.
+    them is refused at lock and at apply, since it is not bound to the commit whose signature is checked, as a git
+    lock's tree is. Exactly these are refused as tarballs: a `github:`, `gitlab:` or `sourcehut:` lock naming the
+    releases' owner and repository (with or without a `host`; for `gitlab:` and `sourcehut:` that is broader than
+    needed, and harmless: the same mirror as `git+https://` is not the releases and passes as any other source); and
+    a `tarball` or `file` lock at a releases address or under it (`…/archive/…`, `….git/archive/…`), or for a GitHub
+    address under GitHub's tarball hosts for it (`codeload.github.com/<owner>/<repo>/…`,
+    `api.github.com/repos/<owner>/<repo>/…`). Any such tarball is refused in any changed node, not only TorqOS's
+    (a release's file used as some other input would be too: harmless, and said here). A tarball of the releases
+    served from any other host is another address, not refused and not checked (KNOWN-GAPS 6zze). A tarball lock
+    already in a machine's lock is left as it is when something else changes: refusing it then would leave the
+    machine unable to change anything.
   - **What the lock names and what it takes agree:** Nix compares `flake.nix` with a lock's `original` only, and
     builds its `locked`, so a lock-only change could keep the source reading as the releases while taking TorqOS
-    from elsewhere, with no signature asked (found by the review, shown with Nix on 2026-11-12). The broker
-    refuses a lock in which any changed node, or the node the root's `torq` input resolves to (by name, or through
-    other inputs with `follows`; changed or not), has an `original` naming the releases and a `locked` that is not
-    the releases at all. A source honestly moved away moves `original` and `flake.nix` with it: shown as a change of
-    source, and allowed.
+    from elsewhere, with no signature asked (found by the review, shown with Nix on 2026-11-12). Any change to the
+    lock, whatever part of it changed (a node's `locked`, its `original` or `inputs`, the root's inputs, a node
+    added), is looked at. The broker refuses a lock in which any node that differs from the old lock, or the node the
+    root's `torq` input resolves to (by name, or through other inputs with `follows`; whether it changed or not), has
+    an `original` naming the releases and a `locked` that is not the releases at all. A `torq` input that leads to no
+    node (missing, a path that does not resolve or goes round) is refused too. A source honestly moved away moves
+    `original` and `flake.nix` with it: shown as a change of source, and allowed.
+  - **Not covered yet: TorqOS's other inputs.** What is signed is TorqOS's own tree. The machine's lock also pins
+    the inputs TorqOS takes (`nixpkgs`, followed by the machine's `nixpkgs.follows = "torq/nixpkgs"`, and
+    `nixpkgs-cosmic`), and a lock-only change to those is checked only for its hash: shown with Nix on 2026-11-12, a
+    lock whose `nixpkgs` node alone is rewritten builds the other nixpkgs while TorqOS stays at its signed commit
+    (KNOWN-GAPS 6zzj). So "what is built is what the release key signed" holds for TorqOS's own tree, not yet for
+    the system around it.
   - **The setting:** every TorqOS machine has `/etc/torq/releases.json` (modules/releases.nix writes it). If it is
     missing or cannot be read, the broker refuses any change to the lock rather than treating nothing as the
     releases. Fields it does not know are passed by, so that a broker reading a newer TorqOS's setting (during an

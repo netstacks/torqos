@@ -94,8 +94,9 @@ The releases are taken as git only: a `github:` source for them is refused, at e
     - **On TorqOS 0.3.2: do not set the new address by hand.** Update as usual: 0.3.2 checks only
       its own (old) address, which GitHub redirects, and 0.4.0 moves it for you afterwards.
     - **On 0.4.0-rc1, with the old address as your source: set the new address by hand first**
-      (`set system software torq source "git+https://github.com/torqosorg/torqos-releases?ref=stable"`,
-      commit), then update. rc1 checks only the new address.
+      (`set system software torq source "git+https://github.com/torqosorg/torqos-releases?ref=refs/tags/v0.4.0-rc1"`,
+      commit), then update. rc1 checks only the new address. Use the rc's tag, not `?ref=stable`, until
+      0.4.0 is on `stable`: `stable` is still 0.3.2, and would take you back to it (6zzg).
 
 ## Going back to earlier software
 
