@@ -111,7 +111,13 @@ fn notify(c: &Crash, uid: u32) -> zbus::Result<()> {
                     // The person said so: only now is the crash read, and attached.
                     eprintln!("torq-crash-watch: asked about pid {}", c.pid);
                     if let Err(e) = handoff::open_window(&c.handoff(c.info(uid).as_deref())) {
+                        // The person clicked and nothing opened: said to them, not only to the journal.
                         eprintln!("torq-crash-watch: opening the agent's window: {e:#}");
+                        let none = std::collections::HashMap::<&str, zbus::zvariant::Value>::new();
+                        let told: zbus::Result<u32> = bus.call("Notify", &("TorqOS", 0u32, "torqos", "The agent's window did not open", crash::markup(&torq::app::said(&e)).as_str(), Vec::<&str>::new(), none, -1i32));
+                        if let Err(e) = told {
+                            eprintln!("torq-crash-watch: saying so: {e}");
+                        }
                     }
                     return Ok(());
                 }
@@ -119,8 +125,13 @@ fn notify(c: &Crash, uid: u32) -> zbus::Result<()> {
                 crash::Heard::Nothing => {}
             },
             Err(_) => {
-                // Past its deadline: taken down, which also wakes the reader with the daemon's close.
-                let _: zbus::Result<()> = bus.call("CloseNotification", &(id,));
+                // Past its deadline: taken down, which also wakes the reader with the daemon's close. The reader
+                // otherwise ends at the daemon's next signal of either kind, about any notification (its send
+                // then fails): it keeps nothing of the offer's.
+                let closed: zbus::Result<()> = bus.call("CloseNotification", &(id,));
+                if let Err(e) = closed {
+                    eprintln!("torq-crash-watch: taking down an expired offer: {e}");
+                }
                 return Ok(());
             }
         }

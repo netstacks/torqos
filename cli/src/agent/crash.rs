@@ -79,7 +79,7 @@ pub fn watch_command() -> std::process::Command {
 }
 
 /// Text put in a notification's body: escaped, as the notification spec's markup reads it.
-fn markup(s: &str) -> String {
+pub fn markup(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 

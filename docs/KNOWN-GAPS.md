@@ -1219,9 +1219,10 @@ Its §5 lists claims without a test.
    - **Decline is offered only on the person's own agent's proposals.** Someone else's change waiting for the
      person (another person's, a pull) is declined in torqcli (`request system decline <n>`), which asks an
      administrator's password where the broker says so.
-   - **A crash notification's thread** ends when the notification is clicked, closed or expires (10 minutes,
-     said to the daemon); a daemon that never says so leaves it waiting until its next signal. At most 3 are
-     open at once.
+   - **A crash notification** is waited for until it is clicked, closed or expires (10 minutes, said to the
+     daemon), and given up 30 seconds after that whatever the daemon says: taken down, its slot freed (at most 3
+     open at once). The thread reading the daemon's signals for it ends at the daemon's next signal about any
+     notification. A daemon that never sends another keeps that one idle thread, holding nothing of the crash.
 
 6zzo. **torq-mcp, Claude Code as a tool, and the broker's resident rule (ADR-051 5 and 7, step 5, built 2026-11-10,
    `tests/agent-mcp.nix`).** Open:

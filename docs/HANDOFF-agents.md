@@ -55,7 +55,7 @@ Partly done in the WIP commit, untested:
   first defence and the cgroup and ptrace guards second.
 - (9) done, type-checked only (settings has no tests): `open_window` is off the update path (it froze the UI for up to 10 s), its failure said; `cosmic-edit`/`xdg-open` are
   reaped in tunnels.rs, and neither starting is said.
-- (10) crash offers wait with a timeout, so three unclosed notifications don't stop them for good.
+- (10) done: crash offers wait with a timeout (expiry + 30 s), so three unclosed notifications don't stop them for good; `heard()`/`give_up_at()` tested and mutation-checked; a failed open said to the person. The watcher's loop is type-checked only.
 
 Not started:
 - (11) a launch failure after `systemd-run` is silent (handoff.rs), and no activation token is passed.
@@ -74,7 +74,7 @@ Not started:
   - the decline check's order in `schedule` (at.rs);
   - window.rs's `p.yours` gates and the `Failed` arm;
   - (crash.rs's `_TRANSPORT`, `.service` and COREDUMP_UID checks: done with finding 8, each with its own forged case;)
-  - `notify()`'s id, key and deadline;
+  - (`notify()`'s id, key and deadline: done with finding 10, in `crash::heard` and `give_up_at`;)
   - the model judged only at session start: re-judge it at apply, or say why the start is enough.
 
 To finish the batch, settle the WIP's items, then re-run:
