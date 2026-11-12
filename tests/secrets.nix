@@ -2,12 +2,23 @@
 # runs them; a second machine is the HTTPS host (`api.example.test`, with a certificate from a test authority
 # the first machine trusts), and writes down every request it is sent, so the test can see both ends: what
 # reached the host, and what came back to the program that asked.
+# Last, the way TorqOS Settings keeps a value (step 5): usable, and in no file of the machine.
 { pkgs, self }:
 
 let
   # The test's own passwords, as tests/socket.nix has them: dev is the owner (wheel), sam is not.
   devHash = "$6$torqsocketsalt$Z7RLey3l5vKGfukhfuZYYM/EjWNo7QM8.65r88XmZ9z3/jBCY.NAnH7RwYpiLoE2fedxUd/I7UFcKDX1KEXDg/";
   samHash = "$6$torqsocketsal2$p4ihhGlRahyPpWY43xyA52iNOzVtnXF1dQCVxf0eBeRehXODXyWOdptk3znfwCfmhj5ERP28izhmIRqrAL5J00";
+  # TorqOS Settings' way of keeping a value (`torq::app::secret_set`, what its masked fields call), without the
+  # window: torqcli's package, building its one example and nothing else. This test's alone; no system has it.
+  windowSet = self.packages.${pkgs.stdenv.hostPlatform.system}.torq.overrideAttrs (_: {
+    pname = "torq-secret-set-example";
+    cargoBuildFlags = [ "--example" "secret_set" ];
+    doCheck = false;
+    installPhase = ''
+      install -Dm755 "$(find . -path '*/release/examples/secret_set' -type f)" $out/bin/torq-secret-set-example
+    '';
+  });
   certs = pkgs.runCommand "torq-secrets-test-certs" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir $out
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=TorqOS test authority" -keyout $out/ca.key -out $out/ca.crt
@@ -91,7 +102,7 @@ pkgs.testers.runNixOSTest {
     security.pki.certificateFiles = [ "${certs}/ca.crt" ];
     networking.hosts.${nodes.far.networking.primaryIPAddress} = [ "api.example.test" "other.example.test" "git.example.test" ];
     networking.hosts.${nodes.elsewhere.networking.primaryIPAddress} = [ "elsewhere.example.test" ];
-    environment.systemPackages = [ pkgs.socat pkgs.curl pkgs.jq ];
+    environment.systemPackages = [ pkgs.socat pkgs.curl pkgs.jq windowSet ];
   };
 
   testScript = ''
@@ -272,5 +283,33 @@ pkgs.testers.runNixOSTest {
         assert "dev-token-1" not in journal, "never in the daemon's log"
         assert "torq-agent used dev's secret gh for GET https://api.example.test/echo: 200" in journal, journal
         assert "dev used dev's secret gh" in journal
+
+    with subtest("a value kept the way TorqOS Settings keeps it is usable, and is in no file"):
+        # The window's own call (app::secret_set), as dev: over the socket, the value the request's own.
+        keep = "su -s /bin/sh {} -c 'torq-secret-set-example {}'"
+        said = machine.succeed("printf %s window-token-7 | " + keep.format("dev", "win dev"))
+        assert "The value of dev's secret win is kept" in said and "window-token-7" not in said, said
+        # Kept by the broker, encrypted: what is in the store is not the value, and decrypts to it.
+        store = "/var/lib/torq/secrets/store/users/dev/win"
+        assert machine.succeed(f"stat -c %a:%U {store}").strip() == "600:root"
+        assert machine.succeed(f"systemd-creds decrypt --name=torq-secret.user.dev.win {store} -") == "window-token-7"
+        # Usable: the host is sent it, the program that asked is not.
+        machine.succeed("su - dev -c 'torq request system secret allow win https api.example.test user dev'")
+        status, body, _ = use("dev", "/user/dev/win/api.example.test/echo")
+        assert status == 200 and "window-token-7" not in body, (status, body)
+        assert requests()[-1]["headers"]["Authorization"] == "Bearer window-token-7", requests()[-1]
+        # In no file of the machine's, the ledger and the logs among them (dev's own torqcli log is in /home).
+        found = machine.succeed("grep -rlaF -D skip window-token-7 /home /root /tmp /run /dev/shm /var /etc 2>/dev/null || true")
+        assert found.strip() == "", found
+        assert "window-token-7" not in machine.succeed("torq-broker log")
+        assert "window-token-7" not in machine.succeed("journalctl --no-pager -b")
+        # Who may is the broker's to say, this way as any: not another person's, not the system's without an
+        # administrator's approval, and nothing typed is no value. What was kept stays.
+        machine.fail("printf %s window-token-8 | " + keep.format("sam", "win dev"))
+        machine.fail("printf %s window-token-8 | " + keep.format("sam", "win"))
+        machine.fail("printf %s window-token-8 | " + keep.format("dev", "win"))
+        machine.fail(": | " + keep.format("dev", "win dev"))
+        assert machine.succeed(f"systemd-creds decrypt --name=torq-secret.user.dev.win {store} -") == "window-token-7"
+        machine.fail("test -e /var/lib/torq/secrets/store/system/win")
   '';
 }
