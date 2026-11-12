@@ -951,7 +951,8 @@ fn connected(client: u16, server: u16) -> Result<(String, u32)> {
     let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
     let tables = format!("{}{}", read("/proc/net/tcp"), read("/proc/net/tcp6"));
     let (passwd, group) = (read("/etc/passwd"), read("/etc/group"));
-    let account = |uid: u32| torq_broker::socket::caller(uid, &passwd, &group).map(|c| c.name);
+    // Only the account's name is wanted: whom an agent serves is not read here (no agent map is passed).
+    let account = |uid: u32| torq_broker::socket::caller(uid, &passwd, &group, &Default::default(), &Default::default()).map(|c| c.name);
     let daemon = uid_of_connection(&tables, server, client).map(account).transpose()?;
     if daemon.as_deref() != Some(DAEMON) {
         anyhow::bail!("refused: no connection from 127.0.0.1:{client} to the secrets daemon");
