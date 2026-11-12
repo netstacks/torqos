@@ -234,16 +234,18 @@ pkgs.testers.runNixOSTest {
             frames = [json.loads(l) for l in machine.succeed(f"su -s /bin/sh {user} -c {shlex.quote(cmd)}").splitlines()]
             return next((f["exit"] for f in frames if "exit" in f), None), " ".join(f.get("err", "") + f.get("out", "") for f in frames)
         seq = p["seq"]
-        for args in [["apply", str(seq)], ["decline", str(seq)], ["revert", str(seq)], ["trust-grant", "10"]]:
+        for args in [["apply", str(seq)], ["decline", str(seq)], ["revert", str(seq)], ["trust-grant", "--minutes=10"]]:
             code, said = broker("torq-resident-alice", {"args": ["--json"] + args})
-            assert code not in (0, None), (args, code, said)
+            # Refused at the gate, for that reason: an agent proposes, nothing more (not any failure).
+            assert code not in (0, None) and "the agent proposes; a person applies" in said, (args, code, said)
         assert not [e for e in entries() if e["kind"] in ("applied", "declined") and e["data"].get("proposal") == seq], "nothing done to it"
         assert not [e for e in entries() if e["kind"] == "trust_granted" and e.get("approved_by") == "torq-resident-alice"], "no trust from it"
         head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
         bobs = '--- /dev/null\n+++ b/users/bob/packages.json\n@@ -0,0 +1 @@\n+["htop"]\n'
         code, said = broker("torq-resident-alice", {"args": ["--json", "propose", f"--base={head}", "--reason=htop for bob"], "diff": bobs})
         assert code not in (0, None) and "bob" in said, (code, said)
-        assert [e for e in entries() if e["kind"] == "refused"][-1]["data"].get("caller") == "torq-resident-alice", "refused on the record, as its caller"
+        refused = [e for e in entries() if e["kind"] == "refused"][-1]
+        assert refused["data"].get("caller") == "torq-resident-alice" and refused["data"].get("agent") == "torq-agent-alice", ("refused on the record, as its caller", refused)
 
     with subtest("the model's key: the resident agent's credential; nothing run as the agent elsewhere reads it"):
         auth = machine.succeed("cat /run/fake-model/auth").split("\n")
@@ -287,7 +289,8 @@ pkgs.testers.runNixOSTest {
         # link, and the resident agent does not start, saying why; put right, it starts again.
         # Each refusal read from the journal after its own restart, not an earlier one's (C16: the same words twice).
         def journal_after(cursor, text):
-            machine.succeed(f"journalctl -u {unit} --no-pager --after-cursor={shlex.quote(cursor)} | grep -q {shlex.quote(text)}")
+            # Waited for: journald may write it a moment after the restart has failed.
+            machine.wait_until_succeeds(f"journalctl -u {unit} --no-pager --after-cursor={shlex.quote(cursor)} | grep -q {shlex.quote(text)}", timeout=30)
         def cursor():
             return machine.succeed(f"journalctl -u {unit} -n 0 --show-cursor --no-pager | sed -n 's/^-- cursor: //p'").strip()
         for bad in ["chmod 644 /var/lib/torq/secrets/model.key", "chown alice /var/lib/torq/secrets/model.key"]:
@@ -308,6 +311,9 @@ pkgs.testers.runNixOSTest {
         # The review of the rebased branch, B16: agent-assertions checks the configuration; this, the running machine.
         assert machine.succeed("sysctl -n kernel.yama.ptrace_scope").strip() in ("1", "2", "3")
         sibling = machine.succeed("setpriv --reuid torq-agent-alice --regid torq-agent-alice --clear-groups -- sleep 600 >/dev/null 2>&1 & echo $!").strip()
+        machine.wait_until_succeeds(f"test \"$(ps -o user= -p {sibling})\" = torq-agent-alice", timeout=10)
+        # The control: a program of the agent's traces its own child, which Yama allows.
+        machine.succeed("setpriv --reuid torq-agent-alice --regid torq-agent-alice --clear-groups -- strace -f -e trace=none -o /dev/null true")
         # Same uid, not its descendant: Yama refuses the attach (with scope 0 it would be taken).
         machine.fail(f"setpriv --reuid torq-agent-alice --regid torq-agent-alice --clear-groups -- strace -p {sibling} -e trace=none -o /dev/null")
         machine.succeed(f"kill {sibling}")
@@ -407,8 +413,9 @@ pkgs.testers.runNixOSTest {
         reading_keys("g")
         machine.succeed("su - alice -c 'tmux send-keys -t g C-c'")
         pane_says("g", "agent: stopping", 10)
-        # Not at once: it waits GIVE_UP (5 s) for the stop. That much is time, by its nature.
-        machine.sleep(3)
+        # Not at once: it waits GIVE_UP (5 s) for the stop. That much is time, by its nature: 2 s, well inside it on a
+        # slow machine.
+        machine.sleep(2)
         machine.fail("su - alice -c 'tmux capture-pane -p -t g' | grep -q 'exit='")
         pane_says("g", "exit=130", 15)
         machine.succeed(f"systemctl thaw {unit}")
