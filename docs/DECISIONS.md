@@ -2970,6 +2970,9 @@ vouches for, that only proposes, every change ledgered and undone in one command
   (Decision 4) is still not built, and only the resident agent starts a session untainted, so until it is no
   agent's use is let through: a coding tool's session is tainted from its start, and the resident agent has no
   tool that sends HTTPS or signs (KNOWN-GAPS 6zzs).
+  The Secrets page (step 5) follows it: a person's own secret offers their own agent, as before; a system
+  secret shows each person's agent it names, each with the line that takes it back, offers the person's own,
+  and leaves anyone else's to the command line (`allow <name> agent <person>`).
 
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 

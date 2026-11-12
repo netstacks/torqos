@@ -622,8 +622,9 @@ pub struct Secret {
     pub https: Vec<String>,
     /// The hosts it may sign for over SSH.
     pub ssh: Vec<String>,
-    /// The agent may use it.
-    pub agent: bool,
+    /// Whose agents may use it, by person: a person's own secret, that person's alone (`torq-agent` in their
+    /// rules); a system secret, each person whose agent's account it names (`torq-agent-<person>`).
+    pub agents: Vec<String>,
     /// When a person is asked before the agent uses it.
     pub approve: Approve,
 }
@@ -631,6 +632,11 @@ pub struct Secret {
 fn secret_of(l: crate::secrets::Listed) -> Secret {
     let said = l.said();
     let r = l.rule;
+    // A person's own rules say `torq-agent` for their own agent; the system's name each by its account.
+    let agents = match &l.owner {
+        Some(u) => r.as_ref().filter(|r| r.actors.iter().any(|a| a == torq_wire::secrets::AGENT)).map(|_| u.clone()).into_iter().collect(),
+        None => r.iter().flat_map(|r| &r.actors).filter_map(|a| a.strip_prefix(&format!("{}-", torq_wire::secrets::AGENT))).map(String::from).collect(),
+    };
     Secret {
         name: l.name,
         user: l.owner,
@@ -639,7 +645,7 @@ fn secret_of(l: crate::secrets::Listed) -> Secret {
         kind: r.as_ref().map(|r| r.kind),
         https: r.as_ref().and_then(|r| r.https.as_ref()).map(|h| h.hosts.clone()).unwrap_or_default(),
         ssh: r.as_ref().and_then(|r| r.ssh.as_ref()).map(|s| s.hosts.clone()).unwrap_or_default(),
-        agent: r.as_ref().is_some_and(|r| r.actors.iter().any(|a| a == torq_wire::secrets::AGENT)),
+        agents,
         approve: r.map(|r| r.approve).unwrap_or_default(),
     }
 }
@@ -760,14 +766,18 @@ mod secret_tests {
         let s = secret_of(crate::secrets::Listed { owner: Some("dev".into()), name: "gh".into(), has_value: true, rule: Some(rule) });
         assert_eq!(s.said, "token, has a value; https to api.github.com, uploads.github.com; the agent too, approved never");
         assert_eq!((s.name.as_str(), s.user.as_deref(), s.has_value, s.kind), ("gh", Some("dev"), true, Some(Kind::Token)));
-        assert_eq!((s.https, s.ssh, s.agent, s.approve), (vec!["api.github.com".to_string(), "uploads.github.com".to_string()], vec![], true, Approve::Never));
+        assert_eq!((s.https, s.ssh, s.agents, s.approve), (vec!["api.github.com".to_string(), "uploads.github.com".to_string()], vec![], vec!["dev".to_string()], Approve::Never));
         let mut rule = Rule::new(Kind::SshKey);
         rule.ssh = Some(Ssh { hosts: vec!["github.com".into()], known: vec![] });
+        let s = secret_of(crate::secrets::Listed { owner: None, name: "deploy".into(), has_value: false, rule: Some(rule.clone()) });
+        assert_eq!((s.kind, s.https, s.ssh, s.agents, s.approve), (Some(Kind::SshKey), vec![], vec!["github.com".to_string()], Vec::<String>::new(), Approve::FirstUse));
+        // A system secret names each agent by its account: the page has the people they serve.
+        rule.actors = vec![format!("{AGENT}-alice"), format!("{AGENT}-bob")];
         let s = secret_of(crate::secrets::Listed { owner: None, name: "deploy".into(), has_value: false, rule: Some(rule) });
-        assert_eq!((s.kind, s.https, s.ssh, s.agent, s.approve), (Some(Kind::SshKey), vec![], vec!["github.com".to_string()], false, Approve::FirstUse));
+        assert_eq!(s.agents, vec!["alice".to_string(), "bob".to_string()]);
         // A value with no rule yet: nothing says what it is.
         let s = secret_of(crate::secrets::Listed { owner: None, name: "new".into(), has_value: true, rule: None });
-        assert_eq!((s.said.as_str(), s.kind, s.agent), ("has a value; used for nothing", None, false));
+        assert_eq!((s.said.as_str(), s.kind, s.agents), ("has a value; used for nothing", None, Vec::<String>::new()));
     }
 }
 

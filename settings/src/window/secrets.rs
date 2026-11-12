@@ -272,7 +272,24 @@ impl Settings {
         // Who, and when a person is asked: both need a rule to be in, and a use is what makes one.
         match listed.filter(|x| x.kind.is_some()) {
             Some(x) => {
-                let agent = if x.agent { run("The agent may use it, never reading it. Stop the agent using it".into(), &["disallow", name, "agent"], named) } else { run("The agent may not use it. Let the agent use it, never reading it".into(), &["allow", name, "agent"], named) };
+                // A person's own secret: their own agent alone (`agent`, then `user <you>`). A system secret names
+                // each person's agent that may use it (`agent <person>`): yours is offered, anyone else's is typed.
+                let mut agent = settings::section().title("The agent");
+                if user.is_some() {
+                    agent = agent.add(if x.agents.is_empty() {
+                        run("The agent may not use it. Let the agent use it, never reading it".into(), &["allow", name, "agent"], named)
+                    } else {
+                        run("The agent may use it, never reading it. Stop the agent using it".into(), &["disallow", name, "agent"], named)
+                    });
+                } else {
+                    for p in &x.agents {
+                        agent = agent.add(run(format!("{p}'s agent may use it, never reading it. Stop it using it"), &["disallow", name, "agent", p.as_str()], named));
+                    }
+                    if let Some(me) = s.me.as_ref().filter(|me| !x.agents.contains(me)) {
+                        agent = agent.add(run("Let your agent use it, never reading it".into(), &["allow", name, "agent", me.as_str()], named));
+                    }
+                    agent = agent.add(widget::text::caption(format!("Another person's agent, on the Command Line page: {}", command(&["allow", name, "agent", "<person>"], None))));
+                }
                 let mut approve = settings::section().title("Before the agent uses it, a person is asked");
                 for (rule, label) in [(Approve::Never, "Never"), (Approve::FirstUse, "The first time in each of the agent's sessions"), (Approve::EachUse, "Every time")] {
                     approve = if x.approve == rule {
@@ -281,7 +298,7 @@ impl Settings {
                         approve.add(run(label.into(), &["approve", name, rule.word()], named))
                     };
                 }
-                page = page.push(settings::section().title("The agent").add(agent)).push(approve).push(widget::text::caption(
+                page = page.push(agent).push(approve).push(widget::text::caption(
                     "The asking itself is not built yet. Until it is, the agent may use only a secret set to never, and only from a session that has read nothing from outside (a web page, an email, a downloaded file).",
                 ));
             }

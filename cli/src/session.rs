@@ -3419,7 +3419,7 @@ mod tests {
         assert_eq!(
             listed.iter().map(row).collect::<Vec<_>>(),
             [
-                (None, "ci".to_string(), true, Some((Kind::Token, Approve::FirstUse)), "token, has a value; https to api.github.com; the agent too, approved first-use".to_string()),
+                (None, "ci".to_string(), true, Some((Kind::Token, Approve::FirstUse)), "token, has a value; https to api.github.com; torq-agent-dev too, approved first-use".to_string()),
                 (Some("dev".to_string()), "deploy".to_string(), false, Some((Kind::SshKey, Approve::Never)), "SSH key, no value yet; ssh to github.com; not the agent".to_string()),
             ]
         );
