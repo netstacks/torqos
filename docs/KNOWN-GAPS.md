@@ -1305,3 +1305,14 @@ Its §5 lists claims without a test.
      stay there, unused; new ones go under `/var/lib/torq-agent-memory/<person>/home`.
    - **Not in this step**: "Start Claude Code" from the agent's window (a folder to choose and a terminal to
      open), Codex and opencode, removing the link when the tool is no longer chosen.
+
+6zzp. **No agent can use a secret yet, with one agent per person (ADR-052, amended 2026-11-12; the approval
+  design, `docs/DESIGN-agent-approval.md`).** `torq-agent` in a person's rules is their own agent, and a system rule
+  names each agent's account (`broker/tests/secrets.rs`, `tests/secrets.nix`). But a use is let through only from
+  an untainted session, with the rule asking no approval, and:
+   - every program run as `torq-agent-<person>` (a coding tool, `torq agent run`) starts its session tainted
+     (`not-the-resident-agent`, 6zzo), so each of its uses waits for a person, and approving is not built: refused;
+   - the resident agent, whose session can start untainted, has no tool that sends an HTTPS request or signs.
+  So until approval is built (the design's parts 2 and 3, waiting on the owner), a secret is used only by its
+  person. The daemon's path for an agent's use is tested up to its refusal; the path for a use let through is
+  tested only for the person's own uses and in `broker/tests/secrets.rs` (a resident's session there).

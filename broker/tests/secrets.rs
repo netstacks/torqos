@@ -44,7 +44,7 @@ impl Machine {
         let creds = dir.path().join("creds");
         fs::write(&creds, script).unwrap();
         fs::set_permissions(&creds, fs::Permissions::from_mode(0o755)).unwrap();
-        let b = Broker::new(&repo, dir.path().join("state"), "true").with_secrets(dir.path().join("store"), &creds.to_string_lossy());
+        let b = Broker::new(&repo, dir.path().join("state"), "true").with_secrets(dir.path().join("store"), &creds.to_string_lossy()).with_agent_limits(&agents()).with_residents(&residents());
         b.init().unwrap();
         Machine { dir, b }
     }
@@ -54,6 +54,23 @@ impl Machine {
     fn ledger(&self) -> String {
         fs::read_to_string(self.b.ledger.path()).unwrap()
     }
+    /// The broker as one agent account's request finds it (`--agent`, and `--resident` for the resident's), its model a
+    /// remote one over TLS (not this machine, said here: the test's host may not resolve it, and this_host fails
+    /// closed), the one kind a resident session starts untainted with.
+    fn as_agent(&self, account: &str, resident: bool) -> Broker {
+        Broker::new(self.b.repo.root(), self.dir.path().join("state"), "true").with_agent_limits(&agents()).with_residents(&residents()).with_model(Some("https://api.example.org/v1")).with_this_host(|_| false).as_agent(Some(account)).from_resident(resident)
+    }
+}
+
+/// The broker's map (ADR-051 3): alice's and bob's agents.
+fn agents() -> torq_broker::agent::Limits {
+    let agents = [("torq-agent-alice", "alice"), ("torq-agent-bob", "bob")].iter().map(|(a, p)| (a.to_string(), p.to_string())).collect();
+    torq_broker::agent::Limits { agents, settings: vec![] }
+}
+
+/// Alice's resident agent's own account.
+fn residents() -> std::collections::BTreeMap<String, String> {
+    [("torq-resident-alice".to_string(), "alice".to_string())].into_iter().collect()
 }
 
 fn alice() -> Owner {
@@ -173,13 +190,17 @@ fn a_use_is_judged_by_its_rule_and_the_agents_first_is_recorded() {
     git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "rules"]);
     m.b.set_secret(&alice(), "gh", VALUE, "alice").unwrap();
     m.b.set_secret(&alice(), "own", "alice's own", "alice").unwrap();
-    let session = torq_broker::session::start(&m.b).unwrap().id;
-    let agent = |name: &str, host: &str, session: Option<&str>| Use { owner: alice(), name: name.into(), host: host.into(), actor: "torq-agent".into(), session: session.map(String::from), ssh: false };
+    let resident = m.as_agent("torq-agent-alice", true);
+    let session = torq_broker::session::start(&resident).unwrap().id;
+    // Alice's agent is her resident agent's account and her agent account, judged as one (ADR-051 3): `torq-agent`
+    // in her own rules (the approval design, part 1).
+    let as_ = |actor: &str, name: &str, host: &str, session: Option<&str>| Use { owner: alice(), name: name.into(), host: host.into(), actor: actor.into(), session: session.map(String::from), ssh: false };
+    let agent = |name: &str, host: &str, session: Option<&str>| as_("torq-resident-alice", name, host, session);
     let count = |kind: &str| m.ledger().matches(&format!("\"kind\":\"{kind}\"")).count();
     assert_eq!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).unwrap().value, VALUE);
     assert_eq!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).unwrap().value, VALUE);
     assert_eq!(count("secret_first_use"), 1, "the first use in a session, once");
-    let other = torq_broker::session::start(&m.b).unwrap().id;
+    let other = torq_broker::session::start(&resident).unwrap().id;
     m.b.use_secret(&agent("gh", "api.github.com", Some(&other))).unwrap();
     assert_eq!(count("secret_first_use"), 2, "and once in each session");
     for _ in 0..3 {
@@ -190,7 +211,21 @@ fn a_use_is_judged_by_its_rule_and_the_agents_first_is_recorded() {
         assert!(m.b.use_secret(&agent(&format!("made-up-{i}"), "api.github.com", Some(&session))).is_err());
     }
     assert_eq!(count("secret_use_refused"), 2, "each refusal once, not each time; a name with no rule, never: the daemon's log has it");
-    torq_broker::session::taint(&m.b, &session, "web").unwrap();
+    // No one else's agent, and no account that is no one's agent, whatever session it names. Bob's agent's
+    // refusal is on the record (an agent's, of a secret with a rule); an account that is no agent's is not.
+    let bobs = torq_broker::session::start(&m.as_agent("torq-agent-bob", false)).unwrap().id;
+    for (actor, s) in [("torq-agent-bob", bobs.as_str()), ("torq-agent", session.as_str())] {
+        assert!(m.b.use_secret(&as_(actor, "gh", "api.github.com", Some(s))).is_err(), "{actor}");
+    }
+    assert_eq!(count("secret_use_refused"), 3, "bob's agent's, once");
+    let e = format!("{:#}", m.b.use_secret(&agent("gh", "api.github.com", Some(&bobs))).unwrap_err());
+    assert!(e.contains("is not torq-agent-alice's"), "another agent's session is none of hers to cite: {e}");
+    // Her agent account outside the resident agent (a coding tool, torq agent run): its session starts tainted, so
+    // each use asks a person, which is not built yet.
+    let tool = torq_broker::session::start(&m.as_agent("torq-agent-alice", false)).unwrap().id;
+    let e = format!("{:#}", m.b.use_secret(&as_("torq-agent-alice", "gh", "api.github.com", Some(&tool))).unwrap_err());
+    assert!(e.contains("untrusted text"), "a coding tool's session is tainted: {e}");
+    torq_broker::session::taint(&resident, &session, "web").unwrap();
     assert!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).is_err(), "tainted: a person approves, not built yet");
     assert!(m.b.use_secret(&agent("gh", "api.github.com", None)).is_err(), "no session is a tainted one");
     assert!(m.b.use_secret(&agent("gh", "api.github.com", Some("0123456789abcdef0123456789abcdef"))).is_err(), "no such session");
@@ -212,10 +247,12 @@ fn an_agent_sockets_grant_is_who_asked() {
     let read = m.b.grant(&g).unwrap();
     assert_eq!((read.actor.as_str(), read.uid, read.session), ("alice", 1000, None));
     assert!(m.b.grant_agent("alice", 1000, Some("0123456789abcdef0123456789abcdef")).is_err(), "a person names no session");
-    assert!(m.b.grant_agent("torq-agent", 990, Some("0123456789abcdef0123456789abcdef")).is_err(), "no such session");
-    let s = torq_broker::session::start(&m.b).unwrap().id;
-    let a = m.b.grant_agent("torq-agent", 990, Some(&s)).unwrap();
+    assert!(m.b.grant_agent("torq-agent-alice", 990, Some("0123456789abcdef0123456789abcdef")).is_err(), "no such session");
+    let s = torq_broker::session::start(&m.as_agent("torq-agent-alice", false)).unwrap().id;
+    let a = m.b.grant_agent("torq-agent-alice", 990, Some(&s)).unwrap();
     assert_eq!(m.b.grant(&a).unwrap().session.as_deref(), Some(s.as_str()));
+    assert!(m.b.grant_agent("torq-agent-bob", 991, Some(&s)).is_err(), "another agent's session");
+    assert!(m.b.grant_agent("torq-agent", 989, Some(&s)).is_err(), "an account that is no one's agent names no session");
     for bad in ["", "../x", "0123456789abcdef0123456789abcdeg", "00000000000000000000000000000000"] {
         assert!(m.b.grant(bad).is_err(), "{bad:?}");
     }

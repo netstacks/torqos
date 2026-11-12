@@ -121,11 +121,9 @@ See KNOWN-GAPS 6zq, 6zzk and 6zzo.
    - Only the tip was compiled. Commits from "one agent account per person" to the rebase fix (fa9e6da) do not build
      the broker binary: `connected()` (secrets, main) calls `socket::caller` with the old three arguments. Left there,
      not moved into each commit: a bisect in that range needs the same one-line change, with that commit's arguments.
-   - **Open:** secrets (ADR-052) still name the agent as one account, `torq-agent` (`actors`, `wire::secrets::AGENT`,
-     their tests). Here every person has their own agent, plus a resident account, so a rule naming `torq-agent`
-     matches no one. Two broker tests in tests/secrets.rs fail on it: a session is now an agent account's own. Who
-     a secret's `actors` mean is part of step 4's design (the person's own agent, the approver), so it waits for
-     that.
+   - **Settled (the approval design's part 1, 2026-11-12):** `torq-agent` in a person's rules is their own agent,
+     both accounts; system rules name each agent's account. The two broker tests pass again. What it leaves:
+     no agent can use a secret until approval is built (KNOWN-GAPS 6zzp).
 2. Finish the second review's batch, as above.
 3. Run the full check on .52, then land as a fast-forward with the owner (the lead session's plan).
 

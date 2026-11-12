@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 pub const SYSTEM_RULES: &str = "secrets/system.json";
 /// A person's own rules: `users/<person>/` and this.
 pub const PERSON_RULES: &str = "secrets.json";
-/// The agent's account (ADR-041): the only actor besides people.
+/// The word for the agent in a person's own rules: that person's own agent, both of its accounts (`torq-agent-<person>`
+/// and `torq-resident-<person>`, ADR-051 3), and no one else's. A system rule names each agent by its account
+/// instead (`torq-agent-<person>`): this word there would say no one's agent (the approval design, part 1).
 pub const AGENT: &str = "torq-agent";
 /// The daemon that uses secrets (`torq-secrets`, its own account): the only caller of the broker's `secret-use`.
 pub const DAEMON: &str = "torq-secrets";
@@ -218,8 +220,8 @@ pub fn check(rules: &Rules) -> Result<(), String> {
     Ok(())
 }
 
-/// A rules file read and checked.
-pub fn parse(bytes: &[u8]) -> Result<Rules, String> {
+/// A rules file read and checked: what a person's and the system's have in common.
+fn read(bytes: &[u8]) -> Result<Rules, String> {
     if bytes.len() as u64 > MAX_FILE {
         return Err(format!("larger than {} KiB", MAX_FILE / 1024));
     }
@@ -228,10 +230,19 @@ pub fn parse(bytes: &[u8]) -> Result<Rules, String> {
     Ok(rules)
 }
 
-/// A person's own rules file: as `parse`, and only the agent besides them may use their secrets. Another
+/// The system's rules file, read and checked: its actors are people and agent accounts, each by name.
+pub fn parse(bytes: &[u8]) -> Result<Rules, String> {
+    let rules = read(bytes)?;
+    if let Some((name, _)) = rules.iter().find(|(_, r)| r.actors.iter().any(|a| a == AGENT)) {
+        return Err(format!("secret {name}: {AGENT:?} says no one's agent in the system's rules: name each agent that may use it by its account, {AGENT}-<person>"));
+    }
+    Ok(rules)
+}
+
+/// A person's own rules file: as the system's, and only the agent besides them may use their secrets. Another
 /// person is given a secret as a system secret, by an administrator.
 pub fn parse_person(bytes: &[u8]) -> Result<Rules, String> {
-    let rules = parse(bytes)?;
+    let rules = read(bytes)?;
     if let Some((name, r)) = rules.iter().find(|(_, r)| r.actors.iter().any(|a| a != AGENT)) {
         let other = r.actors.iter().find(|a| *a != AGENT).cloned().unwrap_or_default();
         return Err(format!("secret {name}: {other:?} is not the agent: a person's secret is used by them, and the agent if they say so"));
@@ -371,7 +382,7 @@ mod tests {
 
     #[test]
     fn a_rule_as_written() {
-        let r = one(r#"{"github-ci":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"]}}"#).unwrap();
+        let r = one(r#"{"github-ci":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent-alice"]}}"#).unwrap();
         let g = &r["github-ci"];
         assert_eq!(g.approve, Approve::FirstUse, "asked the first time, unless the rule says otherwise");
         let h = g.https.as_ref().unwrap();
@@ -443,6 +454,10 @@ mod tests {
         assert!(parse_person(br#"{"t":{"kind":"token","actors":["torq-agent"]}}"#).is_ok());
         assert!(parse_person(br#"{"t":{"kind":"token","actors":["sam"]}}"#).is_err());
         assert!(parse(br#"{"t":{"kind":"token","actors":["sam"]}}"#).is_ok(), "a system secret may be a person's to use");
+        // Whose agent: a person's own rules say theirs; the system's name each agent's account (the approval design, part 1).
+        assert!(parse(br#"{"t":{"kind":"token","actors":["torq-agent-sam"]}}"#).is_ok(), "a system secret may be sam's agent's");
+        let e = parse(br#"{"t":{"kind":"token","actors":["sam","torq-agent"]}}"#).unwrap_err();
+        assert!(e.contains("no one's agent") && e.contains("torq-agent-<person>"), "{e}");
     }
 
     /// A throwaway key, made for this test alone (ssh-keygen -t ed25519 -N ""), and its public half as ssh-keygen wrote it.

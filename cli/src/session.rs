@@ -3382,12 +3382,15 @@ mod tests {
         assert_eq!((tier.as_str(), reason.as_str()), ("user", "Secret gh: may be sent to api.github.com"));
         assert!(diff.contains("+++ b/users/dev/secrets.json") && diff.contains("\"api.github.com\""), "{diff}");
         // What a secret is for comes first; then who.
-        let e = format!("{:#}", s.exec("request system secret allow ci agent").unwrap_err());
+        let e = format!("{:#}", s.exec("request system secret allow ci agent dev").unwrap_err());
         assert!(e.contains("not used for anything yet"), "{e}");
         s.exec("request system secret allow ci https api.github.com").unwrap();
         let (diff, _, tier, _, _) = m.commits.borrow().last().unwrap().clone();
         assert_eq!(tier, "system");
         assert!(diff.contains("+++ b/secrets/system.json"), "{diff}");
+        // A system secret names whose agent may use it, by its account (the approval design, part 1; what it writes:
+        // secrets::tests::a_grant_to_an_agent_says_whose).
+        assert!(s.exec("request system secret allow ci agent").is_err(), "whose agent");
         // Deleting: its value, and for someone else's, only that.
         assert_eq!(s.exec("request system secret delete x user sam").unwrap(), "delete x\n");
         assert!(s.exec("request system secret delete none").is_err(), "nothing to delete");
@@ -3399,7 +3402,7 @@ mod tests {
     #[test]
     fn the_secrets_rules_shown_as_the_repository_has_them() {
         let d = repo();
-        sh(d.path(), "mkdir -p secrets users/dev && printf '%s' '{\"ci\":{\"kind\":\"token\",\"https\":{\"hosts\":[\"api.github.com\"]},\"actors\":[\"torq-agent\"]}}' > secrets/system.json \
+        sh(d.path(), "mkdir -p secrets users/dev && printf '%s' '{\"ci\":{\"kind\":\"token\",\"https\":{\"hosts\":[\"api.github.com\"]},\"actors\":[\"torq-agent-dev\"]}}' > secrets/system.json \
             && printf '%s' '{\"deploy\":{\"kind\":\"ssh-key\",\"ssh\":{\"hosts\":[\"github.com\"],\"known\":[\"github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\"]},\"approve\":\"never\"}}' > users/dev/secrets.json && git add -A && git commit -qm rules");
         let gitlab = "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf".to_string();
         let m = Fake { kept: vec![(None, "ci".into())], known_hosts: vec![gitlab.clone()], ..Default::default() };
@@ -3407,7 +3410,7 @@ mod tests {
         let shown = s.exec("show system secrets").unwrap();
         assert_eq!(
             shown,
-            "The system's secrets:\n  ci                   token, has a value; https to api.github.com; the agent too, approved first-use\n                       use: http://127.0.0.1:7800/system/ci/api.github.com/\ndev's secrets:\n  deploy               SSH key, no value yet; ssh to github.com; not the agent\n"
+            "The system's secrets:\n  ci                   token, has a value; https to api.github.com; torq-agent-dev too, approved first-use\n                       use: http://127.0.0.1:7800/system/ci/api.github.com/\ndev's secrets:\n  deploy               SSH key, no value yet; ssh to github.com; not the agent\n"
         );
         // The same reading, each secret apart (TorqOS Settings' rows): whose, its value or none, its rule.
         use torq_wire::secrets::{Approve, Kind};

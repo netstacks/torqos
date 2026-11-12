@@ -2955,6 +2955,15 @@ vouches for, that only proposes, every change ledgered and undone in one command
     for the tests alone), uses it, and looks for it in every file of the machine; `tests/desktop.nix` has the
     non-dumpable client's approval. Both written, not yet run. The page itself has no test: nothing drives
     the window (KNOWN-GAPS 6zzr).
+- **Amended 2026-11-12 — whose agent, with one agent per person (ADR-051 3; the approval design's part 1,
+  `docs/DESIGN-agent-approval.md`, built on `work/agents`):** `torq-agent` in a person's own rules means that person's
+  own agent, both of its accounts (`torq-agent-<person>` and `torq-resident-<person>`, by the broker's map), and no
+  other person's. The system's rules name each agent that may use a secret by its account (`actors [
+  torq-agent-alice ]`, `request system secret allow <name> agent alice`); the bare word is refused there, as
+  saying no one's agent. An agent's use names a session of its own agent account's, never another's. Approval
+  (Decision 4) is still not built, and only the resident agent starts a session untainted, so until it is no
+  agent's use is let through: a coding tool's session is tainted from its start, and the resident agent has no
+  tool that sends HTTPS or signs (KNOWN-GAPS 6zzp).
 
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 

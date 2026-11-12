@@ -331,12 +331,34 @@ pub struct Use {
     pub ssh: bool,
 }
 
-/// Why `u` may not happen by these rules (Err), or the rule that lets it. `tainted`: whether the agent's session
-/// read untrusted text (None: no session, which is tainted too, as an agent's proposal naming none is).
-/// Until a person can approve a use (step 4), the agent's uses are those its rule lets without asking, from a
-/// session that read nothing untrusted; anything else is refused, never let through.
-pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, tainted: Option<bool>) -> Result<&'a torq_wire::secrets::Rule> {
-    use torq_wire::secrets::{Approve, Kind, AGENT};
+/// Whose agent an account is, by the broker's map (ADR-051 3): the person it serves, and the agent account it is
+/// judged as — its own name, or for a resident account its person's agent account (one agent per person).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOf {
+    pub person: String,
+    pub account: String,
+}
+
+/// Whether `actor` (the person's agent when `agent` says so) may use `owner`'s secret under rule `r`
+/// (the approval design, part 1): a person's own secret by them, or by their own agent where the rule says
+/// `torq-agent`, never another's agent; a system secret by each person and each agent account the rule names.
+fn may(owner: &Owner, r: &torq_wire::secrets::Rule, actor: &str, agent: Option<&AgentOf>) -> bool {
+    use torq_wire::secrets::AGENT;
+    match (owner, agent) {
+        (Owner::Person(p), None) => p == actor,
+        (Owner::Person(p), Some(a)) => a.person == *p && r.actors.iter().any(|x| x == AGENT),
+        (Owner::System, None) => r.actors.iter().any(|x| x == actor),
+        (Owner::System, Some(a)) => r.actors.iter().any(|x| *x == a.account),
+    }
+}
+
+/// Why `u` may not happen by these rules (Err), or the rule that lets it. `agent`: whose agent `u.actor` is, if
+/// one. `tainted`: whether the agent's session read untrusted text (None: no session, which is tainted too, as
+/// an agent's proposal naming none is). Until a person can approve a use (step 4), the agent's uses are those
+/// its rule lets without asking, from a session that read nothing untrusted; anything else is refused, never
+/// let through.
+pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, agent: Option<&AgentOf>, tainted: Option<bool>) -> Result<&'a torq_wire::secrets::Rule> {
+    use torq_wire::secrets::{Approve, Kind};
     let whose = u.owner.whose(&u.name);
     let r = rules.get(&u.name).with_context(|| format!("{whose} has no rule: it is used for nothing"))?;
     match (u.ssh, r.kind) {
@@ -346,15 +368,10 @@ pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, tainted: Optio
         (true, _) if !r.ssh.as_ref().is_some_and(|s| s.hosts.contains(&u.host)) => bail!("{whose} does not sign for {}", u.host),
         _ => {}
     }
-    let named = r.actors.iter().any(|a| *a == u.actor);
-    let allowed = match &u.owner {
-        Owner::Person(p) => *p == u.actor || (u.actor == AGENT && named),
-        Owner::System => named,
-    };
-    if !allowed {
+    if !may(&u.owner, r, &u.actor, agent) {
         bail!("{} may not use {whose}", u.actor);
     }
-    if u.actor == AGENT {
+    if agent.is_some() {
         match tainted {
             None => bail!("the agent's request names no session (X-Torq-Session): a person approves such a use, and approving is not built yet"),
             Some(true) => bail!("the agent's session read untrusted text: a person approves each of its uses, and approving is not built yet"),
@@ -366,6 +383,27 @@ pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, tainted: Optio
 }
 
 impl Broker {
+    /// Whose agent `account` is, by the broker's map: an agent account it names (`agent.agents`), or a resident
+    /// account whose person has one (`agent.residents`). None: a person, or an account that is no one's agent.
+    pub fn agent_of(&self, account: &str) -> Option<AgentOf> {
+        if let Some(p) = self.agent_limits.serves(account) {
+            return Some(AgentOf { person: p.to_string(), account: account.to_string() });
+        }
+        let p = self.residents().get(account)?;
+        let (a, _) = self.agent_limits.agents.iter().find(|(_, q)| *q == p)?;
+        Some(AgentOf { person: p.clone(), account: a.clone() })
+    }
+
+    /// Session `id`, if it is agent `a`'s own: a session is its agent account's (ADR-051 3), and another agent's is
+    /// none of this one's to cite.
+    fn agents_session(&self, a: &AgentOf, id: &str) -> Result<crate::session::Record> {
+        let r = crate::session::read(self, id)?.context("refused: the request names no session the broker holds")?;
+        if r.agent != a.account {
+            bail!("refused: session {id} is not {}'s", a.account);
+        }
+        Ok(r)
+    }
+
     /// The rules `owner`'s secrets have now (the repository's HEAD): none is none; a file that is not one, refused.
     fn rules_of(&self, owner: &Owner) -> Result<torq_wire::secrets::Rules> {
         let (path, parse): (String, fn(&[u8]) -> std::result::Result<torq_wire::secrets::Rules, String>) = match owner {
@@ -383,14 +421,15 @@ impl Broker {
     /// value. Every use the daemon logs itself. No broker lock: a rebuild does not hold a use up.
     pub fn use_secret(&self, u: &Use) -> Result<Granted> {
         let _l = Lock::acquire_named(&self.state_dir, "secrets.lock", 10)?;
-        let agent = u.actor == torq_wire::secrets::AGENT;
-        let tainted = match &u.session {
-            Some(id) if agent => Some(crate::session::read(self, id)?.context("refused: the request names no session the broker holds")?.tainted),
-            Some(_) => bail!("refused: a session is the agent's; a person's use names none"),
-            None => None,
+        let of = self.agent_of(&u.actor);
+        let agent = of.is_some();
+        let tainted = match (&u.session, &of) {
+            (Some(id), Some(a)) => Some(self.agents_session(a, id)?.tainted),
+            (Some(_), None) => bail!("refused: a session is the agent's; a person's use names none"),
+            (None, _) => None,
         };
         let rules = self.rules_of(&u.owner)?;
-        let judged = may_use(&rules, u, tainted).cloned();
+        let judged = may_use(&rules, u, of.as_ref(), tainted).cloned();
         let note = |kind: &str, reason: String, extra: serde_json::Value| -> Result<Entry> {
             let mut data = u.owner.data(&u.name);
             data["session"] = json!(u.session);
@@ -523,8 +562,9 @@ mod tests {
         assert_eq!(uid_of_connection(&listening, 0xC350, 0x1E78), None, "established only");
     }
 
+    /// Sam's own rules: `torq-agent` there is sam's own agent.
     fn rules() -> torq_wire::secrets::Rules {
-        parse(br#"{"gh":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"],"approve":"never"},
+        torq_wire::secrets::parse_person(br#"{"gh":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"],"approve":"never"},
                    "asks":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent"]},
                    "mine":{"kind":"token","https":{"hosts":["api.github.com"]}},
                    "key":{"kind":"ssh-key","ssh":{"hosts":["github.com"],"known":["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"]},"actors":["torq-agent"],"approve":"never"}}"#).unwrap()
@@ -534,31 +574,44 @@ mod tests {
         Use { owner, name: name.into(), host: host.into(), actor: actor.into(), session: session.map(String::from), ssh: false }
     }
 
+    fn agent(person: &str) -> AgentOf {
+        AgentOf { person: person.into(), account: format!("torq-agent-{person}") }
+    }
+
     #[test]
     fn a_use_is_what_its_rule_says_and_nothing_else() {
         let r = rules();
         let sam = || Owner::Person("sam".into());
-        assert!(may_use(&r, &u(sam(), "mine", "api.github.com", "sam", None), None).is_ok(), "its owner's own");
-        assert!(may_use(&r, &u(sam(), "gh", "api.github.com", "torq-agent", Some("s")), Some(false)).is_ok(), "the agent, as the rule lets it");
-        for (use_, tainted, why) in [
-            (u(sam(), "mine", "api.github.com", "torq-agent", Some("s")), Some(false), "not the agent's"),
-            (u(sam(), "mine", "api.github.com", "viper", None), None, "not another person's"),
-            (u(sam(), "gh", "evil.example.com", "sam", None), None, "not to another host"),
-            (u(sam(), "key", "github.com", "torq-agent", Some("s")), Some(false), "an SSH key is never sent"),
-            (u(sam(), "none", "api.github.com", "sam", None), None, "no rule"),
-            (u(sam(), "gh", "api.github.com", "torq-agent", None), None, "no session"),
-            (u(sam(), "gh", "api.github.com", "torq-agent", Some("s")), Some(true), "a tainted session"),
-            (u(sam(), "asks", "api.github.com", "torq-agent", Some("s")), Some(false), "approval needed"),
-            (u(Owner::System, "mine", "api.github.com", "sam", None), None, "a system secret is used by the actors it names"),
+        let sams = agent("sam");
+        assert!(may_use(&r, &u(sam(), "mine", "api.github.com", "sam", None), None, None).is_ok(), "its owner's own");
+        assert!(may_use(&r, &u(sam(), "gh", "api.github.com", "torq-agent-sam", Some("s")), Some(&sams), Some(false)).is_ok(), "sam's agent, as the rule lets it");
+        assert!(may_use(&r, &u(sam(), "gh", "api.github.com", "torq-resident-sam", Some("s")), Some(&sams), Some(false)).is_ok(), "sam's resident agent: the same agent");
+        for (use_, of, tainted, why) in [
+            (u(sam(), "gh", "api.github.com", "torq-agent-viper", Some("s")), Some(agent("viper")), Some(false), "not another person's agent"),
+            (u(sam(), "gh", "api.github.com", "torq-agent", Some("s")), None, Some(false), "an account that is no one's agent"),
+            (u(sam(), "mine", "api.github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), Some(false), "not the agent's"),
+            (u(sam(), "mine", "api.github.com", "viper", None), None, None, "not another person's"),
+            (u(sam(), "gh", "evil.example.com", "sam", None), None, None, "not to another host"),
+            (u(sam(), "key", "github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), Some(false), "an SSH key is never sent"),
+            (u(sam(), "none", "api.github.com", "sam", None), None, None, "no rule"),
+            (u(sam(), "gh", "api.github.com", "torq-agent-sam", None), Some(sams.clone()), None, "no session"),
+            (u(sam(), "gh", "api.github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), Some(true), "a tainted session"),
+            (u(sam(), "asks", "api.github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), Some(false), "approval needed"),
         ] {
-            assert!(may_use(&r, &use_, tainted).is_err(), "{why}");
+            assert!(may_use(&r, &use_, of.as_ref(), tainted).is_err(), "{why}");
         }
-        assert!(may_use(&r, &u(Owner::System, "gh", "api.github.com", "torq-agent", Some("s")), Some(false)).is_ok());
+        // The system's: each agent by its account, each person by name, and no one else.
+        let system = parse(br#"{"gh":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent-sam","viper"],"approve":"never"}}"#).unwrap();
+        let sys = |actor: &str, of: Option<&AgentOf>| may_use(&system, &u(Owner::System, "gh", "api.github.com", actor, of.map(|_| "s")), of, of.map(|_| false)).is_ok();
+        assert!(sys("torq-agent-sam", Some(&sams)) && sys("torq-resident-sam", Some(&sams)), "sam's agent, named");
+        assert!(sys("viper", None), "viper, named");
+        assert!(!sys("torq-agent-viper", Some(&agent("viper"))), "viper's agent is not named");
+        assert!(!sys("sam", None), "nor is sam");
         // SSH: a key, for the hosts its rule names; a token signs for nothing.
-        let ssh = |name: &str, host: &str| Use { ssh: true, ..u(sam(), name, host, "torq-agent", Some("s")) };
-        assert!(may_use(&r, &ssh("key", "github.com"), Some(false)).is_ok());
-        assert!(may_use(&r, &ssh("key", "gitlab.com"), Some(false)).is_err());
-        assert!(may_use(&r, &ssh("gh", "api.github.com"), Some(false)).is_err());
+        let ssh = |name: &str, host: &str| Use { ssh: true, ..u(sam(), name, host, "torq-agent-sam", Some("s")) };
+        assert!(may_use(&r, &ssh("key", "github.com"), Some(&sams), Some(false)).is_ok());
+        assert!(may_use(&r, &ssh("key", "gitlab.com"), Some(&sams), Some(false)).is_err());
+        assert!(may_use(&r, &ssh("gh", "api.github.com"), Some(&sams), Some(false)).is_err());
     }
 }
 
@@ -607,10 +660,8 @@ impl Broker {
     pub fn grant_agent(&self, actor: &str, uid: u32, session: Option<&str>) -> Result<String> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         if let Some(id) = session {
-            if actor != torq_wire::secrets::AGENT {
-                bail!("refused: a session is the agent's; a person's names none");
-            }
-            crate::session::read(self, id)?.context("refused: the request names no session the broker holds")?;
+            let a = self.agent_of(actor).context("refused: a session is the agent's; a person's names none")?;
+            self.agents_session(&a, id)?;
         }
         let mut bytes = [0u8; 16];
         fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).context("reading /dev/urandom")?;
@@ -650,7 +701,8 @@ impl Broker {
     /// The SSH keys `actor` may use, by their rules: their public halves (no value, nothing on the record). Which of
     /// them a use may sign with, and for which host, is judged at each use.
     pub fn ssh_keys_for(&self, actor: &str) -> Vec<SshKey> {
-        use torq_wire::secrets::{Kind, AGENT};
+        use torq_wire::secrets::Kind;
+        let agent = self.agent_of(actor);
         let mut out = Vec::new();
         let mut owners: Vec<Owner> = self.kept_secrets().into_iter().map(|k| k.owner).collect();
         owners.sort();
@@ -659,11 +711,7 @@ impl Broker {
             let Ok(rules) = self.rules_of(&owner) else { continue };
             for (name, r) in rules {
                 let Some(ssh) = r.ssh.clone() else { continue };
-                let named = r.actors.iter().any(|a| a == actor);
-                let theirs = match &owner {
-                    Owner::Person(p) => p == actor || (actor == AGENT && named),
-                    Owner::System => named,
-                };
+                let theirs = may(&owner, &r, actor, agent.as_ref());
                 let Ok(public) = fs::read_to_string(self.secret_dir(&owner).join(format!("{name}.pub"))) else { continue };
                 if r.kind == Kind::SshKey && theirs {
                     out.push(SshKey { owner: owner.clone(), name, public: public.trim().to_string(), hosts: ssh.hosts, known: ssh.known });

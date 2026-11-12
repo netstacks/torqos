@@ -295,9 +295,16 @@ static SECRET_SET: &[Node] = &[
 
 static SECRET_OWNER: &[Node] = &[fixed("user", "A person's own secret, not the system's: yours (no one else's, an administrator included, but to delete)", In::Op).then(&[value(Value::User, "Whose: yours").whole(secret)])];
 
+/// After `agent`: a person's own secret's (`user <you>`: their own agent), or for a system secret, whose agent
+/// (the approval design, part 1: a system rule names each agent by its account).
+static SECRET_AGENT: &[Node] = &[
+    fixed("user", "A person's own secret, not the system's: yours (no one else's, an administrator included, but to delete)", In::Op).then(&[value(Value::User, "Whose: yours").whole(secret)]),
+    value(Value::User, "A system secret: the person whose agent may use it (theirs, torq-agent-<person>)").whole(secret),
+];
+
 /// What a secret may be used for, or by whom: given (`allow`) or taken back (`disallow`).
 static SECRET_GRANT: &[Node] = &[
-    fixed("agent", "The agent (torq-agent): it uses the secret through TorqOS, never reading it", In::Op).whole(secret).then(SECRET_OWNER),
+    fixed("agent", "An agent: it uses the secret through TorqOS, never reading it (yours, for your own secret; a person's, named, for a system secret)", In::Op).then(SECRET_AGENT),
     fixed("https", "Sent in an HTTPS header to this host, and to no other (a token)", In::Op).then(&[value(Value::Host, "The host: a DNS name (api.github.com)").whole(secret).then(SECRET_OWNER)]),
     fixed("ssh", "Signs for SSH to this host, and for no other (an SSH key)", In::Op).then(&[value(Value::Host, "The host: a DNS name (github.com)").whole(secret).then(SECRET_OWNER)]),
 ];
@@ -432,7 +439,7 @@ fn secret(r: &Read) -> Result<Op> {
         } else if r.has("ssh") {
             Grant::Ssh(host())
         } else {
-            Grant::Agent
+            Grant::Agent((!r.has("user")).then(|| r.value(Value::User).map(String::from)).flatten())
         }
     };
     let act = if r.has("allow") {
@@ -450,7 +457,9 @@ fn secret(r: &Read) -> Result<Op> {
     } else {
         Act::Delete
     };
-    Ok(Op::Request(Request::Secret { name: r.value(Value::Secret).unwrap_or_default().into(), user: r.value(Value::User).map(String::from), act }))
+    // The owner is the person after `user`; a person named after `agent` alone is whose agent (a system secret).
+    let user = r.has("user").then(|| r.value(Value::User).map(String::from)).flatten();
+    Ok(Op::Request(Request::Secret { name: r.value(Value::Secret).unwrap_or_default().into(), user, act }))
 }
 
 fn interfaces(r: &Read) -> Result<Op> {

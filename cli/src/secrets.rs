@@ -11,8 +11,9 @@ use torq_wire::secrets::{self as w, Approve, Https, Kind, Rule, Rules, Ssh};
 /// What a rule lets happen, given or taken back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Grant {
-    /// The agent (torq-agent) may use it.
-    Agent,
+    /// An agent may use it. A person's own secret: their own agent (None, `torq-agent` in their rules). A system
+    /// secret: the named person's agent, by its account (`torq-agent-<person>`): the approval design, part 1.
+    Agent(Option<String>),
     /// Sent in an HTTPS header to this host.
     Https(String),
     /// Signs for SSH to this host.
@@ -47,7 +48,8 @@ impl Act {
     /// The words after the secret's name.
     pub fn rest(&self) -> String {
         let grant = |g: &Grant| match g {
-            Grant::Agent => " agent".to_string(),
+            Grant::Agent(None) => " agent".to_string(),
+            Grant::Agent(Some(p)) => format!(" agent {}", crate::syntax::quote(p)),
             Grant::Https(h) => format!(" https {h}"),
             Grant::Ssh(h) => format!(" ssh {h}"),
         };
@@ -85,6 +87,37 @@ pub fn read(repo: &Repo, rev: &str, user: Option<&str>) -> Result<Rules> {
 }
 
 /// `act` done to `rules`: what it did, in a few words, for the change's reason. Refused, it changes nothing.
+/// The actor a grant to an agent writes: `torq-agent` in a person's own rules (their own agent), the named
+/// person's agent account in the system's.
+fn agent_word(of: &Option<String>) -> String {
+    match of {
+        None => w::AGENT.to_string(),
+        Some(p) => format!("{}-{p}", w::AGENT),
+    }
+}
+
+/// The same, as said to the person.
+fn agent_said(of: &Option<String>) -> String {
+    match of {
+        None => "the agent".to_string(),
+        Some(p) => format!("{p}'s agent ({})", agent_word(of)),
+    }
+}
+
+/// A grant to an agent fits whose secret it is: a person's own, their own agent alone; a system secret, the
+/// agent of a person it names (the approval design, part 1).
+fn agent_fits(name: &str, user: Option<&str>, act: &Act) -> Result<()> {
+    match (act, user) {
+        (Act::Allow(Grant::Agent(None)) | Act::Disallow(Grant::Agent(None)), None) => {
+            bail!("a system secret names whose agent may use it: request system secret {} {name} agent <person>", act.verb())
+        }
+        (Act::Allow(Grant::Agent(Some(p))) | Act::Disallow(Grant::Agent(Some(p))), Some(u)) => {
+            bail!("{u}'s own secret {name} is used by {u}'s own agent alone, not {p}'s: request system secret {} {name} agent user {u}", act.verb())
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn edit(rules: &mut Rules, name: &str, act: &Act) -> Result<String> {
     edit_with(rules, name, act, &[])
 }
@@ -138,19 +171,20 @@ fn edit_unchecked(rules: &mut Rules, name: &str, act: &Act, known: &[String]) ->
             ssh.hosts.sort();
             Ok(format!("may sign for {h}"))
         }
-        Act::Allow(Grant::Agent) => {
+        Act::Allow(Grant::Agent(of)) => {
             let r = rules.get_mut(name).ok_or_else(first)?;
-            if r.actors.iter().any(|a| a == w::AGENT) {
-                bail!("the agent may already use secret {name}");
+            let a = agent_word(of);
+            if r.actors.contains(&a) {
+                bail!("{} may already use secret {name}", agent_said(of));
             }
-            r.actors.push(w::AGENT.into());
+            r.actors.push(a);
             r.actors.sort();
-            Ok("the agent may use it".into())
+            Ok(format!("{} may use it", agent_said(of)))
         }
         Act::Disallow(g) => {
             let r = rules.get_mut(name).with_context(|| format!("secret {name} has no rule"))?;
             let (list, what) = match g {
-                Grant::Agent => (&mut r.actors, w::AGENT.to_string()),
+                Grant::Agent(of) => (&mut r.actors, agent_word(of)),
                 Grant::Https(h) => (r.https.as_mut().map(|x| &mut x.hosts).with_context(|| format!("secret {name} is sent nowhere"))?, h.clone()),
                 Grant::Ssh(h) => (r.ssh.as_mut().map(|x| &mut x.hosts).with_context(|| format!("secret {name} signs for nothing"))?, h.clone()),
             };
@@ -170,7 +204,7 @@ fn edit_unchecked(rules: &mut Rules, name: &str, act: &Act, known: &[String]) ->
                 r.ssh = None;
             }
             Ok(match g {
-                Grant::Agent => "the agent may no longer use it".into(),
+                Grant::Agent(of) => format!("{} may no longer use it", agent_said(of)),
                 Grant::Https(h) => format!("no longer sent to {h}"),
                 Grant::Ssh(h) => format!("no longer signs for {h}"),
             })
@@ -204,6 +238,7 @@ pub fn change(machine: &dyn Machine, repo: &Repo, name: &str, user: Option<&str>
         Act::Allow(Grant::Ssh(h)) => machine.known_host_keys(h)?,
         _ => Vec::new(),
     };
+    agent_fits(name, user, act)?;
     let what = edit_with(&mut rules, name, act, &known)?;
     let new = (!rules.is_empty()).then(|| w::render(&rules));
     let scratch = crate::scratch_dir()?;
@@ -288,7 +323,13 @@ impl Listed {
         if let Some(s) = &r.ssh {
             uses.push(format!("ssh to {}", s.hosts.join(", ")));
         }
-        let who = if r.actors.iter().any(|a| a == w::AGENT) { format!("the agent too, approved {}", r.approve.word()) } else { "not the agent".to_string() };
+        // Which agents: a person's own secret, their own (`torq-agent`); a system secret, each by its account.
+        let agents: Vec<&str> = r.actors.iter().map(String::as_str).filter(|a| *a == w::AGENT || a.starts_with(&format!("{}-", w::AGENT))).collect();
+        let who = match agents.as_slice() {
+            [] => "not the agent".to_string(),
+            [a] if *a == w::AGENT => format!("the agent too, approved {}", r.approve.word()),
+            some => format!("{} too, approved {}", some.join(", "), r.approve.word()),
+        };
         let uses = if uses.is_empty() { "used for nothing".to_string() } else { uses.join("; ") };
         format!("{kind}, {value}; {uses}; {who}")
     }
@@ -361,16 +402,35 @@ mod tests {
     #[test]
     fn a_secret_is_said_what_it_is_for_then_who() {
         let mut r = Rules::new();
-        assert!(edit(&mut r, "gh", &Act::Allow(Grant::Agent)).is_err(), "what it is for first");
+        assert!(edit(&mut r, "gh", &Act::Allow(Grant::Agent(None))).is_err(), "what it is for first");
         assert!(edit(&mut r, "gh", &Act::Approve(Approve::Never)).is_err());
         assert_eq!(edit(&mut r, "gh", &Act::Allow(Grant::Https("api.github.com".into()))).unwrap(), "may be sent to api.github.com");
-        edit(&mut r, "gh", &Act::Allow(Grant::Agent)).unwrap();
+        edit(&mut r, "gh", &Act::Allow(Grant::Agent(None))).unwrap();
         edit(&mut r, "gh", &Act::Approve(Approve::EachUse)).unwrap();
         let g = &r["gh"];
         assert_eq!((g.kind, g.actors.clone(), g.approve), (Kind::Token, vec![w::AGENT.to_string()], Approve::EachUse));
-        assert!(edit(&mut r, "gh", &Act::Allow(Grant::Agent)).is_err(), "already");
+        assert!(edit(&mut r, "gh", &Act::Allow(Grant::Agent(None))).is_err(), "already");
         assert!(edit(&mut r, "gh", &Act::Allow(Grant::Ssh("github.com".into()))).is_err(), "a token signs for nothing");
         assert!(edit(&mut r, "gh", &Act::Allow(Grant::Https("api.github.com".into()))).is_err(), "already");
+    }
+
+    /// Whose agent (the approval design, part 1): a person's own secret, their own agent (`torq-agent`); a system
+    /// secret, a named person's agent by its account. Either way round is refused before anything changes.
+    #[test]
+    fn a_grant_to_an_agent_says_whose() {
+        let mut r = Rules::new();
+        edit(&mut r, "ci", &Act::Allow(Grant::Https("api.github.com".into()))).unwrap();
+        assert_eq!(edit(&mut r, "ci", &Act::Allow(Grant::Agent(Some("dev".into())))).unwrap(), "dev's agent (torq-agent-dev) may use it");
+        assert_eq!(r["ci"].actors, ["torq-agent-dev"]);
+        assert!(edit(&mut r, "ci", &Act::Allow(Grant::Agent(Some("dev".into())))).is_err(), "already");
+        assert_eq!(Act::Allow(Grant::Agent(Some("dev".into()))).rest(), " agent dev");
+        let mine = Act::Allow(Grant::Agent(None));
+        let theirs = Act::Allow(Grant::Agent(Some("sam".into())));
+        assert!(agent_fits("ci", None, &theirs).is_ok() && agent_fits("gh", Some("dev"), &mine).is_ok());
+        let e = format!("{:#}", agent_fits("ci", None, &mine).unwrap_err());
+        assert!(e.contains("agent <person>"), "{e}");
+        let e = format!("{:#}", agent_fits("gh", Some("dev"), &theirs).unwrap_err());
+        assert!(e.contains("dev's own agent alone"), "{e}");
     }
 
     #[test]
@@ -383,7 +443,7 @@ mod tests {
             ("k", Act::Allow(Grant::Ssh("10.0.0.1".into()))),
             ("k", Act::Allow(Grant::Ssh("*.github.com".into()))),
             ("k", Act::Disallow(Grant::Ssh("gitlab.com".into()))),
-            ("k", Act::Disallow(Grant::Agent)),
+            ("k", Act::Disallow(Grant::Agent(None))),
             ("../k", Act::Allow(Grant::Ssh("github.com".into()))),
             ("none", Act::Delete),
         ] {
@@ -397,12 +457,12 @@ mod tests {
         let mut r = Rules::new();
         edit(&mut r, "gh", &Act::Allow(Grant::Https("api.github.com".into()))).unwrap();
         edit(&mut r, "gh", &Act::Allow(Grant::Https("uploads.github.com".into()))).unwrap();
-        edit(&mut r, "gh", &Act::Allow(Grant::Agent)).unwrap();
+        edit(&mut r, "gh", &Act::Allow(Grant::Agent(None))).unwrap();
         edit(&mut r, "gh", &Act::Disallow(Grant::Https("api.github.com".into()))).unwrap();
         assert_eq!(r["gh"].https.as_ref().unwrap().hosts, ["uploads.github.com"]);
         edit(&mut r, "gh", &Act::Disallow(Grant::Https("uploads.github.com".into()))).unwrap();
         assert_eq!(r["gh"].https, None);
-        edit(&mut r, "gh", &Act::Disallow(Grant::Agent)).unwrap();
+        edit(&mut r, "gh", &Act::Disallow(Grant::Agent(None))).unwrap();
         assert!(r["gh"].actors.is_empty());
         edit(&mut r, "gh", &Act::Delete).unwrap();
         assert!(r.is_empty());
@@ -428,7 +488,7 @@ mod tests {
     #[test]
     fn the_words_read_back() {
         assert_eq!(Act::Allow(Grant::Https("a.com".into())).rest(), " https a.com");
-        assert_eq!(Act::Disallow(Grant::Agent).rest(), " agent");
+        assert_eq!(Act::Disallow(Grant::Agent(None)).rest(), " agent");
         assert_eq!(Act::Approve(Approve::FirstUse).rest(), " first-use");
         assert_eq!(rules_path(None), "secrets/system.json");
         assert_eq!(rules_path(Some("casey")), "users/casey/secrets.json");
