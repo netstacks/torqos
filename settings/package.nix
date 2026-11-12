@@ -17,7 +17,7 @@ rustPlatform.buildRustPackage {
   # libcosmic and its own git dependencies, each at the revision Cargo.lock names, vendored as nixpkgs does
   # COSMIC's own applications (two git sources give crates of one name and version, which cargoLock refuses).
   # Changing Cargo.lock changes this hash: build once, and take the one Nix reports.
-  cargoHash = "sha256-mqLnx7S6+LYbu9cf5G0Pju1ml12g9jO7SGR0fxxZ6w8=";
+  cargoHash = "sha256-kVoGYirsRsWRrcJIe2x9w39fgXSbr44e5I9yHD8eAx0=";
 
   nativeBuildInputs = [ pkg-config libcosmicAppHook copyDesktopItems ];
 
