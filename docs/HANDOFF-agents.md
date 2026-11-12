@@ -119,6 +119,9 @@ See KNOWN-GAPS 6zq, 6zzk and 6zzo.
      - CLAUDE.md is main's throughout. The branch's edits to it wait for the owner's word.
      - The guide's paragraph saying another program can look untainted was dropped, because step 5 makes every
        program but the resident agent start tainted.
+   - Only the tip was compiled. Commits from "one agent account per person" to the rebase fix (fa9e6da) do not build
+     the broker binary: `connected()` (secrets, main) calls `socket::caller` with the old three arguments. Left there,
+     not moved into each commit: a bisect in that range needs the same one-line change, with that commit's arguments.
    - **Open:** secrets (ADR-052) still name the agent as one account, `torq-agent` (`actors`, `wire::secrets::AGENT`,
      their tests). Here every person has their own agent, plus a resident account, so a rule naming `torq-agent`
      matches no one. Two broker tests in tests/secrets.rs fail on it: a session is now an agent account's own. Who
