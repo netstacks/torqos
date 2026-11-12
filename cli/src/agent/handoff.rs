@@ -99,10 +99,33 @@ fn dir() -> Result<PathBuf> {
     Ok(PathBuf::from(run).join("torq-agent"))
 }
 
+/// How long a handoff no window took is kept: older ones go when the next is written (the review of the rebased
+/// branch, C11), so one left by a window that never started is not kept until the person logs out.
+const KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// `dir` is the person's own, by itself (C11): a directory, not a link, `uid`'s, open to no group or other.
+fn own_dir(dir: &Path, uid: u32) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(dir).with_context(|| format!("reading {}", dir.display()))?;
+    if !m.is_dir() || m.uid() != uid || m.mode() & 0o077 != 0 {
+        bail!("{}: not a directory of yours alone (it must be yours, 0700, and no link)", dir.display());
+    }
+    Ok(())
+}
+
 /// Written for the window, in `dir`: a new file of the person's (0600, never one that was there), its path.
 pub fn write_in(dir: &Path, h: &Handoff) -> Result<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("making {}", dir.display()))?;
+    own_dir(dir, rustix::process::getuid().as_raw())?;
+    // Those no window took, past their time: gone (a failure to remove one is no reason not to write this one).
+    for e in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?.flatten() {
+        let old = e.file_name().to_string_lossy().starts_with("ask-")
+            && std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_file() && m.modified().is_ok_and(|t| t.elapsed().is_ok_and(|a| a > KEPT_FOR)));
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
     let text = serde_json::to_string(h)?;
     for n in 0..64u32 {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
@@ -126,20 +149,31 @@ pub fn take_from(dir: &Path, path: &Path, uid: u32) -> Result<Handoff> {
     if path.parent() != Some(dir) {
         bail!("{}: not a handoff of TorqOS's ({} only)", path.display(), dir.display());
     }
+    own_dir(dir, uid)?;
+    // A file refused here is in the person's own directory, and goes (C11): never taken, it would stay until logout.
+    let refused = |why: anyhow::Error| -> anyhow::Error {
+        if let Err(e) = std::fs::remove_file(path) {
+            return why.context(format!("and it could not be removed: {e}"));
+        }
+        why
+    };
     let mut f = std::fs::OpenOptions::new()
         .read(true)
         // Never through a link; never waiting (a FIFO left there would hold the window: opened without
         // blocking, its type is then checked on the open descriptor, before anything is read).
         .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+        .with_context(|| format!("opening {}", path.display()))
+        .map_err(refused)?;
     let m = f.metadata()?;
     if !m.is_file() || m.uid() != uid || m.len() > MAX_FILE {
-        bail!("{}: not a handoff of yours", path.display());
+        return Err(refused(anyhow::anyhow!("{}: not a handoff of yours", path.display())));
     }
     let mut text = String::new();
     (&mut f).take(MAX_FILE).read_to_string(&mut text)?;
-    let _ = std::fs::remove_file(path);
+    // Taken once: removed before it is used, and refused if it cannot be (C11: its result was dropped, so a handoff
+    // could be read twice).
+    std::fs::remove_file(path).with_context(|| format!("removing {} once read", path.display()))?;
     let h: Handoff = serde_json::from_str(&text).context("not a handoff TorqOS wrote")?;
     // Bounded again: whoever wrote it.
     Ok(Handoff::new(&h.question, h.context.as_deref()))
@@ -179,13 +213,20 @@ pub fn open_window(h: &Handoff, token: Option<&str>) -> Result<()> {
     let file = write_in(&dir()?, h)?;
     // Waited for (bounded): nothing of it is left behind.
     let c = window_command(&file, token);
-    match super::setup::output_within(c, std::time::Duration::from_secs(10)) {
-        Some(_) => Ok(()),
-        None => {
-            let _ = std::fs::remove_file(&file);
-            bail!("could not start the agent's window (torq-agent-ui, through systemd-run --user): see `journalctl --user -n 20`")
-        }
+    let started = std::time::Instant::now();
+    let limit = std::time::Duration::from_secs(10);
+    if super::setup::output_within(c, limit).is_some() {
+        return Ok(());
     }
+    // Past its time, systemd-run was killed but may yet start the window, which then takes the file: kept (it goes
+    // after KEPT_FOR). A refusal before that is the window's end: the file goes (the review of the rebased branch, C11).
+    if started.elapsed() >= limit {
+        bail!("the agent's window did not start within {} s; it may still come (journalctl --user -n 20)", limit.as_secs());
+    }
+    if let Err(e) = std::fs::remove_file(&file) {
+        eprintln!("torq: removing {}: {e}", file.display());
+    }
+    bail!("could not start the agent's window (torq-agent-ui, through systemd-run --user): see `journalctl --user -n 20`")
 }
 
 #[cfg(test)]
@@ -312,5 +353,29 @@ mod tests {
         assert_eq!(c.lines().count(), 3, "{c:?}");
         assert!(!c.contains('\u{202e}') && !c.contains('\u{200b}') && !c.contains('\x1b') && !c.contains('\r') && !c.contains('\t'), "{c:?}");
         assert!(c.contains("\\u{202e}"), "shown, not silently gone: {c:?}");
+    }
+
+    /// The person's handoff directory, by itself (C11): one open to others, or not theirs, is refused at both ends; a
+    /// refused file in it goes; an untaken one goes after KEPT_FOR.
+    #[test]
+    fn the_handoff_directory_is_theirs_and_kept_tidy() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("torq-agent");
+        let h = Handoff::new("q", None);
+        let p = write_in(&dir, &h).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(write_in(&dir, &h).is_err() && take_from(&dir, &p, me()).is_err(), "open to its group");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Too large: refused, and gone.
+        let big = dir.join("ask-big.json");
+        std::fs::write(&big, "x".repeat(MAX_FILE as usize + 1)).unwrap();
+        assert!(take_from(&dir, &big, me()).is_err());
+        assert!(!big.exists(), "a refused file goes");
+        // Not taken for longer than KEPT_FOR: gone at the next write.
+        let old = std::fs::File::options().write(true).open(&p).unwrap();
+        old.set_modified(std::time::SystemTime::now() - KEPT_FOR - std::time::Duration::from_secs(5)).unwrap();
+        let q = write_in(&dir, &h).unwrap();
+        assert!(!p.exists() && q.exists());
     }
 }
