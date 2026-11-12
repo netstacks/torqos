@@ -118,6 +118,14 @@ fn agent_fits(name: &str, user: Option<&str>, act: &Act) -> Result<()> {
     }
 }
 
+/// Whether `person` has an agent account on this machine, by /etc/passwd's text (`torq agent people` makes one each):
+/// a system secret is given only to an agent that exists (the review of the rebased branch, B9; the broker checks it
+/// again against its own map).
+fn agent_here(passwd: &str, person: &str) -> bool {
+    let account = format!("{}-{person}", w::AGENT);
+    passwd.lines().any(|l| l.split(':').next() == Some(account.as_str()))
+}
+
 pub fn edit(rules: &mut Rules, name: &str, act: &Act) -> Result<String> {
     edit_with(rules, name, act, &[])
 }
@@ -240,6 +248,12 @@ pub fn change(machine: &dyn Machine, repo: &Repo, name: &str, user: Option<&str>
     };
     agent_fits(name, user, act)?;
     let what = edit_with(&mut rules, name, act, &known)?;
+    if let Act::Allow(Grant::Agent(Some(p))) = act {
+        let passwd = std::fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
+        if !agent_here(&passwd, p) {
+            bail!("{p} has no agent on this machine ({}-{p}): `torq agent people` names who has one", w::AGENT);
+        }
+    }
     let new = (!rules.is_empty()).then(|| w::render(&rules));
     let scratch = crate::scratch_dir()?;
     let diff = crate::candidate::unified_diff_bytes(scratch.path(), &[(path, old.as_deref(), new.as_deref().map(str::as_bytes))])?;
@@ -492,5 +506,13 @@ mod tests {
         assert_eq!(Act::Approve(Approve::FirstUse).rest(), " first-use");
         assert_eq!(rules_path(None), "secrets/system.json");
         assert_eq!(rules_path(Some("casey")), "users/casey/secrets.json");
+    }
+
+    /// A system secret is given only to an agent that exists (B9).
+    #[test]
+    fn only_an_agent_that_exists_is_given_one() {
+        let passwd = "root:x:0:0::/root:/bin/sh\nalice:x:1000:100::/home/alice:/bin/sh\ntorq-agent-alice:x:990:990::/var/lib/torq-agent-alice:/sbin/nologin\n";
+        assert!(agent_here(passwd, "alice"));
+        assert!(!agent_here(passwd, "alicee") && !agent_here(passwd, "bob") && !agent_here(passwd, "agent-alice"));
     }
 }

@@ -3977,3 +3977,23 @@ fn a_declined_proposal_is_said_declined_first_when_scheduled() {
     let e = format!("{:#}", t.s().schedule(p, "casey", &At::in_seconds(30)).unwrap_err());
     assert!(e.contains("was declined") && !e.contains("untrusted"), "{e}");
 }
+
+/// A system secret's rule names only agents this machine has (the review of the rebased branch, B9): a name with no
+/// agent in the broker's map (a typo, a person with none) is refused, so a person given that name later does not
+/// inherit the secret. Taking a stale name out is never refused.
+#[test]
+fn a_system_secret_names_only_agents_that_exist() {
+    let (dir, b) = setup("true");
+    let rule = |actor: &str| format!("{{\"ci\": {{\"kind\": \"token\", \"https\": {{\"hosts\": [\"api.github.com\"]}}, \"actors\": [\"{actor}\"]}}}}");
+    let head = || b.repo.head().unwrap();
+    let ghost = write_diff(dir.path(), "g.diff", &format!("--- /dev/null\n+++ b/secrets/system.json\n@@ -0,0 +1 @@\n+{}\n", rule("torq-agent-ghost")));
+    let e = format!("{:#}", b.propose_on(Some(&head()), &ghost, "ci for ghost", Actor::User, false).unwrap_err());
+    assert!(e.contains("torq-agent-ghost") && e.contains("no agent"), "{e}");
+    let casey = write_diff(dir.path(), "c.diff", &format!("--- /dev/null\n+++ b/secrets/system.json\n@@ -0,0 +1 @@\n+{}\n", rule("torq-agent-casey")));
+    let p = b.propose_on(Some(&head()), &casey, "ci for casey's agent", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    // Casey's agent gone from the map: the name taken out is a change like any other.
+    let b = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_agent_limits(&torq_broker::agent::Limits { agents: Default::default(), settings: vec![] });
+    let out = write_diff(dir.path(), "o.diff", &format!("--- a/secrets/system.json\n+++ b/secrets/system.json\n@@ -1 +1 @@\n-{}\n+{}\n", rule("torq-agent-casey"), rule("sam")));
+    b.propose_on(Some(&b.repo.head().unwrap()), &out, "ci for sam", Actor::User, false).unwrap();
+}

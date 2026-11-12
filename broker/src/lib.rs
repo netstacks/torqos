@@ -1953,6 +1953,24 @@ impl Broker {
         for (path, file) in self.repo.proposed_files(diff_path, &paths, most)? {
             if let Some(f) = file {
                 Self::data_ok(&path, &f)?;
+                if path == torq_wire::secrets::SYSTEM_RULES {
+                    self.system_rules_name_real_agents(&path, &f.content)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The system's secrets' rules, as a change leaves them, name only agent accounts the broker's map has (the review
+    /// of the rebased branch, B9): a name with none (a typo, a person with no agent) is refused, so that a person given
+    /// that name later does not inherit the secret. Checked on a change only, not at an undo: a rule a person's agent
+    /// later left still undoes, and taking its name out is a change like any other.
+    fn system_rules_name_real_agents(&self, path: &str, content: &[u8]) -> Result<()> {
+        let rules = torq_wire::secrets::parse(content).map_err(|why| anyhow::anyhow!("refused: {path}: {why}"))?;
+        let prefix = format!("{}-", torq_wire::secrets::AGENT);
+        for (name, r) in &rules {
+            if let Some(a) = r.actors.iter().find(|a| a.starts_with(&prefix) && self.agent_limits.serves(a).is_none()) {
+                bail!("refused: {path}: secret {name}: {a} is no agent this machine has (torq agent people names who has one)");
             }
         }
         Ok(())
