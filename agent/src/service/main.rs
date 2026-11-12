@@ -652,15 +652,15 @@ printf '%s\n' '{"type":"called","tool":"read_journal"}' '{"type":"done","exit":0
         assert_eq!(read_line(&mut std::io::Cursor::new(b"\xff\nb\n".as_slice())).unwrap(), Line::Dropped);
     }
 
-    /// A task that says something over the bound (an answer of 2 MB): dropped, said so, and the task runs
-    /// on to its end — never left blocked on a pipe no one reads.
+    /// A task that says something over the bound (an answer of 2 MB): dropped, said so (and taken as tainting, as it
+    /// may have been a taint), and the task runs on to its end — never left blocked on a pipe no one reads.
     #[test]
     fn a_task_saying_too_much_is_not_left_hanging() {
         let (_a, sock, _d) = agent(r#"read -r t; printf '{"type":"say","text":"'; head -c 2000000 /dev/zero | tr '\0' x; printf '"}\n'; printf '%s\n' '{"type":"say","text":"after"}'"#, me());
         let seen = talk(&sock, &[ask("long")], done);
-        assert_eq!(seen.len(), 3, "{:?}", seen.iter().map(|e| format!("{e:?}").chars().take(80).collect::<String>()).collect::<Vec<_>>());
+        assert_eq!(seen.len(), 4, "{:?}", seen.iter().map(|e| format!("{e:?}").chars().take(80).collect::<String>()).collect::<Vec<_>>());
         assert!(matches!(&seen[0], Event::Error { text } if text.contains("left out")));
-        assert_eq!(seen[1..], [Event::Say { text: "after".into() }, Event::Done { exit: 0 }]);
+        assert_eq!(seen[1..], [Event::Tainted { why: UNNAMED.into() }, Event::Say { text: "after".into() }, Event::Done { exit: 0 }]);
     }
 
     /// `forget` while a task runs: refused, and ended (no client waits); after it, done.
