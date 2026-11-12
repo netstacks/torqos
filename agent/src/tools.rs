@@ -374,6 +374,26 @@ pub const PROGRAM_TIMEOUT: Duration = Duration::from_secs(30);
 /// person's trust the broker applies it then and there — a build and a switch.
 pub const PROPOSE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// What torqcli's output says of a proposal it was given to make: made (its number), cut short (it may have been
+/// made: the broker alone knows), or not made (torqcli said why, or failed before the broker).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Proposed {
+    Made(u64),
+    Unknown,
+    Not,
+}
+
+/// torqcli's word, from its output: "proposed as #<n>" when the broker took it.
+pub fn proposed(output: &str) -> Proposed {
+    if let Some(n) = output.split("proposed as #").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse().ok()) {
+        return Proposed::Made(n);
+    }
+    if output.contains("\n[stopped: ") {
+        return Proposed::Unknown;
+    }
+    Proposed::Not
+}
+
 /// Run `cmd`, its input closed, in a process group of its own; its standard output and error
 /// together, read only up to `cap` bytes — past that, or past `timeout`, the whole group is killed
 /// and the output so far given, with a line saying why.

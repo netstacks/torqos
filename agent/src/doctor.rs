@@ -207,9 +207,13 @@ pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: 
                     // The broker told first, before the model is shown a word of it.
                     if tool.taints() && !session.tainted_by.contains(&tool) {
                         session.save()?;
-                        // A proposal torqcli ran is said as given to the broker, never lost in the error (the review of
-                        // the rebased branch, B3): asked again, it would be proposed twice.
-                        let given = if tool == Tool::Propose { "; the proposal was given to the broker: look in show system proposals before asking for it again" } else { "" };
+                        // A proposal torqcli says it made (or was stopped making) is said as given, never lost in the
+                        // error: asked again, it would be proposed twice. One it says it did not make is not called given.
+                        let given = match (tool == Tool::Propose).then(|| tools::proposed(&output)) {
+                            Some(tools::Proposed::Made(n)) => format!("; proposal #{n} was given to the broker: look in show system proposals before asking for it again"),
+                            Some(tools::Proposed::Unknown) => "; the proposal may have been given to the broker: look in show system proposals before asking for it again".to_string(),
+                            _ => String::new(),
+                        };
                         host.session(&["taint", &broker, tool.name()]).with_context(|| format!("reporting to the broker that the session read {}: the session ends here, and the model is not shown it{given}", tool.name()))?;
                         events(Event::Tainted { why: tool.name().into() })?;
                     }
@@ -220,17 +224,17 @@ pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: 
                     // torqcli's output, which a time limit may have cut short.
                     let said = if tool == Tool::Propose {
                         // The broker's record unread is said as that, never as an error ending the task with the
-                        // proposal unmentioned (B3): the model is told not to propose it again.
+                        // proposal unmentioned: as given only where torqcli says it was (or may have been).
                         let (new, unread) = match broker_said(host, &broker, &mut seen) {
                             Ok(new) => (new, None),
                             Err(e) => (vec![], Some(clean(&format!("{e:#}")))),
                         };
-                        let line = if let Some(why) = unread {
-                            format!("the proposal was given to the broker; what became of it could not be read ({why}): do not propose it again; the person sees it in show system proposals")
-                        } else if new.is_empty() {
-                            format!("the broker recorded no proposal (torqcli said: {})", tools::truncate(output.trim().lines().last().unwrap_or("nothing"), 200))
-                        } else {
-                            new.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("; ")
+                        let line = match (unread, tools::proposed(&output)) {
+                            (Some(why), tools::Proposed::Made(n)) => format!("proposal #{n} was given to the broker; what became of it could not be read ({why}): do not propose it again; the person sees it in show system proposals"),
+                            (Some(why), tools::Proposed::Unknown) => format!("the proposal may have been given to the broker; what became of it could not be read ({why}): do not propose it again before the person has looked"),
+                            (Some(why), tools::Proposed::Not) => format!("not proposed: torqcli said: {} ({why})", tools::truncate(output.trim().lines().last().unwrap_or("nothing"), 200)),
+                            (None, _) if new.is_empty() => format!("the broker recorded no proposal (torqcli said: {})", tools::truncate(output.trim().lines().last().unwrap_or("nothing"), 200)),
+                            (None, _) => new.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("; "),
                         };
                         writeln!(err, "doctor: {line}")?;
                         for (seq, _) in &new {
@@ -386,6 +390,8 @@ mod tests {
         recorded: Option<Option<u64>>,
         /// What the broker holds tainted the session from its start.
         held: Vec<&'static str>,
+        /// What torqcli says to a proposal, where not the default (cut short at its time limit).
+        said: Option<&'static str>,
     }
     const SESSION: &str = "0123456789abcdef0123456789abcdef";
     impl Host for FakeHost {
@@ -395,7 +401,7 @@ mod tests {
         }
         fn propose(&self, script: &str, session: &str) -> Result<String> {
             self.proposals.lock().unwrap().push((script.into(), session.into()));
-            Ok("[edit users viper packages]\n+ htop\n[stopped: still running after 1800 s]\n".into())
+            Ok(self.said.unwrap_or("[edit users viper packages]\n+ htop\n[stopped: still running after 1800 s]\n").into())
         }
         fn session(&self, args: &[&str]) -> Result<String> {
             self.reports.lock().unwrap().push(args.join(" "));
@@ -413,7 +419,7 @@ mod tests {
         }
     }
     fn host(output: &str) -> FakeHost {
-        FakeHost { output: output.into(), ran: Mutex::new(vec![]), reports: Mutex::new(vec![]), broken: (false, false), proposals: Mutex::new(vec![]), recorded: Some(None), held: vec![] }
+        FakeHost { output: output.into(), ran: Mutex::new(vec![]), reports: Mutex::new(vec![]), broken: (false, false), proposals: Mutex::new(vec![]), recorded: Some(None), held: vec![], said: None }
     }
 
     fn config(endpoint: Endpoint, dir: &Path) -> Config {
@@ -817,5 +823,17 @@ mod tests {
         .unwrap();
         assert!(s.tainted());
         assert_eq!(said, [Event::Tainted { why: "held-by-the-broker".into() }]);
+    }
+
+    /// A proposal torqcli says it did not make is not called given when the report of its read fails: said plainly.
+    #[test]
+    fn a_proposal_not_made_is_not_said_given() {
+        let mut h = host("");
+        h.broken = (false, true);
+        h.said = Some("the broker did not answer\n\n[exited with exit status: 1]\n");
+        let d = tempfile::tempdir().unwrap();
+        let (ep, _) = fake_model(vec![calls(&[("propose_change", json!({"reason": "htop for viper", "set": [{"path": "users viper packages", "value": "htop"}]}))]), answer("never")]);
+        let e = format!("{:#}", ask(&config(ep, d.path()), &h, "install htop", true, &mut Vec::new(), &mut Vec::new()).unwrap_err());
+        assert!(!e.contains("given"), "{e}");
     }
 }
