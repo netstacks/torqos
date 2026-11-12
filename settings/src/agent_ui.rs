@@ -156,9 +156,11 @@ impl Window {
         let Some(file) = files.first() else { return Task::none() };
         match handoff::take(std::path::Path::new(file)) {
             Ok(h) => {
-                self.question = h.question;
+                // A half-typed question is not lost without a word (C15): the one handed over takes the box, and what
+                // was there is said, to copy back.
+                let typed = std::mem::replace(&mut self.question, h.question);
                 self.attached = h.context;
-                self.note = None;
+                self.note = (!typed.trim().is_empty() && typed != self.question).then(|| (format!("A question was handed over; what you had typed was: {}", typed.trim()), false));
             }
             Err(e) => self.note = Some((torq::app::said(&e), true)),
         }
@@ -293,7 +295,11 @@ impl cosmic::Application for Window {
                         self.talk.clear();
                         self.note = Some(("Your agent forgot the conversation (Forget, from elsewhere): what was shown here is gone from its memory.".into(), false));
                     }
-                    self.remembered = Some(st.turns);
+                    // Not while its own task runs: a Forget from elsewhere then would be taken as the count, and missed
+                    // (C15). The count only grows by this window's turns otherwise.
+                    if !self.talk.working() {
+                        self.remembered = Some(st.turns);
+                    }
                 }
                 self.client = l.client;
                 self.reach = l.reach;

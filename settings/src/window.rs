@@ -318,6 +318,10 @@ pub enum Message {
     OpenAgent,
     /// Open the agent's window about something (ADR-051 4): a question, that thing attached.
     AskAgent(Handoff),
+    /// The same about the failure beside it, or the draft's changes: built when pressed, not at every frame (the
+    /// review of the rebased branch, C15: a draft's diff was cleaned at every redraw).
+    AskAgentFailure,
+    AskAgentDraft,
     /// What became of opening the agent's window (an error, said on the page).
     AskedAgent(Result<(), String>),
     Forget,
@@ -1035,6 +1039,16 @@ impl cosmic::Application for Settings {
             Message::OpenAgent => self.said_if_not(app::open_agent()),
             // Off the window's thread (step 5's second review): systemd-run is waited for, bounded.
             Message::AskAgent(h) => return cosmic::task::future(async move { Message::AskedAgent(blocking(move || handoff::open_window(&h, None)).await) }),
+            Message::AskAgentFailure => {
+                if let Some((command, said)) = &self.failure {
+                    return self.update(Message::AskAgent(About::Failure { command, said }.handoff()));
+                }
+            }
+            Message::AskAgentDraft => {
+                if let Some(Loaded::Got(diff)) = self.outputs.get(COMPARE) {
+                    return self.update(Message::AskAgent(About::Draft(diff).handoff()));
+                }
+            }
             Message::AskedAgent(r) => {
                 if let Err(e) = r {
                     self.note = Some((e, true));
@@ -1090,9 +1104,8 @@ impl cosmic::Application for Settings {
             // Something failed: the agent can look at it with the person (what failed and what it said, attached).
             // Only beside the failure it names: a note other than its own (any of the page's other failures) has no
             // Ask the agent here, rather than one about an older failure (the review of the rebased branch, B11).
-            if let (true, Some((command, said))) = (*failed, self.failure.as_ref().filter(|(_, said)| said == text)) {
-                let h = About::Failure { command, said }.handoff();
-                content = content.push(widget::button::text("Ask the agent about this").on_press(Message::AskAgent(h)));
+            if *failed && self.failure.as_ref().is_some_and(|(_, said)| said == text) {
+                content = content.push(widget::button::text("Ask the agent about this").on_press(Message::AskAgentFailure));
             }
         }
         content = content.push(body);
@@ -1604,8 +1617,8 @@ impl Settings {
             return page.push(widget::text::body("Your draft is the configuration in effect: nothing to commit.")).into();
         }
         page = page.push(self.diff(COMPARE));
-        if let Some(Loaded::Got(diff)) = self.outputs.get(COMPARE) {
-            page = page.push(widget::button::text("Ask the agent about these changes").on_press(Message::AskAgent(About::Draft(diff).handoff())));
+        if matches!(self.outputs.get(COMPARE), Some(Loaded::Got(_))) {
+            page = page.push(widget::button::text("Ask the agent about these changes").on_press(Message::AskAgentDraft));
         }
         let mut commit = settings::section().title("Commit");
         commit = commit.add(settings::item::builder("Comment").description("What the change is for: it goes in the history").control(widget::text_input("Optional", &self.comment).on_input(Message::Comment).width(Length::FillPortion(2))));

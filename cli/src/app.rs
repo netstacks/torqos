@@ -1052,15 +1052,14 @@ pub fn agent_fates(seqs: &[u64]) -> Result<Vec<(u64, crate::agent::conversation:
     Ok(crate::agent::conversation::fates(&entries, &crate::agent::agent_of(&crate::me()?), seqs))
 }
 
-/// Proposals waiting for a person: the agent's and other people's. One's own commit that did not go through leaves
-/// a proposal too, and that is not something waiting on them.
 /// Whether Settings and the applets offer `me` Decline of proposal `e`, by their own say: narrower than the broker's rule,
 /// on purpose (Proposal.yours): their own agent proposed it.
 fn yours(e: &history::Entry, me: &str) -> bool {
     e.data["agent_for"].as_str() == Some(me)
 }
 
-/// The proposals waiting that `me` did not make: those waiting for them, or for someone else, to apply.
+/// Proposals waiting for a person: the agent's and other people's. One's own commit that did not go through leaves
+/// a proposal too, and that is not something waiting on them.
 fn waiting_on_me<'a>(entries: &'a [history::Entry], me: &str) -> Vec<&'a history::Entry> {
     history::waiting_proposals(entries).into_iter().filter(|e| e.data["caller"].as_str().unwrap_or(&e.actor) != me).collect()
 }

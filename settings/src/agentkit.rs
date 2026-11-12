@@ -104,7 +104,11 @@ pub async fn look(client: Result<Client, Unreachable>, seqs: Vec<u64>) -> Look {
                 Err(e) => Err(Unreachable::Broken(torq::app::said(&e))),
             },
         };
-        let fates = torq::app::agent_fates(&seqs).unwrap_or_default();
+        // The ledger unread: each said so, and the reason in the journal (C15), not "looking it up…" for good.
+        let fates = torq::app::agent_fates(&seqs).unwrap_or_else(|e| {
+            eprintln!("torq: looking up what became of the agent's proposals: {e:#}");
+            seqs.iter().map(|&s| (s, Fate::Unread)).collect()
+        });
         Look { client, reach, brain: setup::brain().ok().flatten(), fates }
     })
     .await
