@@ -20,7 +20,6 @@ use std::time::Duration;
 use torq::app::{self, Console, Glance, Needs};
 
 fn main() -> cosmic::iced::Result {
-    torq::app::restart_on_panic();
     cosmic::applet::run::<Applet>(())
 }
 
@@ -54,8 +53,11 @@ struct Applet {
     last_change: Option<String>,
     /// What was last notified, so each state is said once.
     told: Option<String>,
-    /// Why the last save of the person's desktop failed or was refused: told once, shown until a save works.
-    unsaved: app::Unsaved,
+    /// Why the last save of the person's desktop failed or was refused, why some of the configuration's settings could
+    /// not be put on it, and why their apps could not be brought back: each told once, and shown until a try works.
+    unsaved: app::Told,
+    unapplied: app::Told,
+    apps: app::Told,
     /// The confirmation already warned of as about to expire.
     warned: Option<u64>,
     /// Now, for the countdown.
@@ -68,7 +70,9 @@ enum Message {
     Looked,
     Tick,
     SyncDesktop,
-    Synced(Result<(), String>),
+    /// The settings that could not be put on the desktop, or why the sync failed.
+    Synced(Result<Vec<String>, String>),
+    Reconciled(Result<(), String>),
     Answer(Result<Glance, String>),
     Confirm,
     Closed,
@@ -260,8 +264,10 @@ impl Applet {
                 col = col.push(line(s));
             }
         }
-        if let Some(why) = self.unsaved.why() {
-            col = col.push(widget::text::caption(format!("Your desktop was not saved: {why}")));
+        for (told, what) in [(&self.unsaved, UNSAVED), (&self.unapplied, UNAPPLIED), (&self.apps, APPS)] {
+            if let Some(why) = told.why() {
+                col = col.push(widget::text::caption(format!("{what}: {why}")));
+            }
         }
         col = col.push(widget::divider::horizontal::default());
         col = col.push(widget::button::text("Open TorqOS Settings").on_press(Message::Open(open)));
@@ -286,17 +292,8 @@ impl cosmic::Application for Applet {
     fn init(core: cosmic::Core, _flags: ()) -> (Self, Task<cosmic::Action<Message>>) {
         let mut app = Applet { core, console: Some(Console::watcher()), session: app::session_system(), running: running(), now: app::now(), ..Default::default() };
         // A rebuilt machine's apps and desktop come back at the first login.
-        let first = cosmic::task::future(async {
-            Message::Synced(
-                blocking(|| {
-                    let _ = app::reconcile_apps();
-                    app::sync_desktop(false).map(|_| ())
-                })
-                .await,
-            )
-        });
         let ask = app.update(Message::Ask);
-        (app, Task::batch([first, ask]))
+        (app, Task::batch([reconcile().chain(sync()), ask]))
     }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
@@ -348,18 +345,30 @@ impl cosmic::Application for Applet {
                 // Settled: the panel and the rest, where they changed, without a new login. Open windows stay.
                 if let (Some(old), Some(new)) = (self.switched_from.take(), now) {
                     // The configuration may name other apps now: an undo, or a pull from the remote.
-                    std::thread::spawn(|| {
-                        let _ = app::reconcile_apps();
-                    });
                     app::restart_parts(&app::stale_parts(&old, &new));
+                    return reconcile();
                 }
             }
             // Not while a commit confirmed waits: the broker takes no change until it is confirmed or rolled back.
             Message::SyncDesktop if matches!(self.state(), State::Confirm(_)) => {}
             Message::SyncDesktop => return sync(),
+            // What failed is said in its own words, once for each reason: the reasons differ (a change waiting to be
+            // confirmed, the broker not answering, a refusal), so no one piece of advice fits them all.
             Message::Synced(outcome) => {
-                if let Some(why) = self.unsaved.heard(outcome) {
-                    notify("Your desktop was not saved".to_string(), format!("{why} Save it again from TorqOS Settings, Desktop."), "desktop");
+                // A sync that failed says nothing of what it could put on the desktop: that stands as it was.
+                if let Ok(failed) = &outcome {
+                    let words = (!failed.is_empty()).then(|| app::desktop_words(failed));
+                    if let Some(words) = self.unapplied.heard(words.map_or(Ok(()), Err)) {
+                        notify(UNAPPLIED.to_string(), words, "desktop");
+                    }
+                }
+                if let Some(why) = self.unsaved.heard(outcome.map(|_| ())) {
+                    notify(UNSAVED.to_string(), why, "desktop");
+                }
+            }
+            Message::Reconciled(outcome) => {
+                if let Some(why) = self.apps.heard(outcome) {
+                    notify(APPS.to_string(), why, "apps");
                 }
             }
             Message::Tick => {
@@ -467,9 +476,21 @@ fn running() -> Option<PathBuf> {
     std::fs::read_link("/run/current-system").ok()
 }
 
-/// Bring the person's desktop and configuration together, and answer whether a save failed or was refused.
+/// What the panel says when a try of its own fails, before the reason.
+const UNSAVED: &str = "Your desktop was not saved";
+const UNAPPLIED: &str = "Not put on your desktop";
+const APPS: &str = "Your apps were not brought back";
+
+/// Bring the person's desktop and configuration together, and answer what could not be put on the desktop, or why
+/// the sync (a save among it) failed or was refused.
 fn sync() -> Task<cosmic::Action<Message>> {
-    cosmic::task::future(async { Message::Synced(blocking(|| app::sync_desktop(false).map(|_| ())).await) })
+    cosmic::task::future(async { Message::Synced(blocking(|| app::sync_desktop(false).map(|s| s.failed)).await) })
+}
+
+/// Bring the person's apps in line with the configuration, and answer why that failed. An app that could not be
+/// installed is not an error here: it is tried again at the next reconcile (`reconcile_apps`).
+fn reconcile() -> Task<cosmic::Action<Message>> {
+    cosmic::task::future(async { Message::Reconciled(blocking(app::reconcile_apps).await) })
 }
 
 /// A call that blocks on a thread of its own, so the panel keeps drawing.

@@ -390,16 +390,19 @@ Its §5 lists claims without a test.
    still carries niri until M4 rewrites it.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
-9. **An applet a signal ends stays gone until the panel starts again** (2026-11-10; narrowed 2026-11-12). COSMIC
-   1.11's panel starts again an applet that exits with an error code (launch-pad, with a growing wait), but not one a
-   signal ended (an abort, a segfault, a kill). A panic on any thread of `torq-applet` or `torq-tunnels` now ends
-   the applet with code 70 (`torq::app::restart_on_panic`), its message in the journal first, so the panel starts it
-   again; before, a panic on a side thread left the applet running without that thread, saying nothing. A death by
-   a signal (seen only when the panel itself died, which starts its applets anew) still leaves the machine without
-   TorqOS in the panel, and without its restarting of the approval dialog after polkit is replaced, until the panel
-   restarts or the person logs in again. A supervisor process between the panel and the applet would cover it; not
-   built. torqcli's own retry (cli/src/run.rs, `NO_APPROVAL_AGENT`) still starts the dialog again for a terminal's
-   command. The panel's wait before each restart doubles and is not reset within a login.
+9. **An applet a signal ends stays gone until the panel starts again** (2026-11-10; corrected 2026-11-12). COSMIC
+   1.11's panel starts again an applet that exits with an error code (launch-pad, with a wait that doubles and is not
+   reset within a login), but not one a signal ended (an abort, a segfault, a kill): read in its source
+   (cosmic-panel 1.11, launch-pad 1.0.1), not tested. A panic on the applet's main thread exits it with code 101, so
+   it comes back. A panic in one of its own calls (each on a thread of its own, `off`) is answered as that call's
+   error ("the call stopped before it answered"; a notification's own thread excepted: that notification is lost);
+   one in a library task (tokio's, zbus's executor, iced's SVG
+   drawing) is caught by that library, which carries on, as it means to: ending the whole applet on any panic was
+   tried and dropped for that reason. A death by a signal (seen only when the panel itself died, which starts its
+   applets anew) still leaves the machine without TorqOS in the panel, and without its restarting of the approval
+   dialog after polkit is replaced, until the panel restarts or the person logs in again. A supervisor process
+   between the panel and the applet would cover it; not built. torqcli's own retry (cli/src/run.rs,
+   `NO_APPROVAL_AGENT`) still starts the dialog again for a terminal's command.
 10. **Desktop VM tests on .52 (nested ESXi, software rendering).** COSMIC's launcher, app library and portal panic
    on wgpu validation errors there, and the desktop is slow enough that the first approval after login can come
    before COSMIC's dialog has registered with polkit (answered in 3 s, no dialog): once in three runs, the others
@@ -473,8 +476,9 @@ Its §5 lists claims without a test.
    Since `c6342be` (0.4.0-rc1), a switch that changes `torq-applet` or `torq-tunnels` ends the panel, and COSMIC's
    session starts it again with its applets, new from the system's path (`app::LIVE_PARTS`); an applet of 0.3.2
    does not, and keeps its old torqcli until the person logs in again. A save that fails or is refused is no longer
-   silent (2026-11-12): the applet says why in a notification, once for each reason (again after a save worked),
-   and in its popup until a save works.
+   silent (2026-11-12), nor are settings it could not put on the desktop or apps it could not bring back: the
+   applet says why in a notification, once for each reason (again after a try worked),
+   and in its popup until a try works.
 
 ## Dev host quirks (not TorqOS bugs)
 - **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test

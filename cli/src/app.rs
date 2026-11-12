@@ -818,27 +818,14 @@ pub fn ask_log_out() {
     spawn("cosmic-osd", &["log-out"]);
 }
 
-/// The exit code of a panel applet that panicked: COSMIC's panel starts again an applet that exits with an
-/// error code, but not one a signal ended.
-pub const PANICKED: i32 = 70;
-
-/// For a panel applet: a panic on any thread ends the whole applet with `PANICKED`, so the panel starts it again,
-/// instead of leaving it running without that thread (its saves, its notifications) and saying nothing.
-pub fn restart_on_panic() {
-    let said = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        said(info);
-        std::process::exit(PANICKED);
-    }));
-}
-
-/// Why the panel's last save of the person's desktop failed or was refused. Each reason is told once, not at
-/// every 15 minutes' save; a save that works forgets it, so the same reason coming back later is told again.
+/// Why something the panel does by itself last failed (a save of the person's desktop, putting the configuration's
+/// settings on it, bringing their apps back). Each reason is told once, not at every 15 minutes' try; a try that
+/// works forgets it, so the same reason coming back later is told again.
 #[derive(Default)]
-pub struct Unsaved(Option<String>);
+pub struct Told(Option<String>);
 
-impl Unsaved {
-    /// A save's outcome: what to tell the person now, if anything.
+impl Told {
+    /// A try's outcome: what to tell the person now, if anything.
     pub fn heard(&mut self, outcome: Result<(), String>) -> Option<String> {
         let why = outcome.err();
         let new = why.is_some() && why != self.0;
@@ -846,7 +833,7 @@ impl Unsaved {
         if new { self.0.clone() } else { None }
     }
 
-    /// Why the last save did not happen (None: it did, or none was tried).
+    /// Why the last try failed (None: it worked, or none was made).
     pub fn why(&self) -> Option<&str> {
         self.0.as_deref()
     }
@@ -1868,7 +1855,7 @@ mod applet_faults {
 
     #[test]
     fn a_reason_a_save_failed_is_told_once_and_again_after_a_save_worked() {
-        let mut u = Unsaved::default();
+        let mut u = Told::default();
         assert_eq!(u.heard(Ok(())), None);
         assert_eq!(u.heard(Err("refused".into())).as_deref(), Some("refused"));
         // Every 15 minutes the same refusal: told once, still shown.
@@ -1879,27 +1866,5 @@ mod applet_faults {
         assert_eq!(u.why(), None);
         // The same reason a week later is news again.
         assert_eq!(u.heard(Err("another".into())).as_deref(), Some("another"));
-    }
-
-    /// Run by the test below in a process of its own: a side thread panics after the hook is set.
-    #[test]
-    fn panicking_side_thread() {
-        if std::env::var_os("TORQ_TEST_PANIC").is_none() {
-            return;
-        }
-        restart_on_panic();
-        let _ = std::thread::spawn(|| panic!("a side thread's panic")).join();
-    }
-
-    #[test]
-    fn a_panic_on_any_thread_ends_the_applet_with_an_error_code_and_its_message() {
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "app::applet_faults::panicking_side_thread", "--nocapture", "--test-threads=1"])
-            .env("TORQ_TEST_PANIC", "1")
-            .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(PANICKED), "{out:?}");
-        // The default hook still writes the panic first, so the journal says why the applet ended.
-        assert!(String::from_utf8_lossy(&out.stderr).contains("a side thread's panic"), "{out:?}");
     }
 }

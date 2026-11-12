@@ -101,8 +101,9 @@ For the second, `request system desktop save` first, then undo.
   from the panel, and so is the approval dialog's automatic restart, until the panel restarts or you
   log in again. Log out and in again to bring it back. (A terminal's commands still start the dialog
   themselves.)
-- **A save that fails is said.** If your desktop cannot be saved, or TorqOS refuses the save, the
-  applet tells you why in a notification and in its menu, until a save works.
+- **What fails is said.** If your desktop cannot be saved (or TorqOS refuses the save), a setting
+  cannot be put on your desktop, or your apps cannot be brought back, the applet tells you why in a
+  notification and in its menu, until it works.
 - **The lid.** Some laptop panels cannot wake from suspend (the owner's OLED display is one). For
   those, `set torq desktop dimInsteadOfSuspend true` makes the machine never suspend: closing the lid
   locks it and turns the display fully down, and opening it brings the brightness back. It is off by
