@@ -42,7 +42,10 @@ pub enum Request {
     Forget,
 }
 
-/// What the service (and, for the first five, the task's process) says.
+/// What the service (and, for the first five, the task's process) says. Strict, as `Request` is: a kind or a field one
+/// side does not know is refused, never guessed at (the review of the rebased branch, C8). Both sides are one
+/// system's build: a switch that changes either restarts the service (its unit names the new programs), so a
+/// client and the service it reaches differ only for a moment, and then say so rather than misread.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Event {
@@ -104,7 +107,7 @@ pub struct Task {
 mod tests {
     use super::*;
 
-    /// The bytes on the socket, pinned: the CLI, the panel and the service may be different builds.
+    /// The bytes on the socket, pinned: a change to this format is a deliberate one, made on both sides at once.
     #[test]
     fn the_lines_on_the_socket() {
         let ask = Request::Ask { text: "why?".into(), context: None };
