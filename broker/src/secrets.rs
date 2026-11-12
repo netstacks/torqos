@@ -410,8 +410,13 @@ impl Broker {
             bail!("refused: session {id} is not {}'s", a.account);
         }
         if r.resident != a.resident {
-            let whose = if r.resident { "the resident agent's" } else { "another program's of the agent's" };
-            bail!("refused: session {id} is {whose}: only that kind of caller cites it");
+            // Said as what it is: the resident account citing a session its service did not start (another program's
+            // of the agent account, or its own from outside its service, as root's su makes it) is not "another
+            // program's" in its own eyes.
+            if r.resident {
+                bail!("refused: session {id} is the resident agent's: only it cites it");
+            }
+            bail!("refused: session {id} was not started inside the resident agent's service: the resident account cites only its service's sessions");
         }
         Ok(r)
     }

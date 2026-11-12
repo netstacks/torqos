@@ -231,7 +231,7 @@ fn a_use_is_judged_by_its_rule_and_the_agents_first_is_recorded() {
     let e = format!("{:#}", m.b.use_secret(&as_("torq-agent-alice", "gh", "api.github.com", Some(&session))).unwrap_err());
     assert!(e.contains("the resident agent's"), "a coding tool citing the resident's session: {e}");
     let e = format!("{:#}", m.b.use_secret(&agent("gh", "api.github.com", Some(&tool))).unwrap_err());
-    assert!(e.contains("another program's"), "the resident citing a coding tool's session: {e}");
+    assert!(e.contains("not started inside the resident agent's service"), "the resident citing a coding tool's session: {e}");
     torq_broker::session::taint(&resident, &session, "web").unwrap();
     assert!(m.b.use_secret(&agent("gh", "api.github.com", Some(&session))).is_err(), "tainted: a person approves, not built yet");
     assert!(m.b.use_secret(&agent("gh", "api.github.com", None)).is_err(), "no session is a tainted one");
@@ -266,7 +266,7 @@ fn an_agent_sockets_grant_is_who_asked() {
     let e = format!("{:#}", m.b.grant_agent("torq-agent-alice", 990, Some(&clean)).unwrap_err());
     assert!(e.contains("the resident agent's"), "{e}");
     let e = format!("{:#}", m.b.grant_agent("torq-resident-alice", 980, Some(&s)).unwrap_err());
-    assert!(e.contains("another program's"), "{e}");
+    assert!(e.contains("not started inside the resident agent's service"), "{e}");
     let r = m.b.grant_agent("torq-resident-alice", 980, Some(&clean)).unwrap();
     assert_eq!(m.b.grant(&r).unwrap().session.as_deref(), Some(clean.as_str()), "the resident's own");
     for bad in ["", "../x", "0123456789abcdef0123456789abcdeg", "00000000000000000000000000000000"] {
