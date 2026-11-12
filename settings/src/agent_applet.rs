@@ -122,13 +122,15 @@ impl Applet {
             }
             let mut answer = widget::column::with_capacity(4).spacing(spacing.space_xxs);
             if !t.answer.is_empty() {
+                // Named as the agent's own words, apart from the rows TorqOS draws (B13).
+                answer = answer.push(widget::text::caption(crate::agentkit::AGENTS_WORDS));
                 answer = answer.push(widget::text::body(conversation::shown(&t.answer, SHOWN)).width(Length::Fill));
             }
             for e in &t.errors {
                 answer = answer.push(widget::text::caption(e.clone()).width(Length::Fill));
             }
             answer = answer.push(widget::text::caption(t.state()));
-            col = col.push(widget::container(widget::scrollable(answer)).max_height(260.0));
+            col = col.push(widget::container(widget::scrollable(answer)).padding(spacing.space_xs).class(cosmic::theme::Container::Secondary).max_height(260.0));
             for row in t.proposal_rows(&self.fates) {
                 let mut line = widget::row::with_capacity(2).align_y(Alignment::Center).push(widget::text::body(row.text).width(Length::Fill));
                 if row.review {

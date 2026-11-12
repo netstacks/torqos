@@ -179,7 +179,10 @@ impl Window {
         }
         if full {
             if !t.answer.is_empty() {
-                col = col.push(widget::text::body(t.answer.clone()).width(Length::Fill));
+                // The agent's words, framed and named as its own: they are not the rows TorqOS draws below them, which
+                // they could otherwise imitate ("Proposed #57: applied"; the review of the rebased branch, B13).
+                let words = widget::column::with_capacity(2).spacing(spacing.space_xxxs).push(widget::text::caption(crate::agentkit::AGENTS_WORDS)).push(widget::text::body(t.answer.clone()).width(Length::Fill));
+                col = col.push(widget::container(words).padding(spacing.space_xs).class(cosmic::theme::Container::Secondary).width(Length::Fill));
             }
             for e in &t.errors {
                 col = col.push(widget::text::body(e.clone()).width(Length::Fill));

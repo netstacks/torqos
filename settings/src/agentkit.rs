@@ -128,6 +128,10 @@ impl Reply {
     }
 }
 
+/// What heads the agent's answer wherever it is drawn: the words are its, not TorqOS's (the review of the rebased
+/// branch, B13).
+pub const AGENTS_WORDS: &str = "Your agent wrote:";
+
 /// Decline proposal `seq`: `request system decline <n>`, run as TorqOS Settings runs its lines (torqcli's
 /// session). torqcli shows the proposal and asks first: its question goes to the program as `asked`, and the
 /// person's answer back through the `Reply`; what it said at the end as `done`.
