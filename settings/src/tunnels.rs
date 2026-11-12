@@ -19,6 +19,7 @@ use std::time::Duration;
 use torq::tunnels::{self, State};
 
 fn main() -> cosmic::iced::Result {
+    torq::app::restart_on_panic();
     cosmic::applet::run::<Applet>(())
 }
 

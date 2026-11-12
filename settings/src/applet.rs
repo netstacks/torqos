@@ -20,6 +20,7 @@ use std::time::Duration;
 use torq::app::{self, Console, Glance, Needs};
 
 fn main() -> cosmic::iced::Result {
+    torq::app::restart_on_panic();
     cosmic::applet::run::<Applet>(())
 }
 
@@ -53,6 +54,8 @@ struct Applet {
     last_change: Option<String>,
     /// What was last notified, so each state is said once.
     told: Option<String>,
+    /// Why the last save of the person's desktop failed or was refused: told once, shown until a save works.
+    unsaved: app::Unsaved,
     /// The confirmation already warned of as about to expire.
     warned: Option<u64>,
     /// Now, for the countdown.
@@ -65,6 +68,7 @@ enum Message {
     Looked,
     Tick,
     SyncDesktop,
+    Synced(Result<(), String>),
     Answer(Result<Glance, String>),
     Confirm,
     Closed,
@@ -256,6 +260,9 @@ impl Applet {
                 col = col.push(line(s));
             }
         }
+        if let Some(why) = self.unsaved.why() {
+            col = col.push(widget::text::caption(format!("Your desktop was not saved: {why}")));
+        }
         col = col.push(widget::divider::horizontal::default());
         col = col.push(widget::button::text("Open TorqOS Settings").on_press(Message::Open(open)));
         self.core.applet.popup_container(col).into()
@@ -279,12 +286,17 @@ impl cosmic::Application for Applet {
     fn init(core: cosmic::Core, _flags: ()) -> (Self, Task<cosmic::Action<Message>>) {
         let mut app = Applet { core, console: Some(Console::watcher()), session: app::session_system(), running: running(), now: app::now(), ..Default::default() };
         // A rebuilt machine's apps and desktop come back at the first login.
-        std::thread::spawn(|| {
-            let _ = app::reconcile_apps();
-            let _ = app::sync_desktop(false);
+        let first = cosmic::task::future(async {
+            Message::Synced(
+                blocking(|| {
+                    let _ = app::reconcile_apps();
+                    app::sync_desktop(false).map(|_| ())
+                })
+                .await,
+            )
         });
         let ask = app.update(Message::Ask);
-        (app, ask)
+        (app, Task::batch([first, ask]))
     }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
@@ -344,10 +356,11 @@ impl cosmic::Application for Applet {
             }
             // Not while a commit confirmed waits: the broker takes no change until it is confirmed or rolled back.
             Message::SyncDesktop if matches!(self.state(), State::Confirm(_)) => {}
-            Message::SyncDesktop => {
-                std::thread::spawn(|| {
-                    let _ = app::sync_desktop(false);
-                });
+            Message::SyncDesktop => return sync(),
+            Message::Synced(outcome) => {
+                if let Some(why) = self.unsaved.heard(outcome) {
+                    notify("Your desktop was not saved".to_string(), format!("{why} Save it again from TorqOS Settings, Desktop."), "desktop");
+                }
             }
             Message::Tick => {
                 self.now = app::now();
@@ -362,12 +375,11 @@ impl cosmic::Application for Applet {
             Message::Answer(g) => {
                 let first = self.glance.is_none();
                 let failed = g.is_err();
+                let mut then = Task::none();
                 // A change since the last look may be to the person's desktop (an undo of one): put it on the desktop.
                 if let Ok(now) = &g {
                     if self.last_change.is_some() && self.last_change != now.last && now.confirm.is_none() {
-                        std::thread::spawn(|| {
-                            let _ = app::sync_desktop(false);
-                        });
+                        then = sync();
                     }
                     self.last_change = now.last.clone();
                 }
@@ -385,6 +397,7 @@ impl cosmic::Application for Applet {
                         self.told = key;
                     }
                 }
+                return then;
             }
             Message::Confirm => {
                 let restart = matches!(&self.glance, Some(Ok(g)) if matches!(g.needs, Needs::Restart(_)));
@@ -452,6 +465,11 @@ impl cosmic::Application for Applet {
 /// The running system.
 fn running() -> Option<PathBuf> {
     std::fs::read_link("/run/current-system").ok()
+}
+
+/// Bring the person's desktop and configuration together, and answer whether a save failed or was refused.
+fn sync() -> Task<cosmic::Action<Message>> {
+    cosmic::task::future(async { Message::Synced(blocking(|| app::sync_desktop(false).map(|_| ())).await) })
 }
 
 /// A call that blocks on a thread of its own, so the panel keeps drawing.
