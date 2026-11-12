@@ -434,6 +434,13 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
     checked at lock (torqcli) and at apply (the broker), against the releases at their address now. A tarball of
     them (`github:` in any form, with or without a `host`; an archive URL) is refused at lock and at apply: a
     tarball is not bound to the commit whose signature is checked, as a git lock's tree is.
+  - **What the lock names and what it takes agree:** Nix compares `flake.nix` with a lock's `original` only, and
+    builds its `locked`, so a lock-only change could keep the source reading as the releases while taking TorqOS
+    from elsewhere, with no signature asked (found by the review, shown with Nix on 2026-11-12). The broker
+    refuses a lock in which any changed node, or the node the root's `torq` input resolves to (by name, or through
+    other inputs with `follows`; changed or not), has an `original` naming the releases and a `locked` that is not
+    the releases at all. A source honestly moved away moves `original` and `flake.nix` with it: shown as a change of
+    source, and allowed.
   - **The setting:** every TorqOS machine has `/etc/torq/releases.json` (modules/releases.nix writes it). If it is
     missing or cannot be read, the broker refuses any change to the lock rather than treating nothing as the
     releases. Fields it does not know are passed by, so that a broker reading a newer TorqOS's setting (during an

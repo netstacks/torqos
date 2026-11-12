@@ -106,5 +106,19 @@ pkgs.testers.runNixOSTest {
         assert code != 0 and "which inputs are TorqOS's releases cannot be read" in out, out
         machine.succeed(f"rm /etc/torq/releases.json && ln -s {setting} /etc/torq/releases.json")
         machine.succeed("torq-broker verify && torq-broker status")
+
+    with subtest("a lock that names the releases (original) but takes TorqOS from elsewhere (locked): refused"):
+        # Another repository, unsigned; its hash is what its rev fetches, so only the rule stops it.
+        machine.succeed("git init -q -b main /srv/other && echo evil > /srv/other/a && git -C /srv/other add a && git -C /srv/other -c user.name=e -c user.email=e@e commit -qm evil")
+        evil = machine.succeed("git -C /srv/other rev-parse HEAD").strip()
+        evil_nar = json.loads(machine.succeed(f"nix eval --impure --json --expr '(builtins.fetchTree {{ type = \"git\"; url = \"file:///srv/other\"; rev = \"{evil}\"; }}).narHash'"))
+        mixed = json.dumps({"nodes": {"root": {"inputs": {"torq": "torq"}}, "torq": {
+            "original": {"type": "git", "url": "file:///srv/releases-now", "ref": "stable"},
+            "locked": {"type": "git", "url": "file:///srv/other", "rev": evil, "narHash": evil_nar, "lastModified": 1}}}, "root": "root", "version": 7}, indent=2)
+        head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+        code, out = apply(mixed)
+        assert code != 0 and "names TorqOS's releases but takes TorqOS from elsewhere" in out, out
+        assert machine.succeed(f"git -C {repo} rev-parse HEAD").strip() == head
+        machine.succeed("torq-broker verify && torq-broker status")
   '';
 }

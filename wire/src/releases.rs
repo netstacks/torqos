@@ -98,6 +98,11 @@ impl Releases {
         }
     }
 
+    /// Whether a lock's attribute set (its `original`, or its `locked`) names the releases at all, in any form.
+    pub fn names(&self, attrs: &Value) -> bool {
+        self.verdict(attrs) != Verdict::Other
+    }
+
     /// A source (`git+https://…?ref=…`) at an earlier address of the releases, as the same source at their
     /// address now (its `?ref=…` kept). None: not at an earlier address (a `github:` source is not moved: it is
     /// refused as a tarball at its lock).
@@ -229,6 +234,16 @@ mod tests {
         other(json!({"type": "git", "url": "https://github.com/torqosorg/torqos", "rev": rev}));
         other(json!({"type": "tarball", "url": "https://github.com/torqosorg/torqos-releases-evil/archive/x.tar.gz"}));
         other(json!({"type": "path", "path": "/nix/store/x-source"}));
+    }
+
+    #[test]
+    fn an_original_names_the_releases_in_any_form() {
+        let r = releases();
+        assert!(r.names(&json!({"type": "git", "url": "https://github.com/torqosorg/torqos-releases", "ref": "stable"})));
+        assert!(r.names(&json!({"type": "git", "url": "https://github.com/netstacks/torqos-releases"})));
+        assert!(r.names(&json!({"type": "github", "owner": "torqosorg", "repo": "torqos-releases"})));
+        assert!(!r.names(&json!({"type": "git", "url": "https://example.com/elsewhere"})));
+        assert!(!r.names(&Value::Null), "no original: names nothing");
     }
 
     #[test]

@@ -13,6 +13,28 @@ use std::path::Path;
 /// The keys a release may be signed with, as the machine has them (modules/releases.nix).
 pub const SIGNERS: &str = "/etc/torq/release-signers";
 
+/// The node a lock's root input `name` resolves to: named directly, or by a path through other inputs
+/// (`follows`: `["a", "b"]` is input b of input a). None: no such input, or a path that does not resolve.
+pub fn resolve(lock: &Value, name: &str) -> Option<String> {
+    let root = lock["root"].as_str().unwrap_or("root");
+    resolve_from(lock, root, name, 0)
+}
+
+/// Input `name` of node `node`, followed to the node it is; a path that goes round is cut off.
+fn resolve_from(lock: &Value, node: &str, name: &str, depth: usize) -> Option<String> {
+    if depth > 64 {
+        return None;
+    }
+    match &lock["nodes"][node]["inputs"][name] {
+        Value::String(n) => Some(n.clone()),
+        Value::Array(path) => {
+            let root = lock["root"].as_str().unwrap_or("root");
+            path.iter().try_fold(root.to_string(), |at, step| resolve_from(lock, &at, step.as_str()?, depth + 1))
+        }
+        _ => None,
+    }
+}
+
 /// The locked inputs `new` has that `old` does not have as they are: by node name.
 pub fn changed(old: &str, new: &str) -> Result<BTreeMap<String, Value>> {
     let parse = |t: &str| -> Result<Value> { if t.trim().is_empty() { Ok(Value::Null) } else { Ok(serde_json::from_str(t)?) } };
@@ -111,6 +133,19 @@ mod tests {
             "root": { "inputs": { "torq": "torq" } }
         }, "root": "root", "version": 7 })
         .to_string()
+    }
+
+    #[test]
+    fn a_root_input_resolves_to_its_node_however_named() {
+        let l = json!({"root": "root", "nodes": {
+            "root": {"inputs": {"torq": "torq_2", "x": "x", "via": ["x", "y"], "loop": ["loop"], "gone": ["x", "nope"]}},
+            "torq_2": {}, "x": {"inputs": {"y": "z"}}, "z": {}
+        }});
+        assert_eq!(resolve(&l, "torq").as_deref(), Some("torq_2"));
+        assert_eq!(resolve(&l, "via").as_deref(), Some("z"), "a follows path");
+        assert_eq!(resolve(&l, "none"), None);
+        assert_eq!(resolve(&l, "gone"), None, "a path that does not resolve");
+        assert_eq!(resolve(&l, "loop"), None, "a path that goes round");
     }
 
     #[test]

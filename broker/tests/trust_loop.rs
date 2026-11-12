@@ -3482,6 +3482,38 @@ fn the_releases_setting_unreadable_or_the_releases_as_a_tarball_refuse_a_lock_ch
     }
 }
 
+/// A lock that names the releases (its `original`, which Nix compares with flake.nix) but takes TorqOS from
+/// elsewhere (its `locked`, which Nix builds) is refused, however the root's `torq` input reaches that node;
+/// a source honestly moved away (its `original` too) is not this (ADR-028, amended 2026-11-12).
+#[test]
+fn a_lock_that_names_the_releases_but_takes_torqos_from_elsewhere_is_refused() {
+    let setting = r#"{"url": "git+https://github.com/torqosorg/torqos-releases?ref=stable", "former": ["https://github.com/netstacks/torqos-releases"]}"#;
+    let try_lock = |lock: &str| -> String {
+        let (dir, repo) = config_dir();
+        let file = dir.path().join("releases.json");
+        fs::write(&file, setting).unwrap();
+        let b = Broker::new(&repo, dir.path().join("state"), "true").with_releases_file(&file);
+        b.init().unwrap();
+        let d = write_diff(dir.path(), "lock.diff", &format!("--- /dev/null\n+++ b/flake.lock\n@@ -0,0 +1 @@\n+{lock}\n"));
+        let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "lock", Actor::User, false).unwrap();
+        format!("{:#}", b.apply(p.body.seq, "casey", false).unwrap_err())
+    };
+    let releases = r#"{"type": "git", "url": "https://github.com/netstacks/torqos-releases", "ref": "stable"}"#;
+    let elsewhere = r#"{"type": "git", "url": "https://example.com/elsewhere", "rev": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "narHash": "sha256-x"}"#;
+    let refused = "the lock names TorqOS's releases but takes TorqOS from elsewhere";
+    // The torq node itself.
+    let e = try_lock(&format!(r#"{{"nodes": {{"root": {{"inputs": {{"torq": "torq"}}}}, "torq": {{"original": {releases}, "locked": {elsewhere}}}}}, "root": "root", "version": 7}}"#));
+    assert!(e.contains(&format!("refused: torq: {refused}")), "{e}");
+    // The root's torq input pointed at another node, by name or through another input (follows).
+    let e = try_lock(&format!(r#"{{"nodes": {{"root": {{"inputs": {{"torq": "other"}}}}, "other": {{"original": {releases}, "locked": {elsewhere}}}}}, "root": "root", "version": 7}}"#));
+    assert!(e.contains(&format!("refused: other: {refused}")), "{e}");
+    let e = try_lock(&format!(r#"{{"nodes": {{"root": {{"inputs": {{"torq": ["mid", "t"], "mid": "mid"}}}}, "mid": {{"inputs": {{"t": "deep"}}, "original": {{"type": "path", "path": "/x"}}, "locked": {{"type": "path", "path": "/x", "narHash": "sha256-m"}}}}, "deep": {{"original": {releases}, "locked": {elsewhere}}}}}, "root": "root", "version": 7}}"#));
+    assert!(e.contains(&format!("refused: deep: {refused}")), "{e}");
+    // Honestly elsewhere (`original` too): not this refusal (it goes on to fetch it again, which a test cannot).
+    let e = try_lock(&format!(r#"{{"nodes": {{"root": {{"inputs": {{"torq": "torq"}}}}, "torq": {{"original": {{"type": "git", "url": "https://example.com/elsewhere"}}, "locked": {elsewhere}}}}}, "root": "root", "version": 7}}"#));
+    assert!(!e.contains(refused), "{e}");
+}
+
 /// A desktop saved by an older TorqOS, with another program's settings in it, cleaned by the next save: an undo
 /// of that save would put them back, so it is refused (an undo of a person's own change needs no approval, so it
 /// would otherwise be the way around the rule), and nothing is recorded.

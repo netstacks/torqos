@@ -1966,6 +1966,20 @@ impl Broker {
             .map_err(|e| e.to_string())
             .and_then(|s| torq_wire::releases::Releases::parse(&s))
             .map_err(|why| anyhow::anyhow!("refused: which inputs are TorqOS's releases cannot be read ({}: {why}), so no change to the software is applied", self.releases_file.display()))?;
+        // A lock whose `original` names the releases but whose `locked` takes TorqOS from elsewhere: Nix compares
+        // flake.nix with `original` only and builds `locked`, so the machine's source would read as the releases
+        // while it builds something no key signed. Each changed node, and the node the root's `torq` input
+        // resolves to however it is named (changed or not): if it names the releases, it is the releases as git.
+        // (A source honestly moved away moves `original` and flake.nix too: not this.)
+        let new_lock: serde_json::Value = if new.trim().is_empty() { serde_json::Value::Null } else { serde_json::from_str(&new).context("reading the new flake.lock")? };
+        let torq_node = inputs::resolve(&new_lock, "torq");
+        for name in changes.keys().chain(torq_node.iter()) {
+            let node = &new_lock["nodes"][name];
+            // (A `locked` that is the releases in another form, a tarball, is refused just below, in its own words.)
+            if releases.names(&node["original"]) && releases.verdict(&node["locked"]) == torq_wire::releases::Verdict::Other {
+                bail!("refused: {name}: the lock names TorqOS's releases but takes TorqOS from elsewhere (its `locked` is not the releases as git): what would be built is not what the release key signed");
+            }
+        }
         // The releases in a form not bound to a commit the key signed (a tarball): refused before anything is
         // fetched; the releases as git: checked below, at their address now.
         let mut signed = vec![];
