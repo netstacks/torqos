@@ -202,7 +202,10 @@ pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: 
                     // The broker told first, before the model is shown a word of it.
                     if tool.taints() && !session.tainted_by.contains(&tool) {
                         session.save()?;
-                        host.session(&["taint", &broker, tool.name()]).with_context(|| format!("reporting to the broker that the session read {}: the session ends here, and the model is not shown it", tool.name()))?;
+                        // A proposal torqcli ran is said as given to the broker, never lost in the error (the review of
+                        // the rebased branch, B3): asked again, it would be proposed twice.
+                        let given = if tool == Tool::Propose { "; the proposal was given to the broker: look in show system proposals before asking for it again" } else { "" };
+                        host.session(&["taint", &broker, tool.name()]).with_context(|| format!("reporting to the broker that the session read {}: the session ends here, and the model is not shown it{given}", tool.name()))?;
                         events(Event::Tainted { why: tool.name().into() })?;
                     }
                     session.read(tool);
@@ -211,8 +214,15 @@ pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: 
                     // What a proposal became is the broker's word (its record of the session), not
                     // torqcli's output, which a time limit may have cut short.
                     let said = if tool == Tool::Propose {
-                        let new = broker_said(host, &broker, &mut seen)?;
-                        let line = if new.is_empty() {
+                        // The broker's record unread is said as that, never as an error ending the task with the
+                        // proposal unmentioned (B3): the model is told not to propose it again.
+                        let (new, unread) = match broker_said(host, &broker, &mut seen) {
+                            Ok(new) => (new, None),
+                            Err(e) => (vec![], Some(clean(&format!("{e:#}")))),
+                        };
+                        let line = if let Some(why) = unread {
+                            format!("the proposal was given to the broker; what became of it could not be read ({why}): do not propose it again; the person sees it in show system proposals")
+                        } else if new.is_empty() {
                             format!("the broker recorded no proposal (torqcli said: {})", tools::truncate(output.trim().lines().last().unwrap_or("nothing"), 200))
                         } else {
                             new.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("; ")
@@ -763,5 +773,20 @@ mod tests {
         assert!(out.starts_with(&"x".repeat(MAX_ANSWER)) && out.trim_end().ends_with(&format!("[… {} characters left out]", 2_000_000 - MAX_ANSWER)));
         let event = serde_json::to_string(&Event::Say { text: out }).unwrap();
         assert!(event.len() < torq_wire::agent::MAX_LINE, "fits the service's line");
+    }
+
+    /// A proposal torqcli made is not lost in an error (the review of the rebased branch, B3): when the read of it
+    /// cannot be reported, the session still ends before the model sees it, and the error says the proposal was given
+    /// to the broker, so that no one asks for it again unlooked.
+    #[test]
+    fn a_proposal_made_is_said_when_its_report_fails() {
+        let mut h = host("");
+        h.broken = (false, true);
+        let d = tempfile::tempdir().unwrap();
+        let (ep, seen) = fake_model(vec![calls(&[("propose_change", json!({"reason": "htop for viper", "set": [{"path": "users viper packages", "value": "htop"}]}))]), answer("never")]);
+        let e = format!("{:#}", ask(&config(ep, d.path()), &h, "install htop", true, &mut Vec::new(), &mut Vec::new()).unwrap_err());
+        assert_eq!(h.proposals.lock().unwrap().len(), 1);
+        assert!(e.contains("given to the broker") && e.contains("show system proposals"), "{e}");
+        assert_eq!(seen.lock().unwrap().len(), 1, "the model is not shown it");
     }
 }
