@@ -162,6 +162,11 @@ fn kept(b: &Broker) -> Result<Vec<(String, String, String, bool)>> {
 /// `SESSIONS_KEPT`, the oldest records go.
 pub fn start(b: &Broker) -> Result<Record> {
     let (agent, _) = b.acting_agent()?;
+    // Untainted at its start only from the resident agent (ADR-051 step 5), and only when its model is one no
+    // account here can stand in for (its review: a TCP model on this machine, a socket in a place others write).
+    // Judged before the sessions' lock (the review of the rebased branch, S1): it may ask the resolver whether the
+    // model's host is this machine, and a slow resolver then holds up this start alone, not every agent's.
+    let taint = if b.resident() { b.model_taint() } else { Some(socket::NOT_RESIDENT) };
     let _l = lock(b)?;
     let kept = kept(b)?;
     let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
@@ -187,9 +192,6 @@ pub fn start(b: &Broker) -> Result<Record> {
     if read(b, &id)?.is_some() {
         bail!("a session {id} exists already");
     }
-    // Untainted at its start only from the resident agent (ADR-051 step 5), and only when its model is one no
-    // account here can stand in for (its review: a TCP model on this machine, a socket in a place others write).
-    let taint = if b.resident() { b.model_taint() } else { Some(socket::NOT_RESIDENT) };
     let (tainted, tainted_by) = match taint {
         None => (false, vec![]),
         Some(why) => (true, vec![why.to_string()]),

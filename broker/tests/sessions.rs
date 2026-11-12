@@ -613,3 +613,22 @@ fn a_session_is_tainted_by_its_own_kind_of_caller() {
     assert!(session::taint(&resident, &clean.id, "read_journal").unwrap().tainted, "its own");
     assert!(session::taint(&tool, &theirs.id, "web").unwrap().tainted, "its own");
 }
+
+/// The model is judged before the sessions' lock (the review of the rebased branch, S1): a resolver that takes its
+/// time over whether the model's host is this machine holds up that session's start alone, never another's.
+#[test]
+fn a_slow_resolver_holds_up_no_other_session() {
+    fn slow(_: &str) -> bool {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        false
+    }
+    let (dir, resident) = setup(&[]);
+    let resident = resident.with_this_host(slow);
+    let tool = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey"));
+    let waiting = std::thread::spawn(move || session::start(&resident).map(|r| r.tainted));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let t = std::time::Instant::now();
+    session::start(&tool).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_millis(1500), "held up {:?}", t.elapsed());
+    assert_eq!(waiting.join().unwrap().unwrap(), false, "the slow one starts too, untainted");
+}
