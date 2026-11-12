@@ -22,6 +22,9 @@ pub const FILE: &str = "desktop.json";
 pub const MAX_VALUE: usize = 64 * 1024;
 pub const MAX_KEYS: usize = 2000;
 pub const MAX_TOTAL: usize = 1024 * 1024;
+/// torqcli's own, not the broker's: the most settings kept of one component, so that one with very many (planted
+/// under a name that sorts first) cannot fill `MAX_KEYS` and leave COSMIC's none. COSMIC's have tens.
+const MAX_COMPONENT_KEYS: usize = 200;
 
 /// When a person's desktop is saved.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,10 +156,13 @@ pub fn local(cosmic: &Path) -> Local {
     // In order of name, so that the same settings are kept each time, whatever order the folder lists them in.
     found.sort();
     let mut total = 0;
+    let mut kept: BTreeMap<String, usize> = BTreeMap::new();
     for (key, path) in found {
+        let of_component = kept.entry(key.split('/').next().unwrap_or_default().to_string()).or_default();
         match std::fs::read_to_string(&path) {
-            Ok(text) if value_ok(&text) && out.values.len() < MAX_KEYS && total + text.len() <= MAX_TOTAL => {
+            Ok(text) if value_ok(&text) && *of_component < MAX_COMPONENT_KEYS && out.values.len() < MAX_KEYS && total + text.len() <= MAX_TOTAL => {
                 total += text.len();
+                *of_component += 1;
                 out.values.insert(key, text);
             }
             _ => {
@@ -666,6 +672,29 @@ mod tests {
         assert!(!c.join(K).exists());
     }
 
+
+    /// One component cannot crowd the others out (KNOWN-GAPS 6zza): as many files as the limit, planted under a
+    /// name that sorts first, leave the person's settings kept, and a save within what the broker takes.
+    #[test]
+    fn one_component_cannot_fill_the_limit() {
+        let d = tempfile::tempdir().unwrap();
+        let c = d.path().join("cosmic");
+        write_atomically(&c.join(K), b"M").unwrap();
+        let planted = c.join("com.system76.Aaa/v1");
+        std::fs::create_dir_all(&planted).unwrap();
+        for i in 0..MAX_KEYS {
+            std::fs::write(planted.join(format!("k{i}")), b"x").unwrap();
+        }
+        let here = local(&c);
+        assert_eq!(here.values.get(K).map(String::as_str), Some("M"), "the person's own is still kept");
+        assert_eq!(here.values.len(), MAX_COMPONENT_KEYS + 1);
+        // What a sync would then send: the saved settings and what is new here.
+        let saved = map(&[(K, "M")]);
+        let p = plan(&saved, &saved, &here.values, |k| here.manages(k));
+        let mut now = Saved { cosmic: saved, ..Saved::default() };
+        now.cosmic.extend(p.save.into_iter().filter_map(|(k, v)| Some((k, v?))));
+        check(&now).unwrap();
+    }
 
     #[test]
     fn what_is_behind_a_link_is_left_alone() {

@@ -469,9 +469,12 @@ Its §5 lists claims without a test.
    during the freeze). Any program running as the person can write `~/.config/cosmic/com.system76.Foo/v1/…`:
    it would be saved as COSMIC's, bringing back the 15-minute saves (6zx) or putting its data in the repository.
    It can also propose a `desktop.json` to the broker itself: the person's own folder, so no password, and no
-   limit on how often. Only the names and sizes are checked, not who wrote the files. And 2000 files planted
-   under a component that sorts first (`com.system76.Aaa`) fill `MAX_KEYS` ahead of the real settings, so every
-   sync fails (older than this fix).
+   limit on how often. Only the names and sizes are checked, not who wrote the files. 2000 files planted
+   under a component that sorts first (`com.system76.Aaa`) filled `MAX_KEYS` ahead of the real settings, so every
+   sync failed: one component now has at most 200 settings kept (`cli/src/desktop.rs` `MAX_COMPONENT_KEYS`,
+   2026-11-12, its test `one_component_cannot_fill_the_limit`), and the rest of it is left alone. Still open,
+   the name being no identity: ten such components fill `MAX_KEYS` as one did, a few large files fill the
+   1 MiB of `MAX_TOTAL` the same way, and the 200 kept are saved as COSMIC's.
 6zzb. **COSMIC's own settings can be personal, and the saved desktop is readable by every account** (6r; the
    review of work/autosave). Kept on purpose, as the person's desktop, but not harmless: the wallpaper's path
    (`CosmicBackground/v1/all`, a folder in the home), custom shortcuts (`CosmicSettings.Shortcuts/v1/custom`,
