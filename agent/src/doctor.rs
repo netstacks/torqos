@@ -34,14 +34,17 @@ impl Config {
     /// (systemd's LoadCredential, its file handed to the task): where the configuration names a key
     /// (`apiKeyFile`, a file only root reads), it is the only way to it — so the one-shot `torq doctor` and
     /// `torq agent propose`, which run as any program of the agent's does, say plainly that they cannot use a
-    /// keyed model (ADR-051 step 5, amended).
-    pub fn load(file: &Path, home: &Path, credential: Option<&Path>) -> Result<Config> {
+    /// keyed model (ADR-051 step 5, amended). `resident`: the resident agent's own task (`--task`), told why it has no
+    /// key as itself.
+    pub fn load(file: &Path, home: &Path, credential: Option<&Path>, resident: bool) -> Result<Config> {
         let text = std::fs::read_to_string(file).with_context(|| format!("reading {} (is doctor mode on? torq.agent.doctor.enable)", file.display()))?;
         let v: Value = serde_json::from_str(&text).with_context(|| format!("reading {}", file.display()))?;
         let s = |k: &str| v[k].as_str().with_context(|| format!("{}: no {k}", file.display()));
         let key = match (v["apiKeyFile"].as_str(), credential) {
             (None, _) => None,
             (Some(_), Some(c)) => model::key(Some(c))?,
+            // The resident agent's own task told so as itself, not sent to torq ask (the review of the rebased branch, C10).
+            (Some(_), None) if resident => bail!("this machine's model needs its API key, and your resident agent was not given it (its credential, torq.agent.doctor.apiKeyFile): an administrator sees why in journalctl -u torq-agent@<you>.service"),
             (Some(_), None) => bail!("this machine's model needs its API key, which only your resident agent holds: ask it there (torq ask \"…\"); torq doctor and torq agent propose cannot use a keyed model"),
         };
         Ok(Config {
@@ -728,8 +731,8 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
     }
 
-    /// A model that answers 2 MB: the answer is cut to its first `MAX_ANSWER` characters, and says so —
-    /// one line the agent service relays whole.
+    /// The model's key, where one is configured, only through the agent service's credential: a one-shot run is told
+    /// so, and the resident agent's own task told why it has none (C10).
     #[test]
     fn a_keyed_model_only_through_the_services_credential() {
         let d = tempfile::tempdir().unwrap();
@@ -737,13 +740,16 @@ mod tests {
         let cred = d.path().join("model-key");
         std::fs::write(&cred, "sk-test\n").unwrap();
         std::fs::write(&settings, r#"{"endpoint":"https://api.example.org/v1","model":"m","apiKeyFile":"/var/lib/torq/secrets/model.key"}"#).unwrap();
-        assert_eq!(Config::load(&settings, d.path(), Some(&cred)).unwrap().key.as_deref(), Some("sk-test"));
-        let e = format!("{:#}", Config::load(&settings, d.path(), None).err().unwrap());
+        assert_eq!(Config::load(&settings, d.path(), Some(&cred), false).unwrap().key.as_deref(), Some("sk-test"));
+        let e = format!("{:#}", Config::load(&settings, d.path(), None, false).err().unwrap());
         assert!(e.contains("only your resident agent holds") && e.contains("torq ask"), "{e}");
+        // The resident agent's own task without it: not sent to torq ask, where it already is (C10).
+        let e = format!("{:#}", Config::load(&settings, d.path(), None, true).err().unwrap());
+        assert!(e.contains("was not given it") && !e.contains("torq ask"), "{e}");
         // No key configured: none, credential or not.
         std::fs::write(&settings, r#"{"endpoint":"https://api.example.org/v1","model":"m","apiKeyFile":null}"#).unwrap();
-        assert!(Config::load(&settings, d.path(), Some(&cred)).unwrap().key.is_none());
-        assert!(Config::load(&settings, d.path(), None).unwrap().key.is_none());
+        assert!(Config::load(&settings, d.path(), Some(&cred), false).unwrap().key.is_none());
+        assert!(Config::load(&settings, d.path(), None, false).unwrap().key.is_none());
     }
 
     #[test]
@@ -767,6 +773,8 @@ mod tests {
         assert!(out.starts_with(TAINTED) && out.contains("(local-tcp-model)"), "{out}");
     }
 
+    /// A model that answers 2 MB: the answer is cut to its first `MAX_ANSWER` characters, and says so —
+    /// one line the agent service relays whole.
     #[test]
     fn a_long_answer_is_cut() {
         let h = host("");

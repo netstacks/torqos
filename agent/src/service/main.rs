@@ -1,5 +1,6 @@
 //! `torq-agent-service <person>` (ADR-051 3, step 2): a person's agent, resident —
-//! `torq-agent@<person>.service`, run as `torq-agent-<person>` in its sandbox (modules/agent.nix),
+//! `torq-agent@<person>.service`, run as `torq-resident-<person>` (the person's one agent, its own account: ADR-051 3
+//! amended 2026-11-11) in its sandbox (modules/agent.nix),
 //! started by its socket (`/run/torq-agent/<person>.sock`, handed over as its standard input) the
 //! first time it is asked.
 //!
@@ -188,6 +189,13 @@ impl Agent {
             match serde_json::from_str::<Request>(&line) {
                 Err(e) => refuse(format!("not a request: {e}")),
                 Ok(Request::Ask { text, context }) => {
+                    // A second ask on a connection whose own task runs is refused ending with `status`, not `done`: a
+                    // `done` here would read as its running task's end (the review of the rebased branch, C7).
+                    if self.running().is_some_and(|r| r.conn == id) {
+                        out.send(&Event::Error { text: "this connection's task is still running: wait for its done, or stop it".into() });
+                        out.send(&self.status());
+                        continue;
+                    }
                     if let Err(e) = self.ask(text, context, &out, id) {
                         refuse(format!("{e:#}"));
                     }
@@ -210,10 +218,8 @@ impl Agent {
                 }
             }
         }
-        // Whoever asked is gone: no one hears the rest, so it is stopped.
-        if self.running().is_some_and(|r| r.conn == id) {
-            self.stop();
-        }
+        // Whoever asked is gone: no one hears the rest, so its own task is stopped, and no other.
+        self.stop_task(Some(id));
         Ok(())
     }
 
@@ -229,6 +235,9 @@ impl Agent {
         }
         // The memory read with the slot held: a `forget` before this is honoured.
         let task = Task { question: text.clone(), context, memory: self.memory.recent() };
+        // Everything that can fail before the slot is taken (the review of the rebased branch, C4): a failure after
+        // it would leave the agent "running" for good.
+        let line = serde_json::to_string(&task)?;
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new(&self.harness);
         cmd.args(["--propose", "--task"]).env_clear().env("PATH", "/run/current-system/sw/bin").env("HOME", &self.home).env("LANG", "C.UTF-8");
@@ -245,11 +254,14 @@ impl Agent {
             .stderr(Stdio::inherit())
             .spawn()
             .with_context(|| format!("starting {}", self.harness.display()))?;
+        let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            // Piped both, so never so; if it were, the task goes, and nothing is held.
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("the task's input or output was not there");
+        };
         *slot = Some(Running { group: rustix::process::Pid::from_child(&child), conn });
         drop(slot);
-        let mut stdin = child.stdin.take().context("the task's input")?;
-        let stdout = child.stdout.take().context("the task's output")?;
-        let line = serde_json::to_string(&task)?;
         let (me, out) = (self.clone(), out.clone());
         // The task's events relayed as they come (a thread of their own); this one waits for the harness
         // to end, sweeps what is left of it — which also closes the output anything left could hold —
@@ -308,10 +320,20 @@ impl Agent {
     /// End the running task: its process group; then the rest of it goes as the task ends (`sweep`, by
     /// the task's waiter, before the slot is free). Waits, at most 5 s, for it to be over.
     fn stop(&self) {
+        self.stop_task(None);
+    }
+
+    /// End the running task — only connection `of`'s, when it is given — read once: a disconnect that comes as its
+    /// own task ends never takes the next one, started meanwhile by someone else (the review of the rebased branch,
+    /// C3). Waits, at most 5 s, for that task to be over.
+    fn stop_task(&self, of: Option<u64>) {
         let Some(r) = self.running() else { return };
+        if of.is_some_and(|c| c != r.conn) {
+            return;
+        }
         let _ = rustix::process::kill_process_group(r.group, rustix::process::Signal::KILL);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while self.running().is_some() && Instant::now() < deadline {
+        while self.running().is_some_and(|n| n.group == r.group) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -407,7 +429,11 @@ fn agent(args: &[String]) -> Result<Agent> {
         home,
         memory: memory::Memory::new(Path::new(&state)),
         running: Mutex::new(None),
-        procs: unit_procs(&format!("/torq-agent@{person}.service")),
+        procs: unit_procs(&format!("/torq-agent@{person}.service")).or_else(|| {
+            // Said once, at the start (the review of the rebased branch, C5): without it, a task's leftovers are not swept.
+            eprintln!("torq-agent-service: this unit's processes cannot be listed (its control group's cgroup.procs): what a task leaves running is not swept");
+            None
+        }),
         key: std::env::var_os("CREDENTIALS_DIRECTORY").map(|d| PathBuf::from(d).join("model-key")).filter(|k| k.is_file()),
     })
 }
@@ -431,7 +457,17 @@ fn run(args: &[String]) -> Result<()> {
 fn serve(agent: Arc<Agent>, listener: UnixListener) -> Result<()> {
     let mut id = 0u64;
     loop {
-        let (conn, _) = listener.accept().context("waiting for the person (is standard input the socket?)")?;
+        let conn = match listener.accept() {
+            Ok((conn, _)) => conn,
+            // A connection given up before it was taken, a signal, or too many files open for now: the next one, a
+            // moment later; anything else ends the service, which its socket starts again (the review's C6).
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted) || matches!(e.raw_os_error(), Some(23 | 24)) => {
+                eprintln!("torq-agent-service: taking a connection: {e} (again, a moment later)");
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(e) => return Err(e).context("waiting for the person (is standard input the socket?)"),
+        };
         id += 1;
         let (agent, n) = (agent.clone(), id);
         std::thread::spawn(move || {
@@ -798,5 +834,18 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
             talk(&sock, &[ask("q")], |e| matches!(e, Event::Done { .. }));
             assert_eq!(a.memory.recent(), vec![Turn { question: "q".into(), answer: None }], "{}", &line[..40.min(line.len())]);
         }
+    }
+
+    /// A second ask on a connection whose task runs ends with `status`, so its task's `done` stays the only one (C7).
+    #[test]
+    fn a_second_ask_on_a_busy_connection_is_no_done() {
+        let (a, sock, _d) = agent(r#"read -r t; sleep 2; printf '%s\n' '{"type":"say","text":"first"}'"#, me());
+        let seen = talk(&sock, &[ask("one"), ask("two")], |e| matches!(e, Event::Done { .. }));
+        let dones = seen.iter().filter(|e| matches!(e, Event::Done { .. })).count();
+        assert_eq!(dones, 1, "{seen:?}");
+        assert!(seen.contains(&Event::Status { running: true, turns: 0 }), "{seen:?}");
+        assert_eq!(seen.last(), Some(&Event::Done { exit: 0 }), "the first ask's own end: {seen:?}");
+        assert!(seen.contains(&Event::Say { text: "first".into() }));
+        assert!(a.running().is_none());
     }
 }

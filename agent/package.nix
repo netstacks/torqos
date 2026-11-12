@@ -30,7 +30,7 @@ rustPlatform.buildRustPackage {
   passthru = { inherit doctorEnv; };
 
   meta = {
-    description = "TorqOS agent (unprivileged, as a person's torq-agent-<person>): doctor mode, read-only tools, proposes nothing; and the person's agent service";
+    description = "TorqOS agent (unprivileged, as a person's torq-agent-<person> and torq-resident-<person>): doctor mode's read-only tools, a change proposed in propose mode and never applied; torq-mcp; and the person's agent service";
     mainProgram = "torq-doctor";
     license = lib.licenses.asl20;
   };

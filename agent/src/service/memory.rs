@@ -1,5 +1,5 @@
 //! The conversation the agent remembers (ADR-051 9, phase 1's memory): its recent turns, in one file
-//! in the agent service's own state directory (`/var/lib/torq-agent-memory/<person>`, the agent's,
+//! in the agent service's own state directory (`/var/lib/torq-agent-memory/<person>`, the resident account's,
 //! 0700) — not in the agent's home, which every program run as the agent (`torq agent run`) can
 //! write, and hidden from them (modules/agent-run.sh). Bounded: the last `MAX_TURNS` turns, each
 //! question and answer cut to `MAX_CHARS`; a file larger than `MAX_FILE`, or not one this wrote, is

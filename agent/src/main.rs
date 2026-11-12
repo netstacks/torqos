@@ -56,7 +56,7 @@ fn run(args: &[String]) -> Result<()> {
     let (propose, question) = parse(args)?;
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
     // One question at a terminal (torq doctor, torq agent propose): no key but the resident service's, so none.
-    let cfg = doctor::Config::load(Path::new(SETTINGS), &home, None)?;
+    let cfg = doctor::Config::load(Path::new(SETTINGS), &home, None, false)?;
     let machine = Machine { home };
     doctor::ask(&cfg, &machine, &question, propose, &mut std::io::stdout(), &mut std::io::stderr())?;
     Ok(())
@@ -87,7 +87,7 @@ fn run_task() -> Result<()> {
     // The agent service's task: the model's key, if one is configured, is its credential (TORQ_MODEL_KEY_FILE,
     // set by the service from systemd's LoadCredential).
     let credential = std::env::var_os("TORQ_MODEL_KEY_FILE").map(PathBuf::from);
-    let cfg = doctor::Config::load(Path::new(SETTINGS), &home, credential.as_deref())?;
+    let cfg = doctor::Config::load(Path::new(SETTINGS), &home, credential.as_deref(), true)?;
     let machine = Machine { home };
     let mut answer = Vec::new();
     let stdout = std::io::stdout();

@@ -315,7 +315,6 @@ mod tests {
     struct FakeHost {
         output: String,
         reports: Mutex<Vec<String>>,
-        /// Fail the session's start, or its reports.
         /// Fail the session's start; fail every report after it (set at any time).
         broken_start: bool,
         broken_reports: std::sync::atomic::AtomicBool,

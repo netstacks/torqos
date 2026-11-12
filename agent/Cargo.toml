@@ -2,7 +2,7 @@
 name = "torq-agent"
 version = "0.4.0"
 edition = "2021"
-description = "TorqOS agent (unprivileged, run as a person's agent account, torq-agent-<person>): doctor mode, read-only tools, proposes nothing"
+description = "TorqOS agent (unprivileged, run as a person's agent accounts, torq-agent-<person> and torq-resident-<person>): doctor mode's read-only tools, and in propose mode a change proposed, never applied"
 license = "Apache-2.0"
 
 # What the three programs share: the tools, the cleaning, the session (ADR-051 step 5).
