@@ -169,9 +169,12 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    torqcli does not check the rest of it (outputs, `configDir`, no extra modules or inputs): a
    flake.nix changed by hand beyond that line is still shown as TorqOS's own. It is changed only
    through the broker, as a system-tier change a person reads.
-6q. **`| display set` loads back, with three exceptions:** a value that is exactly `|`, or a list
-   value that is exactly `[` or `]`, is refused when read back (a quoted word is not told apart from
-   the syntax). `save` / `load override` keep them. `load set` saves the candidate as it goes:
+6q. **`| display set` loads back, with one exception:** a value that is exactly `|` is refused when
+   read back (a quoted word is not told apart from the syntax: telling them apart means words that
+   say whether they were quoted, through the grammar, the filters and completion). A list value that
+   is exactly `[` or `]` was refused too; it is now written inside brackets (`set … [ "[" ]`), where
+   it is a value, and loads back (`cli/src/tree.rs` `display_set_entries`, 2026-11-12).
+   `save` / `load override` keep them all. `load set` saves the candidate as it goes:
    all or nothing for errors, not for a crash or a full disk midway.
 6r. **The config repo is readable by every user** (0755/0644; second audit, L4), and so is the Nix
    store it is built into: a secret must never be in it. M2's first-boot setup must keep passwords

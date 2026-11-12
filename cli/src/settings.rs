@@ -408,6 +408,21 @@ mod tests {
         assert_eq!(again, s);
     }
 
+    /// A list's value that is exactly a bracket comes back from `| display set` (KNOWN-GAPS 6q): it is
+    /// written inside brackets, where it is a value and not the list's own syntax.
+    #[test]
+    fn a_bracket_as_a_lists_value_comes_back_from_display_set() {
+        let t = tree();
+        let mut s = Settings::new();
+        set(&t, &mut s, &w(r#"services httpd virtualHosts example.com serverAliases [ "[" a "]" ]"#)).unwrap();
+        let shown = crate::tree::display_set_entries(&entries(&s));
+        let mut again = Settings::new();
+        for line in shown.lines() {
+            set(&t, &mut again, &w(line.strip_prefix("set ").unwrap())).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
+        assert_eq!(again, s, "{shown}");
+    }
+
     #[test]
     fn delete_takes_exactly_what_it_names() {
         let t = tree();

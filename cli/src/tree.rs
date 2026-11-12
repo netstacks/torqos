@@ -556,7 +556,13 @@ pub fn display_set_entries(entries: &[(Vec<String>, Val)]) -> String {
             Val::Many(vs) if vs.is_empty() => out.push_str(&format!("set {path} [ ]\n")),
             Val::Many(vs) => {
                 for v in vs {
-                    out.push_str(&format!("set {path} {}\n", quote(v)));
+                    // A bracket alone after the path would read as the list's own syntax, quoted or not
+                    // (a word does not say it was quoted): inside brackets it is a value.
+                    if v == "[" || v == "]" {
+                        out.push_str(&format!("set {path} [ {} ]\n", quote(v)));
+                    } else {
+                        out.push_str(&format!("set {path} {}\n", quote(v)));
+                    }
                 }
             }
         }
