@@ -49,7 +49,7 @@ impl std::fmt::Display for Unreachable {
             Unreachable::IsAgent => write!(f, "this is an agent: it has no agent of its own to ask"),
             Unreachable::NoService(path) => write!(f, "your agent's service is not on this machine ({path}): it runs where doctor mode is (torq agent doctor enable true, an administrator's change)"),
             Unreachable::NotYours(path) => write!(f, "{path}: not yours to connect to"),
-            Unreachable::Silent(what) => write!(f, "your agent did not answer {what} (journalctl -u torq-agent@<you>.service, an administrator's)"),
+            Unreachable::Silent(what) => write!(f, "your agent did not answer {what}"),
             Unreachable::Refused(text) => write!(f, "{text}"),
             Unreachable::Broken(text) => write!(f, "connecting to your agent: {text}"),
         }
@@ -115,6 +115,17 @@ impl Client {
     }
 
     /// The agent on `path`, which must be `uid`'s socket.
+    /// The unit that serves this socket: `torq-agent@<person>.service`, the person's own name in it (the review of the
+    /// rebased branch, C13: a literal <you> was printed).
+    pub fn unit(&self) -> String {
+        format!("torq-agent@{}.service", self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default())
+    }
+
+    /// Where an administrator reads why it did not answer.
+    fn journal(&self) -> String {
+        format!("journalctl -u {}, an administrator's", self.unit())
+    }
+
     pub fn at(path: &Path, uid: u32) -> Client {
         Client { path: path.to_path_buf(), uid, quick: QUICK, quiet: QUIET }
     }
@@ -148,10 +159,10 @@ impl Client {
                 Ok(()) => break,
                 // Its queue is full (a frozen service): again, until the deadline.
                 Err(Errno::AGAIN) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-                Err(Errno::AGAIN) => return Err(Unreachable::Silent("in time: it takes no connection".into())),
+                Err(Errno::AGAIN) => return Err(Unreachable::Silent(format!("in time: it takes no connection ({})", self.journal()))),
                 Err(Errno::NOENT) => return Err(Unreachable::NoService(shown)),
                 Err(Errno::ACCESS) => return Err(Unreachable::NotYours(shown)),
-                Err(Errno::CONNREFUSED) => return Err(Unreachable::Broken(format!("{shown}: nothing listens there (systemctl status torq-agent@<you>.socket)"))),
+                Err(Errno::CONNREFUSED) => return Err(Unreachable::Broken(format!("{shown}: nothing listens there (systemctl status {})", self.unit().replace(".service", ".socket")))),
                 Err(e) => return Err(Unreachable::Broken(format!("{shown}: {e}"))),
             }
         }
@@ -167,7 +178,7 @@ impl Client {
         let mut conn = self.connect()?;
         let line = serde_json::to_string(r).map_err(|e| Unreachable::Broken(e.to_string()))?;
         writeln!(conn, "{line}").map_err(|e| Unreachable::Broken(format!("asking your agent: {e}")))?;
-        Ok(Lines { r: BufReader::new(conn), deadline: Some(Instant::now() + self.quick), quiet: None })
+        Ok(Lines { r: BufReader::new(conn), deadline: Some(Instant::now() + self.quick), quiet: None, journal: self.journal() })
     }
 
     /// Whether a task runs, and how much the conversation keeps.
@@ -225,12 +236,14 @@ struct Lines {
     deadline: Option<Instant>,
     /// The most between two events, besides the deadline (an answer's).
     quiet: Option<Duration>,
+    /// Where an administrator reads why it is silent.
+    journal: String,
 }
 
 impl Lines {
     /// The next event, or why there is none: `what` was asked.
     fn next(&mut self, what: &str) -> Result<Event, Unreachable> {
-        let silent = || Unreachable::Silent(format!("{what} in time"));
+        let silent = || Unreachable::Silent(format!("{what} in time ({})", self.journal));
         let mut line = Vec::new();
         loop {
             if let Some(d) = self.deadline {
@@ -247,7 +260,7 @@ impl Lines {
                 Err(e) => return Err(Unreachable::Broken(format!("reading your agent's answer: {e}"))),
             };
             if got.is_empty() {
-                return Err(Unreachable::Silent(format!("{what}: it ended before it answered")));
+                return Err(Unreachable::Silent(format!("{what}: it ended before it answered ({})", self.journal)));
             }
             let (used, whole) = match got.iter().position(|&b| b == b'\n') {
                 Some(i) => (i + 1, true),

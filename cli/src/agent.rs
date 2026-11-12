@@ -227,8 +227,14 @@ pub(crate) fn run(args: &[String]) -> Result<i32> {
         // With its own process namespace (the launcher), nothing of a session outlives it.
         let frozen = Frozen::hold(&launch[0])?;
         let shared = share_acls(&dir, uid, &agent, &me);
-        frozen.thaw()?;
-        shared?;
+        // Thawed whatever the walk did, and both said when both fail (the review of the rebased branch, C13: the
+        // walk's own error was lost behind the thaw's).
+        let thawed = frozen.thaw();
+        match (shared, thawed) {
+            (Err(e), Err(t)) => return Err(e.context(format!("and your agent could not be thawed after: {t:#}"))),
+            (Err(e), Ok(())) | (Ok(()), Err(e)) => return Err(e),
+            (Ok(()), Ok(())) => {}
+        }
         // Opened as the person, kept open across exec (no close-on-exec), and kept by sudo (`-C`,
         // which the launcher's rule allows): the agent is handed the directory, not a way to it.
         let f = std::fs::File::open(&dir).with_context(|| format!("opening {}", dir.display()))?;
@@ -273,11 +279,16 @@ pub(crate) fn parse_ask(args: &[String]) -> Result<Asked> {
     Ok(Asked::Question(q))
 }
 
-/// One line read as the question (`ask` alone): whatever it holds, no shell reads it. At most 8 KiB.
+/// One line read as the question (`ask` alone): whatever it holds, no shell reads it. At most 8 KiB: a longer
+/// one is refused, never cut unsaid (C13).
 fn question_from<R: std::io::BufRead>(r: &mut R) -> Result<String> {
     use std::io::Read;
+    const MAX: u64 = 8 * 1024;
     let mut line = String::new();
-    std::io::BufRead::read_line(&mut r.take(8 * 1024), &mut line).context("reading your question")?;
+    std::io::BufRead::read_line(&mut r.take(MAX), &mut line).context("reading your question")?;
+    if line.len() as u64 >= MAX && !line.ends_with('\n') {
+        bail!("your question is longer than {MAX} bytes: ask it shorter");
+    }
     let q = line.trim();
     if q.is_empty() {
         bail!("{ASK_USAGE}");
@@ -495,7 +506,9 @@ pub(crate) fn ask(args: &[String]) -> Result<i32> {
         }
     };
     // Held before any thread starts (a thread started earlier would take them, and end with the terminal raw), and
-    // only now: at the question's prompt, Ctrl-C ends torq ask as it always does.
+    // only now: at the question's prompt, Ctrl-C ends torq ask as it always does. Until the key thread reads them (just
+    // below) they are held unread for as long as agent.ask takes to return its stream: bounded, its connect and its
+    // request each within the client's QUICK (15 s).
     use std::io::IsTerminal;
     let signals = std::io::stdin().is_terminal().then(Signals::hold).flatten();
     let answer = agent.ask(&text, None)?;
@@ -513,7 +526,7 @@ pub(crate) fn ask(args: &[String]) -> Result<i32> {
             return Ok(if stopped() { 130 } else { code });
         }
     }
-    bail!("your agent's service ended before it answered (journalctl -u torq-agent@<you>.service, an administrator's)")
+    bail!("your agent's service ended before it answered (journalctl -u {}, an administrator's)", agent.unit())
 }
 
 /// `torq doctor "<question>"` (ADR-042): the agent, in doctor mode, asked one question — run as the
@@ -715,5 +728,17 @@ mod tests {
         assert_eq!(s.next(), Some(15));
         drop(s);
         assert!(!SigSet::thread_get_mask().unwrap().contains(Signal::SIGTERM), "let go again");
+    }
+
+    /// A question read from input past 8 KiB is refused, not cut unsaid; one within is taken whole (C13). And the
+    /// client names the person's own unit, not a placeholder.
+    #[test]
+    fn a_long_question_is_refused_and_the_unit_named() {
+        let long = format!("{}\n", "x".repeat(9 * 1024));
+        assert!(format!("{:#}", question_from(&mut long.as_bytes()).unwrap_err()).contains("longer than 8192 bytes"));
+        let fits = format!("{}\n", "y".repeat(8 * 1024 - 1));
+        assert_eq!(question_from(&mut fits.as_bytes()).unwrap().len(), 8 * 1024 - 1);
+        let c = client::Client::at(std::path::Path::new("/run/torq-agent/alice.sock"), 1000);
+        assert_eq!(c.unit(), "torq-agent@alice.service");
     }
 }
