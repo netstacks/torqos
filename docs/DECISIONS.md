@@ -2268,6 +2268,13 @@ off many times a day.
 - **Not:** a browser password manager (the person's own: KeePassXC, Bitwarden, the browser's); a sync service
   for secrets (ADR-039); handing the agent any secret "just this once". There is no fallback route around the
   guarantee: a task that needs a value in hand is done by a person.
+- **Amended 2026-11-11 — the scope, and step 5 deferred (the owner):** secrets are the narrow store for the
+  agent's tokens and keys: a program uses one and never reads it. They are not a general password manager.
+  A person's everyday passwords are left to a password-manager app such as 1Password, and TorqOS does not try
+  to be one. Secrets are command line only for now. So step 5, the Secrets page in TorqOS Settings, is
+  deferred, and Decision 4 (values entered in TorqOS Settings) and the Settings page named in the
+  consequences wait with it. Step 4 (approvals and taint) is unchanged: still to build, after rc1. Nothing
+  is renamed: the commands, the `secrets` tree and `torq-secrets` stay as built.
 
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 

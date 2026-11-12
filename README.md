@@ -286,7 +286,7 @@ maintainers rather than in a public issue.
 | Later — owner-rooted boot security: the owner's Secure Boot keys, TPM2, disk encryption | ⬜ | Designed (ADR-033, [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md)); not built |
 
 Released: `v0.1.0` to `v0.3.2`. Not released: `0.4.0-rc1`, in preparation, which is the desktop and
-secrets (ADR-052, which lets the agent use a token or key without being able to read it).
+secrets (ADR-052, which lets the agent use a token or key without being able to read it; command line only, and not a password manager).
 The roadmap is [docs/ROADMAP.md](docs/ROADMAP.md); design decisions and their reasons are recorded as
 ADRs in [docs/DECISIONS.md](docs/DECISIONS.md).
 

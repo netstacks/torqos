@@ -79,6 +79,15 @@ backup can be read. A remote target's own login, an SSH key or S3's keys, you pl
 of the folder, what is there now is set aside beside it, it asks an administrator's password, and it
 goes in the ledger.
 
+## Secrets for the agent and programs
+
+A secret is a token or key that a program, such as the agent, may use and never read. TorqOS keeps it
+encrypted, outside the configuration, and out of the ledger. It is for that and nothing more.
+
+You manage secrets from the command line (`request system secret …`). There is no Secrets page in
+TorqOS Settings. For your everyday passwords, use a password manager such as 1Password: TorqOS does
+not try to be one.
+
 ## Checking a release yourself
 
 See [Install → Check the download](../start/install.md#2-check-the-download). You need only OpenSSH

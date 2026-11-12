@@ -5,7 +5,7 @@ drive. M1–M2 built the base and the server face. M3–M5 build what the laptop
 each of them serves the server face too.
 
 Milestones and releases (2026-11-11): v0.2.0 = M2; v0.3.x = M3 and the agent's non-GUI half (M5's
-doctor, proposals and session trust); 0.4.0 = the desktop (M4) and secrets (ADR-052), in preparation
+doctor, proposals and session trust); 0.4.0 = the desktop (M4) and secrets (ADR-052, command line only), in preparation
 and not released. The checkboxes below are the current record; a box is ticked only for what is built,
 and a part not built has its own unticked line.
 
@@ -293,13 +293,14 @@ acceptance tests, each a VM test.
       session and ledgered; remote input checked first. In the person's session; the agent's
       tooling, not the broker's.
 
-### Secrets the agent may use and never read (ADR-052; on `work/secrets`, for 0.4.0, not released)
+### Secrets the agent may use and never read (ADR-052; steps 1 to 3 in 0.4.0-rc1)
 - [x] **Steps 1 to 3** (built 2026-11-10; `tests/secrets.nix`): the values and their rules (`request system
       secret …`, `show system secrets`, kept encrypted, root's alone, never in the ledger); the daemon
       `torq-secrets` that uses a secret in an HTTPS request for a program that never reads it; SSH.
 - [ ] **Step 4**: approvals and taint (a person asked before the agent uses a secret; until then the
       agent may use only a secret that asks for no approval, from an untainted session).
-- [ ] **Step 5**: the Secrets page in TorqOS Settings.
+- [ ] **Step 5**: the Secrets page in TorqOS Settings. Deferred by the owner's decision (2026-11-11): secrets
+      stay command line only, the narrow store for the agent. Everyday passwords are for apps such as 1Password.
 
 ## After 0.3.0: in the next cycle
 

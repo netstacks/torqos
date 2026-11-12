@@ -56,6 +56,10 @@ command can be abbreviated to a unique beginning, and `?` or `help` works anywhe
 | `clear system commit` | cancel the commit scheduled with `commit at` (asks first; yours, or an administrator's with their password) |
 | <code>help [&lt;command&gt; &#124; &lt;words&gt;]</code> | the commands, one command, or a search of commands and settings |
 
+Secrets are for the tokens and keys that the agent and programs use and never read. They are managed
+here, from the command line, and not in TorqOS Settings. Keep everyday passwords in a password manager
+such as 1Password.
+
 ## Configuration mode
 
 | Command | Does |
