@@ -317,6 +317,28 @@ Its §5 lists claims without a test.
    the cache went away, Nix builds from source — slowly. Answer when there are users: a nixpkgs
    mirror under `torqosorg`, a caching proxy, a source mirror. Not yet: the release's source
    statement and CI's unfree check (ROADMAP M2).
+6zzd. **A pre-release image's first update offers a downgrade** (the v0.4.0-rc1 release-path check,
+   2026-11-12). An image made from a pre-release (v0.4.0-rc1) takes TorqOS from its own copy until its first
+   `request system update`, which moves it to the releases' `stable`, the last release (0.3.2), and marks it
+   "## TorqOS 0.3.2 is older than 0.4.0, which runs now: a downgrade". Answer no, and take the pre-release by its
+   tag instead: `set system software torq source "git+https://github.com/torqosorg/torqos-releases?ref=refs/tags/v0.4.0-rc1"`,
+   still checked against the release key (docs/INSTALL.md).
+6zze. **The release key protects the releases only** (by design, ADR-028). A source at the releases' address
+   (now, or an earlier one: `torq.releases.former`) must be a commit the release key signed. Any other source a
+   person sets, the development repository at the same tag included, is taken as that person's choice: no
+   signature is asked, the compare shows it under `[edit system software torq]`, and committing it needs a person
+   at a terminal like any system change.
+6zzf. **An image shows no version number on its TorqOS line until its first update.** `show version` on a
+   machine set up from an image reads "TorqOS torq <date>": its TorqOS is the image's own copy (a `path:` in the
+   store), not a release whose version was checked. torqcli's own line ("torqcli 0.4.0") says the version; the
+   first update to the releases brings the number.
+6zzg. **A 0.3.2 machine pointed by hand at `torqosorg/torqos-releases` takes it unchecked**, and 0.3.2 cannot
+   be changed (ADR-028, amended 2026-11-12). 0.3.2 counts only its own address, `netstacks/torqos-releases`, as the
+   releases. Its default path, `request system update` on that address (GitHub redirects it), is checked, and
+   0.4.0 then keeps that address as the releases and moves the source to `torqosorg`. A person who sets the new
+   address by hand while still on 0.3.2 gets no signature check for that update. Do the update first; the move
+   comes with it. This relies on GitHub's redirect: nobody may create a repository named
+   `netstacks/torqos-releases` again.
 
 ## Desktop (off in the base; the torqos-desktop configuration's, ADR-034, M4)
 7. ~~niri runs its stock config.~~ Moot: the desktop is COSMIC (ADR-045); `modules/desktop.nix`

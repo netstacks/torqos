@@ -120,7 +120,12 @@ can write to stays a dev-mode source). The first `request system update` moves t
 TorqOS's releases (`git+https://github.com/torqosorg/torqos-releases?ref=stable`, ADR-028); every
 update after takes the newest release on `stable`, and only one signed with the release key the
 machine was installed with (`/etc/torq/release-signers`): anything else is refused before it is
-loaded.
+loaded. A pre-release is not on `stable`: take one by its tag,
+`set system software torq source "git+https://github.com/torqosorg/torqos-releases?ref=refs/tags/v0.4.0-rc1"`,
+checked the same (an image made from a pre-release is offered `stable` by its first update, marked a
+downgrade: KNOWN-GAPS 6zzd). The releases' earlier address (`netstacks/torqos-releases`,
+`torq.releases.former`) is still the releases, checked the same, and an update moves a source there to
+the address now (ADR-028, amended 2026-11-12).
 
 NixOS's own software (the kernel, services, applications) comes signed from NixOS's binary cache, as
 on any NixOS machine; the machine builds TorqOS's few small pieces itself (ADR-023). Setup's switch

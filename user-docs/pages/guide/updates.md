@@ -54,6 +54,32 @@ only TorqOS's own small pieces.
     `request system update` moves it onto the signed release channel; every update after that takes
     the newest signed release.
 
+## Pre-releases
+
+A pre-release (a release candidate, `v0.4.0-rc1`) is published beside the releases but `stable` does
+not move to it, so a plain update never takes one. To try one, point your machine at its tag; it is
+checked against the release key like any release:
+
+```text
+alice@torq> configure
+alice@torq# set system software torq source "git+https://github.com/torqosorg/torqos-releases?ref=refs/tags/v0.4.0-rc1"
+TorqOS release 8146497d8591 (TorqOS 0.4.0-rc1): signed by the TorqOS release key.
+alice@torq# show | compare
+alice@torq# commit
+```
+
+Back to the releases later: the same with `?ref=stable` (the compare marks it a downgrade until a
+newer release is out). A machine installed from a pre-release image is offered `stable` by its
+first update, marked as a downgrade: answer no and set the tag as above.
+
+## When the releases' address changes
+
+The releases moved from `netstacks/torqos-releases` to `torqosorg/torqos-releases` in November 2026.
+A machine installed before then still names the old address. It is still the releases, checked
+against the same key, and the next `request system update` moves the source to the new address,
+saying so and showing it in the compare (`[edit system software torq]`). On TorqOS 0.3.2, update
+as usual rather than setting the new address by hand: 0.3.2 checks only its own address.
+
 ## Going back to earlier software
 
 `rollback` restores configuration but keeps your current software. To go back to the software of an
