@@ -36,7 +36,11 @@ fn records(dir: &Path) -> Result<Vec<PathBuf>> {
         let e = e.with_context(|| format!("reading {}", dir.display()))?;
         let name = e.file_name().to_string_lossy().into_owned();
         let ours = name.strip_prefix("doctor-").and_then(|n| n.strip_suffix(".json")).is_some_and(|h| h.len() == 32 && h.bytes().all(|b| b.is_ascii_hexdigit()));
-        let m = std::fs::symlink_metadata(e.path()).with_context(|| format!("reading {}", e.path().display()))?;
+        // Gone meanwhile (another task pruning at once): not one to list.
+        let m = match std::fs::symlink_metadata(e.path()) {
+            Err(x) if x.kind() == std::io::ErrorKind::NotFound => continue,
+            m => m.with_context(|| format!("reading {}", e.path().display()))?,
+        };
         if ours && m.is_file() {
             found.push((m.modified().with_context(|| format!("reading {}", e.path().display()))?, e.path()));
         }
@@ -45,10 +49,18 @@ fn records(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(found.into_iter().map(|(_, p)| p).collect())
 }
 
+/// `r` removed; one already gone (another task pruning at once) is removed too.
+fn remove(r: &Path) -> Result<()> {
+    match std::fs::remove_file(r) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e).with_context(|| format!("removing {}", r.display())),
+        _ => Ok(()),
+    }
+}
+
 /// Erase every task record in `dir` (`torq ask --forget`, with the memory): none there is none.
 pub fn forget_all(dir: &Path) -> Result<()> {
     for r in records(dir)? {
-        std::fs::remove_file(&r).with_context(|| format!("removing {}", r.display()))?;
+        remove(&r)?;
     }
     Ok(())
 }
@@ -87,7 +99,7 @@ impl Session {
         // Bounded: room for this one, the oldest gone.
         let old = records(dir)?;
         for r in &old[..old.len().saturating_sub(RECORDS_KEPT - 1)] {
-            std::fs::remove_file(r).with_context(|| format!("removing {}", r.display()))?;
+            remove(r)?;
         }
         let id = format!("doctor-{}", random_hex()?);
         let record = dir.join(format!("{id}.json"));
@@ -172,6 +184,9 @@ mod tests {
         let mut first = None;
         for i in 0..RECORDS_KEPT + 3 {
             let s = Session::start(d.path(), &format!("q{i}"), "m", "0").unwrap();
+            // Each a second apart, oldest first: many made in one clock tick would leave their order to chance.
+            let at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 + i as u64);
+            std::fs::File::options().write(true).open(&s.record).unwrap().set_modified(at).unwrap();
             first.get_or_insert(s.record);
         }
         let records = || std::fs::read_dir(d.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("doctor-")).count();
