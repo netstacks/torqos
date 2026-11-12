@@ -50,15 +50,30 @@ struct Running {
     conn: u64,
 }
 
-/// A connection's writer, shared by its reader and its task's relay: one event, one whole line.
+/// How long one event may take to reach a client. A client that stops reading is taken as gone after it, and
+/// nothing more is written to it (the review of the rebased branch, B2): otherwise the relay would block on the
+/// full connection, the task on its full pipe, and the agent would stay running for good.
+const WRITE_WAIT: Duration = Duration::from_secs(10);
+
+/// A connection's writer, shared by its reader and its task's relay: one event, one whole line. Once a write fails
+/// (the client gone, or stopped reading for `WRITE_WAIT`), it writes nothing more.
 #[derive(Clone)]
-struct Out(Arc<Mutex<UnixStream>>);
+struct Out(Arc<Mutex<(UnixStream, bool)>>);
 
 impl Out {
+    fn new(conn: &UnixStream) -> Result<Out> {
+        let w = conn.try_clone()?;
+        w.set_write_timeout(Some(WRITE_WAIT))?;
+        Ok(Out(Arc::new(Mutex::new((w, false)))))
+    }
+
     fn send(&self, e: &Event) {
-        let mut s = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let (s, gone) = &mut *g;
         // A client gone is not an error of the agent's: what it asked still runs to its end, or is stopped.
-        let _ = writeln!(s, "{}", serde_json::to_string(e).unwrap_or_default()).and_then(|()| s.flush());
+        if !*gone && writeln!(s, "{}", serde_json::to_string(e).unwrap_or_default()).and_then(|()| s.flush()).is_err() {
+            *gone = true;
+        }
     }
 }
 
@@ -134,7 +149,7 @@ impl Agent {
     /// Serve one connection: the person's, or no one's. Every request's answer ends with a last frame
     /// (`done`, `status` or `forgotten`), on every way it can go — a refusal and an error included.
     fn serve(self: &Arc<Self>, conn: UnixStream, id: u64) -> Result<()> {
-        let out = Out(Arc::new(Mutex::new(conn.try_clone()?)));
+        let out = Out::new(&conn)?;
         let refuse = |text: String| {
             out.send(&Event::Error { text });
             out.send(&Event::Done { exit: 1 });
@@ -750,5 +765,21 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
         assert!(s.record.exists());
         assert_eq!(talk(&sock, &[Request::Forget], |e| matches!(e, Event::Forgotten)), [Event::Forgotten]);
         assert!(!s.record.exists(), "forgotten with the memory");
+    }
+
+    /// A client that asks and never reads does not keep the agent running (the review of the rebased branch, B2):
+    /// its connection is given up after `WRITE_WAIT`, the task's output still drained, and the slot is free.
+    #[test]
+    fn a_client_that_never_reads_holds_nothing() {
+        let (a, sock, _d) = agent(r#"read -r t; i=0; while [ $i -lt 40000 ]; do printf '%s\n' '{"type":"say","text":"a line of the answer, long enough to fill a socket and a pipe soon"}'; i=$((i+1)); done"#, me());
+        let mut c = UnixStream::connect(&sock).unwrap();
+        writeln!(c, "{}", serde_json::to_string(&ask("talk a lot")).unwrap()).unwrap();
+        let deadline = Instant::now() + WRITE_WAIT + Duration::from_secs(20);
+        std::thread::sleep(Duration::from_millis(500));
+        while a.running().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(a.running().is_none(), "still running with its client not reading");
+        drop(c);
     }
 }
