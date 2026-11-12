@@ -187,8 +187,8 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
     let key = req.key.as_deref().map(|k| scratch.write("key", k)).transpose().map_err(&refused)?;
     let cmd = req.args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_default();
     // Whether an agent account calls from its person's resident agent (ADR-051 step 5): the kernel's answer, read
-    // here, for what the broker judges by it — a session's start and a proposal.
-    if matches!(cmd.as_str(), "propose" | "session-start") {
+    // here, for what the broker judges by it — a session's start, a report into one, and a proposal.
+    if matches!(cmd.as_str(), "propose" | "session-start" | "session-taint") {
         // From its uid first (the resident's own account), then its control group (ADR-051 3 amended 2026-11-11).
         who.resident = socket::found_resident(&who, &std::io::stdin(), pid);
     }

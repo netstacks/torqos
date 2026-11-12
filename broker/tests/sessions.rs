@@ -594,3 +594,22 @@ fn the_model_is_judged_again_at_a_trusted_apply() {
     assert!(session::apply_trusted(&tcp, &p).unwrap().is_none(), "not under trust: the model is not believed now");
     assert!(session::apply_trusted(&b, &p).unwrap().is_some(), "with the believed model: applied");
 }
+
+/// A session is reported into by its own kind of caller alone (the review of the rebased branch, B1): another program
+/// of the agent account reads the resident agent's session id in the ledger, and could otherwise taint it on purpose,
+/// so that what the resident agent proposes waits and its trust never applies. The resident agent reports into none
+/// of another program's either.
+#[test]
+fn a_session_is_tainted_by_its_own_kind_of_caller() {
+    let (dir, resident) = setup(&[]);
+    let tool = Broker::new(dir.path().join("config"), dir.path().join("state"), "true").with_agent_limits(&Limits { agents: agents(&["casey"]), settings: vec![] }).as_agent(Some("torq-agent-casey"));
+    let clean = session::start(&resident).unwrap();
+    let theirs = session::start(&tool).unwrap();
+    let e = format!("{:#}", session::taint(&tool, &clean.id, "web").unwrap_err());
+    assert!(e.contains("the resident agent's"), "{e}");
+    assert!(!session::read(&resident, &clean.id).unwrap().unwrap().tainted, "left clean");
+    let e = format!("{:#}", session::taint(&resident, &theirs.id, "web").unwrap_err());
+    assert!(e.contains("another program's"), "{e}");
+    assert!(session::taint(&resident, &clean.id, "read_journal").unwrap().tainted, "its own");
+    assert!(session::taint(&tool, &theirs.id, "web").unwrap().tainted, "its own");
+}

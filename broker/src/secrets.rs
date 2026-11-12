@@ -337,6 +337,11 @@ pub struct Use {
 pub struct AgentOf {
     pub person: String,
     pub account: String,
+    /// Whether the account is its person's resident agent's (`agent.residents`). Here that rests on the uid alone:
+    /// the daemon vouches for the uid at the other end of its loopback connection, and the broker has no pidfd or
+    /// control group of the caller as on its own socket. The resident account is the service's alone (no login,
+    /// no home, ADR-051 3 amended), so its uid is the service.
+    pub resident: bool,
 }
 
 /// Whether `actor` (the person's agent when `agent` says so) may use `owner`'s secret under rule `r`
@@ -387,19 +392,26 @@ impl Broker {
     /// account whose person has one (`agent.residents`). None: a person, or an account that is no one's agent.
     pub fn agent_of(&self, account: &str) -> Option<AgentOf> {
         if let Some(p) = self.agent_limits.serves(account) {
-            return Some(AgentOf { person: p.to_string(), account: account.to_string() });
+            return Some(AgentOf { person: p.to_string(), account: account.to_string(), resident: false });
         }
         let p = self.residents().get(account)?;
         let (a, _) = self.agent_limits.agents.iter().find(|(_, q)| *q == p)?;
-        Some(AgentOf { person: p.clone(), account: a.clone() })
+        Some(AgentOf { person: p.clone(), account: a.clone(), resident: true })
     }
 
-    /// Session `id`, if it is agent `a`'s own: a session is its agent account's (ADR-051 3), and another agent's is
-    /// none of this one's to cite.
+    /// Session `id`, if it is agent `a`'s own and of its own kind: a session is its agent account's (ADR-051 3), and
+    /// another agent's is none of this one's to cite; the resident agent's is cited by the resident account alone, and
+    /// another program's of the agent account by the agent account alone (the review of the rebased branch, B1). A
+    /// session's id is in the ledger for every account to read: without this, a coding tool would cite the resident
+    /// agent's untainted session and use a secret no person was asked about. As `session::judge` does for proposals.
     fn agents_session(&self, a: &AgentOf, id: &str) -> Result<crate::session::Record> {
         let r = crate::session::read(self, id)?.context("refused: the request names no session the broker holds")?;
         if r.agent != a.account {
             bail!("refused: session {id} is not {}'s", a.account);
+        }
+        if r.resident != a.resident {
+            let whose = if r.resident { "the resident agent's" } else { "another program's of the agent's" };
+            bail!("refused: session {id} is {whose}: only that kind of caller cites it");
         }
         Ok(r)
     }
@@ -575,7 +587,7 @@ mod tests {
     }
 
     fn agent(person: &str) -> AgentOf {
-        AgentOf { person: person.into(), account: format!("torq-agent-{person}") }
+        AgentOf { person: person.into(), account: format!("torq-agent-{person}"), resident: false }
     }
 
     #[test]

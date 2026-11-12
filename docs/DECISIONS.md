@@ -2962,7 +2962,11 @@ vouches for, that only proposes, every change ledgered and undone in one command
   own agent, both of its accounts (`torq-agent-<person>` and `torq-resident-<person>`, by the broker's map), and no
   other person's. The system's rules name each agent that may use a secret by its account (`actors [
   torq-agent-alice ]`, `request system secret allow <name> agent alice`); the bare word is refused there, as
-  saying no one's agent. An agent's use names a session of its own agent account's, never another's. Approval
+  saying no one's agent. An agent's use, and its SSH socket's grant, name a session of its own agent account's, never another's,
+  and of its own kind: the resident account's only the resident agent's, the agent account's only another
+  program's (a session's id is in the ledger for every account to read). For a use, "resident" rests on the
+  resident account's uid alone: the daemon vouches for the uid of its loopback peer, and the broker has no
+  pidfd or control group of the caller there, as it has on its own socket. Approval
   (Decision 4) is still not built, and only the resident agent starts a session untainted, so until it is no
   agent's use is let through: a coding tool's session is tainted from its start, and the resident agent has no
   tool that sends HTTPS or signs (KNOWN-GAPS 6zzs).

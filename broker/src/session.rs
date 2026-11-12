@@ -213,6 +213,14 @@ pub fn taint(b: &Broker, id: &str, source: &str) -> Result<Record> {
     if r.agent != agent {
         bail!("refused: session {id} is not {agent}'s");
     }
+    // Reported into by its own kind of caller alone (the review of the rebased branch, B1), as it is cited: another
+    // program of the agent account reads the resident agent's session id in the ledger, and could otherwise taint it
+    // on purpose, so that the resident agent's proposals wait and its trust never applies. Taint only adds, so this
+    // is a denial it closes, not a way in; the resident agent never reports into another program's session either.
+    if r.resident != b.resident() {
+        let whose = if r.resident { "the resident agent's" } else { "another program's of the agent's" };
+        bail!("refused: session {id} is {whose}: only that kind of caller reports into it");
+    }
     // Bounded: a record any agent program can report into must not grow until no one can start a
     // session (the audit of 0.3.0). Tainted is tainted; past the bound, what tainted it is said as "more".
     if !r.tainted_by.iter().any(|s| s == source) && r.tainted_by.len() < SOURCES_KEPT {

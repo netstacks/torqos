@@ -351,7 +351,13 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
                 a.push("--resident".into());
             }
         }
-        "session-taint" if who.agent_for.is_some() => a.extend(["--agent".into(), who.acts_as.clone().context("an agent acts as its agent account")?]),
+        // Reported into by its own kind of caller alone (session::taint), so the resident agent is said here too.
+        "session-taint" if who.agent_for.is_some() => {
+            a.extend(["--agent".into(), who.acts_as.clone().context("an agent acts as its agent account")?]);
+            if who.resident && who.resident_account {
+                a.push("--resident".into());
+            }
+        }
         "password" => {
             a.extend(["--hash-file".into(), hash.context("a password needs its hash, in the request")?.into()]);
             a.extend(["--approved-by".into(), who.name.clone()]);
@@ -613,10 +619,13 @@ mod tests {
         res.resident = true;
         assert_eq!(p(&res), ["propose", "--base=c", "--actor", "agent", "--agent", "torq-agent-viper", "--resident", "--diff", "/run/d"]);
         assert_eq!(s(&res), ["session-start", "--agent", "torq-agent-viper", "--resident"]);
+        // A report into a session too (session::taint, B1): the resident agent's said, as at its start.
+        let t = |c: &Caller| with_identity(&["session-taint".into(), "x".into()], "session-taint", c, None, None, None).unwrap();
+        assert_eq!(t(&res), ["session-taint", "x", "--agent", "torq-agent-viper", "--resident"]);
         // The agent account, even were it found in the unit's control group: never resident.
         let mut agent = who(990);
         agent.resident = true;
-        assert!(!p(&agent).contains(&"--resident".to_string()) && !s(&agent).contains(&"--resident".to_string()));
+        assert!(!p(&agent).contains(&"--resident".to_string()) && !s(&agent).contains(&"--resident".to_string()) && !t(&agent).contains(&"--resident".to_string()));
         // It proposes, and nothing more, as the agent does.
         for cmd in ["apply", "revert", "decline", "trust-grant", "password", "fetch-incoming"] {
             assert!(matches!(gate(&who(980), cmd, Some(&change(Tier::User, &["users/viper/packages.json"])), Some("viper")), Gate::Refused(_)), "{cmd}");
@@ -633,10 +642,11 @@ mod tests {
     }
 
     /// The broker is told the caller is the resident agent only by serve, never by the caller; and only for
-    /// an agent's proposal and session start.
+    /// an agent's proposal, its session's start and a report into one.
     #[test]
     fn resident_is_added_never_taken() {
         assert!(check_args(&["session-start".into(), "--resident".into()]).is_err());
+        assert!(check_args(&["session-taint".into(), "x".into(), "--resident".into()]).is_err());
         assert!(check_args(&["propose".into(), "--resident=true".into()]).is_err());
         // The person's resident account (ADR-051 3 amended 2026-11-11): the only one that can be resident.
         let mut a = who(980);
@@ -647,7 +657,7 @@ mod tests {
         assert_eq!(p(&a), ["propose", "--base=c", "--actor", "agent", "--agent", "torq-agent-viper", "--resident", "--diff", "/run/d"]);
         assert_eq!(s(&a), ["session-start", "--agent", "torq-agent-viper", "--resident"]);
         let t = with_identity(&["session-taint".into(), "x".into()], "session-taint", &a, None, None, None).unwrap();
-        assert_eq!(t, ["session-taint", "x", "--agent", "torq-agent-viper"]);
+        assert_eq!(t, ["session-taint", "x", "--agent", "torq-agent-viper", "--resident"], "a report into its session too (B1)");
         // A person is never resident, whatever were set.
         let mut v = who(1000);
         v.resident = true;

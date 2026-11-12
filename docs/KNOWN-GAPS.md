@@ -1316,7 +1316,9 @@ Its §5 lists claims without a test.
   names each agent's account (`broker/tests/secrets.rs`, `tests/secrets.nix`). But a use is let through only from
   an untainted session, with the rule asking no approval, and:
    - every program run as `torq-agent-<person>` (a coding tool, `torq agent run`) starts its session tainted
-     (`not-the-resident-agent`, 6zzo), so each of its uses waits for a person, and approving is not built: refused;
+     (`not-the-resident-agent`, 6zzo), so each of its uses waits for a person, and approving is not built: refused.
+     It cannot borrow the resident agent's clean session either, though its id is in the ledger: a use or an SSH
+     socket cites only its own kind of session (the review of the rebased branch, B1; before that fix, it could);
    - the resident agent, whose session can start untainted, has no tool that sends an HTTPS request or signs.
   So until approval is built (the design's parts 2 and 3, waiting on the owner), a secret is used only by its
   person. The daemon's path for an agent's use is tested up to its refusal; the path for a use let through is

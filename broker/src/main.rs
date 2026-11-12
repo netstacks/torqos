@@ -174,7 +174,8 @@ fn command_line() -> clap::Command {
                 .about("The agent's session read untrusted text: marked tainted for good (nothing clears it).")
                 .arg(Arg::new("id").required(true))
                 .arg(Arg::new("source").long("source").required(true).help("What it read: a tool's name."))
-                .arg(agent()),
+                .arg(agent())
+                .arg(resident()),
         )
         .subcommand(Command::new("session").about("The broker's record of one of the agent's sessions.").arg(Arg::new("id").required(true)))
         .subcommand(
