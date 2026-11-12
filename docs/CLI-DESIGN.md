@@ -273,7 +273,8 @@ commit would:
   interfaces eth0 ipv4 addresses 1 address 10.0.0.1`, `… addresses 1 prefixLength 24`; `… addresses 2
   address …` adds another. One past the end is refused, saying how many there are; `?` offers the
   numbers there are and the next. `show` and `| compare` say `addresses 1 { … }`; `delete … addresses
-  1` removes it, the ones after it renumbering. In the files they are a JSON list, as NixOS reads it.
+  1` removes it, the ones after it renumbering, and says so ("entry 2 is now 1"). In the files they are
+  a JSON list, as NixOS reads it.
 - **Package names** are checked and offered as they are set, in TorqOS's software lists and in any
   NixOS setting that takes a package: the schema carries this machine's nixpkgs names (only the
   names: nothing is evaluated). A name it does not have is refused with the closest ("'btopp' is not

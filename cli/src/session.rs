@@ -771,14 +771,16 @@ impl<'a> Session<'a> {
                     }
                 }
                 let mut d = self.candidate_data()?;
+                let was = d.settings.clone();
                 let done = self.whole().delete(&mut d, &full)?;
                 if done == crate::whole::Deleted::NotFound {
                     return Ok(self.noted(&format!("nothing deleted: {} is not set", if full.is_empty() { "anything".to_string() } else { full.join(" ") })));
                 }
+                let moved = crate::settings::renumbered(&self.tree, &was, &d.settings, &full).map(|m| self.noted(&m)).unwrap_or_default();
                 let note = self.rules_note(&d);
                 self.put_data(d)?;
                 self.save()?;
-                Ok(note)
+                Ok(format!("{moved}{note}"))
             }
             Op::ShowCandidate { path, display } => {
                 let d = self.candidate_data()?;
@@ -4170,6 +4172,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A delete that renumbers a list's entries says which number each one has now (KNOWN-GAPS 6w):
+    /// the entry itself or its last setting; the last entry, or a setting an entry outlives, moves none.
+    #[test]
+    fn a_delete_says_what_it_renumbered() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        let at = "networking interfaces eth0 ipv4 addresses";
+        run(&mut s, &["configure"]);
+        for i in 1..=4 {
+            run(&mut s, &[&format!("set {at} {i} address 10.0.0.{i}"), &format!("set {at} {i} prefixLength 24")]);
+        }
+        assert_eq!(run(&mut s, &[&format!("delete {at} 4")]), "", "the last one: none after it");
+        assert_eq!(run(&mut s, &[&format!("delete {at} 1 prefixLength")]), "", "the entry is still there");
+        assert_eq!(run(&mut s, &["delete netw interf eth0 ipv4 addresses 1"]), format!("! {at}: entries 2 to 3 are now 1 to 2\n"));
+        assert_eq!(run(&mut s, &[&format!("delete {at} 1 prefixLength"), &format!("delete {at} 1 address")]), format!("! {at}: entry 2 is now 1\n"), "its last setting takes the entry");
+        assert_eq!(run(&mut s, &[&format!("delete {at} 1")]), "");
     }
 
     /// A change to how the machine starts is said so before anyone approves it; others are not.

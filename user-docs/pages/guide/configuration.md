@@ -55,7 +55,8 @@ alice@torq# set networking interfaces eth0 ipv4 addresses 1 prefixLength 24
 ```
 
 Lists of unnamed entries, like an interface's addresses, are set by number: `addresses 1`,
-`addresses 2`, and so on.
+`addresses 2`, and so on. Deleting one gives the entries after it the number before theirs, and
+`delete` says so: `entry 2 is now 1`.
 
 ## Software
 

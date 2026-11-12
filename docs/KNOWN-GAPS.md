@@ -212,7 +212,9 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    system's nixpkgs, not the candidate's after `request system update`.
 6w. **Entries of a list without names renumber on delete.** `delete networking interfaces eth0 ipv4
    addresses 1` makes 2 the new 1: a pasted script that deletes one and then sets another by its old
-   number changes the wrong entry. `show | compare` shows what each number now holds before commit.
+   number changes the wrong entry. `delete` now says what moved (`! networking interfaces eth0 ipv4
+   addresses: entry 2 is now 1`, `cli/src/settings.rs` `renumbered`, 2026-11-12), and `show | compare`
+   shows what each number holds before commit; a script that does not read the answer is as before.
 
 6x. **What a setting's default is, when nothing sets it, is not shown.** `show` says "Nothing is set
    at …", and `set services openssh ports 2222` does not say it replaces the default 22. Reading

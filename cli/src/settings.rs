@@ -241,6 +241,32 @@ pub fn delete(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// What `delete <words>` renumbered, as a sentence: the entries after one removed from a list without
+/// names each took the number before theirs, so a script that goes on by the old numbers changes the
+/// wrong entry (KNOWN-GAPS 6w). None if nothing moved.
+pub fn renumbered(tree: &Tree, before: &Settings, after: &Settings, words: &[String]) -> Option<String> {
+    let (loc, ..) = tree.locate(words).ok()?;
+    tree.item_positions(&loc).into_iter().find_map(|p| {
+        // How many entries the list numbered at `p` has.
+        let entries = |s: &Settings| {
+            let mut at = s.get(&loc[0])?;
+            for k in &loc[1..p] {
+                at = match at {
+                    Value::Array(a) => a.get(k.parse::<usize>().ok()?.checked_sub(1)?)?,
+                    v => v.get(k)?,
+                };
+            }
+            at.as_array().map(Vec::len)
+        };
+        let (i, was): (usize, usize) = (loc[p].parse().ok()?, entries(before)?);
+        if i >= was || entries(after).unwrap_or(0) >= was {
+            return None;
+        }
+        let list = loc[..p].join(" ");
+        Some(if i + 1 == was { format!("{list}: entry {was} is now {i}") } else { format!("{list}: entries {} to {was} are now {i} to {}", i + 1, was - 1) })
+    })
+}
+
 /// Remove `path` below `v` (with `what`: only those list elements, or that entry of a set). Whether
 /// anything was there; objects left empty are removed on the way back.
 fn remove_at(v: &mut Value, path: &[String], what: Option<&Value>) -> Result<bool> {
