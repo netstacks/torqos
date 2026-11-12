@@ -34,7 +34,8 @@ pkgs.testers.runNixOSTest {
       -{ nightLight = false; }
       +{ nightLight = true; }
     '';
-    environment.systemPackages = [ pkgs.pam ];
+    # torq-secret-set-example: TorqOS Settings' way of keeping a secret's value, without the window.
+    environment.systemPackages = [ pkgs.pam (import ./secret-set-example.nix { inherit pkgs self; }) ];
   };
 
   testScript = ''
@@ -195,6 +196,32 @@ pkgs.testers.runNixOSTest {
         applied = [e for e in applied if e["kind"] == "applied" and e["data"].get("proposal") == int(seq)]
         assert len(applied) == 1 and applied[0]["data"].get("rechecked_on"), applied
         machine.succeed(f"git -C {repo} cat-file -e HEAD:users/alice/desktop.json")
+
+    with subtest("a program that has closed its memory still gets the dialog: a system secret kept the way TorqOS Settings keeps one"):
+        # TorqOS Settings is not dumpable once its Secrets page is used, and stays so until it is closed: every
+        # approval it asks after that is asked of polkit about a process whose files in /proc are root's. The page's
+        # own call (torq::app::secret_set, tests/secret-set-example.nix), from a program of alice's session, which
+        # is not dumpable by the time the broker asks. The system's secret, so an administrator's approval.
+        keep = "printf %s dialog-token-1 | torq-secret-set-example dlg"
+        # (`ask` is what ask_in_the_dialog starts, above.)
+        ask = f"systemd-run --user --machine=alice@ --pipe --wait --quiet /bin/sh -c {shlex.quote(keep)}"
+        ask_in_the_dialog("/tmp/secret.out")
+        pid = machine.succeed("pgrep -u alice -x torq-secret-set").strip()
+        # Not dumpable: its files are root's and alice cannot read its environment. Its folder stays alice's, which
+        # is what the broker reads to know the caller is still there.
+        assert machine.succeed(f"stat -c %U /proc/{pid} /proc/{pid}/stat /proc/{pid}/environ").split() == ["alice", "root", "root"]
+        machine.fail(f"su -s /bin/sh alice -c 'cat /proc/{pid}/environ'")
+        machine.sleep(8)
+        machine.screenshot("approval-secret")
+        machine.send_chars("torq-desktop\n", delay=0.1)
+        try:
+            machine.wait_until_succeeds("grep -q 'The value of the system.s secret dlg is kept' /tmp/secret.out", timeout=60)
+        except Exception:
+            print(machine.execute("cat /tmp/secret.out; journalctl -b --no-pager -u 'torq-broker@*' -u polkit -u 'polkit-agent-helper@*' | tail -40")[1])
+            raise
+        store = "/var/lib/torq/secrets/store/system/dlg"
+        assert machine.succeed(f"systemd-creds decrypt --name=torq-secret.system.dlg {store} -") == "dialog-token-1"
+        assert "dialog-token-1" not in machine.succeed("torq-broker log") + machine.succeed("cat /tmp/secret.out")
 
     with subtest("Flathub is the person's, not the system's"):
         machine.wait_until_succeeds("su - alice -c 'flatpak remotes --user' | grep -q flathub", timeout=60)

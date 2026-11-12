@@ -9,16 +9,8 @@ let
   # The test's own passwords, as tests/socket.nix has them: dev is the owner (wheel), sam is not.
   devHash = "$6$torqsocketsalt$Z7RLey3l5vKGfukhfuZYYM/EjWNo7QM8.65r88XmZ9z3/jBCY.NAnH7RwYpiLoE2fedxUd/I7UFcKDX1KEXDg/";
   samHash = "$6$torqsocketsal2$p4ihhGlRahyPpWY43xyA52iNOzVtnXF1dQCVxf0eBeRehXODXyWOdptk3znfwCfmhj5ERP28izhmIRqrAL5J00";
-  # TorqOS Settings' way of keeping a value (`torq::app::secret_set`, what its masked fields call), without the
-  # window: torqcli's package, building its one example and nothing else. This test's alone; no system has it.
-  windowSet = self.packages.${pkgs.stdenv.hostPlatform.system}.torq.overrideAttrs (_: {
-    pname = "torq-secret-set-example";
-    cargoBuildFlags = [ "--example" "secret_set" ];
-    doCheck = false;
-    installPhase = ''
-      install -Dm755 "$(find . -path '*/release/examples/secret_set' -type f)" $out/bin/torq-secret-set-example
-    '';
-  });
+  # TorqOS Settings' way of keeping a value, without the window (tests/secret-set-example.nix).
+  windowSet = import ./secret-set-example.nix { inherit pkgs self; };
   certs = pkgs.runCommand "torq-secrets-test-certs" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir $out
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=TorqOS test authority" -keyout $out/ca.key -out $out/ca.crt
@@ -303,11 +295,15 @@ pkgs.testers.runNixOSTest {
         assert found.strip() == "", found
         assert "window-token-7" not in machine.succeed("torq-broker log")
         assert "window-token-7" not in machine.succeed("journalctl --no-pager -b")
-        # Who may is the broker's to say, this way as any: not another person's, not the system's without an
-        # administrator's approval, and nothing typed is no value. What was kept stays.
+        # Who may is the broker's to say, this way as any: not another person's, and not the system's for one who is no
+        # administrator; nothing typed is no value. What was kept stays.
         machine.fail("printf %s window-token-8 | " + keep.format("sam", "win dev"))
         machine.fail("printf %s window-token-8 | " + keep.format("sam", "win"))
-        machine.fail("printf %s window-token-8 | " + keep.format("dev", "win"))
+        # dev is an administrator (the owner, in wheel), so the system's is not refused outright: it needs dev's
+        # password. This machine has no desktop, so the broker asks no dialog and answers at once that it needs
+        # one; there is no terminal to ask at, and the call ends there. Bounded all the same: a wait is a failure.
+        code, out = machine.execute("printf %s window-token-8 | timeout 30 " + keep.format("dev", "win") + " 2>&1")
+        assert code == 1 and "needs dev's password" in out, (code, out)
         machine.fail(": | " + keep.format("dev", "win dev"))
         assert machine.succeed(f"systemd-creds decrypt --name=torq-secret.user.dev.win {store} -") == "window-token-7"
         machine.fail("test -e /var/lib/torq/secrets/store/system/win")
