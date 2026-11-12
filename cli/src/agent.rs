@@ -355,7 +355,14 @@ impl Signals {
             set.add(s);
         }
         set.thread_block().ok()?;
-        nix::sys::signalfd::SignalFd::new(&set).ok().map(Signals)
+        match nix::sys::signalfd::SignalFd::new(&set) {
+            Ok(fd) => Some(Signals(fd)),
+            // Held and nothing to read them from: let go again, so they end it as they would.
+            Err(_) => {
+                let _ = set.thread_unblock();
+                None
+            }
+        }
     }
 
     /// The next of them (blocking), its number.
@@ -393,7 +400,9 @@ impl Keys {
                 if let Some(n) = signals.next() {
                     // Putting it back may fail (the terminal gone, as at a hangup): then there is nothing to put back.
                     let _ = rustix::termios::tcsetattr(std::io::stdin(), rustix::termios::OptionalActions::Now, &restore);
-                    eprintln!("agent: ended by signal {n}, without its answer (it may still be running: torq ask stops nothing by itself)");
+                    // Said if it can be: at a hangup the terminal is gone, and eprintln! would panic this thread and
+                    // leave torq ask running, the signal taken. Whatever the write does, it ends.
+                    let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("agent: ended by signal {n}, without its answer (the agent stops the task as the connection ends)\n"));
                     std::process::exit(128 + n);
                 }
             });
