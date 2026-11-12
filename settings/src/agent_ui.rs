@@ -110,6 +110,9 @@ struct Window {
     attached: Option<String>,
     /// torqcli's question about a Decline, waiting for the person's answer.
     declining: Option<(String, agentkit::Reply)>,
+    /// The proposal whose Decline is in flight, from the press until it ends: one at a time, and only its own end
+    /// clears its question (the review of the rebased branch, B10).
+    decline_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,9 +133,9 @@ enum Message {
     /// Drop what was attached, before asking.
     Unattach,
     Decline(u64),
-    DeclineAsked(String, agentkit::Reply),
+    DeclineAsked(u64, String, agentkit::Reply),
     Answer(bool),
-    Declined(Result<String, String>),
+    Declined(u64, Result<String, String>),
 }
 
 impl Window {
@@ -179,7 +182,7 @@ impl Window {
             let mut line = widget::row::with_capacity(2).align_y(Alignment::Center).spacing(spacing.space_xs).push(widget::text::body(row.text).width(Length::Fill));
             if row.review {
                 line = line.push(widget::button::standard("Review").on_press(Message::Review));
-                line = line.push(widget::button::destructive("Decline…").on_press_maybe(self.declining.is_none().then_some(Message::Decline(row.seq))));
+                line = line.push(widget::button::destructive("Decline…").on_press_maybe(self.decline_seq.is_none().then_some(Message::Decline(row.seq))));
             }
             col = col.push(line);
         }
@@ -203,7 +206,7 @@ impl cosmic::Application for Window {
     }
 
     fn init(core: cosmic::Core, flags: Flags) -> (Self, Task<cosmic::Action<Message>>) {
-        let mut app = Window { core, client: Client::mine(), reach: Ok(None), brain: None, fates: vec![], remembered: None, looking: false, talk: Conversation::default(), question: String::new(), forgetting: false, note: None, attached: None, declining: None };
+        let mut app = Window { core, client: Client::mine(), reach: Ok(None), brain: None, fates: vec![], remembered: None, looking: false, talk: Conversation::default(), question: String::new(), forgetting: false, note: None, attached: None, declining: None, decline_seq: None };
         let title = match app.core.main_window_id() {
             Some(id) => app.set_window_title("TorqOS Agent".into(), id),
             None => Task::none(),
@@ -342,16 +345,23 @@ impl cosmic::Application for Window {
             Message::Review => torq::app::open_settings("proposals"),
             Message::Unattach => self.attached = None,
             Message::Decline(seq) => {
+                if self.decline_seq.is_some() {
+                    return Task::none();
+                }
+                self.decline_seq = Some(seq);
                 self.note = None;
                 return agentkit::decline(seq, Message::DeclineAsked, Message::Declined);
             }
-            Message::DeclineAsked(q, reply) => self.declining = Some((q, reply)),
+            Message::DeclineAsked(seq, q, reply) if self.decline_seq == Some(seq) => self.declining = Some((q, reply)),
+            Message::DeclineAsked(..) => {}
             Message::Answer(yes) => {
                 if let Some((_, reply)) = self.declining.take() {
                     reply.send(yes);
                 }
             }
-            Message::Declined(r) => {
+            Message::Declined(seq, _) if self.decline_seq != Some(seq) => {}
+            Message::Declined(_, r) => {
+                self.decline_seq = None;
                 self.declining = None;
                 self.note = Some(match r {
                     Ok(said) => (conversation::shown(said.trim(), 600), false),

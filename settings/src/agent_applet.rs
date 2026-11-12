@@ -59,6 +59,9 @@ struct Applet {
     tokens: Option<TokenSender<TokenRequest>>,
     /// torqcli's question about a Decline, waiting for the person's answer.
     declining: Option<(String, agentkit::Reply)>,
+    /// The proposal whose Decline is in flight, from the press until it ends: one at a time, and only its own end
+    /// clears its question (the review of the rebased branch, B10).
+    decline_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,9 +78,9 @@ enum Message {
     Review,
     /// Decline a proposal: torqcli's line; its question, the person's answer, what it said.
     Decline(u64),
-    DeclineAsked(String, agentkit::Reply),
+    DeclineAsked(u64, String, agentkit::Reply),
     Answer(bool),
-    Declined(Result<String, String>),
+    Declined(u64, Result<String, String>),
     Settings,
     Token(TokenUpdate),
     PopupClosed(Id),
@@ -130,7 +133,7 @@ impl Applet {
                 let mut line = widget::row::with_capacity(2).align_y(Alignment::Center).push(widget::text::body(row.text).width(Length::Fill));
                 if row.review {
                     line = line.push(widget::button::standard("Review").on_press(Message::Review));
-                    line = line.push(widget::button::destructive("Decline").on_press_maybe(self.declining.is_none().then_some(Message::Decline(row.seq))));
+                    line = line.push(widget::button::destructive("Decline").on_press_maybe(self.decline_seq.is_none().then_some(Message::Decline(row.seq))));
                 }
                 col = col.push(line);
             }
@@ -200,7 +203,7 @@ impl cosmic::Application for Applet {
 
     fn init(core: cosmic::Core, _flags: ()) -> (Self, Task<cosmic::Action<Message>>) {
         let client = Client::mine();
-        let app = Applet { core, popup: None, client: client.clone(), reach: Ok(None), brain: None, fates: vec![], looking: true, talk: Conversation::default(), question: String::new(), note: None, tokens: None, declining: None };
+        let app = Applet { core, popup: None, client: client.clone(), reach: Ok(None), brain: None, fates: vec![], looking: true, talk: Conversation::default(), question: String::new(), note: None, tokens: None, declining: None, decline_seq: None };
         (app, cosmic::task::future(async move { Message::Looked(agentkit::look(client, vec![]).await) }))
     }
 
@@ -268,16 +271,23 @@ impl cosmic::Application for Applet {
                 return self.update(Message::Look);
             }
             Message::Decline(seq) => {
+                if self.decline_seq.is_some() {
+                    return Task::none();
+                }
+                self.decline_seq = Some(seq);
                 self.note = None;
                 return agentkit::decline(seq, Message::DeclineAsked, Message::Declined);
             }
-            Message::DeclineAsked(q, reply) => self.declining = Some((q, reply)),
+            Message::DeclineAsked(seq, q, reply) if self.decline_seq == Some(seq) => self.declining = Some((q, reply)),
+            Message::DeclineAsked(..) => {}
             Message::Answer(yes) => {
                 if let Some((_, reply)) = self.declining.take() {
                     reply.send(yes);
                 }
             }
-            Message::Declined(r) => {
+            Message::Declined(seq, _) if self.decline_seq != Some(seq) => {}
+            Message::Declined(_, r) => {
+                self.decline_seq = None;
                 self.declining = None;
                 self.note = Some(match r {
                     Ok(said) => conversation::shown(said.trim(), 300),

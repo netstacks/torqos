@@ -131,18 +131,18 @@ impl Reply {
 /// Decline proposal `seq`: `request system decline <n>`, run as TorqOS Settings runs its lines (torqcli's
 /// session). torqcli shows the proposal and asks first: its question goes to the program as `asked`, and the
 /// person's answer back through the `Reply`; what it said at the end as `done`.
-pub fn decline<M: Send + 'static>(seq: u64, asked: fn(String, Reply) -> M, done: fn(Result<String, String>) -> M) -> Task<cosmic::Action<M>> {
+pub fn decline<M: Send + 'static>(seq: u64, asked: fn(u64, String, Reply) -> M, done: fn(u64, Result<String, String>) -> M) -> Task<cosmic::Action<M>> {
     Task::stream(cosmic::iced::stream::channel(4, async move |mut out: Sender<M>| {
         let ui = out.clone();
         let ask = move |question: String| {
             let mut ui = ui.clone();
             let (back, answer) = std::sync::mpsc::channel();
-            let sent = cosmic::iced::futures::executor::block_on(ui.send(asked(question, Reply(std::sync::Arc::new(std::sync::Mutex::new(Some(back)))))));
+            let sent = cosmic::iced::futures::executor::block_on(ui.send(asked(seq, question, Reply(std::sync::Arc::new(std::sync::Mutex::new(Some(back)))))));
             sent.is_ok() && answer.recv().unwrap_or(false)
         };
         let line = torq::app::decline_line(seq);
         let got = off(move || torq::app::Console::start().act(torq::app::At::Read, &line, ask)).await.and_then(|r| r);
-        let _ = out.send(done(got)).await;
+        let _ = out.send(done(seq, got)).await;
     }))
     .map(cosmic::Action::App)
 }
