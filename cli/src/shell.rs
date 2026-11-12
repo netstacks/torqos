@@ -129,6 +129,36 @@ impl<'a> Real<'a> {
     }
 }
 
+impl Real<'_> {
+    /// `value` to the broker, to keep as `user`'s secret `name` (None: the system's): what `request system secret
+    /// set` does once it has the value, typed at the terminal, read from a file, or typed in TorqOS Settings'
+    /// masked fields (`app::secret_set`). The value is in the private file and the request alone: in no argument,
+    /// no environment, not in `log`, and in no word of what this returns, refused or not.
+    pub(crate) fn keep_secret(&self, name: &str, user: Option<&str>, value: &str, me: &str, log: &Path) -> Result<String> {
+        crate::secrets::value_ok(value)?;
+        let whose = user.map_or_else(|| format!("the system's secret {name}"), |u| format!("{u}'s secret {name}"));
+        // In memory only, never on a disk (a killed torqcli would leave it there), and gone when this is.
+        let scratch = crate::memory_scratch_dir()?;
+        let file = scratch.path().join("value");
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?.write_all(value.as_bytes())?;
+        }
+        // As the broker reads it run directly (root's torqcli); over the socket, sent as the request's own.
+        let file = file.to_string_lossy();
+        let mut args = vec!["secret-set", "--name", name];
+        if let Some(u) = user {
+            args.extend(["--user", u]);
+        }
+        args.extend(["--value-file", &file, "--approved-by", me]);
+        let v = done(run::broker_json(broker(self.cli, &args)?, log)?, &format!("request system secret set {name}"))?;
+        Ok(format!(
+            "The value of {whose} is kept (ledger #{}): encrypted, root's alone, outside the configuration. What it may be used for: request system secret allow {name} ….\n",
+            v["seq"].as_u64().unwrap_or(0)
+        ))
+    }
+}
+
 impl Machine for Real<'_> {
     fn needs(&self) -> Option<String> {
         let session = crate::app::session_recorded();
@@ -376,24 +406,7 @@ impl Machine for Real<'_> {
                     }
                     value
                 };
-                if value.trim().is_empty() {
-                    bail!("not changed: no value");
-                }
-                // In memory only, never on a disk (a killed torqcli would leave it there), and gone when this is.
-                let scratch = crate::memory_scratch_dir()?;
-                let file = scratch.path().join("value");
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?.write_all(value.as_bytes())?;
-                }
-                // As the broker reads it run directly (root's torqcli); over the socket, sent as the request's own.
-                args.extend(["--value-file".into(), file.to_string_lossy().into_owned(), "--approved-by".into(), me.into()]);
-                let a: Vec<&str> = args.iter().map(String::as_str).collect();
-                let v = done(run::broker_json(broker(self.cli, &a)?, &log)?, &command)?;
-                Ok(format!(
-                    "The value of {whose} is kept (ledger #{}): encrypted, root's alone, outside the configuration. What it may be used for: request system secret allow {name} ….\n",
-                    v["seq"].as_u64().unwrap_or(0)
-                ))
+                self.keep_secret(name, user, &value, me, &log)
             }
             Act::Show => {
                 args.extend(["--approved-by".into(), me.into()]);

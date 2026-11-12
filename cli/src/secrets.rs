@@ -225,6 +225,26 @@ pub fn changed(machine: &dyn Machine, repo: &Repo, name: &str, user: Option<&str
 /// The largest value the broker keeps (broker/src/secrets.rs): a file larger is not read.
 pub const VALUE_MAX: usize = 16 * 1024;
 
+/// Why `value` is not one to send to the broker, if it is not. What was given is never repeated in the refusal:
+/// a refusal is shown, and may be logged.
+pub fn value_ok(value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("not changed: no value");
+    }
+    if value.len() > VALUE_MAX {
+        bail!("not changed: a value is at most {} KiB", VALUE_MAX / 1024);
+    }
+    Ok(())
+}
+
+/// `value_ok`, for a value typed twice where it cannot be seen (TorqOS Settings' masked fields).
+pub fn typed_ok(value: &str, again: &str) -> Result<()> {
+    if value != again {
+        bail!("not changed: the two differ");
+    }
+    value_ok(value)
+}
+
 /// A secret that has a value, as the broker lists them (None: the system's).
 pub type Kept = (Option<String>, String);
 
@@ -355,6 +375,23 @@ mod tests {
         assert!(r["gh"].actors.is_empty());
         edit(&mut r, "gh", &Act::Delete).unwrap();
         assert!(r.is_empty());
+    }
+
+    /// What is refused before anything is sent, and that no refusal repeats what was typed.
+    #[test]
+    fn a_value_typed_twice_is_refused_in_words_that_do_not_repeat_it() {
+        let long = "k".repeat(VALUE_MAX + 1);
+        for (value, again, why) in [
+            ("", "", "not changed: no value"),
+            (" \t", " \t", "not changed: no value"),
+            ("hunter2-token", "hunter2-tokem", "not changed: the two differ"),
+            ("hunter2-token", "", "not changed: the two differ"),
+            (long.as_str(), long.as_str(), "not changed: a value is at most 16 KiB"),
+        ] {
+            assert_eq!(typed_ok(value, again).unwrap_err().to_string(), why);
+        }
+        typed_ok("hunter2-token", "hunter2-token").unwrap();
+        typed_ok(&long[1..], &long[1..]).unwrap();
     }
 
     #[test]

@@ -599,6 +599,100 @@ pub fn terminal_script(mode: Mode, edit: &[String], line: &str) -> (String, bool
     }
 }
 
+// ── A secret's value, typed in the window (ADR-052 step 5) ───────────────────────────────────────
+
+/// Before the window holds a secret's value: no other program of the same account can read it out of the
+/// window's memory, and a crash leaves no core with it, as torqcli is while it holds one (ADR-040; shell.rs).
+/// It stays so until the window is closed.
+pub fn secret_guard() -> Result<()> {
+    use anyhow::Context as _;
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).context("protecting the value")
+}
+
+/// `request system secret set <name> [user <person>]`, its value typed twice in the window's masked fields
+/// rather than at a terminal. It goes to the broker as torqcli's own goes (`Real::keep_secret`): the request's own
+/// field, and no part of any command, argument, log or message. Who may set it is the broker's to say, as for
+/// torqcli: a person's own is theirs, the system's an administrator's, approved in the dialog. A refusal here
+/// repeats nothing that was typed, the name included (a value typed in the wrong field).
+pub fn secret_set(name: &str, user: Option<&str>, value: &str, again: &str) -> Result<String> {
+    crate::secrets::typed_ok(value, again)?;
+    if !torq_wire::secrets::name_ok(name) {
+        anyhow::bail!("not changed: that is not a secret's name (letters, digits, - and _)");
+    }
+    secret_guard()?;
+    let (cli, me, log) = (cli(), crate::me()?, crate::run::start_log()?);
+    let real = crate::shell::Real::new(&cli);
+    real.keep_secret(name, user, value, &me, &log)
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    const VALUE: &str = "ghp_window/Value+7=";
+
+    /// A stand-in for the broker: what it was run with, its environment and what the value's file held go to
+    /// `dir`, the value's file must be the caller's alone, and it answers as the broker would.
+    fn broker(dir: &std::path::Path, answer: &str) -> Cli {
+        let script = dir.join("broker.sh");
+        let d = dir.display();
+        std::fs::write(
+            &script,
+            format!("printf '%s\\n' \"$@\" > {d}/argv\nenv > {d}/env\nwhile [ $# -gt 0 ]; do [ \"$1\" = --value-file ] && f=$2; shift; done\n[ \"$(stat -c %a \"$f\")\" = 600 ] || exit 3\ncat \"$f\" > {d}/got\nprintf %s \"$f\" > {d}/file\necho 'the broker says on stderr' >&2\n{answer}\n"),
+        )
+        .unwrap();
+        Cli { repo: PathBuf::from(REPO), broker: format!("sh {}", script.display()) }
+    }
+
+    /// Rule 1 of the Secrets page: the value reaches the broker in its private file, and is nowhere else:
+    /// not an argument, not the environment, not the log, not what is said back, kept or refused.
+    #[test]
+    fn a_value_from_the_window_is_in_its_private_file_and_nowhere_else() {
+        for (answer, kept) in [("echo '{\"seq\":7}'", true), ("echo '{\"error\":\"not kept: the broker would not\"}'; exit 1", false)] {
+            let d = tempfile::tempdir().unwrap();
+            let cli = broker(d.path(), answer);
+            let log = d.path().join("last.log");
+            let said = crate::shell::Real::new(&cli).keep_secret("gh", Some("dev"), VALUE, "dev", &log);
+            let read = |f: &str| std::fs::read_to_string(d.path().join(f)).unwrap();
+            assert_eq!(read("got"), VALUE, "the broker is given the value, whole");
+            assert!(!std::path::Path::new(&read("file")).exists(), "its file is gone once the broker has answered");
+            let said = match (said, kept) {
+                (Ok(s), true) => {
+                    assert!(s.starts_with("The value of dev's secret gh is kept (ledger #7)"), "{s}");
+                    s
+                }
+                (Err(e), false) => {
+                    let e = format!("{e:#}");
+                    assert_eq!(e, "request system secret set gh refused: not kept: the broker would not");
+                    e
+                }
+                (other, _) => panic!("{other:?}"),
+            };
+            assert_eq!(read("argv").lines().take(5).collect::<Vec<_>>(), ["secret-set", "--name", "gh", "--user", "dev"]);
+            for (what, text) in [("what is said", said), ("the arguments", read("argv")), ("the environment", read("env")), ("the log", read("last.log"))] {
+                assert!(!text.contains(VALUE), "{what} holds the value: {text}");
+            }
+            assert!(read("last.log").contains("the broker says on stderr"), "the log is the one written to");
+        }
+    }
+
+    /// Refused before anything is sent or logged, in words that repeat nothing typed: no value, the two not the
+    /// same, a value larger than the broker keeps, and a name that is not one.
+    #[test]
+    fn what_the_window_refuses_says_nothing_that_was_typed() {
+        let long = "k".repeat(crate::secrets::VALUE_MAX + 1);
+        for (name, value, again, why) in [
+            ("gh", "", "", "not changed: no value"),
+            ("gh", VALUE, "ghp_window/Value+8=", "not changed: the two differ"),
+            ("gh", long.as_str(), long.as_str(), "not changed: a value is at most 16 KiB"),
+            (VALUE, "v", "v", "not changed: that is not a secret's name (letters, digits, - and _)"),
+            ("../gh", "v", "v", "not changed: that is not a secret's name (letters, digits, - and _)"),
+        ] {
+            assert_eq!(format!("{:#}", secret_set(name, Some("dev"), value, again).unwrap_err()), why);
+        }
+    }
+}
+
 // ── The pages that are the command line's output ─────────────────────────────────────────────────
 
 /// How a button acts on its command.
@@ -839,7 +933,7 @@ impl Told {
     }
 }
 
-/// TorqOS Settings, at a page (`VIEWS`' ids, or overview, configuration, changes, history, proposals, commands).
+/// TorqOS Settings, at a page (`VIEWS`' ids, or overview, configuration, changes, history, proposals, secrets, commands).
 pub fn open_settings(page: &str) {
     spawn("torq-settings", &[page]);
 }
