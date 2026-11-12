@@ -73,6 +73,8 @@ pub struct Broker {
     people: Vec<String>,
     /// What the agent may propose (ADR-041).
     agent_limits: agent::Limits,
+    /// Which repositories are the releases (/etc/torq/releases.json, modules/releases.nix; tests: their own).
+    releases_file: PathBuf,
     /// The backups the configuration declares, and where their keys are (ADR-038, backup.rs).
     backup: backup::Backups,
     /// Where the values of the secrets are, and what encrypts them (ADR-052, secrets.rs).
@@ -619,6 +621,7 @@ impl Broker {
             password_cmd: "chpasswd -e".into(),
             people: Vec::new(),
             agent_limits: agent::Limits::default(),
+            releases_file: PathBuf::from(torq_wire::releases::FILE),
             backup: backup::Backups::default(),
             secrets: secrets::Store::default(),
             remote: None,
@@ -1210,6 +1213,12 @@ impl Broker {
     }
 
     /// What the agent may propose (ADR-041): `torq.agent.mayPropose`, from broker.json.
+    /// Where the releases' setting is read from (a test's own; a machine's is /etc/torq/releases.json).
+    pub fn with_releases_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.releases_file = path.into();
+        self
+    }
+
     pub fn with_agent_limits(mut self, limits: &agent::Limits) -> Self {
         self.agent_limits = limits.clone();
         self
@@ -1947,6 +1956,26 @@ impl Broker {
         let old = lock_at(before)?;
         let new = lock_at(commit)?;
         let changes = inputs::changed(&old, &new)?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+        // Which inputs are the releases (ADR-028, amended 2026-11-12). Every TorqOS machine has the setting
+        // (modules/releases.nix writes it, always): one that cannot be read, or is gone, is no setting with no
+        // releases in it, so nothing that changes the lock goes ahead without it.
+        let releases = fs::read_to_string(&self.releases_file)
+            .map_err(|e| e.to_string())
+            .and_then(|s| torq_wire::releases::Releases::parse(&s))
+            .map_err(|why| anyhow::anyhow!("refused: which inputs are TorqOS's releases cannot be read ({}: {why}), so no change to the software is applied", self.releases_file.display()))?;
+        // The releases in a form not bound to a commit the key signed (a tarball): refused before anything is
+        // fetched; the releases as git: checked below, at their address now.
+        let mut signed = vec![];
+        for (name, locked) in &changes {
+            match releases.verdict(locked) {
+                torq_wire::releases::Verdict::Other => {}
+                torq_wire::releases::Verdict::Release(rev) => signed.push((name.clone(), rev)),
+                torq_wire::releases::Verdict::Refused(why) => bail!("refused: {name}: {why}"),
+            }
+        }
         let fetch = inputs::to_fetch(&changes);
         if !fetch.is_empty() {
             let file = self.state_dir.join("inputs.json");
@@ -1968,12 +1997,12 @@ impl Broker {
             }
         }
         // The releases at their address now or an earlier one (a machine installed before they moved names that):
-        // the same repository, so the same check, done at their address now (ADR-028, amended 2026-11-12).
-        let releases = fs::read_to_string(torq_wire::releases::FILE).ok().and_then(|s| torq_wire::releases::Releases::parse(&s).ok());
-        for (name, locked) in changes.iter().filter(|(_, l)| releases.as_ref().is_some_and(|r| r.is_release(l))) {
-            let rev = locked["rev"].as_str().filter(|r| inputs::rev_ok(r)).with_context(|| format!("refused: {name} names no release"))?;
-            let at = releases.as_ref().map(|r| r.fetch_url()).unwrap_or_default();
-            self.release_signed(&at, rev).with_context(|| format!("refused: {name}'s release {}", &rev[..12]))?;
+        // the same repository, so the same check, done at their address now.
+        for (name, rev) in &signed {
+            if !inputs::rev_ok(rev) {
+                bail!("refused: {name} names no release");
+            }
+            self.release_signed(&releases.fetch_url(), rev).with_context(|| format!("refused: {name}'s release {}", &rev[..12]))?;
         }
         Ok(())
     }

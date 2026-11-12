@@ -41,7 +41,11 @@ pkgs.testers.runNixOSTest {
         f"echo three > /srv/releases/a && {g} -c user.signingkey=/root/other commit -qam three -S"  # another key
     )
     one, two, three = machine.succeed("git -C /srv/releases rev-list --reverse stable").split()
-    machine.succeed("ln -s /srv/releases /srv/releases-now")
+    # Their address now: a repository of its own with the same commits; then one more commit, signed, at the
+    # earlier address only, to tell "checked at the address now" from "checked where the lock says".
+    machine.succeed("git clone -q --bare /srv/releases /srv/releases-now")
+    machine.succeed(f"echo four > /srv/releases/a && {g} -c user.signingkey=/root/rel commit -qam four -S")
+    four = machine.succeed("git -C /srv/releases rev-parse stable").strip()
     machine.succeed(f"mkdir -p {repo} && echo '{{}}' > {repo}/desktop.json && touch {repo}/flake.nix && echo '{{}}' > {repo}/flake.lock && torq-broker init")
 
     def nar(rev):
@@ -82,6 +86,25 @@ pkgs.testers.runNixOSTest {
         for rev in [two, three]:
             code, out = apply(lock(rev, nar(rev), now))
             assert code != 0 and "not signed by the TorqOS release key" in out, (rev, out)
+        machine.succeed("torq-broker verify && torq-broker status")
+
+    with subtest("checked at their address now, not where the lock says: a commit signed but only at the earlier address is refused"):
+        head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+        code, out = apply(lock(four, nar(four)))
+        assert code != 0, out
+        assert machine.succeed(f"git -C {repo} rev-parse HEAD").strip() == head
+
+    with subtest("the releases as a tarball (an archive URL of their address now): refused, not checked"):
+        tarball = json.dumps({"nodes": {"root": {"inputs": {"torq": "torq"}}, "torq": {"locked": {"type": "tarball", "url": "file:///srv/releases-now/archive/stable.tar.gz", "narHash": nar(one)}}}, "root": "root", "version": 7})
+        code, out = apply(tarball)
+        assert code != 0 and "the releases are taken as git" in out, out
+
+    with subtest("the releases' setting unreadable: no change to the lock is applied"):
+        setting = machine.succeed("readlink -f /etc/torq/releases.json").strip()
+        machine.succeed("rm /etc/torq/releases.json && echo 'not json' > /etc/torq/releases.json")
+        code, out = apply(lock(one, nar(one), "file:///srv/releases-now/"))
+        assert code != 0 and "which inputs are TorqOS's releases cannot be read" in out, out
+        machine.succeed(f"rm /etc/torq/releases.json && ln -s {setting} /etc/torq/releases.json")
         machine.succeed("torq-broker verify && torq-broker status")
   '';
 }

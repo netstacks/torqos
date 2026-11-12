@@ -59,11 +59,16 @@ fn store_path(p: &str) -> bool {
 
 /// The commit a flake.lock takes TorqOS at, if it is the releases' (ADR-028; which repositories they are,
 /// at their address now or an earlier one: torq_wire::releases, the broker's rule too): a commit whose
-/// signature is checked before it is loaded.
-pub fn release_commit(lock: &str, releases: &torq_wire::releases::Releases) -> Option<String> {
-    let lock: serde_json::Value = serde_json::from_str(lock).ok()?;
-    let node = lock["nodes"]["root"]["inputs"]["torq"].as_str()?;
-    releases.commit_of(&lock["nodes"][node]["locked"])
+/// signature is checked before it is loaded. Err: the releases in a form not bound to a signed commit (a
+/// tarball), refused.
+pub fn release_commit(lock: &str, releases: &torq_wire::releases::Releases) -> Result<Option<String>, String> {
+    let Ok(lock) = serde_json::from_str::<serde_json::Value>(lock) else { return Ok(None) };
+    let Some(node) = lock["nodes"]["root"]["inputs"]["torq"].as_str() else { return Ok(None) };
+    match releases.verdict(&lock["nodes"][node]["locked"]) {
+        torq_wire::releases::Verdict::Other => Ok(None),
+        torq_wire::releases::Verdict::Release(rev) => Ok(Some(rev)),
+        torq_wire::releases::Verdict::Refused(why) => Err(why),
+    }
 }
 
 /// Whether `url` is an image's own TorqOS (`path:` a store path): what a machine set up from the
@@ -156,14 +161,16 @@ mod tests {
         const RELEASES: &str = "git+https://github.com/torqosorg/torqos-releases?ref=stable";
         let releases = torq_wire::releases::Releases { url: RELEASES.into(), former: vec!["https://github.com/netstacks/torqos-releases".into()] };
         let lock = |locked: &str| format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq_2","nixpkgs":"nixpkgs"}}}},"torq_2":{{"locked":{locked}}}}},"root":"root","version":7}}"#);
-        for (locked, rev) in [
-            (r#"{"type":"git","url":"https://github.com/torqosorg/torqos-releases","ref":"refs/heads/stable","rev":"abc123"}"#, "abc123"),
+        for locked in [
+            r#"{"type":"git","url":"https://github.com/torqosorg/torqos-releases","ref":"refs/heads/stable","rev":"abc123"}"#,
             // Their earlier address, as a machine installed before they moved names it: the releases too.
-            (r#"{"type":"git","url":"https://github.com/netstacks/torqos-releases.git/","rev":"abc123"}"#, "abc123"),
-            // The tarball form names a commit too; GitHub is case-blind.
-            (r#"{"type":"github","owner":"NetStacks","repo":"torqos-releases","rev":"def456"}"#, "def456"),
+            r#"{"type":"git","url":"https://github.com/netstacks/torqos-releases.git/","rev":"abc123"}"#,
         ] {
-            assert_eq!(release_commit(&lock(locked), &releases).as_deref(), Some(rev), "{locked}");
+            assert_eq!(release_commit(&lock(locked), &releases), Ok(Some("abc123".into())), "{locked}");
+        }
+        // As a tarball, at either address and any host: refused, never taken as checked.
+        for locked in [r#"{"type":"github","owner":"NetStacks","repo":"torqos-releases","rev":"def456"}"#, r#"{"type":"github","owner":"torqosorg","repo":"torqos-releases","host":"evil.example","rev":"def456"}"#] {
+            assert!(release_commit(&lock(locked), &releases).is_err(), "{locked}");
         }
         for other in [
             lock(r#"{"type":"git","url":"https://github.com/torqosorg/torqos","rev":"abc123"}"#),
@@ -171,7 +178,7 @@ mod tests {
             lock(r#"{"type":"path","path":"/nix/store/x-source"}"#),
             "not json".into(),
         ] {
-            assert_eq!(release_commit(&other, &releases), None, "{other}");
+            assert_eq!(release_commit(&other, &releases), Ok(None), "{other}");
         }
         assert!(image_own("path:/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source") && !image_own("path:/home/viper/torq") && !image_own(RELEASES));
         valid(RELEASES).unwrap();

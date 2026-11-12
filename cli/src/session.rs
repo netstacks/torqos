@@ -1509,7 +1509,7 @@ impl<'a> Session<'a> {
     /// candidate, for `show | compare` and `commit` to show (audit A3).
     fn release_signed(&mut self, lock: &str) -> Result<String> {
         let releases = self.machine.releases()?;
-        let Some(rev) = crate::software::release_commit(lock, &releases) else { return Ok(String::new()) };
+        let Some(rev) = crate::software::release_commit(lock, &releases).map_err(|why| anyhow::anyhow!("refused: {why}"))? else { return Ok(String::new()) };
         // At their address now, whichever name the lock has them by: the same repository.
         let repo = releases.fetch_url();
         let signed = step(self.machine, "Checking the release's signature", || self.machine.check_release(&repo, &rev))?;
@@ -3001,6 +3001,10 @@ mod tests {
         fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
             self.bases.borrow_mut().push(base.into());
             self.flakes.borrow_mut().push(flake_nix.into());
+            // The releases as a tarball (`github:`), as Nix would lock that source.
+            if flake_nix.contains("github:netstacks/torqos-releases") {
+                return Ok(r#"{"nodes":{"root":{"inputs":{"torq":"torq"}},"torq":{"locked":{"type":"github","owner":"netstacks","repo":"torqos-releases","rev":"0123456789abcdef0123456789abcdef01234567","narHash":"r"}}},"version":7}"#.into());
+            }
             // A release locked at the address the flake names (now, or an earlier one).
             Ok(self.newest(all, if flake_nix.contains("netstacks/torqos-releases") { FORMER_REPO } else { RELEASES_REPO }))
         }
@@ -3592,6 +3596,15 @@ mod tests {
             assert_eq!(r.is_ok(), ok, "{r:?}");
             assert_eq!(*m.release_checks.borrow(), [rev], "checked at the earlier address too");
         }
+        // The releases as a tarball (`github:`, at the earlier address here): refused, not checked, nothing loaded.
+        let d = machine(releases);
+        let m = Fake { answer: true, release: Some((rev.into(), true)), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        s.exec("configure").unwrap();
+        let e = format!("{:#}", s.exec("set system software torq source github:netstacks/torqos-releases").unwrap_err());
+        assert!(e.contains("refused: the releases are taken as git"), "{e}");
+        assert!(m.release_checks.borrow().is_empty(), "never taken as checked");
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
         // Any other source: no releases, nothing to check.
         let d = machine("github:netstacks/torqos");
         let m = Fake { answer: true, ..Default::default() };

@@ -3445,6 +3445,43 @@ fn a_saved_desktop_with_another_programs_settings_is_refused() {
     assert!(!b.repo.root().join("users/casey/desktop.json").exists());
 }
 
+/// Which inputs are TorqOS's releases is the machine's setting: one that cannot be read, or is gone, refuses any
+/// change to the lock (it is no setting with no releases in it), and the releases as a tarball are refused,
+/// never taken as checked (ADR-028, amended 2026-11-12). Refused before anything is fetched or built.
+#[test]
+fn the_releases_setting_unreadable_or_the_releases_as_a_tarball_refuse_a_lock_change() {
+    let lock = |locked: &str| format!("{{\"nodes\": {{\"root\": {{\"inputs\": {{\"torq\": \"torq\"}}}}, \"torq\": {{\"locked\": {locked}}}}}, \"root\": \"root\", \"version\": 7}}");
+    let try_lock = |setting: Option<&str>, locked: &str| -> String {
+        let (dir, repo) = config_dir();
+        let file = dir.path().join("releases.json");
+        if let Some(s) = setting {
+            fs::write(&file, s).unwrap();
+        }
+        let b = Broker::new(&repo, dir.path().join("state"), "true").with_releases_file(&file);
+        b.init().unwrap();
+        let d = write_diff(dir.path(), "lock.diff", &format!("--- /dev/null\n+++ b/flake.lock\n@@ -0,0 +1 @@\n+{}\n", lock(locked)));
+        let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "lock", Actor::User, false).unwrap();
+        let before = kinds(&b);
+        let e = format!("{:#}", b.apply(p.body.seq, "casey", false).unwrap_err());
+        assert_eq!(kinds(&b).len(), before.len() + 1, "only the refusal recorded: {:?}", kinds(&b));
+        e
+    };
+    let git = r#"{"type": "git", "url": "https://github.com/torqosorg/torqos-releases", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "narHash": "sha256-x"}"#;
+    for setting in [None, Some("not json"), Some(r#"{"url": "https://not-git"}"#)] {
+        let e = try_lock(setting, git);
+        assert!(e.contains("which inputs are TorqOS's releases cannot be read"), "{setting:?}: {e}");
+    }
+    let setting = r#"{"url": "git+https://github.com/torqosorg/torqos-releases?ref=stable", "former": ["https://github.com/netstacks/torqos-releases"]}"#;
+    for tarball in [
+        r#"{"type": "github", "owner": "netstacks", "repo": "torqos-releases", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "narHash": "sha256-x"}"#,
+        r#"{"type": "github", "owner": "torqosorg", "repo": "torqos-releases", "host": "evil.example", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "narHash": "sha256-x"}"#,
+        r#"{"type": "tarball", "url": "https://github.com/torqosorg/torqos-releases/archive/stable.tar.gz", "narHash": "sha256-x"}"#,
+    ] {
+        let e = try_lock(Some(setting), tarball);
+        assert!(e.contains("refused: torq: the releases are taken as git"), "{tarball}: {e}");
+    }
+}
+
 /// A desktop saved by an older TorqOS, with another program's settings in it, cleaned by the next save: an undo
 /// of that save would put them back, so it is refused (an undo of a person's own change needs no approval, so it
 /// would otherwise be the way around the rule), and nothing is recorded.

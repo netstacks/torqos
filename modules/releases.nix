@@ -17,7 +17,7 @@ in
     };
     former = lib.mkOption {
       type = lib.types.listOf (lib.types.strMatching "https://[^?]+");
-      # Before 2026-11-11 the releases were netstacks/torqos-releases (ADR-028, amended): a machine installed
+      # Until 2026-11-11 the releases were netstacks/torqos-releases (ADR-028, amended 2026-11-12): a machine installed
       # from 0.3.2 or before still names that address. It is the same repository under its old name, so a
       # source there is the releases, its commits checked against the release key; `request system update`
       # moves such a source to `url`.
