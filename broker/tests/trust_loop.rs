@@ -3997,3 +3997,30 @@ fn a_system_secret_names_only_agents_that_exist() {
     let out = write_diff(dir.path(), "o.diff", &format!("--- a/secrets/system.json\n+++ b/secrets/system.json\n@@ -1 +1 @@\n-{}\n+{}\n", rule("torq-agent-casey"), rule("sam")));
     b.propose_on(Some(&b.repo.head().unwrap()), &out, "ci for sam", Actor::User, false).unwrap();
 }
+
+/// Only what a change adds is judged against the map: two stale agent names (both agents gone) do not wedge the
+/// file. Each is taken out one change at a time, an unrelated edit goes through, and a new name with no agent is
+/// still refused.
+#[test]
+fn stale_agent_names_do_not_wedge_the_systems_rules() {
+    let (dir, b) = setup("true");
+    let both = "{\"ci\": {\"kind\": \"token\", \"https\": {\"hosts\": [\"api.github.com\"]}, \"actors\": [\"torq-agent-casey\"]}, \"deploy\": {\"kind\": \"token\", \"https\": {\"hosts\": [\"api.github.com\"]}, \"actors\": [\"torq-agent-casey\"]}}";
+    let d = write_diff(dir.path(), "1.diff", &format!("--- /dev/null\n+++ b/secrets/system.json\n@@ -0,0 +1 @@\n+{both}\n"));
+    let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "two for casey's agent", Actor::User, false).unwrap();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    // Casey's agent gone from the map: both names are stale.
+    let b = Broker::new(b.repo.root(), dir.path().join("state"), "true").with_agent_limits(&torq_broker::agent::Limits { agents: Default::default(), settings: vec![] });
+    let change = |name: &str, from: &str, to: &str| {
+        let d = write_diff(dir.path(), name, &format!("--- a/secrets/system.json\n+++ b/secrets/system.json\n@@ -1 +1 @@\n-{from}\n+{to}\n"));
+        b.propose_on(Some(&b.repo.head().unwrap()), &d, name, Actor::User, false)
+    };
+    let one_out = both.replacen("\"actors\": [\"torq-agent-casey\"]", "\"actors\": []", 1);
+    let p = change("2.diff", both, &one_out).expect("one stale name taken out, the other still there");
+    b.apply(p.body.seq, "casey", false).unwrap();
+    let other = one_out.replace("api.github.com\"]}, \"actors\": []", "api.github.com\", \"uploads.github.com\"]}, \"actors\": []");
+    let p = change("3.diff", &one_out, &other).expect("an unrelated edit, a stale name still there");
+    b.apply(p.body.seq, "casey", false).unwrap();
+    let ghost = other.replace("\"actors\": []", "\"actors\": [\"torq-agent-ghost\"]");
+    let e = format!("{:#}", change("4.diff", &other, &ghost).unwrap_err());
+    assert!(e.contains("torq-agent-ghost") && e.contains("no agent"), "{e}");
+}

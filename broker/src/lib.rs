@@ -1961,15 +1961,19 @@ impl Broker {
         Ok(())
     }
 
-    /// The system's secrets' rules, as a change leaves them, name only agent accounts the broker's map has (the review
-    /// of the rebased branch, B9): a name with none (a typo, a person with no agent) is refused, so that a person given
-    /// that name later does not inherit the secret. Checked on a change only, not at an undo: a rule a person's agent
-    /// later left still undoes, and taking its name out is a change like any other.
+    /// The system's secrets' rules, as a change leaves them, give a secret only to agent accounts the broker's map
+    /// has: a name with none (a typo, a person with no agent) is refused, so that a person given that name later
+    /// does not inherit the secret. Only what the change adds is judged — a secret's agent not already its own at
+    /// HEAD — so names whose agents have since left never wedge the file: each comes out as a change of its own, and
+    /// other edits go through beside them. Not at an undo, which brings back what was there.
     fn system_rules_name_real_agents(&self, path: &str, content: &[u8]) -> Result<()> {
         let rules = torq_wire::secrets::parse(content).map_err(|why| anyhow::anyhow!("refused: {path}: {why}"))?;
+        // What HEAD has, as it is read; a file there no one could read gives nothing already granted.
+        let head = self.repo.file_at("HEAD", path, torq_wire::secrets::MAX_FILE)?.and_then(|f| torq_wire::secrets::parse(&f.content).ok()).unwrap_or_default();
         let prefix = format!("{}-", torq_wire::secrets::AGENT);
         for (name, r) in &rules {
-            if let Some(a) = r.actors.iter().find(|a| a.starts_with(&prefix) && self.agent_limits.serves(a).is_none()) {
+            let had = |a: &String| head.get(name).is_some_and(|h| h.actors.contains(a));
+            if let Some(a) = r.actors.iter().find(|a| a.starts_with(&prefix) && !had(a) && self.agent_limits.serves(a).is_none()) {
                 bail!("refused: {path}: secret {name}: {a} is no agent this machine has (torq agent people names who has one)");
             }
         }
