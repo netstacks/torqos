@@ -12,8 +12,6 @@ use std::path::Path;
 
 /// The keys a release may be signed with, as the machine has them (modules/releases.nix).
 pub const SIGNERS: &str = "/etc/torq/release-signers";
-/// Where this machine takes its releases from (modules/releases.nix).
-pub const RELEASES: &str = "/etc/torq/releases.json";
 
 /// The locked inputs `new` has that `old` does not have as they are: by node name.
 pub fn changed(old: &str, new: &str) -> Result<BTreeMap<String, Value>> {
@@ -28,19 +26,6 @@ pub fn changed(old: &str, new: &str) -> Result<BTreeMap<String, Value>> {
         out.insert(name.clone(), locked.clone());
     }
     Ok(out)
-}
-
-/// The release repository's address, as git fetches it (`https://…`), from the machine's setting.
-pub fn releases_repo(settings: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(settings).ok()?;
-    let url = v["url"].as_str()?.strip_prefix("git+")?;
-    Some(url.split('?').next()?.trim_end_matches('/').to_string())
-}
-
-/// Whether a locked git input is the machine's releases (so must be signed by the release key).
-pub fn is_release(locked: &Value, releases: Option<&str>) -> bool {
-    let norm = |u: &str| u.trim_end_matches('/').trim_end_matches(".git").to_string();
-    locked["type"] == "git" && releases.is_some_and(|r| locked["url"].as_str().map(norm) == Some(norm(r)))
 }
 
 /// The inputs to fetch again, as `builtins.fetchTree` takes them: what locked them, but the hash, which
@@ -153,11 +138,7 @@ mod tests {
 
     #[test]
     fn the_releases_and_their_signature() {
-        let r = releases_repo(r#"{"url":"git+https://github.com/netstacks/torqos-releases?ref=stable"}"#);
-        assert_eq!(r.as_deref(), Some("https://github.com/netstacks/torqos-releases"));
-        assert!(is_release(&json!({ "type": "git", "url": "https://github.com/netstacks/torqos-releases.git" }), r.as_deref()));
-        assert!(!is_release(&json!({ "type": "github", "owner": "netstacks", "repo": "torqos" }), r.as_deref()));
-        assert!(!is_release(&json!({ "type": "git", "url": "https://example.com/other" }), r.as_deref()));
+        // Which inputs are the releases: torq_wire::releases, the broker's rule and torqcli's (tested there).
         assert!(ssh_signed("tree t\ngpgsig -----BEGIN SSH SIGNATURE-----\n x\n -----END SSH SIGNATURE-----\n\nmsg\n"));
         assert!(!ssh_signed("tree t\ngpgsig -----BEGIN PGP SIGNATURE-----\n x\n\nmsg\n"));
         assert!(!ssh_signed("tree t\n\ngpgsig -----BEGIN SSH SIGNATURE-----\n"), "in the message is not a signature");

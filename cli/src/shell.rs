@@ -1011,11 +1011,10 @@ impl Machine for Real<'_> {
     fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
         self.relock(base, Some(flake_nix), all)
     }
-    fn releases(&self) -> Result<String> {
-        let file = "/etc/torq/releases.json";
+    fn releases(&self) -> Result<torq_wire::releases::Releases> {
+        let file = torq_wire::releases::FILE;
         let text = fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
-        let v: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("{file} is not JSON"))?;
-        v["url"].as_str().map(String::from).with_context(|| format!("{file} names no releases (url)"))
+        torq_wire::releases::Releases::parse(&text).map_err(|why| anyhow::anyhow!("{file}: {why}"))
     }
     fn check_release(&self, repo: &str, rev: &str) -> Result<crate::release::Signed> {
         let _p = self.progress("Checking the release's signature");

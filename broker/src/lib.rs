@@ -1967,10 +1967,13 @@ impl Broker {
                 bail!("refused: flake.lock names {} by a hash that is not what its rev fetches: it would build other source than it says", bad.join(", "));
             }
         }
-        let releases = fs::read_to_string(inputs::RELEASES).ok().and_then(|s| inputs::releases_repo(&s));
-        for (name, locked) in changes.iter().filter(|(_, l)| inputs::is_release(l, releases.as_deref())) {
+        // The releases at their address now or an earlier one (a machine installed before they moved names that):
+        // the same repository, so the same check, done at their address now (ADR-028, amended 2026-11-12).
+        let releases = fs::read_to_string(torq_wire::releases::FILE).ok().and_then(|s| torq_wire::releases::Releases::parse(&s).ok());
+        for (name, locked) in changes.iter().filter(|(_, l)| releases.as_ref().is_some_and(|r| r.is_release(l))) {
             let rev = locked["rev"].as_str().filter(|r| inputs::rev_ok(r)).with_context(|| format!("refused: {name} names no release"))?;
-            self.release_signed(releases.as_deref().unwrap_or_default(), rev).with_context(|| format!("refused: {name}'s release {}", &rev[..12]))?;
+            let at = releases.as_ref().map(|r| r.fetch_url()).unwrap_or_default();
+            self.release_signed(&at, rev).with_context(|| format!("refused: {name}'s release {}", &rev[..12]))?;
         }
         Ok(())
     }

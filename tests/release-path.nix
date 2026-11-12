@@ -16,8 +16,9 @@ pkgs.testers.runNixOSTest {
     users.users.dev.hashedPassword = "!";
     users.allowNoPasswordLogin = true;
     torq.broker.rebuildCommand = "true";
-    # The test's releases: a repository here, and its own key.
-    environment.etc."torq/releases.json".text = lib.mkForce (builtins.toJSON { url = "git+file:///srv/releases?ref=stable"; });
+    # The test's releases: a repository here (at its address now, /srv/releases-now, and by its earlier name,
+    # /srv/releases, as a machine installed before they moved names it: ADR-028, amended), and its own key.
+    environment.etc."torq/releases.json".text = lib.mkForce (builtins.toJSON { url = "git+file:///srv/releases-now?ref=stable"; former = [ "file:///srv/releases" ]; });
     environment.etc."torq/release-signers".source = lib.mkForce "/etc/torq-test/signers";
     environment.systemPackages = [ pkgs.jq pkgs.git ];
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
@@ -40,13 +41,15 @@ pkgs.testers.runNixOSTest {
         f"echo three > /srv/releases/a && {g} -c user.signingkey=/root/other commit -qam three -S"  # another key
     )
     one, two, three = machine.succeed("git -C /srv/releases rev-list --reverse stable").split()
+    machine.succeed("ln -s /srv/releases /srv/releases-now")
     machine.succeed(f"mkdir -p {repo} && echo '{{}}' > {repo}/desktop.json && touch {repo}/flake.nix && echo '{{}}' > {repo}/flake.lock && torq-broker init")
 
     def nar(rev):
         return json.loads(machine.succeed(f"nix eval --impure --json --expr '(builtins.fetchTree {{ type = \"git\"; url = \"file:///srv/releases\"; rev = \"{rev}\"; }}).narHash'"))
 
-    def lock(rev, nar_hash):
-        return json.dumps({"nodes": {"root": {"inputs": {"torq": "torq"}}, "torq": {"locked": {"type": "git", "url": "file:///srv/releases", "rev": rev, "narHash": nar_hash, "lastModified": 1}}}, "root": "root", "version": 7}, indent=2)
+    # The releases by their earlier name (as a machine installed from 0.3.2 has them), unless `at` says.
+    def lock(rev, nar_hash, at="file:///srv/releases"):
+        return json.dumps({"nodes": {"root": {"inputs": {"torq": "torq"}}, "torq": {"locked": {"type": "git", "url": at, "rev": rev, "narHash": nar_hash, "lastModified": 1}}}, "root": "root", "version": 7}, indent=2)
 
     def apply(text):
         machine.succeed(f"rm -rf /tmp/c && cp -r {repo} /tmp/c && printf '%s\\n' {shlex.quote(text)} > /tmp/c/flake.lock && cd /tmp/c && git diff > /tmp/l.diff")
@@ -54,7 +57,7 @@ pkgs.testers.runNixOSTest {
         p = json.loads(machine.succeed(f"torq-broker --json propose --base {head} --diff /tmp/l.diff --reason lock"))
         return machine.execute(f"torq-broker --json apply {p['seq']} --approved-by dev 2>&1")
 
-    with subtest("a release signed by the release key, its hash what its rev fetches: applied"):
+    with subtest("at the releases' earlier address, a release signed by the release key, its hash what its rev fetches: applied"):
         code, out = apply(lock(one, nar(one)))
         assert code == 0, out
 
@@ -64,9 +67,20 @@ pkgs.testers.runNixOSTest {
         assert code != 0 and "not what its rev fetches" in out, out
         assert machine.succeed(f"git -C {repo} rev-parse HEAD").strip() == head
 
-    with subtest("a release not signed, or signed by another key: refused"):
+    # The case a release's move left open (ADR-028, amended 2026-11-12): the releases by their earlier name were
+    # no longer the releases, so an unsigned commit there was applied unchecked.
+    with subtest("at the releases' earlier address, a release not signed, or signed by another key: refused"):
         for rev in [two, three]:
             code, out = apply(lock(rev, nar(rev)))
+            assert code != 0 and "not signed by the TorqOS release key" in out, (rev, out)
+        machine.succeed("torq-broker verify && torq-broker status")
+
+    with subtest("at their address now: signed applied, not signed refused"):
+        now = "file:///srv/releases-now"
+        code, out = apply(lock(one, nar(one), now))
+        assert code == 0, out
+        for rev in [two, three]:
+            code, out = apply(lock(rev, nar(rev), now))
             assert code != 0 and "not signed by the TorqOS release key" in out, (rev, out)
         machine.succeed("torq-broker verify && torq-broker status")
   '';

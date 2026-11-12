@@ -8,5 +8,6 @@
 #![forbid(dead_code)]
 
 pub mod desktop;
+pub mod releases;
 pub mod secrets;
 pub mod socket;

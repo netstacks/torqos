@@ -131,9 +131,9 @@ pub trait Machine {
     /// `set system software torq source`: the `flake.lock` that locking `torq` (with `all`, every
     /// input) makes, from the configuration at commit `base` with its flake.nix as `flake_nix`.
     fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String>;
-    /// Where this machine's releases are (/etc/torq/releases.json, modules/releases.nix): a flake
-    /// reference, `git+https://…?ref=stable`.
-    fn releases(&self) -> Result<String>;
+    /// Where this machine's releases are (/etc/torq/releases.json, modules/releases.nix): their flake reference
+    /// now (`git+https://…?ref=stable`), and their earlier addresses (torq_wire::releases).
+    fn releases(&self) -> Result<torq_wire::releases::Releases>;
     /// Whether commit `rev` of the releases (`repo`) is signed by the release key (release.rs): what
     /// git says of its signature and the version of TorqOS it holds, or why it is refused.
     fn check_release(&self, repo: &str, rev: &str) -> Result<crate::release::Signed>;
@@ -1417,6 +1417,12 @@ impl<'a> Session<'a> {
         if self.base_source()?.as_deref().is_some_and(crate::software::image_own) {
             return Ok(loaded);
         }
+        // So does the first update of a machine at the releases' earlier address (its source moves).
+        if let Some(old) = self.base_source()? {
+            if self.machine.releases()?.moved(&old).is_some() {
+                return Ok(loaded);
+            }
+        }
         let base = self.candidate()?.base.clone();
         if base != self.repo.head()? {
             return Ok(loaded);
@@ -1442,6 +1448,13 @@ impl<'a> Session<'a> {
     fn update(&mut self, all: bool) -> Result<String> {
         let base = self.candidate()?.base.clone();
         let source = self.base_source()?;
+        // The releases under an earlier name (a machine installed before they moved): the same releases, checked
+        // the same; the update moves the source to their name now, in the candidate, to read before commit
+        // (ADR-028, amended 2026-11-12).
+        let moving = match &source {
+            Some(old) => self.machine.releases()?.moved(old).map(|to| (old.clone(), to)),
+            None => None,
+        };
         // With a new source in the candidate, the update is of that source (its flake.nix as it will be).
         let new = match self.candidate()?.source.clone() {
             Some(url) if Some(&url) != source.as_ref() => {
@@ -1452,13 +1465,23 @@ impl<'a> Session<'a> {
             // An image's own TorqOS has no newer version: the first update moves the machine to the
             // releases (ADR-028), as `set system software torq source` would.
             _ if source.as_deref().is_some_and(crate::software::image_own) => {
-                let releases = self.machine.releases()?;
+                let releases = self.machine.releases()?.url;
                 let mut d = self.candidate_data()?;
                 d.source = Some(releases.clone());
                 let shown = self.lock_source(&releases, all)?;
                 self.put_data(d)?;
                 self.save()?;
                 let moved = self.said(&format!("This machine runs the TorqOS it was installed with: the update moves it to TorqOS's releases ({releases})."));
+                return Ok(format!("{moved}{shown}"));
+            }
+            _ if moving.is_some() => {
+                let (old, to) = moving.context("the releases' address")?;
+                let mut d = self.candidate_data()?;
+                d.source = Some(to.clone());
+                let shown = self.lock_source(&to, all)?;
+                self.put_data(d)?;
+                self.save()?;
+                let moved = self.said(&format!("TorqOS's releases have a new address: the update moves this machine's source from {old} to {to} (the same releases, signed by the same key)."));
                 return Ok(format!("{moved}{shown}"));
             }
             _ => step(self.machine, "Locking the newest software", || self.machine.update_lock(&base, all))?,
@@ -1485,8 +1508,10 @@ impl<'a> Session<'a> {
     /// it did not sign is refused, before anything is loaded. The version it holds is kept with the
     /// candidate, for `show | compare` and `commit` to show (audit A3).
     fn release_signed(&mut self, lock: &str) -> Result<String> {
-        let repo = crate::software::releases_repo(&self.machine.releases()?);
-        let Some(rev) = crate::software::release_commit(lock, &repo) else { return Ok(String::new()) };
+        let releases = self.machine.releases()?;
+        let Some(rev) = crate::software::release_commit(lock, &releases) else { return Ok(String::new()) };
+        // At their address now, whichever name the lock has them by: the same repository.
+        let repo = releases.fetch_url();
         let signed = step(self.machine, "Checking the release's signature", || self.machine.check_release(&repo, &rev))?;
         let version = signed.version.filter(|v| crate::release::is_version(&v.number));
         let named = version.as_ref().map(|v| format!(" (TorqOS {})", shown_version(v))).unwrap_or_default();
@@ -2971,18 +2996,20 @@ mod tests {
         fn update_lock(&self, base: &str, all: bool) -> Result<String> {
             self.meanwhile();
             self.bases.borrow_mut().push(base.into());
-            Ok(self.newest(all))
+            Ok(self.newest(all, RELEASES_REPO))
         }
         fn lock_with(&self, base: &str, flake_nix: &str, all: bool) -> Result<String> {
             self.bases.borrow_mut().push(base.into());
             self.flakes.borrow_mut().push(flake_nix.into());
-            Ok(self.newest(all))
+            // A release locked at the address the flake names (now, or an earlier one).
+            Ok(self.newest(all, if flake_nix.contains("netstacks/torqos-releases") { FORMER_REPO } else { RELEASES_REPO }))
         }
-        fn releases(&self) -> Result<String> {
-            Ok(RELEASES.into())
+        fn releases(&self) -> Result<torq_wire::releases::Releases> {
+            Ok(torq_wire::releases::Releases { url: RELEASES.into(), former: vec![FORMER_REPO.into()] })
         }
         fn check_release(&self, repo: &str, rev: &str) -> Result<crate::release::Signed> {
-            assert_eq!(repo, "https://github.com/netstacks/torqos-releases", "the machine's releases");
+            // Always at their address now, whichever name the lock has them by.
+            assert_eq!(repo, RELEASES_REPO, "the machine's releases");
             self.release_checks.borrow_mut().push(rev.into());
             match &self.release {
                 Some((r, true)) if r == rev => Ok(crate::release::Signed { said: "Good \"git\" signature for torqos-release".into(), version: self.release_version.clone().map(|number| crate::release::Version { number, exact: !self.release_inexact }) }),
@@ -3001,10 +3028,10 @@ mod tests {
                 None => {}
             }
         }
-        /// What locking finds newest: the release, if a test gives one.
-        fn newest(&self, all: bool) -> String {
+        /// What locking finds newest: the release (at the releases' address `at`), if a test gives one.
+        fn newest(&self, all: bool, at: &str) -> String {
             match &self.release {
-                Some((rev, _)) => format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"type":"git","url":"https://github.com/netstacks/torqos-releases","rev":"{rev}","lastModified":{},"narHash":"r"}}}}}},"version":7}}"#, self.release_date.unwrap_or(NEWER)),
+                Some((rev, _)) => format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"type":"git","url":"{at}","rev":"{rev}","lastModified":{},"narHash":"r"}}}}}},"version":7}}"#, self.release_date.unwrap_or(NEWER)),
                 None => lock(if all { NEWER_ALL } else { NEWER }),
             }
         }
@@ -3296,7 +3323,12 @@ mod tests {
     }
 
     /// The test machine's releases (as /etc/torq/releases.json says).
-    const RELEASES: &str = "git+https://github.com/netstacks/torqos-releases?ref=stable";
+    const RELEASES: &str = "git+https://github.com/torqosorg/torqos-releases?ref=stable";
+    /// The repository of the releases now, as git fetches it.
+    const RELEASES_REPO: &str = "https://github.com/torqosorg/torqos-releases";
+    /// Their earlier address (a machine installed from 0.3.2 or before names it).
+    const FORMER_REPO: &str = "https://github.com/netstacks/torqos-releases";
+    const FORMER: &str = "git+https://github.com/netstacks/torqos-releases?ref=stable";
     /// A `flake.lock` whose `torq` input was last changed at `t` (seconds).
     fn lock(t: u64) -> String {
         format!(r#"{{"nodes":{{"root":{{"inputs":{{"torq":"torq"}}}},"torq":{{"locked":{{"lastModified":{t},"narHash":"h{t}"}}}}}},"version":7}}"#)
@@ -3529,6 +3561,37 @@ mod tests {
         assert!(format!("{:#}", s.exec("request system update").unwrap_err()).contains("not signed by the TorqOS release key"));
         s.exec("configure").unwrap();
         assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
+        // At the releases' earlier address (a machine installed from 0.3.2): the update moves the source to their
+        // address now, in the candidate, said and shown; the release checked the same, at their address now.
+        let d = machine(FORMER);
+        let m = Fake { answer: true, release: Some((rev.into(), true)), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        let out = s.exec("request system update").unwrap();
+        assert!(out.starts_with(&format!("TorqOS's releases have a new address: the update moves this machine's source from {FORMER} to {releases} (the same releases, signed by the same key).\n")), "{out}");
+        assert!(out.contains("TorqOS release 0123456789ab: signed by the TorqOS release key.\n"), "{out}");
+        assert_eq!(*m.release_checks.borrow(), [rev]);
+        assert!(m.flakes.borrow()[0].contains(&format!("torq.url = \"{releases}\";")), "locked at the address now");
+        s.exec("configure").unwrap();
+        let compare = s.exec("show | compare").unwrap();
+        assert!(compare.starts_with(&format!("[edit system software torq]\n-   source {FORMER};\n+   source {releases};\n")), "{compare}");
+        assert_eq!(s.exec("commit").unwrap(), "commit complete (change #42)\n");
+        // Not signed: refused at the earlier address too, nothing loaded.
+        let d = machine(FORMER);
+        let m = Fake { answer: true, release: Some((rev.into(), false)), ..Default::default() };
+        let mut s = session(d.path(), None, &m);
+        assert!(format!("{:#}", s.exec("request system update").unwrap_err()).contains("not signed by the TorqOS release key"));
+        s.exec("configure").unwrap();
+        assert_eq!(s.exec("show | compare").unwrap(), "No changes: the candidate is the configuration in effect.\n");
+        // Set by hand to the earlier address: still the releases, so still checked (and refused unsigned).
+        let d = machine(releases);
+        for (signed, ok) in [(true, true), (false, false)] {
+            let m = Fake { answer: true, release: Some((rev.into(), signed)), ..Default::default() };
+            let mut s = session(d.path(), None, &m);
+            s.exec("configure").unwrap();
+            let r = s.exec(&format!("set system software torq source \"{FORMER}\""));
+            assert_eq!(r.is_ok(), ok, "{r:?}");
+            assert_eq!(*m.release_checks.borrow(), [rev], "checked at the earlier address too");
+        }
         // Any other source: no releases, nothing to check.
         let d = machine("github:netstacks/torqos");
         let m = Fake { answer: true, ..Default::default() };
