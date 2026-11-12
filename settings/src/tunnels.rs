@@ -302,18 +302,20 @@ impl cosmic::Application for Applet {
                 self.error = None;
             }
             Message::Edit => match tunnels::ensure_file() {
-                // COSMIC's own editor; whatever opens text files, where it is not there. Waited for on a thread of
-                // its own, so neither is left a zombie (step 5's second review).
+                // COSMIC's own editor; whatever opens text files, where it is not there; neither, said.
                 Ok(path) => {
-                    std::thread::spawn(move || match std::process::Command::new("cosmic-edit").arg(&path).spawn() {
-                        Ok(mut c) => {
-                            let _ = c.wait();
-                        }
-                        Err(_) => {
-                            if let Ok(mut c) = std::process::Command::new("xdg-open").arg(&path).spawn() {
-                                let _ = c.wait();
-                            }
-                        }
+                    self.error = None;
+                    return act(move || {
+                        use anyhow::Context;
+                        let mut editor = std::process::Command::new("cosmic-edit")
+                            .arg(&path)
+                            .spawn()
+                            .or_else(|_| std::process::Command::new("xdg-open").arg(&path).spawn())
+                            .with_context(|| format!("neither cosmic-edit nor xdg-open could be started to open {}", path.display()))?;
+                        // Reaped when it ends, on a thread of its own, so it is left no zombie (step 5's second
+                        // review). How the editor ends is the editor's to say: nothing here waits for it.
+                        std::thread::spawn(move || editor.wait());
+                        Ok(())
                     });
                 }
                 Err(e) => self.error = Some(format!("{e:#}")),

@@ -53,8 +53,8 @@ Partly done in the WIP commit, untested:
   group or other).
 - (12) the Delegate assertion also covers the `torq-agent@` template. Its messages should say the uids are the
   first defence and the cgroup and ptrace guards second.
-- (9) `open_window` is off the update path (it froze the UI for up to 10 s), and `cosmic-edit`/`xdg-open` are
-  reaped in tunnels.rs.
+- (9) done, type-checked only (settings has no tests): `open_window` is off the update path (it froze the UI for up to 10 s), its failure said; `cosmic-edit`/`xdg-open` are
+  reaped in tunnels.rs, and neither starting is said.
 - (10) crash offers wait with a timeout, so three unclosed notifications don't stop them for good.
 
 Not started:

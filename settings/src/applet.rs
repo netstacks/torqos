@@ -80,6 +80,8 @@ enum Message {
     Restart,
     Open(&'static str),
     AskAgent(String),
+    /// What became of opening the agent's window for an alarm.
+    AskedAgent(Result<(), String>),
     PopupClosed(Id),
     Surface(cosmic::surface::Action<Message>),
 }
@@ -430,11 +432,13 @@ impl cosmic::Application for Applet {
             Message::AskAgent(alarm) => {
                 // Off the panel's thread (step 5's second review): systemd-run is waited for, bounded.
                 let h = torq::agent::handoff::About::Alarm(&alarm).handoff();
-                std::thread::spawn(move || {
-                    if let Err(e) = torq::agent::handoff::open_window(&h) {
-                        eprintln!("torq-applet: opening the agent's window: {e:#}");
-                    }
-                });
+                return cosmic::task::future(async move { Message::AskedAgent(blocking(move || torq::agent::handoff::open_window(&h)).await) });
+            }
+            // The person pressed the button and nothing opened: said, as the applet's other failures are.
+            Message::AskedAgent(outcome) => {
+                if let Err(why) = outcome {
+                    notify(AGENT_UNOPENED.to_string(), why, "agent");
+                }
             }
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
@@ -494,6 +498,8 @@ fn running() -> Option<PathBuf> {
 const UNSAVED: &str = "Your desktop was not saved";
 const UNAPPLIED: &str = "Not put on your desktop";
 const APPS: &str = "Your apps were not brought back";
+/// What a notification says when an Ask the agent button opened nothing.
+const AGENT_UNOPENED: &str = "The agent's window did not open";
 
 /// Bring the person's desktop and configuration together, and answer what could not be put on the desktop, or why
 /// the sync (a save among it) failed or was refused.
