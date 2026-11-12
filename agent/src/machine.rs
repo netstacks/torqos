@@ -41,9 +41,12 @@ impl tools::Host for Machine {
         let mut a: Vec<String> = vec!["agent".into(), "session".into()];
         a.extend(args.iter().map(|s| s.to_string()));
         // A start past its time may still have been made at the broker, which then counts it against the agent's sessions
-        // this hour: said so (the review of the rebased branch, C17), never taken as made.
-        let late = if args.first() == Some(&"start") { " (the broker may have started it all the same: it counts against this hour's sessions)" } else { "" };
-        let out = within(self.command(Path::new(tools::TORQCLI), &a), SESSION_TIMEOUT).with_context(|| format!("running torqcli agent session{late}"))?;
+        // this hour: said so, never taken as made — only for a start that ran out of time, not one that failed to run.
+        let started = std::time::Instant::now();
+        let out = within(self.command(Path::new(tools::TORQCLI), &a), SESSION_TIMEOUT).with_context(|| {
+            let late = args.first() == Some(&"start") && started.elapsed() >= SESSION_TIMEOUT;
+            format!("running torqcli agent session{}", if late { " (the broker may have started it all the same: it counts against this hour's sessions)" } else { "" })
+        })?;
         if !out.status.success() {
             bail!("{}", clean::clean(String::from_utf8_lossy(&out.stderr).trim()));
         }

@@ -44,7 +44,7 @@ impl Config {
             (None, _) => None,
             (Some(_), Some(c)) => model::key(Some(c))?,
             // The resident agent's own task told so as itself, not sent to torq ask (the review of the rebased branch, C10).
-            (Some(_), None) if resident => bail!("this machine's model needs its API key, and your resident agent was not given it (its credential, torq.agent.doctor.apiKeyFile): an administrator sees why in journalctl -u torq-agent@<you>.service"),
+            (Some(_), None) if resident => bail!("this machine's model needs its API key, and your resident agent was not given it (its credential, torq.agent.doctor.apiKeyFile): an administrator sees why in the agent service's own journal (journalctl -u 'torq-agent@*')"),
             (Some(_), None) => bail!("this machine's model needs its API key, which only your resident agent holds: ask it there (torq ask \"…\"); torq doctor and torq agent propose cannot use a keyed model"),
         };
         Ok(Config {
