@@ -726,7 +726,9 @@ Its §5 lists claims without a test.
    - **A broker that dies mid-adopt** after the switch and before the ledger goes in leaves the new
      system running with no ledger (setup's own record of a cut-short setup does not cover adopt).
    - **`torq.dev.enable` and every other setting travel** with the configuration: adopting a dev
-     machine makes a dev machine. The summary does not call it out.
+     machine makes a dev machine. The summary calls out `torq.dev.enable` set in the tree
+     (`nixos/torq.json`; 2026-11-12, `tests/adopt.nix`, extended but not run yet); set in an attached
+     Nix file it is not seen, and no other setting is called out.
 
 6zj. **Strict mode and break-glass (ADR-035).** Open:
    - **No ledger, no shell, by the owner's decision (2026-11-05: "I prefer secure over back doors").**

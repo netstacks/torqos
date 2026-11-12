@@ -74,6 +74,10 @@ pkgs.testers.runNixOSTest {
         answer(first, "")
         first.wait_until_succeeds("test -s /var/lib/torq/state/ledger.jsonl", timeout=300)
         first.wait_for_unit("getty@tty1.service")
+        # A development machine: the summary on `second` must call it out (KNOWN-GAPS 6zi).
+        first.succeed(f"git clone -q {repo} /root/c && cd /root/c && jq '.dev.enable = true' nixos/torq.json > t && mv t nixos/torq.json && git diff > /root/dev.diff")
+        seq = json.loads(first.succeed("torq-broker --json propose --diff /root/dev.diff --reason 'Development mode'"))["seq"]
+        first.succeed(f"torq-broker apply {seq} --approved-by alice")
         # As its broker pushes them: main, and the ledger on torq-ledger.
         first.succeed("ssh-keygen -q -t ed25519 -N ''' -f /root/key")
         key = first.succeed("cat /root/key.pub").strip()
@@ -113,6 +117,7 @@ pkgs.testers.runNixOSTest {
         on_console(second, "the remote's host key SHA256:")
         on_console(second, "will run on this machine as root")
         on_console(second, "Its SSH setting: not on")
+        on_console(second, "It turns development mode on")
         on_console(second, "own hardware file and software")
         second.fail("test -s /var/lib/torq/state/ledger.jsonl")
         on_console(second, "alice's password (on this machine):")

@@ -340,6 +340,8 @@ pub struct Adoptable {
     pub ssh: bool,
     pub keyed: Vec<String>,
     pub files: Vec<String>,
+    /// Whether its tree turns development mode on (`torq.dev.enable`): adopted, this machine is one too.
+    pub dev: bool,
 }
 
 /// How the machine compares with its ledger. See `Broker::status`.
@@ -1033,6 +1035,7 @@ impl Broker {
             ssh,
             keyed,
             files,
+            dev: torq["dev"]["enable"] == json!(true),
         })
     }
 

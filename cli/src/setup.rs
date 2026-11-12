@@ -326,6 +326,9 @@ fn adopt_questions() -> Result<Option<Adopting>> {
         Some(r) => println!("  ! It names another remote: {}", crate::history::one_line(r, 100)),
         None => println!("  ! It names no remote: this machine will not push there until `torq remote url` is set."),
     }
+    if found["dev"].as_bool().unwrap_or(false) {
+        println!("  ! It turns development mode on (torq dev enable): sudo asks no password here either. For developing TorqOS only.");
+    }
     println!("  This machine's own hardware file and software take the place of the repository's.");
     let hash = loop {
         let p = secret(&format!("{user}'s password (on this machine)"))?;
