@@ -4,7 +4,8 @@
 //! logged, as the person (`_SYSTEMD_UNIT`, `_SYSTEMD_SLICE`, `_UID`, `_TRANSPORT`), and whose `COREDUMP_UID`
 //! — the sender's word — is the person too. Each gives a notification,
 //! **Ask the agent about this crash**; nothing is read of the crash and nothing goes anywhere until it is
-//! clicked. Then its summary — `coredumpctl info <pid>` as the person (program, signal, backtrace), bounded —
+//! clicked. Then its summary — `coredumpctl info` as the person, matched by its pid, owner, unit and boot (program,
+//! signal, backtrace), bounded —
 //! opens the agent's window, attached: the person reads it and asks, and the session that reads it is tainted.
 
 use super::handoff::Handoff;

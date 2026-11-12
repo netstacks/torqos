@@ -59,13 +59,9 @@ Partly done in the WIP commit, untested:
 
 Not started:
 - (11) done: `--service-type=exec` makes a window that cannot start fail systemd-run, said where pressed; the activation token is passed from a crash notification's click (tested, mutation-checked); the applets', Settings' and the launcher's buttons pass none yet (KNOWN-GAPS 6zzn).
-- **Doc corrections:**
-  - In the ADR's step 4 fix note: "the programs started are waited for" ("with the session's environment" is fixed, with finding 11).
-  - Comments: crash.rs:1-3 (COREDUMP_UID) and agent_ui.rs:221.
-  - Decline is offered more narrowly than the broker allows: not for a proposal wholly in the person's folder, and
-    not to an administrator. Offer it where the broker allows, or say it is conservative; fix the comment on
-    `Proposal.yours`.
-  - 6zzo: the agent can still read the resident's `/proc/<pid>/cmdline` and `status` (no hidepid).
+- **Doc corrections:** done (2026-11-12): ADR-051's step 4 note (the programs waited for, the environment,
+  coredumpctl's matches); the comments in crash.rs and agent_ui.rs; Decline said to be narrower than the broker on
+  purpose (`Proposal.yours`, 6zzn); 6zzo on what /proc still shows (cmdline and status, never a task's text).
 - **Test gaps,** each a mutation nobody would notice:
   - `trusted_by`'s caller check (session.rs) and `who.resident_account &&` (serve.rs);
   - `Broker::model_taint`'s real passwd and residents set, and `Broker::resident_of`;
@@ -123,7 +119,7 @@ See KNOWN-GAPS 6zq, 6zzk and 6zzo.
      not moved into each commit: a bisect in that range needs the same one-line change, with that commit's arguments.
    - **Settled (the approval design's part 1, 2026-11-12):** `torq-agent` in a person's rules is their own agent,
      both accounts; system rules name each agent's account. The two broker tests pass again. What it leaves:
-     no agent can use a secret until approval is built (KNOWN-GAPS 6zzp).
+     no agent can use a secret until approval is built (KNOWN-GAPS 6zzs).
 2. Finish the second review's batch, as above.
 3. Run the full check on .52, then land as a fast-forward with the owner (the lead session's plan).
 

@@ -1218,7 +1218,9 @@ Its §5 lists claims without a test.
      TorqOS's (pop-launcher prefers the person's): the same uid, so nothing it could not do already.
    - **Decline is offered only on the person's own agent's proposals.** Someone else's change waiting for the
      person (another person's, a pull) is declined in torqcli (`request system decline <n>`), which asks an
-     administrator's password where the broker says so.
+     administrator's password where the broker says so. The buttons are narrower than the broker on purpose: it
+     would also let the person decline, without a password, a proposal wholly in their own folder (a pull's, say),
+     and an administrator anyone's; those are torqcli's too (the second review of step 5).
    - **A crash notification** is waited for until it is clicked, closed or expires (10 minutes, said to the
      daemon), and given up 30 seconds after that whatever the daemon says: taken down, its slot freed (at most 3
      open at once). The thread reading the daemon's signals for it ends at the daemon's next signal about any
@@ -1238,7 +1240,10 @@ Its §5 lists claims without a test.
      The resident account owns the unit's state directory (its memory and its programs' home) and its
      credential (the model's key); the agent account — under `torq agent run`, as itself through `su`, or an
      administrator's `sudo -u` — can write neither, read neither, nor signal, trace or reach the service's
-     processes through /proc (another uid's: `tests/agent-service.nix`). That closes what this said before:
+     processes through /proc beyond what every account sees of every process (another uid's: `tests/agent-service.nix`).
+     What every account sees stays seen, as no `hidepid` is set: each of the resident's processes' `cmdline` and
+     `status` (its program, its flags, its state), never a task's text, which goes on standard input (the second
+     review of step 5). That closes what this said before:
      that an agent-uid process outside the sandbox could reach the harness's `/proc/<pid>/root` (Yama's
      `ptrace_scope` 1 does not hide it from the same uid — only another uid or the sandbox's process namespace
      does), write the state directory, and read the credential. Still resting on: the unit delegates nothing
@@ -1306,7 +1311,7 @@ Its §5 lists claims without a test.
    - **Not in this step**: "Start Claude Code" from the agent's window (a folder to choose and a terminal to
      open), Codex and opencode, removing the link when the tool is no longer chosen.
 
-6zzp. **No agent can use a secret yet, with one agent per person (ADR-052, amended 2026-11-12; the approval
+6zzs. **No agent can use a secret yet, with one agent per person (ADR-052, amended 2026-11-12; the approval
   design, `docs/DESIGN-agent-approval.md`).** `torq-agent` in a person's rules is their own agent, and a system rule
   names each agent's account (`broker/tests/secrets.rs`, `tests/secrets.nix`). But a use is let through only from
   an untainted session, with the rule asking no approval, and:

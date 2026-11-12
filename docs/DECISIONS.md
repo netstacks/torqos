@@ -2481,7 +2481,9 @@ vouches for, that only proposes, every change ledgered and undone in one command
   was pressed (the launcher only logs it); the compositor's activation token is set in the unit where the entry point has one (a crash
   notification's click; not yet the applets' and Settings' buttons, nor the launcher: KNOWN-GAPS 6zzn) (the
   second review of step 5);
-  the programs the applets and Settings start are waited for on a thread. Decline is offered only on the person's
+  every program the applets and Settings start is waited for: the window's systemd-run off the update path, for at
+  most 10 s; the others on a thread of their own, the tunnels applet's editor among them since the second review of
+  step 5, which found it was not. Decline is offered only on the person's
   own agent's proposals (`Proposal.yours`: the ledger's `agent_for`), anyone else's being an administrator's, in
   torqcli. A proposal whose apply failed (it waits again) says "its apply failed once — apply it again, or
   decline it" on the Proposals page, in the applet and in the window. `torq ask` with no words (the alias
@@ -2963,7 +2965,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
   saying no one's agent. An agent's use names a session of its own agent account's, never another's. Approval
   (Decision 4) is still not built, and only the resident agent starts a session untainted, so until it is no
   agent's use is let through: a coding tool's session is tainted from its start, and the resident agent has no
-  tool that sends HTTPS or signs (KNOWN-GAPS 6zzp).
+  tool that sends HTTPS or signs (KNOWN-GAPS 6zzs).
 
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 

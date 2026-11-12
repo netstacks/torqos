@@ -218,7 +218,8 @@ impl cosmic::Application for Window {
     fn dbus_activation(&mut self, msg: cosmic::dbus_activation::Message) -> Task<cosmic::Action<Message>> {
         // Said in its journal: started again, the window handed over here.
         eprintln!("torq-agent-ui: started again: this window raised");
-        // With a question handed over (the key, the launcher, an Ask the agent): put in, or asked.
+        // With a question handed over (the key, the launcher, an Ask the agent): put in the box, what is attached shown
+        // above it; never asked by itself (any of the person's programs can write a handoff): the person asks.
         let handed = match msg.msg {
             cosmic::dbus_activation::Details::ActivateAction { action, args } if action == ASK => self.handed(&args),
             _ => Task::none(),

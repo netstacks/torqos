@@ -1034,7 +1034,10 @@ pub struct Proposal {
     pub sources: Vec<String>,
     /// Its apply failed once: it waits for a person again (ADR-008), who may apply it again or decline it.
     pub failed: bool,
-    /// Whether this person may decline it without anyone else's password: their own agent proposed it (the
+    /// Whether Settings and the applets offer this person Decline: their own agent proposed it (the ledger's
+    /// `agent_for`). Narrower than the broker on purpose: it also lets a person decline, with no password, a proposal
+    /// wholly in their own folder, and an administrator anyone's with their password; those are torqcli's
+    /// (`request system decline <n>`), as is any other choice the buttons do not offer (KNOWN-GAPS 6zzn).
     /// ledger's `agent_for`). Decline is offered only then; anyone else's an administrator declines in torqcli.
     pub yours: bool,
 }

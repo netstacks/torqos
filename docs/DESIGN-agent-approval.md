@@ -21,7 +21,7 @@ yes, it becomes an amendment to ADR-051 and ADR-052 in docs/DECISIONS.md, and th
 - Session trust (ADR-042 7): `request system agent trust <1–60>` takes a password. It covers only untainted
   proposals in the person's own folder, never the system tier, and is ledgered.
 
-## 1. Who a rule's `actors` names (built on `work/agents`, 2026-11-12: ADR-052's amendment of that day, KNOWN-GAPS 6zzp)
+## 1. Who a rule's `actors` names (built on `work/agents`, 2026-11-12: ADR-052's amendment of that day, KNOWN-GAPS 6zzs)
 
 - **A person's own secrets** (`users/<p>/secrets.json`): the word `torq-agent` means *the person's own agent,
   both of its accounts*, and nothing else. A use is the agent's when the broker's map says the caller serves
