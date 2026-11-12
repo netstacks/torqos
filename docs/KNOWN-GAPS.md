@@ -1137,7 +1137,8 @@ Its §5 lists claims without a test.
 
 6zzl. **The agent service (ADR-051 3, step 2, built 2026-11-10, `tests/agent-service.nix`).** Open:
    - **A client that stops reading is given up** after 10 s on one event (the review of the rebased branch, B2):
-     nothing more is written to it, and its task runs on to its end (or `stop`), its answer kept as any other.
+     nothing more is written to it and its connection's writing side is closed, so the client, reading again, says it
+     ended before it answered; its task runs on to its end (or `stop`, or the client going), its answer kept as any other.
    - **The freeze is held for the walk only.** A service the person's socket starts during the walk is not
      frozen; it has every home hidden (ProtectHome), so it cannot reach the directory. After the thaw, the
      service and the `torq agent run` session run side by side as the same account, and the service could

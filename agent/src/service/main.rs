@@ -74,6 +74,9 @@ impl Out {
         // A client gone is not an error of the agent's: what it asked still runs to its end, or is stopped.
         if !*gone && writeln!(s, "{}", serde_json::to_string(e).unwrap_or_default()).and_then(|()| s.flush()).is_err() {
             *gone = true;
+            // Its writing side closed: the client, reading again, finds the end and says the answer was cut, rather
+            // than wait out its QUIET. The reading side stays, so the task runs on until the client goes.
+            let _ = s.shutdown(std::net::Shutdown::Write);
         }
     }
 }
@@ -827,7 +830,10 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(a.running().is_none(), "still running with its client not reading");
-        drop(c);
+        // Reading again, it finds the end at once, not a silence to wait out.
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut rest = Vec::new();
+        std::io::Read::read_to_end(&mut c, &mut rest).expect("the end, not a timeout");
     }
 
     /// Any tainted line counts, whatever its word, and a line left out may have been one (the review of the rebased
