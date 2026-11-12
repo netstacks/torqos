@@ -42,12 +42,18 @@ fn bounded(s: &str, max: usize) -> String {
     out
 }
 
+/// What is attached, as it may be shown and sent: each line cleaned as torqcli cleans text (anything that hides or
+/// moves text shown escaped, a tab as spaces), the lines kept (the review of the rebased branch, B6).
+fn cleaned(s: &str) -> String {
+    s.lines().map(|l| crate::history::clean(&l.replace('\t', "    "))).collect::<Vec<_>>().join("\n")
+}
+
 impl Handoff {
-    /// A question (made one line), with what it is about: both bounded. An empty context is none.
+    /// A question (made one line), with what it is about: both cleaned and bounded. An empty context is none.
     pub fn new(question: &str, context: Option<&str>) -> Handoff {
         Handoff {
             question: crate::history::one_line(question, MAX_QUESTION),
-            context: context.map(str::trim).filter(|c| !c.is_empty()).map(|c| bounded(c, MAX_CONTEXT)),
+            context: context.map(str::trim).filter(|c| !c.is_empty()).map(|c| bounded(&cleaned(c), MAX_CONTEXT)),
         }
     }
 
@@ -295,5 +301,16 @@ mod tests {
         }
         let long = "x".repeat(MAX_CONTEXT * 2);
         assert!(About::Draft(&long).handoff().context.unwrap().chars().count() <= MAX_CONTEXT);
+    }
+
+    /// What is attached is cleaned as the question is, its lines kept (the review of the rebased branch, B6): shown
+    /// above the box and sent with the question, it could otherwise reorder itself (U+202E) or hide text (zero-width).
+    #[test]
+    fn what_is_attached_is_cleaned_its_lines_kept() {
+        let h = Handoff::new("why?", Some("SIGSEGV in \u{202e}txt.exe\nline two\u{200b}\tend\r\n\x1b[2Jthree"));
+        let c = h.context.unwrap();
+        assert_eq!(c.lines().count(), 3, "{c:?}");
+        assert!(!c.contains('\u{202e}') && !c.contains('\u{200b}') && !c.contains('\x1b') && !c.contains('\r') && !c.contains('\t'), "{c:?}");
+        assert!(c.contains("\\u{202e}"), "shown, not silently gone: {c:?}");
     }
 }
