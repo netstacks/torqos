@@ -377,7 +377,7 @@ pkgs.testers.runNixOSTest {
         assert prop("FreezerState") == "running"
         machine.succeed("rm /tmp/fail-setfacl")
         # The service answers after it.
-        machine.succeed(f"systemctl is-active {unit}")
+        assert as_user("alice", "torq ask hello").strip() == "Hello alice."
 
     with subtest("torqcli killed in the middle of the walk: the agent is thawed all the same"):
         machine.succeed("touch /tmp/hang-setfacl")

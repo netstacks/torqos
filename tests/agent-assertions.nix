@@ -60,7 +60,7 @@ let
     (refuses "a delegated resident unit" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.Delegate = true; } "no Delegate or DelegateSubgroup")
     (refuses "a resident unit's subgroup" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.DelegateSubgroup = "x"; } "no Delegate or DelegateSubgroup")
     (refuses "a delegated template" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@".serviceConfig.Delegate = true; } "in any torq-agent@ unit")
-    (refuses "a lingering agent" { torq.agent.doctor = doctorOn; users.users.torq-agent-dev.linger = true; } "an agent account has no user manager of its own")
+    (refuses "a lingering agent" { torq.agent.doctor = doctorOn; users.users.torq-agent-dev.linger = true; } "neither account has a user manager of its own")
     (refuses "tracing allowed" { torq.agent.doctor = doctorOn; boot.kernel.sysctl."kernel.yama.ptrace_scope" = lib.mkForce 0; } "kernel.yama.ptrace_scope")
     (refuses "the key where the agent reads it" { torq.agent.doctor = doctorOn // { apiKeyFile = "/var/lib/torq-agent-dev/model.key"; }; } "a file only root reads")
     (refuses "the key in /var/tmp" { torq.agent.doctor = doctorOn // { apiKeyFile = "/var/tmp/model.key"; }; } "a file only root reads")
