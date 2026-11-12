@@ -1223,6 +1223,12 @@ Its §5 lists claims without a test.
      daemon), and given up 30 seconds after that whatever the daemon says: taken down, its slot freed (at most 3
      open at once). The thread reading the daemon's signals for it ends at the daemon's next signal about any
      notification. A daemon that never sends another keeps that one idle thread, holding nothing of the crash.
+   - **The agent's window is raised only from a crash notification.** Its click carries the compositor's
+     activation token (the notification daemon's `ActivationToken` signal), which is set in the window's unit.
+     The Ask the agent buttons of the panel applet, the tunnels applet and TorqOS Settings pass none yet (each
+     would ask the compositor for one first), and pop-launcher gives its plugins none. Without a token the window
+     can open behind the one in front. A window that cannot be started at all is said in a notification or on
+     the page; from the launcher it is only in the plugin's log.
 
 6zzo. **torq-mcp, Claude Code as a tool, and the broker's resident rule (ADR-051 5 and 7, step 5, built 2026-11-10,
    `tests/agent-mcp.nix`).** Open:

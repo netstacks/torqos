@@ -149,18 +149,30 @@ pub fn take(path: &Path) -> Result<Handoff> {
 /// user manager's environment (its session's as the session's start gave it), not in whatever started it (the
 /// crash watcher's service, the launcher's plugin). `--service-type=exec`: systemd-run returns once the window's
 /// program has been started — and fails, said, if it could not be (step 5's second review); what happens to the
-/// window after that is the window's (its journal).
-pub fn window_command(file: &Path) -> std::process::Command {
+/// window after that is the window's (its journal). The compositor's activation token, when the entry point has
+/// one, is set in the window's own environment (systemd-run passes on none of its caller's), so the window is
+/// raised rather than left behind another (finding 11); one that is not a token's plain text is not passed.
+pub fn window_command(file: &Path, token: Option<&str>) -> std::process::Command {
     let mut c = std::process::Command::new(crate::app::system_program("systemd-run"));
-    c.args(["--user", "--collect", "--quiet", "--service-type=exec", "--"]).arg(crate::app::system_program("torq-agent-ui")).arg("--ask").arg(file);
+    c.args(["--user", "--collect", "--quiet", "--service-type=exec"]);
+    if let Some(t) = token.filter(|t| activation_token_ok(t)) {
+        c.arg(format!("--setenv=XDG_ACTIVATION_TOKEN={t}")).arg(format!("--setenv=DESKTOP_STARTUP_ID={t}"));
+    }
+    c.arg("--").arg(crate::app::system_program("torq-agent-ui")).arg("--ask").arg(file);
     c
 }
 
-/// Open the agent's window with `h` (raising it, with the question in, if it is open).
-pub fn open_window(h: &Handoff) -> Result<()> {
+/// An activation token as compositors make them: a short word of letters, digits, `-`, `_` and `.`.
+fn activation_token_ok(t: &str) -> bool {
+    (1..=256).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
+/// Open the agent's window with `h` (raising it, with the question in, if it is open), with the compositor's
+/// activation token where the entry point has one.
+pub fn open_window(h: &Handoff, token: Option<&str>) -> Result<()> {
     let file = write_in(&dir()?, h)?;
     // Waited for (bounded): nothing of it is left behind.
-    let c = window_command(&file);
+    let c = window_command(&file, token);
     match super::setup::output_within(c, std::time::Duration::from_secs(10)) {
         Some(_) => Ok(()),
         None => {
@@ -245,9 +257,24 @@ mod tests {
     /// The window by absolute path, in a unit of its own, given the file, never the text.
     #[test]
     fn the_window_is_given_a_file() {
-        let c = window_command(Path::new("/run/user/1000/torq-agent/ask-1.json"));
+        let c = window_command(Path::new("/run/user/1000/torq-agent/ask-1.json"), None);
         assert_eq!(c.get_program(), "/run/current-system/sw/bin/systemd-run");
         assert_eq!(c.get_args().collect::<Vec<_>>(), ["--user", "--collect", "--quiet", "--service-type=exec", "--", "/run/current-system/sw/bin/torq-agent-ui", "--ask", "/run/user/1000/torq-agent/ask-1.json"]);
+    }
+
+    /// The compositor's activation token, when an entry point has one, goes to the window's own unit (systemd-run
+    /// does not pass on its caller's environment), so the window is raised, not left behind (finding 11). One that
+    /// is not a token's plain text is not passed: it is a word of systemd-run's.
+    #[test]
+    fn the_window_is_given_its_activation_token() {
+        let args = |t: Option<&str>| window_command(Path::new("/run/user/1000/torq-agent/ask-1.json"), t).get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            args(Some("abc-123_X.y")),
+            ["--user", "--collect", "--quiet", "--service-type=exec", "--setenv=XDG_ACTIVATION_TOKEN=abc-123_X.y", "--setenv=DESKTOP_STARTUP_ID=abc-123_X.y", "--", "/run/current-system/sw/bin/torq-agent-ui", "--ask", "/run/user/1000/torq-agent/ask-1.json"]
+        );
+        for bad in ["", "a b", "a\nb", "a=b", &"x".repeat(257)] {
+            assert_eq!(args(Some(bad)), args(None), "{bad:?}");
+        }
     }
 
     /// Each button's question, and the thing attached: tainting, the person asks, bounded.

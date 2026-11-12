@@ -321,7 +321,7 @@ impl cosmic::Application for Applet {
                 Err(e) => self.error = Some(format!("{e:#}")),
             },
             // Off the panel's thread (step 5's second review): systemd-run is waited for, bounded.
-            Message::AskAgent(h) => return act(move || handoff::open_window(&h)),
+            Message::AskAgent(h) => return act(move || handoff::open_window(&h, None)),
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;

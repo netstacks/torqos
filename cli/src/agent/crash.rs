@@ -120,19 +120,23 @@ impl Crash {
     }
 }
 
-/// What a notification daemon's signal says of the crash offer `id`: asked (its own action, on it), closed, or
-/// nothing of it (another notification's, another action, another signal).
+/// What a notification daemon's signal says of the crash offer `id`: asked (its own action, on it), the activation
+/// token for that ask (sent just before it, by the notification spec), closed, or nothing of it (another
+/// notification's, another action, another signal).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Heard {
     Ask,
+    Token,
     Closed,
     Nothing,
 }
 
-/// The signal `member` about notification `of` (with its action, for `ActionInvoked`), as it bears on offer `id`.
+/// The signal `member` about notification `of` (with its action for `ActionInvoked`, its token for
+/// `ActivationToken`), as it bears on offer `id`.
 pub fn heard(member: &str, id: u32, of: u32, action: Option<&str>) -> Heard {
     match (member, action) {
         ("ActionInvoked", Some(a)) if of == id && a == ASK_ACTION => Heard::Ask,
+        ("ActivationToken", Some(_)) if of == id => Heard::Token,
         ("NotificationClosed", _) if of == id => Heard::Closed,
         _ => Heard::Nothing,
     }
@@ -324,7 +328,9 @@ mod tests {
         assert_eq!(heard("ActionInvoked", 7, 7, None), Heard::Nothing);
         assert_eq!(heard("NotificationClosed", 7, 7, None), Heard::Closed);
         assert_eq!(heard("NotificationClosed", 7, 9, None), Heard::Nothing, "another's close");
-        assert_eq!(heard("ActivationToken", 7, 7, Some(ASK_ACTION)), Heard::Nothing);
+        assert_eq!(heard("ActivationToken", 7, 7, Some("tok")), Heard::Token, "its own ask's token (finding 11)");
+        assert_eq!(heard("ActivationToken", 7, 8, Some("tok")), Heard::Nothing, "another's token");
+        assert_eq!(heard("ActivationToken", 7, 7, None), Heard::Nothing);
         let t = std::time::Instant::now();
         assert_eq!(give_up_at(t) - t, EXPIRES + std::time::Duration::from_secs(30));
     }

@@ -1034,7 +1034,7 @@ impl cosmic::Application for Settings {
             Message::AgentLoaded(r) => self.agent = r.into(),
             Message::OpenAgent => app::open_agent(),
             // Off the window's thread (step 5's second review): systemd-run is waited for, bounded.
-            Message::AskAgent(h) => return cosmic::task::future(async move { Message::AskedAgent(blocking(move || handoff::open_window(&h)).await) }),
+            Message::AskAgent(h) => return cosmic::task::future(async move { Message::AskedAgent(blocking(move || handoff::open_window(&h, None)).await) }),
             Message::AskedAgent(r) => {
                 if let Err(e) = r {
                     self.note = Some((e, true));

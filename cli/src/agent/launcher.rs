@@ -69,7 +69,8 @@ pub fn run() -> i32 {
         let Ok(line) = line else { break };
         let r = plugin.handle(&line);
         if let Some(h) = &r.open {
-            if let Err(e) = super::handoff::open_window(h) {
+            // pop-launcher gives its plugins no activation token.
+            if let Err(e) = super::handoff::open_window(h, None) {
                 eprintln!("torq-agent-launcher: {e:#}");
             }
         }

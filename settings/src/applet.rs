@@ -432,7 +432,7 @@ impl cosmic::Application for Applet {
             Message::AskAgent(alarm) => {
                 // Off the panel's thread (step 5's second review): systemd-run is waited for, bounded.
                 let h = torq::agent::handoff::About::Alarm(&alarm).handoff();
-                return cosmic::task::future(async move { Message::AskedAgent(blocking(move || torq::agent::handoff::open_window(&h)).await) });
+                return cosmic::task::future(async move { Message::AskedAgent(blocking(move || torq::agent::handoff::open_window(&h, None)).await) });
             }
             // The person pressed the button and nothing opened: said, as the applet's other failures are.
             Message::AskedAgent(outcome) => {

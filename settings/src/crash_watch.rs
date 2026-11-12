@@ -93,6 +93,7 @@ fn notify(c: &Crash, uid: u32) -> zbus::Result<()> {
             let member = signal.header().member().map(|m| m.to_string()).unwrap_or_default();
             let heard = match member.as_str() {
                 "ActionInvoked" => signal.body().deserialize::<(u32, String)>().ok().map(|(of, a)| (of, Some(a))),
+                "ActivationToken" => signal.body().deserialize::<(u32, String)>().ok().map(|(of, t)| (of, Some(t))),
                 "NotificationClosed" => signal.body().deserialize::<(u32, u32)>().ok().map(|(of, _)| (of, None)),
                 _ => None,
             };
@@ -103,6 +104,8 @@ fn notify(c: &Crash, uid: u32) -> zbus::Result<()> {
             }
         }
     });
+    // The compositor's token for the click, which the daemon sends just before its action (finding 11).
+    let mut token: Option<String> = None;
     loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok((member, of, action)) => match crash::heard(&member, id, of, action.as_deref()) {
@@ -110,7 +113,7 @@ fn notify(c: &Crash, uid: u32) -> zbus::Result<()> {
                 crash::Heard::Ask => {
                     // The person said so: only now is the crash read, and attached.
                     eprintln!("torq-crash-watch: asked about pid {}", c.pid);
-                    if let Err(e) = handoff::open_window(&c.handoff(c.info(uid).as_deref())) {
+                    if let Err(e) = handoff::open_window(&c.handoff(c.info(uid).as_deref()), token.as_deref()) {
                         // The person clicked and nothing opened: said to them, not only to the journal.
                         eprintln!("torq-crash-watch: opening the agent's window: {e:#}");
                         let none = std::collections::HashMap::<&str, zbus::zvariant::Value>::new();
@@ -121,6 +124,7 @@ fn notify(c: &Crash, uid: u32) -> zbus::Result<()> {
                     }
                     return Ok(());
                 }
+                crash::Heard::Token => token = action,
                 crash::Heard::Closed => return Ok(()),
                 crash::Heard::Nothing => {}
             },

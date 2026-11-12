@@ -58,10 +58,9 @@ Partly done in the WIP commit, untested:
 - (10) done: crash offers wait with a timeout (expiry + 30 s), so three unclosed notifications don't stop them for good; `heard()`/`give_up_at()` tested and mutation-checked; a failed open said to the person. The watcher's loop is type-checked only.
 
 Not started:
-- (11) a launch failure after `systemd-run` is silent (handoff.rs), and no activation token is passed.
+- (11) done: `--service-type=exec` makes a window that cannot start fail systemd-run, said where pressed; the activation token is passed from a crash notification's click (tested, mutation-checked); the applets', Settings' and the launcher's buttons pass none yet (KNOWN-GAPS 6zzn).
 - **Doc corrections:**
-  - In the ADR's step 4 fix note: "the programs started are waited for", and "with the
-    session's environment" (it is the user manager's).
+  - In the ADR's step 4 fix note: "the programs started are waited for" ("with the session's environment" is fixed, with finding 11).
   - Comments: crash.rs:1-3 (COREDUMP_UID) and agent_ui.rs:221.
   - Decline is offered more narrowly than the broker allows: not for a proposal wholly in the person's folder, and
     not to an administrator. Offer it where the broker allows, or say it is conservative; fix the comment on

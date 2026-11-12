@@ -2476,7 +2476,11 @@ vouches for, that only proposes, every change ledgered and undone in one command
   box, the launcher's question too, and the person asks; the question is one line of at most 200 characters (about the box's width), cut with "…", so what the person sends is what the box showed; whatever an entry point has more to say goes in what is attached, shown in full above the box (the second review of step 5: a 2 000-character question hid most of itself).
   The handoff file is opened without blocking and its type checked on the descriptor (a FIFO is refused at
   once). The window starts through `systemd-run --user --collect` (by absolute path, waited for): a unit of its
-  own with the session's environment, not in the crash watcher's or the launcher's control group, and no zombie;
+  own with the user manager's environment (not the caller's), not in the crash watcher's or the launcher's control group, and no
+  zombie; `--service-type=exec`, so a window that cannot be started fails systemd-run and is said where the button
+  was pressed (the launcher only logs it); the compositor's activation token is set in the unit where the entry point has one (a crash
+  notification's click; not yet the applets' and Settings' buttons, nor the launcher: KNOWN-GAPS 6zzn) (the
+  second review of step 5);
   the programs the applets and Settings start are waited for on a thread. Decline is offered only on the person's
   own agent's proposals (`Proposal.yours`: the ledger's `agent_for`), anyone else's being an administrator's, in
   torqcli. A proposal whose apply failed (it waits again) says "its apply failed once — apply it again, or
