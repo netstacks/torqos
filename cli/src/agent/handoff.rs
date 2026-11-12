@@ -191,6 +191,20 @@ mod tests {
         assert!(Handoff::new(&"q".repeat(MAX_QUESTION + 10), None).question.chars().count() <= MAX_QUESTION);
     }
 
+    /// A handed-over question is about one line of the window's box (200 characters), cut visibly, however long
+    /// the file that brought it: what the person sends is what they saw (the second review of step 5).
+    #[test]
+    fn a_handed_over_question_fits_the_box() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("torq-agent");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let file = dir.join("ask-long.json");
+        std::fs::write(&file, serde_json::to_string(&Handoff { question: "why ".repeat(500), context: None }).unwrap()).unwrap();
+        let q = take_from(&dir, &file, me()).unwrap().question;
+        assert!(q.chars().count() <= 200 && q.ends_with('…'), "{} characters", q.chars().count());
+    }
+
     /// Written 0600 in the person's directory and read back once; a file elsewhere, a link, someone else's or
     /// too large is refused.
     #[test]

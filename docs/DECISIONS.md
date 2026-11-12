@@ -2472,7 +2472,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
   default action, so clicking the notification's body asks nothing; offers are bounded (one program's repeats
   merged for 10 minutes, at most 3 open and 5 a minute, each expiring after 10 minutes). **Nothing is sent by
   itself:** `ask_now` is gone — any of the person's programs can write a handoff, so the window only fills its
-  box, the launcher's question too, and the person asks; the question is one line, so the box shows all of it.
+  box, the launcher's question too, and the person asks; the question is one line of at most 200 characters (about the box's width), cut with "…", so what the person sends is what the box showed; whatever an entry point has more to say goes in what is attached, shown in full above the box (the second review of step 5: a 2 000-character question hid most of itself).
   The handoff file is opened without blocking and its type checked on the descriptor (a FIFO is refused at
   once). The window starts through `systemd-run --user --collect` (by absolute path, waited for): a unit of its
   own with the session's environment, not in the crash watcher's or the launcher's control group, and no zombie;

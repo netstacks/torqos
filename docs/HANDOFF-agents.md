@@ -47,7 +47,7 @@ Done in `10f22cc`/`83d3fac`, unit-tested only:
 - (6) `machine::within` joins its readers by the deadline.
 
 Partly done in the WIP commit, untested:
-- (1) the handoff question is capped to what the one-line box shows. ADR-051 still says "the box shows all of it".
+- (1) done: the handoff question is capped at 200 characters, cut with "…", tested; ADR-051 says so.
 - (8) the crash entry is read by cursor or boot id, not by matching fields across boots.
 - (4) the apiKeyFile path is normalised, and its source is checked at unit start (root-owned, not readable by
   group or other).
