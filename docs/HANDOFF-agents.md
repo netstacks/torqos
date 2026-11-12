@@ -62,15 +62,14 @@ Not started:
 - **Doc corrections:** done (2026-11-12): ADR-051's step 4 note (the programs waited for, the environment,
   coredumpctl's matches); the comments in crash.rs and agent_ui.rs; Decline said to be narrower than the broker on
   purpose (`Proposal.yours`, 6zzn); 6zzo on what /proc still shows (cmdline and status, never a task's text).
-- **Test gaps,** each a mutation nobody would notice:
-  - `trusted_by`'s caller check (session.rs) and `who.resident_account &&` (serve.rs);
-  - `Broker::model_taint`'s real passwd and residents set, and `Broker::resident_of`;
-  - the 100 boundary exactly;
-  - the decline check's order in `schedule` (at.rs);
-  - window.rs's `p.yours` gates and the `Failed` arm;
-  - (crash.rs's `_TRANSPORT`, `.service` and COREDUMP_UID checks: done with finding 8, each with its own forged case;)
-  - (`notify()`'s id, key and deadline: done with finding 10, in `crash::heard` and `give_up_at`;)
-  - the model judged only at session start: re-judge it at apply, or say why the start is enough.
+- **Test gaps,** checked 2026-11-12 by breaking each guard and running the broker's suites:
+  - each is now noticed: `trusted_by`'s caller check (trust_applies_only_what_the_agent_itself_sent); the socket's
+    `resident_account` checks (the_resident_account_is_the_persons_one_agent, residency_takes_the_uid_and_the_unit);
+    `model_taint`'s real passwd (three tests); `resident_of` and the residents in the model's judgement
+    (the_brokers_model_judgement_and_its_residents); the 100 boundary, the decline check's order and the model
+    judged again at a trusted apply (the second review's commits); crash.rs's checks (finding 8); `notify()`'s
+    (finding 10);
+  - still not: window.rs's `p.yours` gates and its `Failed` arm (the settings crate has no tests).
 
 To finish the batch, settle the WIP's items, then re-run:
 - the cargo suites and agent-assertions;
