@@ -529,7 +529,7 @@ fn choices_of(s: &mut crate::session::Session<'_>, before: &str) -> Vec<Choice> 
     crate::complete::choices_at(&crate::complete::Know { schema: &s.schema, tree: &s.tree }, &at, &words, &partial)
 }
 
-/// Whether a line must go to a terminal: it has a person type a new secret, or opens their editor. A yes or no
+/// Whether a line must go to a terminal: it has a person type a new secret or prints one, or opens their editor. A yes or no
 /// is asked in the window, and an approval in COSMIC's own dialog (ADR-045 5), never a password in a window
 /// TorqOS draws.
 pub fn needs_terminal(mode: Mode, line: &str) -> bool {
@@ -537,6 +537,9 @@ pub fn needs_terminal(mode: Mode, line: &str) -> bool {
         use crate::syntax::{FileAction, LoadFrom, Op, Request};
         match op {
             Op::Request(Request::Password { .. } | Request::BackupKey { .. }) => true,
+            // A secret's value typed, or printed: never in the window. Its Secrets page takes one in masked fields, by
+            // another way (`secret_set`), and shows none (ADR-052 step 5).
+            Op::Request(Request::Secret { act: crate::secrets::Act::Set | crate::secrets::Act::Show, .. }) => true,
             Op::File { action: FileAction::Edit, .. } => true,
             Op::Load { from: LoadFrom::Terminal, .. } => true,
             Op::Run(op) => types(op),
@@ -596,6 +599,175 @@ pub fn terminal_script(mode: Mode, edit: &[String], line: &str) -> (String, bool
             (format!("configure; {}; {line}", self::line(&place)), true)
         }
         Mode::Operational => (line, false),
+    }
+}
+
+// ── The Secrets page: the list, and a value typed in the window (ADR-052 step 5) ──────────────────
+
+pub use torq_wire::secrets::{Approve, Kind};
+
+/// A secret as the Secrets page lists it: `show system secrets`' own reading (`secrets::listed`). Never its
+/// value: nothing that makes one of these has read it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Secret {
+    pub name: String,
+    /// Whose it is (None: the system's).
+    pub user: Option<String>,
+    /// What it is and what it may be used for, in the words `show system secrets` prints.
+    pub said: String,
+    pub has_value: bool,
+    /// What it is (None: it has no rule yet, so nothing has said).
+    pub kind: Option<Kind>,
+    /// The hosts it may be sent to in an HTTPS header.
+    pub https: Vec<String>,
+    /// The hosts it may sign for over SSH.
+    pub ssh: Vec<String>,
+    /// The agent may use it.
+    pub agent: bool,
+    /// When a person is asked before the agent uses it.
+    pub approve: Approve,
+}
+
+fn secret_of(l: crate::secrets::Listed) -> Secret {
+    let said = l.said();
+    let r = l.rule;
+    Secret {
+        name: l.name,
+        user: l.owner,
+        said,
+        has_value: l.has_value,
+        kind: r.as_ref().map(|r| r.kind),
+        https: r.as_ref().and_then(|r| r.https.as_ref()).map(|h| h.hosts.clone()).unwrap_or_default(),
+        ssh: r.as_ref().and_then(|r| r.ssh.as_ref()).map(|s| s.hosts.clone()).unwrap_or_default(),
+        agent: r.as_ref().is_some_and(|r| r.actors.iter().any(|a| a == torq_wire::secrets::AGENT)),
+        approve: r.map(|r| r.approve).unwrap_or_default(),
+    }
+}
+
+/// What `show system secrets` lists, each secret apart, and why each rules file that could not be read was not.
+pub fn secrets_status() -> Result<(Vec<Secret>, Vec<String>)> {
+    let cli = cli();
+    let kept = crate::shell::Real::new(&cli).kept_secrets(&crate::run::watch_log()?)?;
+    let (mut secrets, mut unread) = (Vec::new(), Vec::new());
+    for l in crate::secrets::listed(&crate::candidate::Repo::new(&cli.repo), &kept)? {
+        match l {
+            Ok(l) => secrets.push(secret_of(l)),
+            Err(why) => unread.push(why),
+        }
+    }
+    Ok((secrets, unread))
+}
+
+/// Before the window holds a secret's value: no other program of the same account can read it out of the
+/// window's memory, and a crash leaves no core with it, as torqcli is while it holds one (ADR-040; shell.rs).
+/// It stays so until the window is closed.
+pub fn secret_guard() -> Result<()> {
+    use anyhow::Context as _;
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable).context("protecting the value")
+}
+
+/// `request system secret set <name> [user <person>]`, its value typed twice in the window's masked fields
+/// rather than at a terminal. It goes to the broker as torqcli's own goes (`Real::keep_secret`): the request's own
+/// field, and no part of any command, argument, log or message. Who may set it is the broker's to say, as for
+/// torqcli: a person's own is theirs, the system's an administrator's, approved in the dialog. A refusal here
+/// repeats nothing that was typed, the name included (a value typed in the wrong field).
+pub fn secret_set(name: &str, user: Option<&str>, value: &str, again: &str) -> Result<String> {
+    crate::secrets::typed_ok(value, again)?;
+    if !torq_wire::secrets::name_ok(name) {
+        anyhow::bail!("not changed: that is not a secret's name (letters, digits, - and _)");
+    }
+    secret_guard()?;
+    let (cli, me, log) = (cli(), crate::me()?, crate::run::start_log()?);
+    let real = crate::shell::Real::new(&cli);
+    real.keep_secret(name, user, value, &me, &log)
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    const VALUE: &str = "ghp_window/Value+7=";
+
+    /// A stand-in for the broker: what it was run with, its environment and what the value's file held go to
+    /// `dir`, the value's file must be the caller's alone, and it answers as the broker would.
+    fn broker(dir: &std::path::Path, answer: &str) -> Cli {
+        let script = dir.join("broker.sh");
+        let d = dir.display();
+        std::fs::write(
+            &script,
+            format!("printf '%s\\n' \"$@\" > {d}/argv\nenv > {d}/env\nwhile [ $# -gt 0 ]; do [ \"$1\" = --value-file ] && f=$2; shift; done\n[ \"$(stat -c %a \"$f\")\" = 600 ] || exit 3\ncat \"$f\" > {d}/got\nprintf %s \"$f\" > {d}/file\necho 'the broker says on stderr' >&2\n{answer}\n"),
+        )
+        .unwrap();
+        Cli { repo: PathBuf::from(REPO), broker: format!("sh {}", script.display()) }
+    }
+
+    /// Rule 1 of the Secrets page: the value reaches the broker in its private file, and is nowhere else:
+    /// not an argument, not the environment, not the log, not what is said back, kept or refused.
+    #[test]
+    fn a_value_from_the_window_is_in_its_private_file_and_nowhere_else() {
+        for (answer, kept) in [("echo '{\"seq\":7}'", true), ("echo '{\"error\":\"not kept: the broker would not\"}'; exit 1", false)] {
+            let d = tempfile::tempdir().unwrap();
+            let cli = broker(d.path(), answer);
+            let log = d.path().join("last.log");
+            let said = crate::shell::Real::new(&cli).keep_secret("gh", Some("dev"), VALUE, "dev", &log);
+            let read = |f: &str| std::fs::read_to_string(d.path().join(f)).unwrap();
+            assert_eq!(read("got"), VALUE, "the broker is given the value, whole");
+            assert!(!std::path::Path::new(&read("file")).exists(), "its file is gone once the broker has answered");
+            let said = match (said, kept) {
+                (Ok(s), true) => {
+                    assert!(s.starts_with("The value of dev's secret gh is kept (ledger #7)"), "{s}");
+                    s
+                }
+                (Err(e), false) => {
+                    let e = format!("{e:#}");
+                    assert_eq!(e, "request system secret set gh refused: not kept: the broker would not");
+                    e
+                }
+                (other, _) => panic!("{other:?}"),
+            };
+            assert_eq!(read("argv").lines().take(5).collect::<Vec<_>>(), ["secret-set", "--name", "gh", "--user", "dev"]);
+            for (what, text) in [("what is said", said), ("the arguments", read("argv")), ("the environment", read("env")), ("the log", read("last.log"))] {
+                assert!(!text.contains(VALUE), "{what} holds the value: {text}");
+            }
+            assert!(read("last.log").contains("the broker says on stderr"), "the log is the one written to");
+        }
+    }
+
+    /// Refused before anything is sent or logged, in words that repeat nothing typed: no value, the two not the
+    /// same, a value larger than the broker keeps, and a name that is not one.
+    #[test]
+    fn what_the_window_refuses_says_nothing_that_was_typed() {
+        let long = "k".repeat(crate::secrets::VALUE_MAX + 1);
+        for (name, value, again, why) in [
+            ("gh", "", "", "not changed: no value"),
+            ("gh", VALUE, "ghp_window/Value+8=", "not changed: the two differ"),
+            ("gh", long.as_str(), long.as_str(), "not changed: a value is at most 16 KiB"),
+            (VALUE, "v", "v", "not changed: that is not a secret's name (letters, digits, - and _)"),
+            ("../gh", "v", "v", "not changed: that is not a secret's name (letters, digits, - and _)"),
+        ] {
+            assert_eq!(format!("{:#}", secret_set(name, Some("dev"), value, again).unwrap_err()), why);
+        }
+    }
+
+    /// The page's row is the list's own reading: its words, and the rule apart. Nothing in it is a value.
+    #[test]
+    fn a_listed_secret_as_the_page_has_it() {
+        use torq_wire::secrets::{Https, Rule, Ssh, AGENT};
+        let mut rule = Rule::new(Kind::Token);
+        rule.https = Some(Https { hosts: vec!["api.github.com".into(), "uploads.github.com".into()], header: "Authorization".into(), prefix: "Bearer ".into() });
+        rule.actors = vec![AGENT.into()];
+        rule.approve = Approve::Never;
+        let s = secret_of(crate::secrets::Listed { owner: Some("dev".into()), name: "gh".into(), has_value: true, rule: Some(rule) });
+        assert_eq!(s.said, "token, has a value; https to api.github.com, uploads.github.com; the agent too, approved never");
+        assert_eq!((s.name.as_str(), s.user.as_deref(), s.has_value, s.kind), ("gh", Some("dev"), true, Some(Kind::Token)));
+        assert_eq!((s.https, s.ssh, s.agent, s.approve), (vec!["api.github.com".to_string(), "uploads.github.com".to_string()], vec![], true, Approve::Never));
+        let mut rule = Rule::new(Kind::SshKey);
+        rule.ssh = Some(Ssh { hosts: vec!["github.com".into()], known: vec![] });
+        let s = secret_of(crate::secrets::Listed { owner: None, name: "deploy".into(), has_value: false, rule: Some(rule) });
+        assert_eq!((s.kind, s.https, s.ssh, s.agent, s.approve), (Some(Kind::SshKey), vec![], vec!["github.com".to_string()], false, Approve::FirstUse));
+        // A value with no rule yet: nothing says what it is.
+        let s = secret_of(crate::secrets::Listed { owner: None, name: "new".into(), has_value: true, rule: None });
+        assert_eq!((s.said.as_str(), s.kind, s.agent), ("has a value; used for nothing", None, false));
     }
 }
 
@@ -741,13 +913,13 @@ mod page_tests {
         for c in ["file edit a.nix", "load merge terminal", "run request system password", "top load set terminal"] {
             assert!(t(Mode::Configuration, c), "{c}");
         }
-        for c in ["request system password", "request system password sam", "request system backup key b"] {
+        for c in ["request system password", "request system password sam", "request system backup key b", "request system secret set gh", "request system secret set gh user sam", "request system secret show gh", "request system secret show gh user sam"] {
             assert!(t(Mode::Operational, c), "{c}");
         }
         for c in ["commit", "commit comment \"x\"", "commit confirmed 5", "commit at 12:00", "commit check", "set a b", "delete", "top delete", "rollback 1", "show | compare", "run request system repair"] {
             assert!(!t(Mode::Configuration, c), "{c}: asked in the window, approved in the dialog");
         }
-        for c in ["request system revert 5", "request system apply 5", "request system repair", "request system snapshot take", "clear system commit", "show system alarms", "request system update"] {
+        for c in ["request system revert 5", "request system apply 5", "request system repair", "request system snapshot take", "clear system commit", "show system alarms", "request system update", "request system secret set gh file key", "request system secret delete gh", "request system secret allow gh agent", "show system secrets"] {
             assert!(!t(Mode::Operational, c), "{c}");
         }
     }
@@ -839,7 +1011,7 @@ impl Told {
     }
 }
 
-/// TorqOS Settings, at a page (`VIEWS`' ids, or overview, configuration, changes, history, proposals, commands).
+/// TorqOS Settings, at a page (`VIEWS`' ids, or overview, configuration, changes, history, proposals, secrets, commands).
 pub fn open_settings(page: &str) {
     spawn("torq-settings", &[page]);
 }

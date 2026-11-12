@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use torq::app::{self, Action, App, At, Choice, Console, DeviceCode, GitHubToken, Glance, How, Machine, Mode, Needs, Proposal, Tool, Typed, View, VIEWS};
 use torq::history::Row;
 
+mod secrets;
+
 /// How many changes History shows.
 const HISTORY: usize = 200;
 /// The most rows a list or the tree shows: filtering narrows the rest.
@@ -35,6 +37,7 @@ enum Page {
     Proposals,
     Apps,
     Desktop,
+    Secrets,
     System,
     Commands,
 }
@@ -141,6 +144,7 @@ pub struct Settings {
     app_search: String,
     app_results: Option<Loaded<Vec<App>>>,
     desktop: Option<Loaded<app::DesktopStatus>>,
+    secrets: secrets::State,
     /// What is being installed, removed or remembered.
     app_work: Option<String>,
     /// Remembering what is installed: one at a time.
@@ -268,6 +272,7 @@ pub enum Message {
     DesktopSaved(Result<app::Synced, String>),
     DesktopSaving(app::Saving),
     DesktopSavingDone(Result<String, String>),
+    Secrets(secrets::Msg),
     ToolSearch(String),
     FindTool,
     ToolsFound(Result<String, String>),
@@ -323,6 +328,7 @@ impl cosmic::Application for Settings {
             "commands" => Page::Commands,
             "apps" => Page::Apps,
             "desktop" => Page::Desktop,
+            "secrets" => Page::Secrets,
             "backup" => Page::System,
             s if VIEWS.iter().any(|v| v.id == s) => Page::System,
             _ => Page::Overview,
@@ -333,6 +339,7 @@ impl cosmic::Application for Settings {
             ("Configuration", Page::Configuration, "preferences-system-symbolic"),
             ("Apps", Page::Apps, "system-software-install-symbolic"),
             ("Desktop", Page::Desktop, "preferences-desktop-wallpaper-symbolic"),
+            ("Secrets", Page::Secrets, "dialog-password-symbolic"),
             ("History", Page::History, "document-open-recent-symbolic"),
             ("Proposals", Page::Proposals, "mail-message-new-symbolic"),
             ("System", Page::System, "computer-symbolic"),
@@ -401,6 +408,7 @@ impl cosmic::Application for Settings {
             app_search: String::new(),
             app_results: None,
             desktop: None,
+            secrets: Default::default(),
             app_work: None,
             syncing: false,
             tool_search: String::new(),
@@ -912,6 +920,7 @@ impl cosmic::Application for Settings {
                 return self.load();
             }
 
+            Message::Secrets(m) => return self.secrets_update(m),
             Message::DesktopLoaded(r) => self.desktop = Some(r.into()),
             Message::DesktopSave => {
                 self.busy = Some("Saving your desktop".into());
@@ -1006,6 +1015,7 @@ impl cosmic::Application for Settings {
             Page::Configuration => self.configuration(),
             Page::Apps => self.apps_page(),
             Page::Desktop => self.desktop_page(),
+            Page::Secrets => self.secrets_page(),
             Page::History => match self.change {
                 Some(seq) => self.change_page(seq),
                 None => self.history(),
@@ -1095,6 +1105,7 @@ impl Settings {
                 Tab::Earlier => tasks.push(self.read(At::Read, COMMITS.into())),
             },
             Page::Desktop => tasks.push(cosmic::task::future(async { Message::DesktopLoaded(blocking(app::desktop_status).await) })),
+            Page::Secrets => tasks.push(secrets::load()),
             Page::Apps => {
                 tasks.push(cosmic::task::future(async { Message::Apps(blocking(app::installed_apps).await) }));
                 tasks.push(self.read(At::Read, ACTIVE.into()));

@@ -5,8 +5,8 @@ drive. M1–M2 built the base and the server face. M3–M5 build what the laptop
 each of them serves the server face too.
 
 Milestones and releases (2026-11-12): v0.2.0 = M2; v0.3.x = M3 and the agent's non-GUI half (M5's
-doctor, proposals and session trust); 0.4.0 = the desktop (M4) and secrets (ADR-052, command line
-only), its first candidate v0.4.0-rc1 published as a pre-release. The checkboxes below are the current record; a box is ticked only for what is built,
+doctor, proposals and session trust); 0.4.0 = the desktop (M4) and secrets (ADR-052; command line
+only in rc1, a Secrets page in TorqOS Settings after it), its first candidate v0.4.0-rc1 published as a pre-release. The checkboxes below are the current record; a box is ticked only for what is built,
 and a part not built has its own unticked line.
 
 ## Milestones (built on x86_64; development on the owner's laptop, full checks on a second machine, ADR-030)
@@ -299,8 +299,17 @@ acceptance tests, each a VM test.
       `torq-secrets` that uses a secret in an HTTPS request for a program that never reads it; SSH.
 - [ ] **Step 4**: approvals and taint (a person asked before the agent uses a secret; until then the
       agent may use only a secret that asks for no approval, from an untainted session).
-- [ ] **Step 5**: the Secrets page in TorqOS Settings. Deferred by the owner's decision (2026-11-11): secrets
-      stay command line only, the narrow store for the agent. Everyday passwords are for apps such as 1Password.
+- [x] **Step 5**: the Secrets page in TorqOS Settings (built 2026-11-12, after v0.4.0-rc1; deferred on
+      2026-11-11, reversed by the owner the next day). What the command line does and nothing more: the
+      secrets `show system secrets` lists, one a row to choose; for the one chosen, what it is allowed now and
+      each `request system secret` line as a button (allow, disallow, approve, and delete in two presses);
+      and a value typed twice in masked fields, sent to the broker as torqcli sends it and part of no command
+      or log. Not there: a value shown back, a value from a file (both stay a terminal's, and typed on the
+      window's Command Line page `set` and `show` open one), and the asking of step 4. Secrets stay the narrow
+      store for the agent and programs; everyday passwords are for apps such as 1Password. The page has no
+      test of its own (KNOWN-GAPS 6zzp to 6zzr); the `tests/secrets.nix` subtest for its way of keeping a
+      value, and the `tests/desktop.nix` check that a non-dumpable program still gets the approval dialog,
+      are written and not yet run.
 
 ## After 0.3.0: in the next cycle
 

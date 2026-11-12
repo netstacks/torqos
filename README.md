@@ -286,8 +286,11 @@ maintainers rather than in a public issue.
 | Later — owner-rooted boot security: the owner's Secure Boot keys, TPM2, disk encryption | ⬜ | Designed (ADR-033, [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md)); not built |
 
 Released: `v0.1.0` to `v0.3.2`, and `v0.4.0-rc1` as a pre-release: the desktop and secrets
-(ADR-052, which lets the agent use a token or key without being able to read it; command line only,
-and not a password manager).
+(ADR-052, which lets the agent use a token or key without being able to read it; not a password
+manager). In `v0.4.0-rc1` secrets are command line only. After it, TorqOS Settings has a Secrets page
+that does what `request system secret …` does: it lists the secrets, changes what each may be used
+for, deletes one, and takes a value typed twice in masked fields. It never shows a value, does not
+read one from a file (both stay in a terminal), and a value pasted into it stays in the clipboard.
 The roadmap is [docs/ROADMAP.md](docs/ROADMAP.md); design decisions and their reasons are recorded as
 ADRs in [docs/DECISIONS.md](docs/DECISIONS.md).
 

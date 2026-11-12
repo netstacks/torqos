@@ -35,7 +35,9 @@ laptop; leave both off unless you want them.
 
 **TorqOS Settings** is `torqcli` in a COSMIC window, in the application menu. It shows the
 configuration tree, your candidate, commits, the history, rollback, changes waiting for you to
-approve, alarms and backups. It talks to the same broker as the command line and offers only
+approve, alarms and backups, and, after 0.4.0-rc1, the
+[secrets](../reference/security.md#secrets-for-the-agent-and-programs) that programs and the agent
+use (never their values). It talks to the same broker as the command line and offers only
 things the command line can do, so anything you do there is the same change as the matching
 `torqcli` command, in the same ledger.
 

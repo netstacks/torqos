@@ -225,6 +225,26 @@ pub fn changed(machine: &dyn Machine, repo: &Repo, name: &str, user: Option<&str
 /// The largest value the broker keeps (broker/src/secrets.rs): a file larger is not read.
 pub const VALUE_MAX: usize = 16 * 1024;
 
+/// Why `value` is not one to send to the broker, if it is not. What was given is never repeated in the refusal:
+/// a refusal is shown, and may be logged.
+pub fn value_ok(value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("not changed: no value");
+    }
+    if value.len() > VALUE_MAX {
+        bail!("not changed: a value is at most {} KiB", VALUE_MAX / 1024);
+    }
+    Ok(())
+}
+
+/// `value_ok`, for a value typed twice where it cannot be seen (TorqOS Settings' masked fields).
+pub fn typed_ok(value: &str, again: &str) -> Result<()> {
+    if value != again {
+        bail!("not changed: the two differ");
+    }
+    value_ok(value)
+}
+
 /// A secret that has a value, as the broker lists them (None: the system's).
 pub type Kept = (Option<String>, String);
 
@@ -240,8 +260,43 @@ pub fn people_with_rules(repo: &Repo, rev: &str) -> Result<Vec<String>> {
     Ok(people)
 }
 
-/// `show system secrets`: each secret, whose, whether it has a value, and what it may be used for.
-pub fn shown(repo: &Repo, kept: &[Kept]) -> Result<String> {
+/// A secret as `show system secrets` lists it: whose, whether it has a value, and its rule. Never the value:
+/// nothing that makes one of these has read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    /// Whose it is (None: the system's).
+    pub owner: Option<String>,
+    pub name: String,
+    pub has_value: bool,
+    /// What it may be used for, and by whom (None: nothing yet).
+    pub rule: Option<Rule>,
+}
+
+impl Listed {
+    /// What it is and what it may be used for, in the list's words.
+    pub fn said(&self) -> String {
+        let value = if self.has_value { "has a value" } else { "no value yet" };
+        let Some(r) = &self.rule else { return format!("{value}; used for nothing") };
+        let kind = match r.kind {
+            Kind::Token => "token",
+            Kind::SshKey => "SSH key",
+        };
+        let mut uses = Vec::new();
+        if let Some(h) = &r.https {
+            uses.push(format!("https to {}", h.hosts.join(", ")));
+        }
+        if let Some(s) = &r.ssh {
+            uses.push(format!("ssh to {}", s.hosts.join(", ")));
+        }
+        let who = if r.actors.iter().any(|a| a == w::AGENT) { format!("the agent too, approved {}", r.approve.word()) } else { "not the agent".to_string() };
+        let uses = if uses.is_empty() { "used for nothing".to_string() } else { uses.join("; ") };
+        format!("{kind}, {value}; {uses}; {who}")
+    }
+}
+
+/// Every secret, the system's first, then each person's by name. A rules file that cannot be read is said (Err)
+/// where its secrets would come, and those of its secrets that have a value are still listed.
+pub fn listed(repo: &Repo, kept: &[Kept]) -> Result<Vec<Result<Listed, String>>> {
     let head = repo.head()?;
     let mut owners: Vec<Option<String>> = vec![None];
     let mut people = people_with_rules(repo, &head)?;
@@ -249,52 +304,48 @@ pub fn shown(repo: &Repo, kept: &[Kept]) -> Result<String> {
     people.sort();
     people.dedup();
     owners.extend(people.into_iter().map(Some));
-    let mut out = String::new();
+    let mut out = Vec::new();
     for owner in owners {
-        let rules = match read(repo, &head, owner.as_deref()) {
+        let mut rules = match read(repo, &head, owner.as_deref()) {
             Ok(r) => r,
             Err(e) => {
-                out.push_str(&format!("! {e:#}\n"));
+                out.push(Err(format!("{e:#}")));
                 Rules::new()
             }
         };
-        let mut names: Vec<&String> = rules.keys().collect();
         let valued: Vec<&String> = kept.iter().filter(|(u, _)| *u == owner).map(|(_, n)| n).collect();
-        names.extend(valued.iter().copied());
+        let mut names: Vec<String> = rules.keys().chain(valued.iter().copied()).cloned().collect();
         names.sort();
         names.dedup();
-        if names.is_empty() {
-            continue;
-        }
-        out.push_str(&match &owner {
-            None => "The system's secrets:\n".to_string(),
-            Some(u) => format!("{u}'s secrets:\n"),
-        });
-        for n in names {
-            let value = if valued.contains(&n) { "has a value" } else { "no value yet" };
-            let Some(r) = rules.get(n) else {
-                out.push_str(&format!("  {n:<20} {value}; used for nothing\n"));
+        out.extend(names.into_iter().map(|name| Ok(Listed { owner: owner.clone(), has_value: valued.contains(&&name), rule: rules.remove(&name), name })));
+    }
+    Ok(out)
+}
+
+/// `show system secrets`: each secret, whose, whether it has a value, and what it may be used for.
+pub fn shown(repo: &Repo, kept: &[Kept]) -> Result<String> {
+    let mut out = String::new();
+    let mut headed: Option<Option<String>> = None;
+    for l in listed(repo, kept)? {
+        let l = match l {
+            Ok(l) => l,
+            Err(e) => {
+                out.push_str(&format!("! {e}\n"));
                 continue;
-            };
-            let kind = match r.kind {
-                Kind::Token => "token",
-                Kind::SshKey => "SSH key",
-            };
-            let mut uses = Vec::new();
-            if let Some(h) = &r.https {
-                uses.push(format!("https to {}", h.hosts.join(", ")));
             }
-            if let Some(s) = &r.ssh {
-                uses.push(format!("ssh to {}", s.hosts.join(", ")));
-            }
-            let who = if r.actors.iter().any(|a| a == w::AGENT) { format!("the agent too, approved {}", r.approve.word()) } else { "not the agent".to_string() };
-            let uses = if uses.is_empty() { "used for nothing".to_string() } else { uses.join("; ") };
-            out.push_str(&format!("  {n:<20} {kind}, {value}; {uses}; {who}\n"));
-            // Where a program sends its request for each host (ADR-052): the daemon puts the secret in.
-            for h in r.https.iter().flat_map(|x| x.hosts.iter()) {
-                let whose = owner.as_ref().map_or_else(|| "system".to_string(), |u| format!("user/{u}"));
-                out.push_str(&format!("  {:<20} use: http://127.0.0.1:{}/{whose}/{n}/{h}/\n", "", w::PORT));
-            }
+        };
+        if headed.as_ref() != Some(&l.owner) {
+            out.push_str(&match &l.owner {
+                None => "The system's secrets:\n".to_string(),
+                Some(u) => format!("{u}'s secrets:\n"),
+            });
+            headed = Some(l.owner.clone());
+        }
+        out.push_str(&format!("  {:<20} {}\n", l.name, l.said()));
+        // Where a program sends its request for each host (ADR-052): the daemon puts the secret in.
+        for h in l.rule.iter().flat_map(|r| r.https.iter()).flat_map(|x| x.hosts.iter()) {
+            let whose = l.owner.as_ref().map_or_else(|| "system".to_string(), |u| format!("user/{u}"));
+            out.push_str(&format!("  {:<20} use: http://127.0.0.1:{}/{whose}/{}/{h}/\n", "", w::PORT, l.name));
         }
     }
     if out.is_empty() {
@@ -355,6 +406,23 @@ mod tests {
         assert!(r["gh"].actors.is_empty());
         edit(&mut r, "gh", &Act::Delete).unwrap();
         assert!(r.is_empty());
+    }
+
+    /// What is refused before anything is sent, and that no refusal repeats what was typed.
+    #[test]
+    fn a_value_typed_twice_is_refused_in_words_that_do_not_repeat_it() {
+        let long = "k".repeat(VALUE_MAX + 1);
+        for (value, again, why) in [
+            ("", "", "not changed: no value"),
+            (" \t", " \t", "not changed: no value"),
+            ("hunter2-token", "hunter2-tokem", "not changed: the two differ"),
+            ("hunter2-token", "", "not changed: the two differ"),
+            (long.as_str(), long.as_str(), "not changed: a value is at most 16 KiB"),
+        ] {
+            assert_eq!(typed_ok(value, again).unwrap_err().to_string(), why);
+        }
+        typed_ok("hunter2-token", "hunter2-token").unwrap();
+        typed_ok(&long[1..], &long[1..]).unwrap();
     }
 
     #[test]

@@ -491,6 +491,46 @@ Its §5 lists claims without a test.
    silent (2026-11-12), nor are settings it could not put on the desktop or apps it could not bring back: the
    applet says why in a notification, once for each reason (again after a try worked),
    and in its popup until a try works.
+6zzp. **A value typed on the Secrets page is not wiped from the window's memory** (ADR-052 step 5, 2026-11-12;
+   open). The page empties both fields when Keep is pressed and drops its two strings when the broker has
+   answered, and the window is non-dumpable from the first thing a person does on the page (no core, no reading
+   by another program of the same account). But nothing is overwritten: each keystroke makes a new string and
+   frees the old one, COSMIC's text field keeps its own copy of what it shows until it is next drawn empty, and
+   the value passes through a private file in memory (the runtime directory, which can be swapped out where
+   there is swap) and the request's line, as torqcli's does. There is no zeroing string type in the code, and
+   none was added. Root, and a debugger root runs, can read all of it, as ADR-035 says of root.
+6zzq. **A value pasted into the Secrets page stays in the clipboard** (2026-11-12; open, said on the page and
+   in the user guide). Every program of the person's session can read the clipboard, a clipboard manager
+   keeps its history, and the page does not clear it (it would clear whatever else the person copied since).
+   Nothing can be copied or cut out of the masked fields.
+6zzr. **The Secrets page itself has no test, and has not been tried on a desktop** (2026-11-12; open). What it
+   calls is tested in torqcli (`app::secret_tests`, `secrets::tests`, the session's list test); the page's own
+   wiring is not: that the fields are masked, that both empty at Keep, that the window is non-dumpable by then,
+   that a row chosen is the secret acted on, that Delete waits for its second press. Nothing drives the window
+   in `tests/desktop.nix`. The page has no file chooser (`set <name> file <path>` stays a terminal's).
+   **The non-dumpable window and the approval dialog**, as read and measured on 2026-11-12, not yet seen end
+   to end. Once the page is used the window is non-dumpable until it is closed, so every later approval it
+   asks is about such a process.
+   - *The broker* (`broker/src/serve.rs`) takes the caller's pid and uid from the socket (`SO_PEERCRED`), no
+     pidfd. `desktop_caller` checks that `/proc/<pid>` is owned by that uid and reads `/proc/<pid>/cgroup`;
+     `approve_in_dialog` reads the start time from `/proc/<pid>/stat` and runs `pkcheck --process
+     <pid>,<start>,<uid>`. It reads as root.
+   - *The kernel* (measured on the laptop, Linux 6.18, with `ssh-agent`, which is non-dumpable, beside a `sleep`):
+     the folder `/proc/<pid>` stays the person's, so the broker's owner check holds; `stat`, `status`, `cgroup`
+     and `cmdline` become root's and stay readable by everyone (444), with the same contents; `environ` and the
+     `exe` link can no longer be read by the person's other programs, which is the point.
+   - *polkit 127*: its library names `/proc/<pid>/stat`, `status` and `cgroup`, and polkitd `/proc/<pid>/cmdline`
+     (the paths in the binaries; its source was not on the machine). Asked without interaction about the
+     non-dumpable process and about the ordinary one (`pkcheck --action-id org.torqos.approve --process …`), it
+     answered the same for both: the action needs the person's authentication.
+   - *COSMIC's agent* (cosmic-osd 1.11.0): its binary names no path in `/proc` but its own (`/proc/self/…`). It
+     is given the action, the message and who may answer by polkit, and reads nothing of the subject.
+   So nothing read on the way to the dialog is closed by non-dumpable. What was not done is the dialog itself
+   for such a process: `tests/desktop.nix` now has that check (the page's own call, from a program of the
+   session that is non-dumpable when the broker asks, setting a system secret, approved in the dialog),
+   **written and not yet run**, as is the `tests/secrets.nix` subtest for the same call. Not looked at: what
+   else in a desktop session reads another program's `/proc` files that non-dumpable closes (`exe`, `root`,
+   `environ`, `fd`), a portal identifying the window for one.
 
 ## Dev host quirks (not TorqOS bugs)
 - **ESXi must expose nested virtualisation** or there is no `/dev/kvm`, and every NixOS VM test
