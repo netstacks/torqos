@@ -535,9 +535,9 @@ fn settings(n: usize) -> String {
 /// For `show system desktop` and TorqOS Settings: what saving by itself holds back, and why, in a sentence.
 pub fn waiting(keys: &[String]) -> Option<String> {
     (!keys.is_empty()).then(|| {
-        let (keeps, by, it) = if keys.len() == 1 { ("keeps", "itself", "it") } else { ("keep", "themselves", "each") };
+        let (keeps, by, it, them) = if keys.len() == 1 { ("keeps", "itself", "it", "it") } else { ("keep", "themselves", "each", "them") };
         format!(
-            "Waiting: {} ({}) {keeps} changing by {by}, so {it} is saved once it holds still; request system desktop save saves it now.",
+            "Waiting: {} ({}) {keeps} changing by {by}, so {it} is saved once it holds still; request system desktop save saves {them} now.",
             what(keys.iter().cloned()),
             settings(keys.len())
         )
