@@ -137,7 +137,15 @@ impl Settings {
                 }
                 s.list = r.into();
             }
-            Msg::Choose(w) => s.chosen = w,
+            Msg::Choose(w) => {
+                // Another secret: what was typed was for the one before. Left in the masked fields, where it
+                // cannot be seen, a value meant for one secret could be kept on another; a host likewise.
+                if s.chosen != w {
+                    drop((std::mem::take(&mut s.value), std::mem::take(&mut s.again)));
+                    s.host.clear();
+                    s.chosen = w;
+                }
+            }
             Msg::Name(n) => s.name = n,
             Msg::Mine(on) => s.mine = on,
             Msg::Host(h) => s.host = h,
