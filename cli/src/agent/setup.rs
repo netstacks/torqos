@@ -168,7 +168,27 @@ pub fn service_running(me: &str) -> bool {
 /// What `c` prints, if it ends well within `limit`; killed, and nothing, if not.
 pub(crate) fn output_within(mut c: std::process::Command, limit: std::time::Duration) -> Option<String> {
     use std::io::Read;
+    const KEPT: usize = 64 * 1024;
     let mut child = c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
+    // Read while it runs (the review of the rebased branch, B7): output past a pipe's size would block it until the
+    // limit. The first KEPT bytes kept, the rest read and dropped.
+    let mut stdout = child.stdout.take()?;
+    let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (ended, read_all) = std::sync::mpsc::channel::<()>();
+    let into = kept.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = stdout.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            let mut k = into.lock().unwrap_or_else(|p| p.into_inner());
+            let room = KEPT.saturating_sub(k.len());
+            k.extend_from_slice(&buf[..n.min(room)]);
+        }
+        // Its receiver may have stopped waiting: nothing is left to tell.
+        let _ = ended.send(());
+    });
     let deadline = std::time::Instant::now() + limit;
     let status = loop {
         match child.try_wait() {
@@ -181,9 +201,11 @@ pub(crate) fn output_within(mut c: std::process::Command, limit: std::time::Dura
             }
         }
     };
-    let mut out = String::new();
-    child.stdout.take()?.take(64 * 1024).read_to_string(&mut out).ok()?;
-    status.success().then_some(out)
+    // Its output ends with it, unless something it left holds the pipe open: then, after a moment, what was read
+    // by then is its output (a timeout here says only that).
+    let _ = read_all.recv_timeout(std::time::Duration::from_secs(2));
+    let out = kept.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    status.success().then(|| String::from_utf8_lossy(&out).into_owned())
 }
 
 #[cfg(test)]
@@ -240,5 +262,28 @@ mod tests {
         let mut failed = std::process::Command::new("sh");
         failed.args(["-c", "echo active; exit 1"]);
         assert_eq!(output_within(failed, std::time::Duration::from_secs(5)), None);
+    }
+
+    /// Output past what a pipe holds is read while the program runs (the review of the rebased branch, B7): a crash
+    /// summary over 64 KiB was never read, the program blocked writing it until the time limit. Kept up to 64 KiB,
+    /// the rest read and dropped; not UTF-8, read as it can be.
+    #[test]
+    fn a_long_output_is_read_while_it_runs() {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", "head -c 300000 /dev/zero | tr '\\0' a; printf '\\377'"]);
+        let t = std::time::Instant::now();
+        let out = output_within(c, std::time::Duration::from_secs(10)).expect("read, not timed out");
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+        assert_eq!(out.len(), 64 * 1024);
+        assert!(out.bytes().all(|b| b == b'a'));
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", "printf 'ok \\377'"]);
+        assert_eq!(output_within(c, std::time::Duration::from_secs(10)).as_deref(), Some("ok \u{fffd}"));
+        // Something it leaves holding the pipe does not keep it waiting past a moment.
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", "echo left; sleep 30 &"]);
+        let t = std::time::Instant::now();
+        assert_eq!(output_within(c, std::time::Duration::from_secs(10)).as_deref(), Some("left\n"));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
     }
 }
