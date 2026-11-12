@@ -74,7 +74,9 @@ For the second, `request system desktop save` first, then undo.
   refuses them if anything tries to save them. Their settings stay where they are, in your home.
 - Settings that belong to the machine rather than to you (which display the panel is on, when the
   machine sleeps) are left out, and so is what COSMIC writes by itself (the screenshot tool's last
-  area). A save happens only when you changed something.
+  area). A save happens only when you changed something. A setting that keeps changing at every
+  check (three in a row) waits until it holds still, so a program rewriting one of COSMIC's settings
+  by itself cannot commit every 15 minutes; `request system desktop save` saves it at any time.
 
 !!! warning "What is saved is readable by every account"
     The configuration repository can be read by every account on the machine, and by a remote if you

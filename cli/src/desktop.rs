@@ -200,6 +200,32 @@ pub fn plan(saved: &BTreeMap<String, String>, applied: &BTreeMap<String, String>
     p
 }
 
+/// A setting changed at this many syncs in a row is changing by itself (a program's own state, KNOWN-GAPS 6zx), not
+/// by the person: saving it each time would commit every 15 minutes for good. It waits until it holds still for
+/// one sync, or until the person saves by hand.
+const RESTLESS: u32 = 3;
+
+/// Each setting changed at the last sync: its value then, and at how many syncs in a row it had changed.
+type Churn = BTreeMap<String, (Option<String>, u32)>;
+
+/// Each setting to save, with its value and at how many syncs in a row it changed, counted on from the last sync's
+/// `churn`; and those to hold back. One that held still since the last sync starts again from nothing.
+fn restless(churn: &Churn, save: &BTreeMap<String, Option<String>>) -> (Churn, BTreeSet<String>) {
+    let now: Churn = save
+        .iter()
+        .map(|(k, v)| {
+            let n = match churn.get(k) {
+                Some((last, n)) if last != v => n + 1,
+                Some(_) => 0,
+                None => 1,
+            };
+            (k.clone(), (v.clone(), n))
+        })
+        .collect();
+    let held = now.iter().filter(|(_, (_, n))| *n >= RESTLESS).map(|(k, _)| k.clone()).collect();
+    (now, held)
+}
+
 /// What the two agree on afterwards; where they still differ (a change not saved), what they last agreed.
 fn agreed(saved: &BTreeMap<String, String>, local: &BTreeMap<String, String>, before: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     let keys: BTreeSet<&String> = saved.keys().chain(local.keys()).chain(before.keys()).collect();
@@ -371,7 +397,17 @@ fn sync_by(repo: &Repo, me: &str, paths: &Paths, save_now: bool, save: &mut dyn 
     saved.cosmic.retain(|k, _| keepable(k));
     before.retain(|k, _| keepable(k));
     let here = local(&paths.cosmic);
-    let p = plan(&saved.cosmic, &before, &here.values, |k| here.manages(k));
+    let mut p = plan(&saved.cosmic, &before, &here.values, |k| here.manages(k));
+    // Saving by itself, a setting that keeps changing by itself waits (`RESTLESS`); Save now takes it all.
+    let churn_path = paths.state.with_file_name("desktop-restless.json");
+    let (churn, held) = if !save_now && saved.save == Saving::Automatic {
+        let last = std::fs::read(&churn_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let (churn, held) = restless(&last, &p.save);
+        p.save.retain(|k, _| !held.contains(k));
+        (Some(churn), held)
+    } else {
+        (None, BTreeSet::new())
+    };
     let mut out = Synced { failed: apply(&paths.cosmic, &p.apply), ..Synced::default() };
     out.applied = p.apply.len() - out.failed.len();
     let mut values = here.values.clone();
@@ -401,8 +437,12 @@ fn sync_by(repo: &Repo, me: &str, paths: &Paths, save_now: bool, save: &mut dyn 
     } else {
         out.unsaved = p.save.len();
     }
+    out.unsaved += held.len();
     let state = agreed(&now.cosmic, &values, &before);
     write_atomically(&paths.state, &serde_json::to_vec(&state)?)?;
+    if let Some(churn) = churn {
+        write_atomically(&churn_path, &serde_json::to_vec(&churn)?)?;
+    }
     Ok(out)
 }
 
@@ -738,5 +778,56 @@ mod tests {
         sync_by(&repo, "dev", &paths, false, &mut save).unwrap();
         assert_eq!(saves.borrow().last().unwrap().0, "Desktop: panel");
         assert_eq!(saves.borrow().len(), 2);
+    }
+
+    /// KNOWN-GAPS 6zx's backstop: a COSMIC setting not on `programs_own` that a program rewrites at every sync is
+    /// saved twice, then waits; it is saved once it holds still, and Save now takes it at any time.
+    #[test]
+    fn a_setting_that_changes_by_itself_at_every_sync_stops_being_saved_by_itself() {
+        let d = tempfile::tempdir().unwrap();
+        let (root, home) = (d.path().join("config"), d.path().join("home"));
+        std::fs::create_dir_all(root.join("users/dev")).unwrap();
+        let old = Saved { save: Saving::Automatic, cosmic: map(&[(K, "M")]) };
+        std::fs::write(root.join("users/dev/desktop.json"), old.render().unwrap()).unwrap();
+        sh(&root, "git init -q -b main && git config user.name t && git config user.email t@t && git add -A && git commit -qm one");
+        let paths = Paths { cosmic: home.join("cosmic"), state: home.join("state/desktop-applied.json") };
+        let w = |k: &str, v: &str| write_atomically(&paths.cosmic.join(k), v.as_bytes()).unwrap();
+        const TAB: &str = "com.system76.CosmicFiles/v1/tab";
+        w(K, "M");
+        let repo = Repo::new(&root);
+        let saves = std::cell::RefCell::new(vec![]);
+        let mut save = |_: Option<&[u8]>, new: &Saved, reason: &str| -> Result<u64> {
+            std::fs::write(root.join("users/dev/desktop.json"), new.render()?)?;
+            sh(&root, "git commit -qam save");
+            saves.borrow_mut().push(reason.to_string());
+            Ok(saves.borrow().len() as u64)
+        };
+        let mut sync = |v: &str, now: bool| {
+            w(TAB, v);
+            sync_by(&repo, "dev", &paths, now, &mut save).unwrap()
+        };
+        assert!(sync("1", false).saved.is_some());
+        assert!(sync("2", false).saved.is_some());
+        // The third change in a row: held, and counted as not saved yet.
+        for v in ["3", "4", "5"] {
+            let s = sync(v, false);
+            assert_eq!((s.saved, s.unsaved), (None, 1), "{v}");
+        }
+        drop(sync);
+        assert_eq!(saves.borrow().len(), 2);
+        // Still since the last sync: saved, and the count starts again.
+        let s = sync_by(&repo, "dev", &paths, false, &mut save).unwrap();
+        assert!(s.saved.is_some(), "{s:?}");
+        let mut sync = |v: &str, now: bool| {
+            w(TAB, v);
+            sync_by(&repo, "dev", &paths, now, &mut save).unwrap()
+        };
+        assert!(sync("6", false).saved.is_some());
+        assert!(sync("7", false).saved.is_some());
+        assert!(sync("8", false).saved.is_none());
+        // Save now, whatever it does by itself.
+        assert!(sync("9", true).saved.is_some());
+        drop(sync);
+        assert_eq!(saves.borrow().len(), 6);
     }
 }

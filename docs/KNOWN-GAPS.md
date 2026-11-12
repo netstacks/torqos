@@ -403,8 +403,12 @@ Its §5 lists claims without a test.
    display (`com.system76.CosmicPortal/v1/screenshot`) was found. Candidates to watch, not seen changing by
    themselves there: `CosmicTheme.Mode/v1/is_dark` when the theme switches with the time of day,
    `CosmicFiles/v1/tab`, `CosmicAudio`. A COSMIC release that starts rewriting another of its settings by
-   itself brings the repeated saves back for that setting until it goes on the list; a backstop (stop saving a
-   setting by itself after it changed at several syncs in a row) is for later. The history's label names what
+   itself no longer commits every 15 minutes for good (the backstop, 2026-11-12, `desktop::RESTLESS`, test
+   `a_setting_that_changes_by_itself_at_every_sync_stops_being_saved_by_itself`): saving by itself, a setting
+   that changed at three syncs in a row waits, and is saved at the first sync it has held still since (or at
+   Save now). Such a setting still costs two saves each time it starts changing again, and a person's own
+   setting changed at three syncs in a row (an hour of rearranging the panel) waits too, until it settles. What
+   waits is counted in `~/.local/state/torq/desktop-restless.json`, and shown as not saved yet. The history's label names what
    changed and what was taken out ("Desktop: panel; other programs' settings taken out …"), never "Desktop:
    com". Old entries are not pruned: the ledger and the repository only grow, by design.
 6zy. ~~**The desktop save copied third-party applets' settings into the configuration repository.**~~ Fixed
