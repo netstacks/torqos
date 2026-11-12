@@ -568,25 +568,31 @@ impl Machine for Real<'_> {
 
     fn decline_proposal(&self, seq: u64, me: &str) -> Result<String> {
         let entries = crate::read_ledger(self.cli)?;
-        let Some(p) = history::waiting_proposals(&entries).into_iter().find(|e| e.seq == seq) else {
+        if !history::waiting_proposals(&entries).iter().any(|e| e.seq == seq) {
             bail!("#{seq} is not a proposal waiting (show system proposals lists them)");
-        };
-        let by = p.data["caller"].as_str().unwrap_or(&p.actor);
-        let files: Vec<String> = p.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(|f| history::one_line(f, 80)).collect();
+        }
+        let log = run::start_log()?;
+        let seq_s = seq.to_string();
+        // Shown as Apply shows it: what the change does, as the broker had git write it, not only the proposer's own
+        // words (the review of the rebased branch, C14).
+        let p = done(run::broker_json(broker(self.cli, &["show", &seq_s])?, &log)?, "decline")?;
+        let by = p["data"]["caller"].as_str().or(p["actor"].as_str()).unwrap_or("?");
+        let files: Vec<String> = p["data"]["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(|f| history::one_line(f, 80)).collect();
+        let effect = p["data"]["effect"].as_str().or(p["data"]["diff"].as_str()).unwrap_or("(what it changes was not recorded)");
+        let diff: String = effect.lines().map(|l| format!("  {}\n", history::clean(l))).collect();
         let what = format!(
-            "Proposal #{seq} \"{}\" (by {}), to {}: declined, it is never applied — the proposer may propose it again.\n",
-            history::one_line(&p.reason, 60),
+            "Proposal #{seq} \"{}\" (by {})\n  files: {}\n{diff}Declined, it is never applied; the proposer may propose it again.\n",
+            history::one_line(p["reason"].as_str().unwrap_or_default(), 60),
             history::one_line(by, 30),
             files.join(", "),
         );
         if let Some(stop) = self.ask(&format!("{what}Decline? ")).go_on("declined")? {
             return Ok(stop);
         }
-        let log = run::start_log()?;
-        let seq_s = seq.to_string();
         let v = done(run::broker_json(broker(self.cli, &["decline", &seq_s, "--approved-by", me])?, &log)?, "decline")?;
         let cancelled = v["data"]["cancelled"].as_u64().map(|c| format!("; the commit scheduled for it is cancelled (#{c})")).unwrap_or_default();
-        Ok(format!("declined proposal #{seq} (#{}){cancelled}\n", v["seq"].as_u64().unwrap_or(0)))
+        let entry = v["seq"].as_u64().map(|e| format!(" (#{e})")).unwrap_or_default();
+        Ok(format!("declined proposal #{seq}{entry}{cancelled}\n"))
     }
 
     fn apply_proposal(&self, seq: u64, me: &str) -> Result<String> {
