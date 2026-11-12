@@ -2466,8 +2466,9 @@ vouches for, that only proposes, every change ledgered and undone in one command
   it — its unit (`systemd-coredump@….service`, from the sender's control group) in `system-systemd\x2dcoredump.slice`,
   `_UID` the person's (systemd-coredump drops to the crashed process's owner before it logs: `_UID=0` would refuse
   every real crash), `_TRANSPORT=journal` — since `COREDUMP_UID` and the rest are anyone's to write
-  (`logger --journald`); `coredumpctl info` then reads exactly that entry (`COREDUMP_PID`, `COREDUMP_UID` and
-  `_SYSTEMD_UNIT` together: a pid may be reused); the crash's question is fixed and the program's name only in
+  (`logger --journald`); `coredumpctl info` then reads that entry by matches, since it takes no cursor (`COREDUMP_PID`, `COREDUMP_UID`,
+  `_SYSTEMD_UNIT` and `_BOOT_ID` together: a pid may be reused, and a unit's name can come again on another boot;
+  the second review of step 5 added the boot); the crash's question is fixed and the program's name only in
   what is attached; the notification's body is escaped as markup; only its own action (`ask`, compared) asks — no
   default action, so clicking the notification's body asks nothing; offers are bounded (one program's repeats
   merged for 10 minutes, at most 3 open and 5 a minute, each expiring after 10 minutes). **Nothing is sent by

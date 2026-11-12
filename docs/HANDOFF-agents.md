@@ -48,7 +48,7 @@ Done in `10f22cc`/`83d3fac`, unit-tested only:
 
 Partly done in the WIP commit, untested:
 - (1) done: the handoff question is capped at 200 characters, cut with "…", tested; ADR-051 says so.
-- (8) the crash entry is read by cursor or boot id, not by matching fields across boots.
+- (8) done: the crash entry is read with its boot id too (coredumpctl takes no cursor), tested and mutation-checked.
 - (4) the apiKeyFile path is normalised, and its source is checked at unit start (root-owned, not readable by
   group or other).
 - (12) the Delegate assertion also covers the `torq-agent@` template. Its messages should say the uids are the
@@ -60,7 +60,7 @@ Partly done in the WIP commit, untested:
 Not started:
 - (11) a launch failure after `systemd-run` is silent (handoff.rs), and no activation token is passed.
 - **Doc corrections:**
-  - In the ADR's step 4 fix note: "reads exactly that entry", "the programs started are waited for", and "with the
+  - In the ADR's step 4 fix note: "the programs started are waited for", and "with the
     session's environment" (it is the user manager's).
   - Comments: crash.rs:1-3 (COREDUMP_UID) and agent_ui.rs:221.
   - Decline is offered more narrowly than the broker allows: not for a proposal wholly in the person's folder, and
@@ -73,7 +73,7 @@ Not started:
   - the 100 boundary exactly;
   - the decline check's order in `schedule` (at.rs);
   - window.rs's `p.yours` gates and the `Failed` arm;
-  - crash.rs's `_TRANSPORT`, `.service` and COREDUMP_UID checks, each with its own forged case;
+  - (crash.rs's `_TRANSPORT`, `.service` and COREDUMP_UID checks: done with finding 8, each with its own forged case;)
   - `notify()`'s id, key and deadline;
   - the model judged only at session start: re-judge it at apply, or say why the start is enough.
 

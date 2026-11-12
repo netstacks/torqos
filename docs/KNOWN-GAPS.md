@@ -1206,6 +1206,10 @@ Its §5 lists claims without a test.
    - **A crash's backtrace can hold anything the program had** (arguments, paths, a line of a file): it is
      attached only after the person's click, shown before it is sent, removable, and tainting; with a remote
      model it then leaves the machine, as anything the person asks does (ADR-051 2).
+   - **A crash is read back by matches, not by its journal cursor**: `coredumpctl info` takes none. The pid, its
+     owner, the systemd-coredump unit and the boot name one entry together: the unit is an instance of a socket-activated
+     service, named by that socket's count of connections since boot, so its name is not reused within a boot; the boot id (journald's own field)
+     tells two boots apart.
    - **Before cosmic-notifications owns its name**, another program of the person's could take
      `org.freedesktop.Notifications` on their session bus and so receive the crash offers and "click" them:
      only the person's own programs (the agent has no way to their session bus), and a click only fills the
