@@ -913,7 +913,7 @@ mod page_tests {
         read_line(mode, &words(c).unwrap()).unwrap_or_else(|e| panic!("`{c}` is not a command of torqcli: {e:#}"));
     }
 
-    /// Every action the window offers is a torqcli command (ADR-045 2): the grammar's own reading of it.
+    /// Why a proposal is tainted, said the same way everywhere (taint_line): what tainted it, the kinds of source apart.
     #[test]
     fn taint_said_plainly() {
         let s = |v: &[&str]| taint_line(&v.iter().map(|x| x.to_string()).collect::<Vec<_>>());
@@ -925,6 +925,7 @@ mod page_tests {
         assert!(m.starts_with("its model could have been stood in for") && !m.contains("untrusted content"), "{m}");
     }
 
+    /// Every action the window offers is a torqcli command (ADR-045 2): the grammar's own reading of it.
     #[test]
     fn everything_the_pages_offer_is_a_command() {
         let check = |a: &Action| match a.how {
@@ -1038,7 +1039,6 @@ pub struct Proposal {
     /// `agent_for`). Narrower than the broker on purpose: it also lets a person decline, with no password, a proposal
     /// wholly in their own folder, and an administrator anyone's with their password; those are torqcli's
     /// (`request system decline <n>`), as is any other choice the buttons do not offer (KNOWN-GAPS 6zzn).
-    /// ledger's `agent_for`). Decline is offered only then; anyone else's an administrator declines in torqcli.
     pub yours: bool,
 }
 
@@ -1054,12 +1054,13 @@ pub fn agent_fates(seqs: &[u64]) -> Result<Vec<(u64, crate::agent::conversation:
 
 /// Proposals waiting for a person: the agent's and other people's. One's own commit that did not go through leaves
 /// a proposal too, and that is not something waiting on them.
-/// Whether `me` may decline proposal `e` by their own say (the broker's rule, as far as the ledger shows it):
-/// their own agent proposed it.
+/// Whether Settings and the applets offer `me` Decline of proposal `e`, by their own say: narrower than the broker's rule,
+/// on purpose (Proposal.yours): their own agent proposed it.
 fn yours(e: &history::Entry, me: &str) -> bool {
     e.data["agent_for"].as_str() == Some(me)
 }
 
+/// The proposals waiting that `me` did not make: those waiting for them, or for someone else, to apply.
 fn waiting_on_me<'a>(entries: &'a [history::Entry], me: &str) -> Vec<&'a history::Entry> {
     history::waiting_proposals(entries).into_iter().filter(|e| e.data["caller"].as_str().unwrap_or(&e.actor) != me).collect()
 }

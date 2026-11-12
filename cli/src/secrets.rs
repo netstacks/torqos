@@ -86,7 +86,6 @@ pub fn read(repo: &Repo, rev: &str, user: Option<&str>) -> Result<Rules> {
     }
 }
 
-/// `act` done to `rules`: what it did, in a few words, for the change's reason. Refused, it changes nothing.
 /// The actor a grant to an agent writes: `torq-agent` in a person's own rules (their own agent), the named
 /// person's agent account in the system's.
 fn agent_word(of: &Option<String>) -> String {
@@ -126,6 +125,7 @@ fn agent_here(passwd: &str, person: &str) -> bool {
     passwd.lines().any(|l| l.split(':').next() == Some(account.as_str()))
 }
 
+/// `act` done to `rules`: what it did, in a few words, for the change's reason. Refused, it changes nothing.
 pub fn edit(rules: &mut Rules, name: &str, act: &Act) -> Result<String> {
     edit_with(rules, name, act, &[])
 }
