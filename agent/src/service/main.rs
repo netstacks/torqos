@@ -56,6 +56,9 @@ struct Running {
 /// full connection, the task on its full pipe, and the agent would stay running for good.
 const WRITE_WAIT: Duration = Duration::from_secs(10);
 
+/// The word a taint is told the client with when the task's own word for it was not one (or its line was left out).
+const UNNAMED: &str = "unnamed-source";
+
 /// A connection's writer, shared by its reader and its task's relay: one event, one whole line. Once a write fails
 /// (the client gone, or stopped reading for `WRITE_WAIT`), it writes nothing more.
 #[derive(Clone)]
@@ -283,18 +286,23 @@ impl Agent {
             loop {
                 let l = match read_line(&mut r) {
                     Ok(Line::Text(l)) => l,
-                    // Read to its end and thrown away: the task goes on, and is never left blocked.
-                    // It may have been a taint: the answer is not remembered (fails closed, the review's B4).
+                    // Read to its end and thrown away: the task goes on, and is never left blocked. It may have been a
+                    // taint: the answer is not remembered, and the client is told so (fails closed).
                     Ok(Line::Dropped) => {
                         tainted = true;
                         relay_out.send(&Event::Error { text: format!("the task said something longer than {MAX_LINE} bytes, or not text: left out") });
+                        relay_out.send(&Event::Tainted { why: UNNAMED.into() });
                         continue;
                     }
                     Ok(Line::End) | Err(_) => break,
                 };
-                // A tainted line counts before its word is checked: one the relay drops still taints (B4).
+                // A tainted line counts before its word is checked, and one whose word the relay would drop is told the
+                // client with a word of TorqOS's, so the turn shows its taint.
                 if serde_json::from_str::<serde_json::Value>(&l).is_ok_and(|v| v["type"] == "tainted") {
                     tainted = true;
+                    if relayed(&l).is_none() {
+                        relay_out.send(&Event::Tainted { why: UNNAMED.into() });
+                    }
                 }
                 let Some(e) = relayed(&l) else { continue };
                 match &e {
@@ -842,7 +850,8 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
     fn a_taint_with_a_bad_word_still_taints() {
         for line in [r#"'{"type":"tainted","why":"not a word!"}'"#, &format!("'{}'", "x".repeat(MAX_LINE + 10))] {
             let (a, sock, _d) = agent(&format!(r#"read -r t; printf '%s\n' {line} '{{"type":"say","text":"remember me"}}'"#), me());
-            talk(&sock, &[ask("q")], |e| matches!(e, Event::Done { .. }));
+            let seen = talk(&sock, &[ask("q")], |e| matches!(e, Event::Done { .. }));
+            assert!(seen.contains(&Event::Tainted { why: UNNAMED.into() }), "the client is told: {seen:?}");
             assert_eq!(a.memory.recent(), vec![Turn { question: "q".into(), answer: None }], "{}", &line[..40.min(line.len())]);
         }
     }
