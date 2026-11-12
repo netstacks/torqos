@@ -1088,7 +1088,9 @@ impl cosmic::Application for Settings {
         if let Some((text, failed)) = &self.note {
             content = content.push(note(text, *failed));
             // Something failed: the agent can look at it with the person (what failed and what it said, attached).
-            if let (true, Some((command, said))) = (*failed, &self.failure) {
+            // Only beside the failure it names: a note other than its own (any of the page's other failures) has no
+            // Ask the agent here, rather than one about an older failure (the review of the rebased branch, B11).
+            if let (true, Some((command, said))) = (*failed, self.failure.as_ref().filter(|(_, said)| said == text)) {
                 let h = About::Failure { command, said }.handoff();
                 content = content.push(widget::button::text("Ask the agent about this").on_press(Message::AskAgent(h)));
             }
