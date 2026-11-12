@@ -31,6 +31,10 @@ Setup writes the machine's configuration from your answers, and keeps your passw
 the system can read, never in the configuration. TorqOS then builds that configuration, switches to
 it and records it as **change #1**, "TorqOS set up".
 
+The build needs no network, with one exception: hardware that needs a driver which is not in the
+kernel. The installer does not carry such a driver, so the build fetches it. Setup says so, naming
+the driver, before the build starts.
+
 If the configuration does not build, nothing changes and setup starts over from its questions. If
 setup is interrupted before the switch (by a power cut, say), it starts again from the beginning at
 the next boot, with its partial work removed. If it is interrupted after the switch, the machine

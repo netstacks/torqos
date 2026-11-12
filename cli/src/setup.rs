@@ -110,6 +110,14 @@ pub fn hardware_file(image: &Path, detected: &Path) -> PathBuf {
     if detected.is_file() { detected.to_path_buf() } else { image.join("hardware-configuration.nix") }
 }
 
+/// The drivers from outside the kernel a hardware file names (`boot.extraModulePackages`, one line as
+/// nixos-generate-config writes it), if any: what the installer carries for the first build has none
+/// of them (ADR-048 5, KNOWN-GAPS 6zu).
+fn own_drivers(hardware: &str) -> Option<String> {
+    let named = hardware.lines().find_map(|l| l.trim().strip_prefix("boot.extraModulePackages = [")?.strip_suffix("];"))?.trim();
+    (!named.is_empty()).then(|| named.to_string())
+}
+
 /// The config repo's files for `a`: TorqOS's template (`template`: its templates/config) with the
 /// answers, the image's lock (`image`), this machine's hardware file (`hardware`: `hardware_file`),
 /// TorqOS from `source` (a store path), for
@@ -447,6 +455,10 @@ fn apply(a: &Answers) -> Result<()> {
         std::fs::write(&p, bytes).with_context(|| format!("writing {}", p.display()))?;
     }
     register_carried(&Path::new("/").join(crate::install::REGISTRATION))?;
+    // Said before the build, which would otherwise fetch it, or fail offline, without a word (ADR-048 5).
+    if let Some(drivers) = files.iter().find(|(rel, _)| rel == "hardware-configuration.nix").and_then(|(_, b)| own_drivers(&String::from_utf8_lossy(b))) {
+        println!("\nThis machine's hardware needs a driver that is not in the kernel ({drivers}). The installer does not carry it: the first build fetches it, and needs the network for that.");
+    }
     // The broker as a service of its own, not a child of this console program: the switch starts the
     // console's login prompt, which takes the console from setup (and stops this unit) — the broker
     // finishes regardless, and records change #1.
@@ -697,6 +709,16 @@ mod tests {
         std::fs::remove_file(&detected).unwrap();
         std::fs::create_dir(&detected).unwrap();
         assert_eq!(hardware_file(image.path(), &detected), image.path().join("hardware-configuration.nix"), "only a file counts");
+    }
+
+    /// A hardware file that names a driver from outside the kernel is one the first build needs the
+    /// network for; one that names none, or has no such line (the image's), is not.
+    #[test]
+    fn drivers_the_installer_does_not_carry() {
+        let file = |named: &str| format!("{{ config, ... }}:\n{{\n  boot.kernelModules = [ \"kvm-intel\" \"wl\" ];\n  boot.extraModulePackages = [{named}];\n}}\n");
+        assert_eq!(own_drivers(&file(" config.boot.kernelPackages.broadcom_sta ")).as_deref(), Some("config.boot.kernelPackages.broadcom_sta"));
+        assert_eq!(own_drivers(&file(" ")), None);
+        assert_eq!(own_drivers("{ ... }: { }\n"), None);
     }
 }
 
