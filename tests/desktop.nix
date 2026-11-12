@@ -132,11 +132,19 @@ pkgs.testers.runNixOSTest {
             # it was still starting 25 s after login, and the broker said so ("no authentication agent is
             # running"), as it would to a person; torqcli asks again the same way. A dialog that never registers
             # (one left on a polkit that has gone) fails it, after about two minutes.
+            # Then until polkit's password helper has started for this request, one that was not there before
+            # it: cosmic-osd starts it when it shows the dialog, and on a loaded machine (.52) that was six
+            # seconds after pkcheck began to wait, so the keys typed after a fixed sleep went nowhere. The
+            # helper is a oneshot unit, "activating" for as long as the dialog is open. The sleep that follows
+            # each call is only for the dialog to draw its field and take the keyboard.
+            helper = "systemctl list-units --plain --no-legend --state=activating 'polkit-agent-helper@*' | awk '{print $1}'"
+            machine.succeed(f"{helper} > /tmp/helpers.before")
             for attempt in range(8):
                 machine.succeed(f"(setsid {ask} > {out} 2>&1 < /dev/null &)")
                 # A dialog is a pkcheck still waiting a second later: without one, pkcheck ends at once.
                 asked, _ = machine.execute(f"timeout 30 sh -c 'until pgrep -x pkcheck >/dev/null && sleep 1 && pgrep -x pkcheck >/dev/null; do grep -q \"no authentication agent\" {out} && exit 1; sleep 0.2; done'")
                 if asked == 0:
+                    machine.wait_until_succeeds(f"{helper} | grep -vxFf /tmp/helpers.before | grep -q .", timeout=60)
                     return
                 print(machine.execute(f"cat {out}; pgrep -u alice -fa cosmic-osd")[1])
                 assert "no authentication agent" in machine.succeed(f"cat {out}"), "no dialog, and not for want of one"
