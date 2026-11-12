@@ -2119,7 +2119,7 @@ off many times a day.
      What a use can do is what the credential can do at that host: a token with full `repo` scope used on
      `api.github.com` can delete repositories there. The rule limits where the secret goes, not what the
      remote end lets it do, so a narrow credential (a fine-grained token, a deploy key) is the person's
-     lever, and TorqOS Settings says so when one is added.
+     lever, and TorqOS Settings says so when one is added (Settings' part deferred: the 2026-11-11 amendment).
   4. **Approval, and taint.** `approve` in the rule sets when a person confirms a use: never, the first use in
      each agent session, or each use. Confirming happens in COSMIC's dialog or at a terminal (ADR-045's
      approvals), showing the secret's name, the operation, the target, the session and its reason. **A tainted
@@ -2269,11 +2269,12 @@ off many times a day.
   for secrets (ADR-039); handing the agent any secret "just this once". There is no fallback route around the
   guarantee: a task that needs a value in hand is done by a person.
 - **Amended 2026-11-11 — the scope, and step 5 deferred (the owner):** secrets are the narrow store for the
-  agent's tokens and keys: a program uses one and never reads it. They are not a general password manager.
+  tokens and keys that programs use, the agent's and a person's own: a program uses one and never reads
+  it. They are not a general password manager.
   A person's everyday passwords are left to a password-manager app such as 1Password, and TorqOS does not try
   to be one. Secrets are command line only for now. So step 5, the Secrets page in TorqOS Settings, is
-  deferred, and Decision 4 (values entered in TorqOS Settings) and the Settings page named in the
-  consequences wait with it. Step 4 (approvals and taint) is unchanged: still to build, after rc1. Nothing
+  deferred, and every part of TorqOS Settings this ADR names above (Decision 4's values entered there,
+  what it says when a secret is added, the commands it shares, the Secrets page) waits with it. Step 4 (approvals and taint) is unchanged: still to build, after rc1. Nothing
   is renamed: the commands, the `secrets` tree and `torq-secrets` stay as built.
 
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown

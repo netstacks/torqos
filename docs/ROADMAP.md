@@ -4,9 +4,9 @@ One base, two faces (ADR-034): the sysadmin's server as code, and a person's mac
 drive. M1–M2 built the base and the server face. M3–M5 build what the laptop face needs — and
 each of them serves the server face too.
 
-Milestones and releases (2026-11-11): v0.2.0 = M2; v0.3.x = M3 and the agent's non-GUI half (M5's
-doctor, proposals and session trust); 0.4.0 = the desktop (M4) and secrets (ADR-052, command line only), in preparation
-and not released. The checkboxes below are the current record; a box is ticked only for what is built,
+Milestones and releases (2026-11-12): v0.2.0 = M2; v0.3.x = M3 and the agent's non-GUI half (M5's
+doctor, proposals and session trust); 0.4.0 = the desktop (M4) and secrets (ADR-052, command line
+only), its first candidate v0.4.0-rc1 published as a pre-release. The checkboxes below are the current record; a box is ticked only for what is built,
 and a part not built has its own unticked line.
 
 ## Milestones (built on x86_64; development on the owner's laptop, full checks on a second machine, ADR-030)
@@ -225,7 +225,7 @@ the answers file, recipes, the installer's other ways, the hardware profiles.
       image's boot from the carried firmware and joined with iwd), the repository offered only online, the restart
       on real hardware from the broker's unit, the failure's cause on screen, the version shown.
 
-### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038, ADR-045)  ← largely built, on main, not released
+### M4 — The desktop as a configuration (ADR-034, ADR-037, ADR-038, ADR-045)  ← largely built, in the v0.4.0-rc1 pre-release
 Not a product: a config repo, `torqos-desktop`, loaded on the skeleton. COSMIC, and only COSMIC
 (ADR-045). Needs `torq-wire` (ADR-044) first.
 

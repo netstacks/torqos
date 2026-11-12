@@ -61,4 +61,4 @@ recorded in a tamper-evident ledger, and reversible with one command.</p>
     layer daily since 2026-10-30, and no one outside the project has tested it yet. Images,
     first-boot setup, signed releases and an ISO installer for physical machines are available.
     The desktop and the agent are experimental; their pages say how far they go. A `0.4.0` release
-    candidate is in preparation and is not released.
+    candidate, `v0.4.0-rc1`, is published as a pre-release.

@@ -73,8 +73,8 @@ It has **one base and two faces**:
 > [!NOTE]
 > **Status:** early releases. The latest is `v0.3.2` (2026-11-09). The configuration layer is
 > complete, and its owner has used it daily since 2026-10-30; no one outside the project has
-> tested it yet. A `0.4.0` release candidate (the desktop, and secrets for the agent) is in
-> preparation and is not released. See [Project status](#project-status).
+> tested it yet. A `0.4.0` release candidate, `v0.4.0-rc1` (the desktop, and secrets for the
+> agent), is published as a pre-release. See [Project status](#project-status).
 
 ## Contents
 
@@ -281,12 +281,13 @@ maintainers rather than in a public issue.
 | **M2** — install: images, first-boot setup, signed releases, the ISO installer, a thin base | ✅ | Done; released as `v0.2.0` |
 | **M3** — trust: identity from the kernel, the agent's account, the config repo's remote (off by default), strict mode, data snapshots | ✅ | Done; in `v0.3.x` |
 | **M3.5** — the install on real hardware | 🟧 | Partly: an offline first build, network-first setup, and TorqOS installed on the owner's laptop. Not built: the console UI, an answers file for unattended installs, recipes (shared configuration repositories), the installer's other ways (beside another system, a partition) |
-| **M4** — the desktop as a configuration, applications, data | 🟧 | Largely built, on the main branch and not released: COSMIC, TorqOS Settings, a panel applet, SSH tunnels, approval as a dialog. It has run on one physical machine, the owner's laptop. Not built: wrapping COSMIC's own settings pages, applications by rung, syncing data |
+| **M4** — the desktop as a configuration, applications, data | 🟧 | Largely built, in the `v0.4.0-rc1` pre-release: COSMIC, TorqOS Settings, a panel applet, SSH tunnels, approval as a dialog. It has run on one physical machine, the owner's laptop. Not built: wrapping COSMIC's own settings pages, applications by rung, syncing data |
 | **M5** — the agent: doctor mode, proposals, session trust | 🟧 | The non-GUI half is built, in `v0.3.x`, and is experimental: the doctor is off by default, no model ships with it, and no real model has been tried (the tests use a scripted one). The rest is parked until after `0.4.0` |
 | Later — owner-rooted boot security: the owner's Secure Boot keys, TPM2, disk encryption | ⬜ | Designed (ADR-033, [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md)); not built |
 
-Released: `v0.1.0` to `v0.3.2`. Not released: `0.4.0-rc1`, in preparation, which is the desktop and
-secrets (ADR-052, which lets the agent use a token or key without being able to read it; command line only, and not a password manager).
+Released: `v0.1.0` to `v0.3.2`, and `v0.4.0-rc1` as a pre-release: the desktop and secrets
+(ADR-052, which lets the agent use a token or key without being able to read it; command line only,
+and not a password manager).
 The roadmap is [docs/ROADMAP.md](docs/ROADMAP.md); design decisions and their reasons are recorded as
 ADRs in [docs/DECISIONS.md](docs/DECISIONS.md).
 

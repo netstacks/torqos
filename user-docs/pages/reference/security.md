@@ -82,10 +82,10 @@ goes in the ledger.
 ## Secrets for the agent and programs
 
 A secret is a token or key that a program, such as the agent, may use and never read. TorqOS keeps it
-encrypted, outside the configuration, and out of the ledger. It is for that and nothing more.
+encrypted and outside the configuration; the ledger records each change and first use, never the
+value. It is for that and nothing more.
 
-You manage secrets from the command line (`request system secret …`). There is no Secrets page in
-TorqOS Settings. For your everyday passwords, use a password manager such as 1Password: TorqOS does
+Secrets are managed only from the command line (`request system secret …`). For your everyday passwords, use a password manager such as 1Password: TorqOS does
 not try to be one.
 
 ## Checking a release yourself
