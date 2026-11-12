@@ -208,6 +208,16 @@ const RESTLESS: u32 = 3;
 /// Each setting changed at the last sync: its value then, and at how many syncs in a row it had changed.
 type Churn = BTreeMap<String, (Option<String>, u32)>;
 
+/// Where the counts are kept: beside what the desktop and the configuration last agreed on.
+fn churn_file(paths: &Paths) -> PathBuf {
+    paths.state.with_file_name("desktop-restless.json")
+}
+
+/// The counts as the last automatic sync left them (none: unreadable or not there, so every count starts again).
+fn read_churn(path: &Path) -> Churn {
+    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
 /// Each setting to save, with its value and at how many syncs in a row it changed, counted on from the last sync's
 /// `churn`; and those to hold back. One that held still since the last sync starts again from nothing.
 fn restless(churn: &Churn, save: &BTreeMap<String, Option<String>>) -> (Churn, BTreeSet<String>) {
@@ -368,7 +378,8 @@ pub struct Synced {
     pub saved: Option<u64>,
     /// Settings the configuration put on the desktop.
     pub applied: usize,
-    /// The person's changes not saved (saving is manual).
+    /// The person's changes not saved: saving is manual, or a setting waits because it keeps changing by itself
+    /// (`RESTLESS`).
     pub unsaved: usize,
     /// Settings that could not be put on the desktop.
     pub failed: Vec<String>,
@@ -399,9 +410,9 @@ fn sync_by(repo: &Repo, me: &str, paths: &Paths, save_now: bool, save: &mut dyn 
     let here = local(&paths.cosmic);
     let mut p = plan(&saved.cosmic, &before, &here.values, |k| here.manages(k));
     // Saving by itself, a setting that keeps changing by itself waits (`RESTLESS`); Save now takes it all.
-    let churn_path = paths.state.with_file_name("desktop-restless.json");
+    let churn_path = churn_file(paths);
     let (churn, held) = if !save_now && saved.save == Saving::Automatic {
-        let last = std::fs::read(&churn_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let last = read_churn(&churn_path);
         let (churn, held) = restless(&last, &p.save);
         p.save.retain(|k, _| !held.contains(k));
         (Some(churn), held)
@@ -442,6 +453,14 @@ fn sync_by(repo: &Repo, me: &str, paths: &Paths, save_now: bool, save: &mut dyn 
     write_atomically(&paths.state, &serde_json::to_vec(&state)?)?;
     if let Some(churn) = churn {
         write_atomically(&churn_path, &serde_json::to_vec(&churn)?)?;
+    } else if saved.save == Saving::Manual {
+        // Counted only between automatic syncs: a spell of manual saving starts them again from nothing, so the
+        // first change after it is not held back for changes made before it. A Save now with saving automatic
+        // keeps them: the syncs around it go on, and a setting that keeps changing by itself still does.
+        match std::fs::remove_file(&churn_path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).context("forgetting which desktop settings kept changing"),
+            _ => {}
+        }
     }
     Ok(out)
 }
@@ -483,8 +502,11 @@ fn words(how: Saving) -> &'static str {
 pub struct Status {
     pub saving: Saving,
     pub saved: usize,
-    /// The person's changes not yet saved, by a few words.
+    /// The person's changes not yet saved, by a few words (those waiting are not among them).
     pub unsaved: Vec<String>,
+    /// Settings saving by itself holds back, as they keep changing by themselves (`RESTLESS`): saved once they hold
+    /// still, or at Save now.
+    pub waiting: Vec<String>,
     /// The configuration's values still to be put on the desktop.
     pub to_apply: usize,
     /// What an earlier TorqOS saved that is no longer kept (another program's settings): taken out by the next save.
@@ -500,12 +522,26 @@ pub fn status(repo: &Repo, me: &str, paths: &Paths) -> Result<Status> {
     applied.retain(|k, _| keepable(k));
     let here = local(&paths.cosmic);
     let p = plan(&saved.cosmic, &applied, &here.values, |k| here.manages(k));
-    Ok(Status { saving: saved.save, saved: saved.cosmic.len(), unsaved: p.save.keys().cloned().collect(), to_apply: p.apply.len(), to_take_out })
+    let churn = if saved.save == Saving::Automatic { read_churn(&churn_file(paths)) } else { Churn::new() };
+    let (waiting, unsaved) = p.save.keys().cloned().partition(|k| churn.get(k).is_some_and(|(_, n)| *n >= RESTLESS));
+    Ok(Status { saving: saved.save, saved: saved.cosmic.len(), unsaved, waiting, to_apply: p.apply.len(), to_take_out })
 }
 
 /// "1 setting", "3 settings".
 fn settings(n: usize) -> String {
     if n == 1 { "1 setting".to_string() } else { format!("{n} settings") }
+}
+
+/// For `show system desktop` and TorqOS Settings: what saving by itself holds back, and why, in a sentence.
+pub fn waiting(keys: &[String]) -> Option<String> {
+    (!keys.is_empty()).then(|| {
+        let (keeps, by, it) = if keys.len() == 1 { ("keeps", "itself", "it") } else { ("keep", "themselves", "each") };
+        format!(
+            "Waiting: {} ({}) {keeps} changing by {by}, so {it} is saved once it holds still; request system desktop save saves it now.",
+            what(keys.iter().cloned()),
+            settings(keys.len())
+        )
+    })
 }
 
 /// For `show system desktop` and TorqOS Settings: what the next save takes out, in a sentence.
@@ -521,10 +557,14 @@ pub fn taking_out(keys: &[String]) -> Option<String> {
 
 pub fn shown(s: &Status) -> String {
     let mut out = format!("Your desktop (COSMIC's settings): {} saved in your configuration, saved {}.\n", s.saved, words(s.saving));
-    if s.unsaved.is_empty() {
+    if s.unsaved.is_empty() && s.waiting.is_empty() {
         out.push_str("  Everything you changed is saved.\n");
-    } else {
+    }
+    if !s.unsaved.is_empty() {
         out.push_str(&format!("  Not saved yet: {} ({}). request system desktop save saves them.\n", what(s.unsaved.iter().cloned()), settings(s.unsaved.len())));
+    }
+    if let Some(w) = waiting(&s.waiting) {
+        out.push_str(&format!("  {w}\n"));
     }
     if let Some(t) = taking_out(&s.to_take_out) {
         out.push_str(&format!("  {t} request system desktop save does it now.\n"));
@@ -815,6 +855,10 @@ mod tests {
         }
         drop(sync);
         assert_eq!(saves.borrow().len(), 2);
+        // Shown as waiting, and why, not as a change left unsaved.
+        let s = status(&repo, "dev", &paths).unwrap();
+        assert_eq!((s.unsaved.clone(), s.waiting.clone()), (vec![], vec![TAB.to_string()]), "{s:?}");
+        assert!(shown(&s).contains("keeps changing by itself"), "{}", shown(&s));
         // Still since the last sync: saved, and the count starts again.
         let s = sync_by(&repo, "dev", &paths, false, &mut save).unwrap();
         assert!(s.saved.is_some(), "{s:?}");
@@ -829,5 +873,44 @@ mod tests {
         assert!(sync("9", true).saved.is_some());
         drop(sync);
         assert_eq!(saves.borrow().len(), 6);
+    }
+
+    /// The counts are of automatic syncs in a row: a spell of manual saving starts them again, so the first change
+    /// after it is saved, not held back for changes made before it.
+    #[test]
+    fn a_spell_of_manual_saving_starts_the_counts_again() {
+        let d = tempfile::tempdir().unwrap();
+        let (root, home) = (d.path().join("config"), d.path().join("home"));
+        std::fs::create_dir_all(root.join("users/dev")).unwrap();
+        let file = root.join("users/dev/desktop.json");
+        std::fs::write(&file, Saved { save: Saving::Automatic, cosmic: map(&[(K, "M")]) }.render().unwrap()).unwrap();
+        sh(&root, "git init -q -b main && git config user.name t && git config user.email t@t && git add -A && git commit -qm one");
+        let paths = Paths { cosmic: home.join("cosmic"), state: home.join("state/desktop-applied.json") };
+        let w = |k: &str, v: &str| write_atomically(&paths.cosmic.join(k), v.as_bytes()).unwrap();
+        const TAB: &str = "com.system76.CosmicFiles/v1/tab";
+        w(K, "M");
+        let repo = Repo::new(&root);
+        let mut save = |_: Option<&[u8]>, new: &Saved, _: &str| -> Result<u64> {
+            std::fs::write(root.join("users/dev/desktop.json"), new.render()?)?;
+            sh(&root, "git commit -qam save");
+            Ok(1)
+        };
+        let set = |how: Saving| {
+            let mut s: Saved = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            s.save = how;
+            std::fs::write(&file, s.render().unwrap()).unwrap();
+            sh(&root, "git commit -qam saving");
+        };
+        for v in ["1", "2"] {
+            w(TAB, v);
+            assert!(sync_by(&repo, "dev", &paths, false, &mut save).unwrap().saved.is_some());
+        }
+        set(Saving::Manual);
+        w(TAB, "3");
+        assert_eq!(sync_by(&repo, "dev", &paths, false, &mut save).unwrap().unsaved, 1);
+        assert!(!churn_file(&paths).exists());
+        set(Saving::Automatic);
+        w(TAB, "4");
+        assert!(sync_by(&repo, "dev", &paths, false, &mut save).unwrap().saved.is_some(), "the first change after manual saving is saved");
     }
 }

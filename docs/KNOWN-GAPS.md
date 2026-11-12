@@ -425,7 +425,9 @@ Its §5 lists claims without a test.
    that changed at three syncs in a row waits, and is saved at the first sync it has held still since (or at
    Save now). Such a setting still costs two saves each time it starts changing again, and a person's own
    setting changed at three syncs in a row (an hour of rearranging the panel) waits too, until it settles. What
-   waits is counted in `~/.local/state/torq/desktop-restless.json`, and shown as not saved yet. The history's label names what
+   waits is counted in `~/.local/state/torq/desktop-restless.json`, over automatic syncs only (a sync with saving
+   manual removes it; a Save now keeps it), and `show system desktop` and TorqOS Settings show it as waiting, with
+   why. The history's label names what
    changed and what was taken out ("Desktop: panel; other programs' settings taken out …"), never "Desktop:
    com". Old entries are not pruned: the ledger and the repository only grow, by design.
 6zy. ~~**The desktop save copied third-party applets' settings into the configuration repository.**~~ Fixed

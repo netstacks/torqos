@@ -1849,6 +1849,11 @@ pub fn desktop_taking_out(keys: &[String]) -> Option<String> {
     crate::desktop::taking_out(keys)
 }
 
+/// What saving by itself holds back as it keeps changing by itself, in a sentence (None: nothing).
+pub fn desktop_waiting(keys: &[String]) -> Option<String> {
+    crate::desktop::waiting(keys)
+}
+
 #[cfg(test)]
 mod applet_faults {
     use super::*;

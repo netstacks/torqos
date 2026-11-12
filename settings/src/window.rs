@@ -1687,10 +1687,12 @@ impl Settings {
         };
         let automatic = s.saving == app::Saving::Automatic;
         let toggle = widget::toggler(automatic).on_toggle(|on| Message::DesktopSaving(if on { app::Saving::Automatic } else { app::Saving::Manual }));
-        let state = if s.unsaved.is_empty() {
-            format!("Saved: {} settings, nothing new since", s.saved)
-        } else {
+        let state = if !s.unsaved.is_empty() {
             format!("Not saved yet: {}", app::desktop_words(&s.unsaved))
+        } else if !s.waiting.is_empty() {
+            format!("Saved: {} settings", s.saved)
+        } else {
+            format!("Saved: {} settings, nothing new since", s.saved)
         };
         let mut save = widget::button::suggested("Save now");
         if self.busy.is_none() {
@@ -1704,6 +1706,9 @@ impl Settings {
         );
         if s.to_apply > 0 {
             page = page.push(widget::text::caption(format!("{} settings from your configuration are still to be put on this desktop: at your next login, or now with Save now.", s.to_apply)));
+        }
+        if let Some(w) = app::desktop_waiting(&s.waiting) {
+            page = page.push(widget::text::caption(w));
         }
         if let Some(t) = app::desktop_taking_out(&s.to_take_out) {
             page = page.push(widget::text::caption(format!("{t} Save now does it now.")));
