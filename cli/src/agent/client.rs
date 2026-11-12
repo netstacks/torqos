@@ -19,6 +19,9 @@ pub const QUICK: Duration = Duration::from_secs(15);
 /// How long an answer may be silent between two of its events: the model is asked for at most 600 s a
 /// round (agent/src/model.rs), so a little more than that, and the service is then not answering.
 pub const QUIET: Duration = Duration::from_secs(660);
+/// The most a whole answer may take: a task's rounds are bounded (8 by default, at most 32, each a model's 600 s and its
+/// tools'), so this, and then the asker leaves it, which stops it.
+pub const ANSWER_MAX: Duration = Duration::from_secs(4 * 3600);
 
 /// Why the agent could not be asked.
 #[derive(Debug, Clone, PartialEq)]
@@ -164,7 +167,7 @@ impl Client {
         let mut conn = self.connect()?;
         let line = serde_json::to_string(r).map_err(|e| Unreachable::Broken(e.to_string()))?;
         writeln!(conn, "{line}").map_err(|e| Unreachable::Broken(format!("asking your agent: {e}")))?;
-        Ok(Lines { r: BufReader::new(conn), deadline: Some(Instant::now() + self.quick) })
+        Ok(Lines { r: BufReader::new(conn), deadline: Some(Instant::now() + self.quick), quiet: None })
     }
 
     /// Whether a task runs, and how much the conversation keeps.
@@ -207,9 +210,10 @@ impl Client {
     /// service stops what no one hears).
     pub fn ask(&self, text: &str, context: Option<String>) -> Result<Answer, Unreachable> {
         let mut lines = self.send(&Request::Ask { text: text.to_string(), context })?;
-        // An answer has no deadline of its own: each of its events comes within `quiet` of the one before.
-        lines.deadline = None;
-        lines.r.get_ref().set_read_timeout(Some(self.quiet)).map_err(|e| Unreachable::Broken(e.to_string()))?;
+        // Each of an answer's events comes within `quiet` of the one before, and the whole of it within ANSWER_MAX: a
+        // service that keeps it coming never holds the asker for ever (the review of the rebased branch, C17).
+        lines.deadline = Some(Instant::now() + ANSWER_MAX);
+        lines.quiet = Some(self.quiet);
         Ok(Answer { lines, over: false })
     }
 }
@@ -219,6 +223,8 @@ impl Client {
 struct Lines {
     r: BufReader<UnixStream>,
     deadline: Option<Instant>,
+    /// The most between two events, besides the deadline (an answer's).
+    quiet: Option<Duration>,
 }
 
 impl Lines {
@@ -232,7 +238,7 @@ impl Lines {
                 if left.is_zero() {
                     return Err(silent());
                 }
-                self.r.get_ref().set_read_timeout(Some(left)).map_err(|e| Unreachable::Broken(e.to_string()))?;
+                self.r.get_ref().set_read_timeout(Some(self.quiet.map_or(left, |q| q.min(left)))).map_err(|e| Unreachable::Broken(e.to_string()))?;
             }
             let got = match self.r.fill_buf() {
                 Ok(b) => b,

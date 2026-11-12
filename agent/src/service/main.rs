@@ -238,6 +238,11 @@ impl Agent {
         // Everything that can fail before the slot is taken (the review of the rebased branch, C4): a failure after
         // it would leave the agent "running" for good.
         let line = serde_json::to_string(&task)?;
+        // Within what the harness reads (C17): a question near the request's own bound, with the conversation kept, is
+        // refused here, said, rather than accepted and failed by the harness.
+        if line.len() > MAX_LINE {
+            bail!("the question, what is attached and the conversation kept are longer than {MAX_LINE} bytes together: ask shorter, or forget the conversation first");
+        }
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new(&self.harness);
         cmd.args(["--propose", "--task"]).env_clear().env("PATH", "/run/current-system/sw/bin").env("HOME", &self.home).env("LANG", "C.UTF-8");
@@ -847,5 +852,18 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
         assert_eq!(seen.last(), Some(&Event::Done { exit: 0 }), "the first ask's own end: {seen:?}");
         assert!(seen.contains(&Event::Say { text: "first".into() }));
         assert!(a.running().is_none());
+    }
+
+    /// A question that fits a request but not, with the conversation kept, the task the harness reads is refused at
+    /// the service and said (C17), never handed over to fail there.
+    #[test]
+    fn a_task_too_long_for_the_harness_is_refused_first() {
+        let (a, sock, d) = agent("read -r t; echo started > \"$HOME/started\"", me());
+        a.memory.remember(Turn { question: "q".repeat(1500), answer: Some("a".repeat(1500)) }).unwrap();
+        let half = MAX_LINE / 2 - 64;
+        let seen = talk(&sock, &[Request::Ask { text: "x".repeat(half), context: Some("y".repeat(half)) }], |e| matches!(e, Event::Done { .. }));
+        assert!(matches!(&seen[0], Event::Error { text } if text.contains("longer than")), "{:?}", &seen[..1]);
+        assert_eq!(seen.last(), Some(&Event::Done { exit: 1 }));
+        assert!(!d.path().join("started").exists(), "the harness never started");
     }
 }
