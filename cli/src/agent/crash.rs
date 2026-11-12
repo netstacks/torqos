@@ -90,10 +90,11 @@ impl Crash {
         self.program.rsplit('/').next().unwrap_or(&self.program)
     }
 
-    /// The notification: its summary and body (escaped: the body may be read as markup). Nothing of the
+    /// The notification: a summary of fixed words (it is under TorqOS's name: the review of the rebased branch, C12), and
+    /// the body with the program's name and signal (escaped: the body may be read as markup). Nothing of the
     /// crash's contents is in it.
     pub fn notification(&self) -> (String, String) {
-        (format!("{} crashed", self.name()), format!("{} ({}). Your agent can look at it with you: nothing is sent unless you ask.", markup(&self.program), markup(&self.signal)))
+        ("A program of yours crashed".to_string(), format!("{} ({}, {}). Your agent can look at it with you: nothing is sent unless you ask.", markup(self.name()), markup(&self.program), markup(&self.signal)))
     }
 
     /// `coredumpctl info` as the person, by absolute path: this crash — its pid, its owner, the boot and the
@@ -286,7 +287,8 @@ mod tests {
         assert!(body.contains("&lt;b&gt;x&lt;/b&gt;&amp;y") && !body.contains("<b>"), "{body}");
         let c = crash_of(&line(1000), 1000).unwrap();
         let (summary, body) = c.notification();
-        assert_eq!(summary, "bash crashed");
+        assert_eq!(summary, "A program of yours crashed", "fixed words: the program's name is only in the body (C12)");
+        assert!(body.starts_with("bash (/run/current-system/sw/bin/bash, SIGSEGV)"), "{body}");
         assert!(body.contains("SIGSEGV") && body.contains("nothing is sent unless you ask"), "{body}");
         let h = c.handoff(Some(&"frame\n".repeat(10_000)));
         assert!(h.taints());
