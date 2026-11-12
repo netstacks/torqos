@@ -414,7 +414,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   organisation, and `torq.releases.url` names `torqosorg/torqos-releases`. Changed outright, because no
   machine took TorqOS from the releases then (the two in use took it from a `path:` folder). Once machines
   track the releases, a move must not be done this way: a release's signature is checked only for a lock
-  at *that* address (`broker/src/inputs.rs` `is_release`, torqcli's `release_commit`), so a machine still
+  at *that* address (then `broker/src/inputs.rs` `is_release` and torqcli's `release_commit`; since the amendment below, `torq_wire::releases`), so a machine still
   locked at the old one would update unchecked. The old address has to stay a release address, signature
   required, and `request system update` move the machine to the new one.
 - **Amended 2026-11-12 — the releases' earlier address stays the releases:** the amendment above assumed no
@@ -423,18 +423,35 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   `netstacks/torqos-releases` (GitHub redirects that name to `torqosorg`). The v0.4.0-rc1 release-path check on
   two machines made from the published images (2026-11-12) showed what followed. 0.3.2 checked a source at its
   own address and took 0.4.0 checked; after the update, 0.4.0 did not count that address as the releases, so
-  every later update through it would have gone unchecked, with nothing said. Fixed for 0.4.0: which
-  repositories are the releases is one rule for torqcli and the broker (`torq_wire::releases`), their address now
-  (`torq.releases.url`) and their earlier ones (`torq.releases.former`, the `netstacks` address by default),
-  written to `/etc/torq/releases.json`. A source at either is the releases: a commit there must be signed by the
-  release key, checked at lock (torqcli) and at apply (the broker), against the releases at their address now.
-  `request system update` on a machine at an earlier address moves its source to the address now, in the
-  candidate, with "TorqOS's releases have a new address: the update moves this machine's source from … to …" and
-  the change shown under `[edit system software torq]`. It is part of the update's own system change, so it asks
-  for nothing an update does not already ask. What 0.3.2 does cannot be changed: a 0.3.2 machine pointed by hand
-  at `torqosorg/torqos-releases` takes it unchecked (KNOWN-GAPS 6zzg); the default path, its own address,
-  redirected, is checked. GitHub's redirect is what keeps that path working: nobody may create a repository named
-  `netstacks/torqos-releases` again.
+  every later update through it would have gone unchecked, with nothing said. Fixed for 0.4.0:
+  - **One rule, these addresses:** which repositories are the releases is one rule for torqcli and the broker
+    (`torq_wire::releases`): exactly their address now (`torq.releases.url`) and their earlier ones
+    (`torq.releases.former`, by default `https://github.com/netstacks/torqos-releases`), written to
+    `/etc/torq/releases.json`. An address is compared in these spellings only: any scheme, without user
+    information, the scheme's default port, `www.`, `.git` or a final `/`, percent-escapes decoded, in any case.
+    Any other spelling is another address, not the releases.
+  - **As git only:** a git lock at either address is the releases. Its commit must be signed by the release key,
+    checked at lock (torqcli) and at apply (the broker), against the releases at their address now. A tarball of
+    them (`github:` in any form, with or without a `host`; an archive URL) is refused at lock and at apply: a
+    tarball is not bound to the commit whose signature is checked, as a git lock's tree is.
+  - **The setting:** every TorqOS machine has `/etc/torq/releases.json` (modules/releases.nix writes it). If it is
+    missing or cannot be read, the broker refuses any change to the lock rather than treating nothing as the
+    releases. Fields it does not know are passed by, so that a broker reading a newer TorqOS's setting (during an
+    upgrade, after a rollback) still works.
+  - **The move:** `request system update` on a machine whose source is a `git+https://` source at an earlier
+    address moves it to the address now (its `?ref=` kept), in the candidate, with "TorqOS's releases have a new
+    address: the update moves this machine's source from … to …" and the change shown under
+    `[edit system software torq]`. It is part of the update's own system change, so it asks for no approval an
+    update does not already ask. It does take more steps: the quick "Install it now?" of a one-shot update is not
+    offered for it (the change is to be read in full), so it is `request system update`, `configure`,
+    `show | compare`, `commit`. A `github:` source at an earlier address is not moved: it is refused, as above.
+  - **What older TorqOS does cannot be changed.** A 0.3.2 machine pointed by hand at `torqosorg/torqos-releases`
+    takes it unchecked (KNOWN-GAPS 6zzg); its default path, its own address, redirected, is checked. A machine on
+    0.4.0-rc1 whose source is still `netstacks/torqos-releases` (one updated there from 0.3.2) has the hole: rc1
+    does not check that address, so on rc1 set the `torqosorg` address by hand first, which rc1 does check
+    (KNOWN-GAPS 6zzh). Both rely on GitHub's redirect: nobody may create a repository named
+    `netstacks/torqos-releases`, and the `netstacks` account must not be renamed or deleted (which would free
+    the name).
 
 ## ADR-029 — TorqOS names itself, as a NixOS derivative
 - **Context:** A TorqOS machine said it was NixOS everywhere it names itself: `/etc/os-release`

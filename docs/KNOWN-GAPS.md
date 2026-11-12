@@ -323,22 +323,35 @@ Its §5 lists claims without a test.
    "## TorqOS 0.3.2 is older than 0.4.0, which runs now: a downgrade". Answer no, and take the pre-release by its
    tag instead: `set system software torq source "git+https://github.com/torqosorg/torqos-releases?ref=refs/tags/v0.4.0-rc1"`,
    still checked against the release key (docs/INSTALL.md).
-6zze. **The release key protects the releases only** (by design, ADR-028). A source at the releases' address
-   (now, or an earlier one: `torq.releases.former`) must be a commit the release key signed. Any other source a
-   person sets, the development repository at the same tag included, is taken as that person's choice: no
-   signature is asked, the compare shows it under `[edit system software torq]`, and committing it needs a person
-   at a terminal like any system change.
+6zze. **The release key protects these addresses, in these spellings, as git** (by design, ADR-028, amended
+   2026-11-12). The releases are exactly `torq.releases.url` and `torq.releases.former` (today
+   `torqosorg/torqos-releases` and `netstacks/torqos-releases` on GitHub), compared without scheme, user
+   information, default port, `www.`, `.git`, a final `/` or case, percent-escapes decoded. A git lock there must
+   be a commit the release key signed; a tarball of them (`github:`, an archive URL) is refused. Anything else is
+   not the releases: any other source a person sets, the development repository at the same tag included, or the
+   releases under some other spelling, is taken as that person's choice, with no signature asked. The compare shows
+   it under `[edit system software torq]`, and committing it needs a person at a terminal like any system change.
 6zzf. **An image shows no version number on its TorqOS line until its first update.** `show version` on a
    machine set up from an image reads "TorqOS torq <date>": its TorqOS is the image's own copy (a `path:` in the
    store), not a release whose version was checked. torqcli's own line ("torqcli 0.4.0") says the version; the
    first update to the releases brings the number.
-6zzg. **A 0.3.2 machine pointed by hand at `torqosorg/torqos-releases` takes it unchecked**, and 0.3.2 cannot
-   be changed (ADR-028, amended 2026-11-12). 0.3.2 counts only its own address, `netstacks/torqos-releases`, as the
-   releases. Its default path, `request system update` on that address (GitHub redirects it), is checked, and
-   0.4.0 then keeps that address as the releases and moves the source to `torqosorg`. A person who sets the new
-   address by hand while still on 0.3.2 gets no signature check for that update. Do the update first; the move
-   comes with it. This relies on GitHub's redirect: nobody may create a repository named
-   `netstacks/torqos-releases` again.
+6zzg. **On 0.3.2: update as usual; do NOT set `torqosorg/torqos-releases` by hand.** 0.3.2 counts only its own
+   address, `netstacks/torqos-releases`, as the releases, and 0.3.2 cannot be changed. Its default path,
+   `request system update` on that address (GitHub redirects it), is checked, and 0.4.0 then keeps that address
+   as the releases and moves the source to `torqosorg` at its next update. A person who sets the new address by
+   hand while still on 0.3.2 gets no signature check for that update.
+6zzh. **On 0.4.0-rc1 with a `netstacks/torqos-releases` source: DO set `torqosorg/torqos-releases` by hand
+   first** — the opposite of 6zzg. A machine that went from 0.3.2 to rc1 through its own address keeps that
+   source, and rc1 (before this fix) does not count it as the releases: an update there, the one to 0.4.0
+   included, is taken unchecked. rc1 does check `torqosorg`, so on rc1:
+   `set system software torq source "git+https://github.com/torqosorg/torqos-releases?ref=refs/tags/v0.4.0-rc1"`
+   (or `?ref=stable` once 0.4.0 is out), commit, then update. A machine set up from the rc1 image is not affected:
+   its first update takes `torqosorg`.
+6zzi. **An undo does not check the inputs it brings back** (the review of work/release-alias, 2026-11-12, open).
+   `request system revert` restores an earlier `flake.lock` without the broker's input check (the rev fetched
+   again and its hash compared; the release key's signature). What it restores was checked when it was first
+   applied, by the TorqOS of that time: on a machine that took an update unchecked (6zzh), an undo can bring that
+   lock back unchecked again. Checking on revert as on apply is the fix, for later.
 
 ## Desktop (off in the base; the torqos-desktop configuration's, ADR-034, M4)
 7. ~~niri runs its stock config.~~ Moot: the desktop is COSMIC (ADR-045); `modules/desktop.nix`

@@ -75,10 +75,27 @@ first update, marked as a downgrade: answer no and set the tag as above.
 ## When the releases' address changes
 
 The releases moved from `netstacks/torqos-releases` to `torqosorg/torqos-releases` in November 2026.
-A machine installed before then still names the old address. It is still the releases, checked
-against the same key, and the next `request system update` moves the source to the new address,
-saying so and showing it in the compare (`[edit system software torq]`). On TorqOS 0.3.2, update
-as usual rather than setting the new address by hand: 0.3.2 checks only its own address.
+A machine installed before then still names the old address. From 0.4.0 on, a `git+https://`
+source at the old address is still the releases, checked against the same key, and the next update
+moves it to the new address, saying so and showing it in the compare (`[edit system software torq]`).
+That update is not offered as "Install it now?"; read it and commit it:
+
+```text
+alice@torq> request system update
+TorqOS's releases have a new address: the update moves this machine's source from git+https://github.com/netstacks/torqos-releases?ref=stable to git+https://github.com/torqosorg/torqos-releases?ref=stable (the same releases, signed by the same key).
+alice@torq> configure
+alice@torq# show | compare
+alice@torq# commit
+```
+
+The releases are taken as git only: a `github:` source for them is refused, at either address.
+
+!!! warning "Which address to set by hand depends on the version you run"
+    - **On TorqOS 0.3.2: do not set the new address by hand.** Update as usual: 0.3.2 checks only
+      its own (old) address, which GitHub redirects, and 0.4.0 moves it for you afterwards.
+    - **On 0.4.0-rc1, with the old address as your source: set the new address by hand first**
+      (`set system software torq source "git+https://github.com/torqosorg/torqos-releases?ref=stable"`,
+      commit), then update. rc1 checks only the new address.
 
 ## Going back to earlier software
 
