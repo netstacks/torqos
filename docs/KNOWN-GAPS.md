@@ -154,8 +154,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    /boot fsType ext4`) builds, switches, and fails at the next boot, into an emergency shell.
    `commit confirmed` cannot help (its timer runs on the new system, which never comes up). torqcli
    says so in the commit question; the way back is an earlier configuration in the boot menu (20
-   kept), which needs the machine's console, and `boot loader timeout 0` hides the menu. To do: make
-   the new boot entry one-shot until a confirmed commit is confirmed; refuse a zero timeout.
+   kept), which needs the machine's console, and `boot loader timeout 0` hides the menu: `set` refuses
+   it, `load` with it (`cli/src/settings.rs`, 2026-11-12); a config file or a hand-made proposal can
+   still set it, and a configuration that already holds it keeps it. To do: make the new boot entry
+   one-shot until a confirmed commit is confirmed.
 
 6o. **A flake.lock that does not match flake.nix is fetched before it is refused** (review of S4b).
    The broker builds with `--no-update-lock-file`, so such a commit never builds, but to find out

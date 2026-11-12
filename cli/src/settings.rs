@@ -169,6 +169,10 @@ pub fn set(tree: &Tree, s: &mut Settings, words: &[String]) -> Result<()> {
     for p in crate::nixos::packages_in(r.ty, &new) {
         tree.package(p).with_context(|| r.loc.join(" "))?;
     }
+    // The boot menu is the one way back from a configuration that does not start (KNOWN-GAPS 6n).
+    if r.loc == ["boot", "loader", "timeout"] && new == 0 {
+        bail!("boot loader timeout: 0 hides the boot menu, where an earlier configuration is chosen when the machine does not start; 1 is the shortest");
+    }
     if control_text(&mut r.loc.clone(), &new).is_some() {
         bail!("{}: a line break or another control character in a value: multi-line text goes in a config file", r.loc.join(" "));
     }
@@ -409,6 +413,10 @@ mod tests {
         assert!(format!("{:#}", set(&t, &mut s, &w("services httpd virtualHosts _x forceSSL true")).unwrap_err()).contains("the tree holds data only"));
         set(&t, &mut s, &w("environment etc motd-torq/x text hi")).unwrap();
         set(&t, &mut s, &w("systemd services myapp enable true")).unwrap();
+        s.clear();
+        let e = format!("{:#}", set(&t, &mut s, &w("boot loader timeout 0")).unwrap_err());
+        assert!(e.contains("0 hides the boot menu"), "{e}");
+        set(&t, &mut s, &w("boot loader timeout 1")).unwrap();
         s.clear();
         assert!(format!("{:#}", load([("nixos/x.json", b"[1]" as &[u8])]).unwrap_err()).contains("not a JSON object"));
         assert!(load([("nixos/x.json", b"{" as &[u8])]).is_err());
