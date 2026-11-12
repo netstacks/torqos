@@ -348,7 +348,9 @@ Its §5 lists claims without a test.
    included, is taken unchecked. rc1 does check `torqosorg`, so on rc1:
    `set system software torq source "git+https://github.com/torqosorg/torqos-releases?ref=refs/tags/v0.4.0-rc1"`
    (or `?ref=stable` once 0.4.0 is out), commit, then update. A machine set up from the rc1 image is not affected:
-   its first update takes `torqosorg`.
+   its first update takes `torqosorg`. A lock taken unchecked that way stays as it is until the machine's next change
+   to its lock: from 0.4.0 on, the broker judges the `torq` node at every lock change, not at a change of anything
+   else.
 6zzi. **An undo does not check the inputs it brings back** (the review of work/release-alias, 2026-11-12, open).
    `request system revert` restores an earlier `flake.lock` without the broker's input check (the rev fetched
    again and its hash compared; the release key's signature). What it restores was checked when it was first
