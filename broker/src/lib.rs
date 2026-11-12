@@ -237,27 +237,65 @@ fn fill(template: &str, vars: &[(&str, &str)]) -> String {
     cmd
 }
 
-/// Run `c` with its stderr passed on to the broker's own as it comes, and whether Nix said there that a database of
-/// its own under `cache` is damaged. Nix names the file in its SQLite errors ("… (in '/root/.cache/nix/…')"), so
-/// a damaged store database (/nix/var/nix/db) is never taken for a cache.
+/// How much of one line of a build's stderr is looked at: Nix's SQLite error, with its file's path, is far shorter.
+const LINE_LOOKED_AT: usize = 4096;
+/// How long a build's stderr is still passed on after the build has ended: anything it left running may hold the
+/// pipe open for good, and the broker must not wait on that with its lock held.
+const STDERR_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether one line of Nix's says that a database of its own, under `within` ("(in '<cache>/"), is damaged, and that
+/// this ended it: Nix names the file in its SQLite errors, so the store's own database (/nix/var/nix/db) is never
+/// taken for a cache, and a fault Nix reports as "error (ignored)" and carries on past is not the build's failure.
+fn cache_damage_ended_it(line: &[u8], within: &str) -> bool {
+    let line = String::from_utf8_lossy(line);
+    line.contains(within) && !line.contains("(ignored)") && (line.contains("database disk image is malformed") || line.contains("file is not a database"))
+}
+
+/// Run `c`, its stderr passed on to the broker's own as it comes (bytes, so a progress line drawn with \r shows), and
+/// whether Nix said there that one of its caches under `cache` is damaged.
 fn watched(c: &mut Command, cache: Option<&Path>) -> std::io::Result<(std::process::Output, bool)> {
+    use std::io::Read as _;
     let mut child = c.stderr(Stdio::piped()).spawn()?;
     let err = child.stderr.take();
     let within = cache.map(|p| format!("(in '{}/", p.display()));
-    let passed = std::thread::spawn(move || {
-        let mut damaged = false;
+    let damaged = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (seen, (ended, end)) = (damaged.clone(), std::sync::mpsc::channel());
+    std::thread::spawn(move || {
         let mut to = std::io::stderr();
-        for line in err.into_iter().flat_map(|e| std::io::BufRead::split(std::io::BufReader::new(e), b'\n')).map_while(Result::ok) {
-            // The broker's own stderr: if it is gone, there is nowhere left to say so.
-            let _ = to.write_all(&line).and_then(|()| to.write_all(b"\n"));
-            let line = String::from_utf8_lossy(&line);
-            damaged |= within.as_deref().is_some_and(|w| line.contains(w)) && (line.contains("database disk image is malformed") || line.contains("file is not a database"));
+        let (mut line, mut chunk) = (Vec::new(), [0u8; 8192]);
+        let look = |line: &[u8]| {
+            if within.as_deref().is_some_and(|w| cache_damage_ended_it(line, w)) {
+                seen.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+        if let Some(mut err) = err {
+            loop {
+                let n = match err.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                };
+                // The broker's own stderr: if it is gone, there is nowhere left to say so.
+                let _ = to.write_all(&chunk[..n]);
+                for &b in &chunk[..n] {
+                    if b == b'\n' || b == b'\r' {
+                        look(&line);
+                        line.clear();
+                    } else if line.len() < LINE_LOOKED_AT {
+                        line.push(b);
+                    }
+                }
+            }
+            look(&line);
         }
-        damaged
+        // The broker may have stopped waiting already (STDERR_AFTER): then nobody is told, and nobody needs to be.
+        let _ = ended.send(());
     });
     let out = child.wait_with_output()?;
-    // A reader that panicked saw no damage it could report.
-    Ok((out, passed.join().unwrap_or(false)))
+    // Ended, or still held open by something the command left behind: either way the broker goes on.
+    let _ = end.recv_timeout(STDERR_AFTER);
+    Ok((out, damaged.load(std::sync::atomic::Ordering::Relaxed)))
 }
 
 /// Another broker operation holds the lock: try again later. Its own type, so the CLI can say
@@ -2633,7 +2671,17 @@ impl Broker {
         if cmd.contains("{flake}") {
             cmd = cmd.replace("{flake}", &shell_quote(&self.flake_at(rev)?));
         }
-        self.run_shell(lock, "rebuild", &cmd)
+        // Run again only if Nix failed on its cache: the default command builds, then sets the profile and switches,
+        // each only after the one before succeeded, so a build that failed so never switched.
+        let out = self.run_again_if_cache_damaged("rebuild", || {
+            let mut c = self.shell(lock, &cmd)?;
+            c.stdout(Stdio::from(std::io::stderr().as_fd().try_clone_to_owned()?));
+            Ok(c)
+        })?;
+        if !out.status.success() {
+            bail!("rebuild command failed ({}): {cmd}", out.status);
+        }
+        Ok(())
     }
 
     /// The configuration to build: the config repo at commit `rev` (`{flake}`), not its working tree —
@@ -2666,21 +2714,17 @@ impl Broker {
         }
         // stdout carries the broker's result (one JSON line with --json): the command's own output
         // (activation scripts print to stdout via systemd-run --pipe) goes to stderr.
-        let out = self.run_again_if_cache_damaged(what, || {
-            let mut c = self.shell(lock, &cmd)?;
-            if let Some(p) = path {
-                c.env("PATH", p);
-            }
-            c.stdout(Stdio::from(std::io::stderr().as_fd().try_clone_to_owned()?));
-            Ok(c)
-        })?;
-        if !out.status.success() {
-            bail!("{what} command failed ({}): {cmd}", out.status);
+        let status = c
+            .stdout(Stdio::from(std::io::stderr().as_fd().try_clone_to_owned()?))
+            .status()
+            .with_context(|| format!("running {what}"))?;
+        if !status.success() {
+            bail!("{what} command failed ({status}): {cmd}");
         }
         Ok(())
     }
 
-    /// The same, returning what the command prints on stdout.
+    /// The build command (`build_system`), returning what it prints on stdout: the system's path.
     fn run_command_output(&self, lock: &Lock, what: &str, template: &str, vars: &[(&str, &str)]) -> Result<String> {
         let cmd = fill(template, vars);
         let out = self.run_again_if_cache_damaged(what, || {
@@ -2705,10 +2749,6 @@ impl Broker {
         eprintln!("torq-broker: Nix's cache {} is damaged (a power cut during a build can do that): removing it and running {what} again", cache.display());
         fs::remove_dir_all(cache).with_context(|| format!("removing Nix's damaged cache {}", cache.display()))?;
         Ok(watched(&mut command()?, None).with_context(|| format!("running {what} again"))?.0)
-    }
-
-    fn run_shell(&self, lock: &Lock, what: &str, cmd: &str) -> Result<()> {
-        self.run_command_in(lock, what, cmd, &[], None)
     }
 
     /// `sh -c cmd` holding the broker lock through its stdin (see `Lock::for_child`).

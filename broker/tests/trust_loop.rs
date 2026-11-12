@@ -3663,22 +3663,40 @@ fn a_persons_secrets_rules_are_theirs_alone_at_the_broker() {
 }
 
 /// KNOWN-GAPS 6t: a build that fails because Nix found its own cache damaged (as a power cut mid-build leaves it)
-/// is run again once with the cache removed. A damaged database elsewhere (the store's) is left alone, and the
-/// change fails as before.
+/// is run again once with the cache removed. A damaged database elsewhere (the store's) is left alone, and so is a
+/// fault Nix reports as ignored and carries on past (the command then failed for a reason of its own): the change
+/// fails as before. The line ends as a progress line would (\r): it is still read.
 #[test]
 fn a_build_failing_on_a_damaged_nix_cache_clears_it_and_builds_again() {
-    for (db, clears) in [("CACHE/fetcher-cache-v4.sqlite", true), ("/nix/var/nix/db/db.sqlite", false)] {
+    for (said, db, clears) in [
+        ("error:", "CACHE/fetcher-cache-v4.sqlite", true),
+        ("error:", "/nix/var/nix/db/db.sqlite", false),
+        ("error (ignored): error:", "CACHE/eval-cache-v6/x.sqlite", false),
+    ] {
         let (dir, repo) = config_dir();
         let cache = dir.path().join("home/.cache/nix");
         fs::create_dir_all(&cache).unwrap();
         let db = db.replace("CACHE", &cache.display().to_string());
-        let said = format!("error: executing SQLite statement 'pragma synchronous = off': database disk image is malformed, database disk image is malformed (in '{db}')");
-        let rebuild = format!("if [ -d '{}' ]; then echo \"{said}\" >&2; exit 1; fi", cache.display());
+        let said = format!("{said} executing SQLite statement 'pragma synchronous = off': database disk image is malformed, database disk image is malformed (in '{db}')");
+        let rebuild = format!("if [ -d '{}' ]; then printf '%s\\r' \"{said}\" >&2; exit 1; fi", cache.display());
         let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_nix_cache(&cache);
         b.init().unwrap();
         let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
         let p = b.propose(&d, "night light", Actor::User, false).unwrap();
-        assert_eq!(b.apply(p.body.seq, "casey", false).is_ok(), clears, "{db}");
-        assert_eq!(cache.exists(), !clears, "{db}");
+        assert_eq!(b.apply(p.body.seq, "casey", false).is_ok(), clears, "{said}");
+        assert_eq!(cache.exists(), !clears, "{said}");
     }
+}
+
+/// What a build leaves running may hold its stderr open for good: the broker passes it on for a moment after the
+/// build ends, then goes on, its lock no longer held.
+#[test]
+fn a_build_that_leaves_a_process_holding_its_output_does_not_hold_the_broker() {
+    let (dir, b) = setup("sleep 60 </dev/null >/dev/null & echo left >&2");
+    let b = b.with_nix_cache(dir.path().join("cache"));
+    let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+    let p = b.propose(&d, "night light", Actor::User, false).unwrap();
+    let started = std::time::Instant::now();
+    b.apply(p.body.seq, "casey", false).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
 }

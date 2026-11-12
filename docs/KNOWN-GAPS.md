@@ -184,14 +184,20 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    writes them without waiting for the disk, and then every later build fails with "database disk
    image is malformed". Found by cutting the power during first-boot setup, which now clears them
    when it starts over (nothing else uses them before change #1). On a set-up machine the broker now
-   does it itself (2026-11-12): a build or switch that fails with Nix saying one of those databases is
-   damaged ("database disk image is malformed" or "file is not a database", in a file under that folder)
-   has the folder removed and runs once more, said in the broker's log (test
-   `a_build_failing_on_a_damaged_nix_cache_clears_it_and_builds_again`; Nix 2.34's own message checked by
-   hand against a damaged copy of a fetcher cache). The same message about any other file, the store's
-   database included, is left alone and the change fails as before. Not covered: a cache damaged so that
-   Nix fails without one of those messages, and damage in a person's own `~/.cache/nix` (their `nix`, not
-   the broker's). (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
+   does it itself (2026-11-12): the two commands that evaluate and build (a commit's `rebuild`, whose default
+   builds, then sets the profile and switches, each only after the one before succeeded; and `commit
+   confirmed`'s `build`), when one fails with Nix saying one of those databases is damaged ("database disk
+   image is malformed" or "file is not a database", in a file under that folder, not "error (ignored)"),
+   have the folder removed and run once more, said in the broker's log (tests
+   `a_build_failing_on_a_damaged_nix_cache_clears_it_and_builds_again`,
+   `a_build_that_leaves_a_process_holding_its_output_does_not_hold_the_broker`; Nix 2.34's own message checked
+   by hand against a damaged copy of a fetcher cache). Their stderr is passed on as it comes and read for
+   that message, and waited for 2 seconds after the command ends, no longer, so a process it left behind
+   cannot hold the broker. The same message about any other file, the store's database included, is left
+   alone and the change fails as before; no other command (activation, boot, snapshots, timers) is run
+   again. Not covered: a cache damaged so that Nix fails without one of those messages; a `rebuild` set by
+   hand that switches before it builds; damage in a person's own `~/.cache/nix` (their `nix`, not the
+   broker's). (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
 6u. **Packages cannot be found by the command they install** (`rg` → ripgrep, `nvim` → neovim).
    `show packages <words>` searches names and descriptions (`nix search` on this machine's
    nixpkgs); which package holds a command needs an index that is not on the machine (nixpkgs'
