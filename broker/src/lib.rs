@@ -1955,8 +1955,9 @@ impl Broker {
         };
         let old = lock_at(before)?;
         let new = lock_at(commit)?;
-        let changes = inputs::changed(&old, &new)?;
-        if changes.is_empty() {
+        // The lock as it was, byte for byte: nothing of it to check. Any other change to it, of whatever part (a
+        // node's `locked`, its `original`, its `inputs`, the root's inputs, a node added), is looked at below.
+        if old == new {
             return Ok(());
         }
         // Which inputs are the releases (ADR-028, amended 2026-11-12). Every TorqOS machine has the setting
@@ -1968,18 +1969,37 @@ impl Broker {
             .map_err(|why| anyhow::anyhow!("refused: which inputs are TorqOS's releases cannot be read ({}: {why}), so no change to the software is applied", self.releases_file.display()))?;
         // A lock whose `original` names the releases but whose `locked` takes TorqOS from elsewhere: Nix compares
         // flake.nix with `original` only and builds `locked`, so the machine's source would read as the releases
-        // while it builds something no key signed. Each changed node, and the node the root's `torq` input
-        // resolves to however it is named (changed or not): if it names the releases, it is the releases as git.
-        // (A source honestly moved away moves `original` and flake.nix too: not this.)
-        let new_lock: serde_json::Value = if new.trim().is_empty() { serde_json::Value::Null } else { serde_json::from_str(&new).context("reading the new flake.lock")? };
-        let torq_node = inputs::resolve(&new_lock, "torq");
-        for name in changes.keys().chain(torq_node.iter()) {
-            let node = &new_lock["nodes"][name];
-            // (A `locked` that is the releases in another form, a tarball, is refused just below, in its own words.)
+        // while it builds something no key signed. Looked at: each node that differs in any way from the old lock's
+        // (or is new), and the node the root's `torq` input resolves to however it is named, whether it changed or
+        // not. If it names the releases, its `locked` must be the releases. (A source honestly moved away moves
+        // `original` and flake.nix too: not this.)
+        let parse = |t: &str| -> Result<serde_json::Value> { if t.trim().is_empty() { Ok(serde_json::Value::Null) } else { Ok(serde_json::from_str(t)?) } };
+        let (old_lock, new_lock) = (parse(&old).context("reading the old flake.lock")?, parse(&new).context("reading the new flake.lock")?);
+        let mut look: std::collections::BTreeSet<String> = new_lock["nodes"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(name, node)| old_lock["nodes"][name.as_str()] != **node)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let root = new_lock["root"].as_str().unwrap_or("root");
+        if new_lock["nodes"][root]["inputs"].get("torq").is_some() {
+            // A `torq` input that leads nowhere (a missing node, a path that does not resolve or goes round): not a
+            // lock that can be judged, so refused, not passed by.
+            let torq_node = inputs::resolve(&new_lock, "torq").context("refused: the lock's torq input does not lead to a node of the lock")?;
+            look.insert(torq_node);
+        }
+        for name in &look {
+            let node = &new_lock["nodes"][name.as_str()];
+            // (A changed `locked` that is the releases in another form, a tarball, is refused just below, in its own
+            // words. An unchanged one is left as it is: it was taken as it was, and refusing it would leave the machine
+            // unable to change anything.)
             if releases.names(&node["original"]) && releases.verdict(&node["locked"]) == torq_wire::releases::Verdict::Other {
                 bail!("refused: {name}: the lock names TorqOS's releases but takes TorqOS from elsewhere (its `locked` is not the releases as git): what would be built is not what the release key signed");
             }
         }
+        // The inputs whose `locked` changed: what is fetched again, and checked against the release key.
+        let changes = inputs::changed(&old, &new)?;
         // The releases in a form not bound to a commit the key signed (a tarball): refused before anything is
         // fetched; the releases as git: checked below, at their address now.
         let mut signed = vec![];

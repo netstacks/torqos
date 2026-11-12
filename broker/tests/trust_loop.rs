@@ -3514,6 +3514,55 @@ fn a_lock_that_names_the_releases_but_takes_torqos_from_elsewhere_is_refused() {
     assert!(!e.contains(refused), "{e}");
 }
 
+/// The same, when no node's `locked` changes: a change to a lock is looked at whatever part of it changed (an
+/// `original` re-labelled, the root's `torq` input pointed at another node), and the node the root's `torq` input
+/// resolves to is judged whether it changed or not. Each case starts from a lock already in the repository.
+#[test]
+fn a_lock_change_that_leaves_every_locked_as_it_was_is_judged_too() {
+    let setting = r#"{"url": "git+https://github.com/torqosorg/torqos-releases?ref=stable", "former": ["https://github.com/netstacks/torqos-releases"]}"#;
+    let try_change = |base: &str, new: &str| -> String {
+        let (dir, repo) = config_dir();
+        fs::write(repo.join("flake.lock"), format!("{base}\n")).unwrap();
+        let file = dir.path().join("releases.json");
+        fs::write(&file, setting).unwrap();
+        let b = Broker::new(&repo, dir.path().join("state"), "true").with_releases_file(&file);
+        b.init().unwrap();
+        let d = write_diff(dir.path(), "lock.diff", &format!("--- a/flake.lock\n+++ b/flake.lock\n@@ -1 +1 @@\n-{base}\n+{new}\n"));
+        let p = b.propose_on(Some(&b.repo.head().unwrap()), &d, "lock", Actor::User, false).unwrap();
+        match b.apply(p.body.seq, "casey", false) {
+            Ok(_) => "applied".into(),
+            Err(e) => format!("{e:#}"),
+        }
+    };
+    let releases = r#"{"type": "git", "url": "https://github.com/torqosorg/torqos-releases", "ref": "stable"}"#;
+    let fork = r#"{"type": "git", "url": "https://example.com/fork"}"#;
+    let fork_locked = r#"{"type": "git", "url": "https://example.com/fork", "rev": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "narHash": "sha256-f"}"#;
+    let path = r#"{"type": "path", "path": "/x"}"#;
+    let path_locked = r#"{"type": "path", "path": "/x", "narHash": "sha256-p"}"#;
+    let lock = |root_torq: &str, nodes: &str| format!(r#"{{"nodes": {{"root": {{"inputs": {{"torq": {root_torq}}}}}, {nodes}}}, "root": "root", "version": 7}}"#);
+    let refused = "the lock names TorqOS's releases but takes TorqOS from elsewhere";
+
+    // On a fork, honestly: its `original` re-labelled as the releases, `locked` as it was.
+    let base = lock(r#""torq""#, &format!(r#""torq": {{"original": {fork}, "locked": {fork_locked}}}"#));
+    let e = try_change(&base, &lock(r#""torq""#, &format!(r#""torq": {{"original": {releases}, "locked": {fork_locked}}}"#)));
+    assert!(e.contains(&format!("refused: torq: {refused}")), "{e}");
+    // The same alongside an unrelated change.
+    let e = try_change(&base, &lock(r#""torq""#, &format!(r#""torq": {{"original": {releases}, "locked": {fork_locked}}}, "other": {{"original": {path}, "locked": {path_locked}}}"#)));
+    assert!(e.contains(&format!("refused: torq: {refused}")), "{e}");
+    // A node already there (named as the releases, taken from a fork) and the root's torq input pointed at it: only the
+    // root changes.
+    let base = lock(r#""torq""#, &format!(r#""torq": {{"original": {path}, "locked": {path_locked}}}, "x": {{"original": {releases}, "locked": {fork_locked}}}"#));
+    let e = try_change(&base, &lock(r#""x""#, &format!(r#""torq": {{"original": {path}, "locked": {path_locked}}}, "x": {{"original": {releases}, "locked": {fork_locked}}}"#)));
+    assert!(e.contains(&format!("refused: x: {refused}")), "{e}");
+    // The torq node already like that, and a change elsewhere: it is judged though it did not change.
+    let base = lock(r#""torq""#, &format!(r#""torq": {{"original": {releases}, "locked": {fork_locked}}}"#));
+    let e = try_change(&base, &lock(r#""torq""#, &format!(r#""torq": {{"original": {releases}, "locked": {fork_locked}}}, "other": {{"original": {path}, "locked": {path_locked}}}"#)));
+    assert!(e.contains(&format!("refused: torq: {refused}")), "{e}");
+    // A torq input that leads nowhere: refused, not passed by.
+    let e = try_change(&base, &lock(r#""gone""#, &format!(r#""torq": {{"original": {path}, "locked": {path_locked}}}"#)));
+    assert!(e.contains("the lock's torq input does not lead to a node of the lock"), "{e}");
+}
+
 /// A desktop saved by an older TorqOS, with another program's settings in it, cleaned by the next save: an undo
 /// of that save would put them back, so it is refused (an undo of a person's own change needs no approval, so it
 /// would otherwise be the way around the rule), and nothing is recorded.

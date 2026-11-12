@@ -26,7 +26,8 @@ fn resolve_from(lock: &Value, node: &str, name: &str, depth: usize) -> Option<St
         return None;
     }
     match &lock["nodes"][node]["inputs"][name] {
-        Value::String(n) => Some(n.clone()),
+        // A node of the lock, or nothing: a name with no node is a path that does not resolve.
+        Value::String(n) => lock["nodes"].get(n.as_str()).is_some_and(Value::is_object).then(|| n.clone()),
         Value::Array(path) => {
             let root = lock["root"].as_str().unwrap_or("root");
             path.iter().try_fold(root.to_string(), |at, step| resolve_from(lock, &at, step.as_str()?, depth + 1))
@@ -144,6 +145,9 @@ mod tests {
         assert_eq!(resolve(&l, "torq").as_deref(), Some("torq_2"));
         assert_eq!(resolve(&l, "via").as_deref(), Some("z"), "a follows path");
         assert_eq!(resolve(&l, "none"), None);
+        let mut dangling = l.clone();
+        dangling["nodes"]["root"]["inputs"]["torq"] = json!("missing");
+        assert_eq!(resolve(&dangling, "torq"), None, "a name with no node");
         assert_eq!(resolve(&l, "gone"), None, "a path that does not resolve");
         assert_eq!(resolve(&l, "loop"), None, "a path that goes round");
     }

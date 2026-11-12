@@ -89,9 +89,11 @@ impl Releases {
                     Verdict::Other
                 }
             }
-            // A tarball or file by URL: the releases' own address or anything under it (`…/archive/<rev>.tar.gz`).
+            // A tarball or file by URL: the releases' own address or anything under it (`…/archive/<rev>.tar.gz`,
+            // `….git/archive/…`), and for a GitHub address, GitHub's tarball hosts for it (`codeload.github.com/<o>/<r>/…`,
+            // `api.github.com/repos/<o>/<r>/…`). These exactly; another host serving them is another address.
             Some("tarball" | "file") => match locked["url"].as_str() {
-                Some(url) if self.places().any(|p| under(&place(url), &p)) => Verdict::Refused(TARBALL.into()),
+                Some(url) if self.places().any(|p| tarball_of(&place(url), &p)) => Verdict::Refused(TARBALL.into()),
                 _ => Verdict::Other,
             },
             _ => Verdict::Other,
@@ -168,9 +170,15 @@ fn decoded(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Whether address `a` is `repo` or a path under it.
+/// Whether address `a` is `repo` or a path under it (`repo/…`, or `repo.git/…`).
 fn under(a: &str, repo: &str) -> bool {
-    a == repo || a.strip_prefix(repo).is_some_and(|rest| rest.starts_with('/'))
+    a == repo || [format!("{repo}/"), format!("{repo}.git/")].iter().any(|p| a.starts_with(p.as_str()))
+}
+
+/// Whether address `a` is a tarball of `repo`: under it, or for a GitHub repository under GitHub's tarball hosts.
+fn tarball_of(a: &str, repo: &str) -> bool {
+    under(a, repo)
+        || repo.strip_prefix("github.com/").is_some_and(|or| under(a, &format!("codeload.github.com/{or}")) || under(a, &format!("api.github.com/repos/{or}")))
 }
 
 #[cfg(test)]
@@ -229,10 +237,15 @@ mod tests {
         refused(json!({"type": "github", "owner": "torqosorg", "repo": "torqos-releases", "host": "evil.example", "rev": rev}));
         refused(json!({"type": "tarball", "url": format!("https://github.com/torqosorg/torqos-releases/archive/{rev}.tar.gz")}));
         refused(json!({"type": "file", "url": "https://github.com/netstacks/torqos-releases/archive/refs/heads/stable.zip"}));
+        refused(json!({"type": "tarball", "url": "https://github.com/torqosorg/torqos-releases.git/archive/stable.tar.gz"}));
+        refused(json!({"type": "tarball", "url": "https://codeload.github.com/torqosorg/torqos-releases/tar.gz/refs/heads/stable"}));
+        refused(json!({"type": "tarball", "url": "https://api.github.com/repos/netstacks/torqos-releases/tarball/stable"}));
         let other = |l: Value| assert_eq!(r.verdict(&l), Verdict::Other, "{l}");
         other(json!({"type": "github", "owner": "torqosorg", "repo": "torqos", "rev": rev}));
         other(json!({"type": "git", "url": "https://github.com/torqosorg/torqos", "rev": rev}));
         other(json!({"type": "tarball", "url": "https://github.com/torqosorg/torqos-releases-evil/archive/x.tar.gz"}));
+        other(json!({"type": "tarball", "url": "https://codeload.github.com/torqosorg/torqos-releases-evil/tar.gz/x"}));
+        other(json!({"type": "tarball", "url": "https://mirror.example/torqosorg/torqos-releases/archive/x.tar.gz"}));
         other(json!({"type": "path", "path": "/nix/store/x-source"}));
     }
 
