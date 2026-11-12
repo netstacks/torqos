@@ -165,7 +165,8 @@ pub fn start(b: &Broker) -> Result<Record> {
     // Untainted at its start only from the resident agent (ADR-051 step 5), and only when its model is one no
     // account here can stand in for (its review: a TCP model on this machine, a socket in a place others write).
     // Judged before the sessions' lock (the review of the rebased branch, S1): it may ask the resolver whether the
-    // model's host is this machine, and a slow resolver then holds up this start alone, not every agent's.
+    // model's host is this machine, and a slow resolver then holds up this start alone, not every agent's. Not
+    // bounded here: getaddrinfo's own timeouts (resolv.conf) are the wait, for this start only.
     let taint = if b.resident() { b.model_taint() } else { Some(socket::NOT_RESIDENT) };
     let _l = lock(b)?;
     let kept = kept(b)?;

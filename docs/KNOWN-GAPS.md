@@ -1130,6 +1130,10 @@ Its §5 lists claims without a test.
      too, but asks the administrator's password — who is then root (above). `/proc/self/loginuid` is no
      better: unset for a person reached by su or runuser from a root shell, and the first person's after
      `su - <another>`.
+   - **Any account can read a session's record** (`torq-broker session <id>`, an OBSERVE command, as the ledger
+     is): whether it is tainted and by what, and which proposals cited it. Nothing secret is in it, and its id is
+     in the ledger already; kept so on purpose (the review of the rebased branch, 2026-11-12). A session is
+     reported into and cited only by its own agent account, and only by its own kind of caller (6zzs).
 
 6zzl. **The agent service (ADR-051 3, step 2, built 2026-11-10, `tests/agent-service.nix`).** Open:
    - **The freeze is held for the walk only.** A service the person's socket starts during the walk is not
