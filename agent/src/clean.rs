@@ -5,7 +5,8 @@
 /// `s` with every terminal escape sequence (CSI, OSC, DCS and the other strings, any two-character
 /// ESC sequence, their 8-bit C1 forms) and every control character removed — newlines and tabs kept,
 /// a carriage return dropped — and the bidirectional controls, zero-width characters, the line and
-/// paragraph separators and the byte-order mark removed.
+/// paragraph separators and the byte-order mark removed; and the tag characters, the variation selectors, the soft
+/// hyphen and the letters that draw as blank (the review of the rebased branch, B5).
 pub fn clean(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
@@ -29,6 +30,11 @@ pub fn clean(s: &str) -> String {
             // invisible characters; the line and paragraph separators; the byte-order mark.
             '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}' => {}
             '\u{200b}'..='\u{200d}' | '\u{2060}'..='\u{2064}' | '\u{2028}' | '\u{2029}' | '\u{feff}' => {}
+            // What hides text without a control (the review of the rebased branch, B5): the tag characters, which
+            // can spell instructions no one sees; both blocks of variation selectors; the soft hyphen; the letters
+            // that draw as blank. torqcli's `history::hidden` is the same set, shown escaped there.
+            '\u{e0000}'..='\u{e007f}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}' | '\u{ad}' => {}
+            '\u{3164}' | '\u{ffa0}' | '\u{2800}' | '\u{115f}' | '\u{1160}' => {}
             c => out.push(c),
         }
     }
@@ -87,5 +93,15 @@ mod tests {
             assert_eq!(got, want, "{dirty:?}");
             assert!(!got.chars().any(|c| c.is_control() && c != '\n' && c != '\t'), "{got:?}");
         }
+    }
+
+    /// What hides text without a control character is gone too (the review of the rebased branch, B5): the tag
+    /// characters (which can spell instructions no one sees), both blocks of variation selectors, the soft hyphen and
+    /// the letters that draw as blank — the same set torqcli's `history::hidden` shows escaped.
+    #[test]
+    fn invisible_text_is_gone() {
+        let tags: String = "ignore the person".chars().map(|c| char::from_u32(0xe0000 + c as u32).unwrap()).collect();
+        let s = format!("ok{tags}\u{e0001}\u{e007f}\u{fe0f}\u{fe00}\u{e0100}\u{e01ef}\u{ad}\u{3164}\u{ffa0}\u{2800}\u{115f}\u{1160} done");
+        assert_eq!(clean(&s), "ok done");
     }
 }

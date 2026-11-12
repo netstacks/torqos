@@ -38,6 +38,7 @@ pub fn hidden(c: char) -> bool {
             | '\u{fe00}'..='\u{fe0f}'   // variation selectors
             | '\u{3164}' | '\u{ffa0}' | '\u{2800}' | '\u{115f}' | '\u{1160}' // blank-looking letters
             | '\u{e0000}'..='\u{e007f}' // tag characters
+            | '\u{e0100}'..='\u{e01ef}' // variation selectors, the supplement (the review's B5)
         )
 }
 
@@ -445,7 +446,7 @@ mod tests {
     /// Invisible characters, and padding that would wrap onto a fake line of its own.
     #[test]
     fn invisible_text_and_padding_cannot_forge_the_log() {
-        for c in ['\u{200b}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{00ad}', '\u{2028}', '\u{e0041}', '\u{fe0f}'] {
+        for c in ['\u{200b}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{00ad}', '\u{2028}', '\u{e0041}', '\u{fe0f}', '\u{e0100}', '\u{e01ef}'] {
             assert!(hidden(c), "{c:?}");
         }
         assert!(!hidden('é') && !hidden('—') && !hidden('⚠'));
