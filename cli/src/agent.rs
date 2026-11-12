@@ -285,8 +285,8 @@ fn question_from<R: std::io::BufRead>(r: &mut R) -> Result<String> {
     use std::io::Read;
     const MAX: u64 = 8 * 1024;
     let mut line = String::new();
-    std::io::BufRead::read_line(&mut r.take(MAX), &mut line).context("reading your question")?;
-    if line.len() as u64 >= MAX && !line.ends_with('\n') {
+    std::io::BufRead::read_line(&mut r.take(MAX + 1), &mut line).context("reading your question")?;
+    if line.trim_end_matches('\n').len() as u64 > MAX {
         bail!("your question is longer than {MAX} bytes: ask it shorter");
     }
     let q = line.trim();
@@ -746,6 +746,7 @@ mod tests {
         let long = format!("{}\n", "x".repeat(9 * 1024));
         assert!(format!("{:#}", question_from(&mut long.as_bytes()).unwrap_err()).contains("longer than 8192 bytes"));
         let fits = format!("{}\n", "y".repeat(8 * 1024 - 1));
+        assert_eq!(question_from(&mut "z".repeat(8 * 1024).as_bytes()).unwrap().len(), 8 * 1024, "exactly 8 KiB, no newline: it fits");
         assert_eq!(question_from(&mut fits.as_bytes()).unwrap().len(), 8 * 1024 - 1);
         let c = client::Client::at(std::path::Path::new("/run/torq-agent/alice.sock"), 1000);
         assert_eq!(c.unit(), "torq-agent@alice.service");

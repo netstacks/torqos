@@ -520,6 +520,72 @@ impl cosmic::Application for Settings {
     }
 
     fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
+        // The failure kept for Ask the agent belongs to the note a command's result set: any other message that
+        // changes the note lets it go, so the button never stands beside a note it did not come with.
+        let (was, from_a_command) = (self.note.clone(), matches!(message, Message::Did(..)));
+        let task = self.updated(message);
+        if !from_a_command && self.note != was {
+            self.failure = None;
+        }
+        task
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let body = match self.page() {
+            Page::Overview => self.overview(),
+            Page::Configuration => self.configuration(),
+            Page::Apps => self.apps_page(),
+            Page::Desktop => self.desktop_page(),
+            Page::Secrets => self.secrets_page(),
+            Page::History => match self.change {
+                Some(seq) => self.change_page(seq),
+                None => self.history(),
+            },
+            Page::Proposals => match self.proposal {
+                Some(seq) => self.proposal_page(seq),
+                None => self.proposals(),
+            },
+            Page::System => self.system(),
+            Page::Commands => self.commands(),
+            Page::Agent => self.agent_page(),
+        };
+        let mut content = widget::column::with_capacity(3).spacing(spacing.space_m).max_width(960);
+        if let Some(what) = &self.busy {
+            content = content.push(widget::text::body(format!("Working: {what}…")));
+        }
+        if let Some((text, failed)) = &self.note {
+            content = content.push(note(text, *failed));
+            // Something failed: the agent can look at it with the person (what failed and what it said, attached).
+            // Only beside the note it came with (`update` lets it go when any other changes the note).
+            if *failed && self.failure.is_some() {
+                content = content.push(widget::button::text("Ask the agent about this").on_press(Message::AskAgentFailure));
+            }
+        }
+        content = content.push(body);
+        widget::scrollable(widget::container(content).width(Length::Fill).center_x(Length::Fill).padding(spacing.space_m)).into()
+    }
+}
+
+/// A configuration's `| display set` lines, by setting.
+fn values(shown: &str) -> Values {
+    let mut out = Values::new();
+    for (path, value) in app::settings_of(shown) {
+        out.entry(path).or_default().push(value);
+    }
+    out
+}
+
+/// The words that may follow a place, without what is not a word.
+fn words_of(c: &[Choice]) -> impl Iterator<Item = &Choice> {
+    c.iter().filter(|c| !c.is_placeholder() && c.word != "|")
+}
+
+
+
+impl Settings {
+    /// What a message does (`update` keeps the Ask the agent failure with its own note).
+    fn updated(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
         match message {
             Message::Refresh => return self.load(),
             Message::Glance(r) => self.glance = r.into(),
@@ -681,14 +747,14 @@ impl cosmic::Application for Settings {
                 }
                 let mut below = path;
                 below.push(word);
-                return self.update(Message::Select(below));
+                return cosmic::Application::update(self, Message::Select(below));
             }
             Message::Filter(s) => self.filter = s,
             Message::Area(a) => {
                 self.area = a;
                 self.filter.clear();
             }
-            Message::AddSetting => return self.update(Message::Select(vec![])),
+            Message::AddSetting => return cosmic::Application::update(self, Message::Select(vec![])),
             Message::PickFilter(s) => self.pick_filter = s,
             Message::SetAt(path, on) => {
                 let line = self.line_at("set", &path, Some(if on { "true" } else { "false" }));
@@ -876,7 +942,7 @@ impl cosmic::Application for Settings {
                 return match r {
                     Ok(_) => {
                         self.remote_url.clear();
-                        self.update(Message::Review)
+                        cosmic::Application::update(self, Message::Review)
                     }
                     Err(e) => {
                         self.note = Some((e, true));
@@ -933,7 +999,7 @@ impl cosmic::Application for Settings {
                     Ok(url) => {
                         self.gh_repo = app::github_repo(&url);
                         self.remote_url = url;
-                        return self.update(Message::Connect);
+                        return cosmic::Application::update(self, Message::Connect);
                     }
                     Err(e) => self.note = Some((e, true)),
                 }
@@ -1041,12 +1107,12 @@ impl cosmic::Application for Settings {
             Message::AskAgent(h) => return cosmic::task::future(async move { Message::AskedAgent(blocking(move || handoff::open_window(&h, None)).await) }),
             Message::AskAgentFailure => {
                 if let Some((command, said)) = &self.failure {
-                    return self.update(Message::AskAgent(About::Failure { command, said }.handoff()));
+                    return cosmic::Application::update(self, Message::AskAgent(About::Failure { command, said }.handoff()));
                 }
             }
             Message::AskAgentDraft => {
                 if let Some(Loaded::Got(diff)) = self.outputs.get(COMPARE) {
-                    return self.update(Message::AskAgent(About::Draft(diff).handoff()));
+                    return cosmic::Application::update(self, Message::AskAgent(About::Draft(diff).handoff()));
                 }
             }
             Message::AskedAgent(r) => {
@@ -1075,61 +1141,6 @@ impl cosmic::Application for Settings {
         Task::none()
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let spacing = cosmic::theme::spacing();
-        let body = match self.page() {
-            Page::Overview => self.overview(),
-            Page::Configuration => self.configuration(),
-            Page::Apps => self.apps_page(),
-            Page::Desktop => self.desktop_page(),
-            Page::Secrets => self.secrets_page(),
-            Page::History => match self.change {
-                Some(seq) => self.change_page(seq),
-                None => self.history(),
-            },
-            Page::Proposals => match self.proposal {
-                Some(seq) => self.proposal_page(seq),
-                None => self.proposals(),
-            },
-            Page::System => self.system(),
-            Page::Commands => self.commands(),
-            Page::Agent => self.agent_page(),
-        };
-        let mut content = widget::column::with_capacity(3).spacing(spacing.space_m).max_width(960);
-        if let Some(what) = &self.busy {
-            content = content.push(widget::text::body(format!("Working: {what}…")));
-        }
-        if let Some((text, failed)) = &self.note {
-            content = content.push(note(text, *failed));
-            // Something failed: the agent can look at it with the person (what failed and what it said, attached).
-            // Only beside the failure it names: a note other than its own (any of the page's other failures) has no
-            // Ask the agent here, rather than one about an older failure (the review of the rebased branch, B11).
-            if *failed && self.failure.as_ref().is_some_and(|(_, said)| said == text) {
-                content = content.push(widget::button::text("Ask the agent about this").on_press(Message::AskAgentFailure));
-            }
-        }
-        content = content.push(body);
-        widget::scrollable(widget::container(content).width(Length::Fill).center_x(Length::Fill).padding(spacing.space_m)).into()
-    }
-}
-
-/// A configuration's `| display set` lines, by setting.
-fn values(shown: &str) -> Values {
-    let mut out = Values::new();
-    for (path, value) in app::settings_of(shown) {
-        out.entry(path).or_default().push(value);
-    }
-    out
-}
-
-/// The words that may follow a place, without what is not a word.
-fn words_of(c: &[Choice]) -> impl Iterator<Item = &Choice> {
-    c.iter().filter(|c| !c.is_placeholder() && c.word != "|")
-}
-
-
-
-impl Settings {
     /// A program the page starts that could not start, said on the page (the review of the rebased branch, B12).
     fn said_if_not(&mut self, r: anyhow::Result<()>) {
         if let Err(e) = r {

@@ -165,12 +165,12 @@ pub fn take_from(dir: &Path, path: &Path, uid: u32) -> Result<Handoff> {
         .open(path)
         .with_context(|| format!("opening {}", path.display()))
         .map_err(refused)?;
-    let m = f.metadata()?;
+    let m = f.metadata().with_context(|| format!("reading {}", path.display())).map_err(refused)?;
     if !m.is_file() || m.uid() != uid || m.len() > MAX_FILE {
         return Err(refused(anyhow::anyhow!("{}: not a handoff of yours", path.display())));
     }
     let mut text = String::new();
-    (&mut f).take(MAX_FILE).read_to_string(&mut text)?;
+    (&mut f).take(MAX_FILE).read_to_string(&mut text).with_context(|| format!("reading {}", path.display())).map_err(refused)?;
     // Taken once: removed before it is used, and refused if it cannot be (C11: its result was dropped, so a handoff
     // could be read twice).
     std::fs::remove_file(path).with_context(|| format!("removing {} once read", path.display()))?;
