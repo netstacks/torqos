@@ -164,7 +164,7 @@ pub fn start(b: &Broker) -> Result<Record> {
     let (agent, _) = b.acting_agent()?;
     // Untainted at its start only from the resident agent (ADR-051 step 5), and only when its model is one no
     // account here can stand in for (its review: a TCP model on this machine, a socket in a place others write).
-    // Judged before the sessions' lock (the review of the rebased branch, S1): it may ask the resolver whether the
+    // Judged before the sessions' lock: it may ask the resolver whether the
     // model's host is this machine, and a slow resolver then holds up this start alone, not every agent's. Not
     // bounded here: getaddrinfo's own timeouts (resolv.conf) are the wait, for this start only.
     let taint = if b.resident() { b.model_taint() } else { Some(socket::NOT_RESIDENT) };
@@ -216,7 +216,7 @@ pub fn taint(b: &Broker, id: &str, source: &str) -> Result<Record> {
     if r.agent != agent {
         bail!("refused: session {id} is not {agent}'s");
     }
-    // Reported into by its own kind of caller alone (the review of the rebased branch, B1), as it is cited: another
+    // Reported into by its own kind of caller alone, as it is cited: another
     // program of the agent account reads the resident agent's session id in the ledger, and could otherwise taint it
     // on purpose, so that the resident agent's proposals wait and its trust never applies. Taint only adds, so this
     // is a denial it closes, not a way in; the resident agent never reports into another program's session either.

@@ -115,8 +115,8 @@ impl Client {
     }
 
     /// The agent on `path`, which must be `uid`'s socket.
-    /// The unit that serves this socket: `torq-agent@<person>.service`, the person's own name in it (the review of the
-    /// rebased branch, C13: a literal <you> was printed).
+    /// The unit that serves this socket: `torq-agent@<person>.service`, the person's own name in it (rather than
+    /// a literal <you>).
     pub fn unit(&self) -> String {
         format!("torq-agent@{}.service", self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default())
     }
@@ -222,7 +222,7 @@ impl Client {
     pub fn ask(&self, text: &str, context: Option<String>) -> Result<Answer, Unreachable> {
         let mut lines = self.send(&Request::Ask { text: text.to_string(), context })?;
         // Each of an answer's events comes within `quiet` of the one before, and the whole of it within ANSWER_MAX: a
-        // service that keeps it coming never holds the asker for ever (the review of the rebased branch, C17).
+        // service that keeps it coming never holds the asker for ever.
         lines.deadline = Some(Instant::now() + ANSWER_MAX);
         lines.quiet = Some(self.quiet);
         Ok(Answer { lines, over: false })

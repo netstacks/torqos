@@ -135,7 +135,7 @@ pkgs.testers.runNixOSTest {
         sa = start("torq-agent-alice")
         code, v = propose("torq-agent-bob", packages("bob", ["fd"]), "on alice's agent's session", session=sa, resident=True)
         assert code == 1 and "not torq-agent-bob's" in v["error"], (code, v)
-        # Refused for that reason, not any (the review of the rebased branch, C16: the exit code alone).
+        # Refused for that reason, not any (the exit code alone).
         code, out = machine.execute(f"su -s /bin/sh torq-agent-bob -c 'torqcli agent session taint {sa} read_journal' 2>&1")
         assert code != 0 and "not torq-agent-bob's" in out, (code, out)
         machine.succeed(f"jq -e '.tainted == false and .agent == \"torq-agent-alice\"' /var/lib/torq/state/sessions/{sa}.json")
@@ -208,7 +208,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("torq-broker verify")
 
     with subtest("an agent's proposals waiting at once are bounded, each agent its own count; a decline frees one"):
-        # The review of the rebased branch, B15: the cap at the running broker, not only in trust_loop. 20 waiting
+        # The cap at the running broker, not only in trust_loop. 20 waiting
         # (AGENT_WAITING_MAX); the 100 not done (AGENT_WAITING_LOOK) needs proposals that no longer wait and were
         # never done, which only a hand-written ledger makes: trust_loop's the_not_done_limit_is_exactly_its_number.
         seqs, refused = [], None

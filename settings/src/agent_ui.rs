@@ -111,7 +111,7 @@ struct Window {
     /// torqcli's question about a Decline, waiting for the person's answer.
     declining: Option<(String, agentkit::Reply)>,
     /// The proposal whose Decline is in flight, from the press until it ends: one at a time, and only its own end
-    /// clears its question (the review of the rebased branch, B10).
+    /// clears its question.
     decline_seq: Option<u64>,
 }
 
@@ -139,7 +139,7 @@ enum Message {
 }
 
 impl Window {
-    /// TorqOS Settings, from a button here, that could not start: said in the window (the review's B12).
+    /// TorqOS Settings, from a button here, that could not start: said in the window.
     fn said_if_not(&mut self, r: anyhow::Result<()>) {
         if let Err(e) = r {
             self.note = Some((torq::app::said(&e), true));
@@ -156,7 +156,7 @@ impl Window {
         let Some(file) = files.first() else { return Task::none() };
         match handoff::take(std::path::Path::new(file)) {
             Ok(h) => {
-                // A half-typed question is not lost without a word (C15): the one handed over takes the box, and what
+                // A half-typed question is not lost without a word: the one handed over takes the box, and what
                 // was there is said, to copy back.
                 let typed = std::mem::replace(&mut self.question, h.question);
                 self.attached = h.context;
@@ -182,7 +182,7 @@ impl Window {
         if full {
             if !t.answer.is_empty() {
                 // The agent's words, framed and named as its own: they are not the rows TorqOS draws below them, which
-                // they could otherwise imitate ("Proposed #57: applied"; the review of the rebased branch, B13).
+                // they could otherwise imitate ("Proposed #57: applied").
                 let words = widget::column::with_capacity(2).spacing(spacing.space_xxxs).push(widget::text::caption(crate::agentkit::AGENTS_WORDS)).push(widget::text::body(t.answer.clone()).width(Length::Fill));
                 col = col.push(widget::container(words).padding(spacing.space_xs).class(cosmic::theme::Container::Secondary).width(Length::Fill));
             }
@@ -296,7 +296,7 @@ impl cosmic::Application for Window {
                         self.note = Some(("Your agent forgot the conversation (Forget, from elsewhere): what was shown here is gone from its memory.".into(), false));
                     }
                     // Not while its own task runs: a Forget from elsewhere then would be taken as the count, and missed
-                    // (C15). The count only grows by this window's turns otherwise.
+                    //. The count only grows by this window's turns otherwise.
                     if !self.talk.working() {
                         self.remembered = Some(st.turns);
                     }

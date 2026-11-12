@@ -74,8 +74,7 @@ fn server(home: &Path, mcp: &str) -> Result<()> {
         return Ok(());
     }
     servers.insert(NAME.into(), entry);
-    // A new file beside it, then renamed over it: whole or as it was; and nothing left beside it when either fails
-    // (the review of the rebased branch, C2).
+    // A new file beside it, then renamed over it: whole or as it was; and nothing left beside it when either fails.
     let part = home.join(format!(".claude.json.torq-{}", std::process::id()));
     let _ = std::fs::remove_file(&part);
     let written = std::fs::OpenOptions::new()

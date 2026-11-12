@@ -43,7 +43,7 @@ impl Config {
         let key = match (v["apiKeyFile"].as_str(), credential) {
             (None, _) => None,
             (Some(_), Some(c)) => model::key(Some(c))?,
-            // The resident agent's own task told so as itself, not sent to torq ask (the review of the rebased branch, C10).
+            // The resident agent's own task told so as itself, not sent to torq ask.
             (Some(_), None) if resident => bail!("this machine's model needs its API key, and your resident agent was not given it (its credential, torq.agent.doctor.apiKeyFile): an administrator sees why in the agent service's own journal (journalctl -u 'torq-agent@*')"),
             (Some(_), None) => bail!("this machine's model needs its API key, which only your resident agent holds: ask it there (torq ask \"…\"); torq doctor and torq agent propose cannot use a keyed model"),
         };
@@ -147,7 +147,7 @@ pub fn ask_task(cfg: &Config, host: &dyn Host, task: &Task, propose: bool, out: 
         events(Event::Tainted { why: why.to_string() })?;
     }
     if held["tainted"].as_bool().unwrap_or(false) && session.held.is_empty() {
-        // Said too, whatever the broker's words were (the review's B4): the event is what the service counts.
+        // Said too, whatever the broker's words were: the event is what the service counts.
         session.held.push("held-by-the-broker".into());
         events(Event::Tainted { why: "held-by-the-broker".into() })?;
     }
@@ -738,7 +738,7 @@ mod tests {
     }
 
     /// The model's key, where one is configured, only through the agent service's credential: a one-shot run is told
-    /// so, and the resident agent's own task told why it has none (C10).
+    /// so, and the resident agent's own task told why it has none.
     #[test]
     fn a_keyed_model_only_through_the_services_credential() {
         let d = tempfile::tempdir().unwrap();
@@ -749,7 +749,7 @@ mod tests {
         assert_eq!(Config::load(&settings, d.path(), Some(&cred), false).unwrap().key.as_deref(), Some("sk-test"));
         let e = format!("{:#}", Config::load(&settings, d.path(), None, false).err().unwrap());
         assert!(e.contains("only your resident agent holds") && e.contains("torq ask"), "{e}");
-        // The resident agent's own task without it: not sent to torq ask, where it already is (C10).
+        // The resident agent's own task without it: not sent to torq ask, where it already is.
         let e = format!("{:#}", Config::load(&settings, d.path(), None, true).err().unwrap());
         assert!(e.contains("was not given it") && !e.contains("torq ask"), "{e}");
         // No key configured: none, credential or not.
@@ -791,7 +791,7 @@ mod tests {
         assert!(event.len() < torq_wire::agent::MAX_LINE, "fits the service's line");
     }
 
-    /// A proposal torqcli made is not lost in an error (the review of the rebased branch, B3): when the read of it
+    /// A proposal torqcli made is not lost in an error: when the read of it
     /// cannot be reported, the session still ends before the model sees it, and the error says the proposal was given
     /// to the broker, so that no one asks for it again unlooked.
     #[test]
@@ -806,8 +806,8 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 1, "the model is not shown it");
     }
 
-    /// The broker's taint is said even when no word of its reason is one the harness takes (the review of the rebased
-    /// branch, B4): the event is what the service counts, so without it a tainted answer would be remembered.
+    /// The broker's taint is said even when no word of its reason is one the harness takes:
+    /// the event is what the service counts, so without it a tainted answer would be remembered.
     #[test]
     fn the_broker_s_taint_is_said_whatever_its_words() {
         let mut h = host("");

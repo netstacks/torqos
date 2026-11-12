@@ -595,7 +595,7 @@ fn the_model_is_judged_again_at_a_trusted_apply() {
     assert!(session::apply_trusted(&b, &p).unwrap().is_some(), "with the believed model: applied");
 }
 
-/// A session is reported into by its own kind of caller alone (the review of the rebased branch, B1): another program
+/// A session is reported into by its own kind of caller alone: another program
 /// of the agent account reads the resident agent's session id in the ledger, and could otherwise taint it on purpose,
 /// so that what the resident agent proposes waits and its trust never applies. The resident agent reports into none
 /// of another program's either.
@@ -614,7 +614,7 @@ fn a_session_is_tainted_by_its_own_kind_of_caller() {
     assert!(session::taint(&tool, &theirs.id, "web").unwrap().tainted, "its own");
 }
 
-/// The model is judged before the sessions' lock (the review of the rebased branch, S1): a resolver that takes its
+/// The model is judged before the sessions' lock: a resolver that takes its
 /// time over whether the model's host is this machine holds up that session's start alone, never another's.
 #[test]
 fn a_slow_resolver_holds_up_no_other_session() {

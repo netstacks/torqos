@@ -43,7 +43,7 @@ fn bounded(s: &str, max: usize) -> String {
 }
 
 /// What is attached, as it may be shown and sent: each line cleaned as torqcli cleans text (anything that hides or
-/// moves text shown escaped, a tab as spaces), the lines kept (the review of the rebased branch, B6).
+/// moves text shown escaped, a tab as spaces), the lines kept.
 fn cleaned(s: &str) -> String {
     s.lines().map(|l| crate::history::clean(&l.replace('\t', "    "))).collect::<Vec<_>>().join("\n")
 }
@@ -99,11 +99,11 @@ fn dir() -> Result<PathBuf> {
     Ok(PathBuf::from(run).join("torq-agent"))
 }
 
-/// How long a handoff no window took is kept: older ones go when the next is written (the review of the rebased
-/// branch, C11), so one left by a window that never started is not kept until the person logs out.
+/// How long a handoff no window took is kept: older ones go when the next is written,
+/// so one left by a window that never started is not kept until the person logs out.
 const KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// `dir` is the person's own, by itself (C11): a directory, not a link, `uid`'s, open to no group or other.
+/// `dir` is the person's own, by itself: a directory, not a link, `uid`'s, open to no group or other.
 fn own_dir(dir: &Path, uid: u32) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let m = std::fs::symlink_metadata(dir).with_context(|| format!("reading {}", dir.display()))?;
@@ -150,7 +150,7 @@ pub fn take_from(dir: &Path, path: &Path, uid: u32) -> Result<Handoff> {
         bail!("{}: not a handoff of TorqOS's ({} only)", path.display(), dir.display());
     }
     own_dir(dir, uid)?;
-    // A file refused here is in the person's own directory, and goes (C11): never taken, it would stay until logout.
+    // A file refused here is in the person's own directory, and goes: never taken, it would stay until logout.
     let refused = |why: anyhow::Error| -> anyhow::Error {
         if let Err(e) = std::fs::remove_file(path) {
             return why.context(format!("and it could not be removed: {e}"));
@@ -171,7 +171,7 @@ pub fn take_from(dir: &Path, path: &Path, uid: u32) -> Result<Handoff> {
     }
     let mut text = String::new();
     (&mut f).take(MAX_FILE).read_to_string(&mut text).with_context(|| format!("reading {}", path.display())).map_err(refused)?;
-    // Taken once: removed before it is used, and refused if it cannot be (C11: its result was dropped, so a handoff
+    // Taken once: removed before it is used, and refused if it cannot be (its result was dropped, so a handoff
     // could be read twice).
     std::fs::remove_file(path).with_context(|| format!("removing {} once read", path.display()))?;
     let h: Handoff = serde_json::from_str(&text).context("not a handoff TorqOS wrote")?;
@@ -219,7 +219,7 @@ pub fn open_window(h: &Handoff, token: Option<&str>) -> Result<()> {
         return Ok(());
     }
     // Past its time, systemd-run was killed but may yet start the window, which then takes the file: kept (it goes
-    // after KEPT_FOR). A refusal before that is the window's end: the file goes (the review of the rebased branch, C11).
+    // after KEPT_FOR). A refusal before that is the window's end: the file goes.
     if started.elapsed() >= limit {
         bail!("the agent's window did not start within {} s; it may still come (journalctl --user -n 20)", limit.as_secs());
     }
@@ -344,7 +344,7 @@ mod tests {
         assert!(About::Draft(&long).handoff().context.unwrap().chars().count() <= MAX_CONTEXT);
     }
 
-    /// What is attached is cleaned as the question is, its lines kept (the review of the rebased branch, B6): shown
+    /// What is attached is cleaned as the question is, its lines kept: shown
     /// above the box and sent with the question, it could otherwise reorder itself (U+202E) or hide text (zero-width).
     #[test]
     fn what_is_attached_is_cleaned_its_lines_kept() {
@@ -355,7 +355,7 @@ mod tests {
         assert!(c.contains("\\u{202e}"), "shown, not silently gone: {c:?}");
     }
 
-    /// The person's handoff directory, by itself (C11): one open to others, or not theirs, is refused at both ends; a
+    /// The person's handoff directory, by itself: one open to others, or not theirs, is refused at both ends; a
     /// refused file in it goes; an untaken one goes after KEPT_FOR.
     #[test]
     fn the_handoff_directory_is_theirs_and_kept_tidy() {

@@ -3978,7 +3978,7 @@ fn a_declined_proposal_is_said_declined_first_when_scheduled() {
     assert!(e.contains("was declined") && !e.contains("untrusted"), "{e}");
 }
 
-/// A system secret's rule names only agents this machine has (the review of the rebased branch, B9): a name with no
+/// A system secret's rule names only agents this machine has: a name with no
 /// agent in the broker's map (a typo, a person with none) is refused, so a person given that name later does not
 /// inherit the secret. Taking a stale name out is never refused.
 #[test]

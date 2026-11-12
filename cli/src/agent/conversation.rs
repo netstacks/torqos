@@ -203,8 +203,8 @@ pub enum Fate {
     Declined,
     /// Its apply failed: it waits again, for a person to apply it again or decline it (ADR-008).
     Failed,
-    /// The ledger could not be read to look it up (said, rather than "looking it up…" for good: the review of the
-    /// rebased branch, C15). Looked up again at the next look.
+    /// The ledger could not be read to look it up (said, rather than "looking it up…" for good).
+    /// Looked up again at the next look.
     Unread,
     /// No proposal of this person's agent has that number: no Review for it.
     NotYours,

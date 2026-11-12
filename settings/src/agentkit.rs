@@ -40,7 +40,7 @@ pub fn mark(mood: Mood) -> icon::Handle {
 /// Ask `question`, with what is attached (`context`: untrusted text, it taints the session): each event of
 /// the answer as `heard(e)`, or why there is none as `lost(why)`; on a thread of its own. If the program stops
 /// listening, the thread ends the ask (and so the task) when the next event finds no one to hear it: within the
-/// client's QUIET of the last one at most, not at once (the review of the rebased branch, C9).
+/// client's QUIET of the last one at most, not at once.
 pub fn ask<M: Send + 'static>(client: Client, question: String, context: Option<String>, heard: fn(Event) -> M, lost: fn(String) -> M) -> Task<cosmic::Action<M>> {
     Task::stream(cosmic::iced::stream::channel(16, async move |out: Sender<M>| {
         let (done, over) = cosmic::iced::futures::channel::oneshot::channel::<()>();
@@ -104,7 +104,7 @@ pub async fn look(client: Result<Client, Unreachable>, seqs: Vec<u64>) -> Look {
                 Err(e) => Err(Unreachable::Broken(torq::app::said(&e))),
             },
         };
-        // The ledger unread: each said so, and the reason in the journal (C15), not "looking it up…" for good.
+        // The ledger unread: each said so, and the reason in the journal, not "looking it up…" for good.
         let fates = torq::app::agent_fates(&seqs).unwrap_or_else(|e| {
             eprintln!("torq: looking up what became of the agent's proposals: {e:#}");
             seqs.iter().map(|&s| (s, Fate::Unread)).collect()
@@ -133,8 +133,7 @@ impl Reply {
     }
 }
 
-/// What heads the agent's answer wherever it is drawn: the words are its, not TorqOS's (the review of the rebased
-/// branch, B13).
+/// What heads the agent's answer wherever it is drawn: the words are its, not TorqOS's.
 pub const AGENTS_WORDS: &str = "Your agent wrote:";
 
 /// Decline proposal `seq`: `request system decline <n>`, run as TorqOS Settings runs its lines (torqcli's

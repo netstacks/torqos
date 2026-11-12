@@ -118,7 +118,7 @@ fn agent_fits(name: &str, user: Option<&str>, act: &Act) -> Result<()> {
 }
 
 /// Whether `person` has an agent account on this machine, by /etc/passwd's text (`torq agent people` makes one each):
-/// a system secret is given only to an agent that exists (the review of the rebased branch, B9; the broker checks it
+/// a system secret is given only to an agent that exists (the broker checks it
 /// again against its own map).
 fn agent_here(passwd: &str, person: &str) -> bool {
     let account = format!("{}-{person}", w::AGENT);
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(rules_path(Some("casey")), "users/casey/secrets.json");
     }
 
-    /// A system secret is given only to an agent that exists (B9).
+    /// A system secret is given only to an agent that exists.
     #[test]
     fn only_an_agent_that_exists_is_given_one() {
         let passwd = "root:x:0:0::/root:/bin/sh\nalice:x:1000:100::/home/alice:/bin/sh\ntorq-agent-alice:x:990:990::/var/lib/torq-agent-alice:/sbin/nologin\n";

@@ -57,7 +57,7 @@ let
       then "claude-code allowed: the agent's alone"
       else throw "agent-assertions: claude-code allowed: ${builtins.toJSON { inherit ms names; }}")
     # What the broker's resident rule rests on (ADR-051 step 5's review): said, where the agent is resident.
-    # Each the per-instance assertion's own message, which the template's check (below) does not share (C16).
+    # Each the per-instance assertion's own message, which the template's check (below) does not share.
     (refuses "a delegated resident unit" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.Delegate = true; } "systemd.services.\"torq-agent@dev\": no Delegate or DelegateSubgroup")
     (refuses "a resident unit's subgroup" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.DelegateSubgroup = "x"; } "systemd.services.\"torq-agent@dev\": no Delegate or DelegateSubgroup")
     (refuses "a delegated template" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@".serviceConfig.Delegate = true; } "in any torq-agent@ unit")

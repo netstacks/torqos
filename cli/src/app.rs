@@ -1152,7 +1152,7 @@ fn command(program: &str, args: &[&str]) -> std::process::Command {
 
 fn spawn(program: &str, args: &[&str]) -> Result<()> {
     // Waited for on a thread of its own: it leaves no zombie behind. One that cannot start is said, where the
-    // button was pressed (the review of the rebased branch, B12).
+    // button was pressed.
     use anyhow::Context as _;
     let mut child = command(program, args).spawn().with_context(|| format!("could not start {program}"))?;
     std::thread::spawn(move || child.wait());

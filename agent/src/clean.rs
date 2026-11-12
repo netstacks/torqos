@@ -6,7 +6,7 @@
 /// ESC sequence, their 8-bit C1 forms) and every control character removed — newlines and tabs kept,
 /// a carriage return dropped — and the bidirectional controls, zero-width characters, the line and
 /// paragraph separators and the byte-order mark removed; and the tag characters, the variation selectors, the soft
-/// hyphen and the letters that draw as blank (the review of the rebased branch, B5).
+/// hyphen and the letters that draw as blank.
 pub fn clean(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
@@ -30,7 +30,7 @@ pub fn clean(s: &str) -> String {
             // invisible characters; the line and paragraph separators; the byte-order mark.
             '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}' => {}
             '\u{200b}'..='\u{200d}' | '\u{2060}'..='\u{2064}' | '\u{2028}' | '\u{2029}' | '\u{feff}' => {}
-            // What hides text without a control (the review of the rebased branch, B5): the tag characters, which
+            // What hides text without a control: the tag characters, which
             // can spell instructions no one sees; both blocks of variation selectors; the soft hyphen; the letters
             // that draw as blank. torqcli's `history::hidden` is the same set, shown escaped there.
             '\u{e0000}'..='\u{e007f}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}' | '\u{ad}' => {}
@@ -95,7 +95,7 @@ mod tests {
         }
     }
 
-    /// What hides text without a control character is gone too (the review of the rebased branch, B5): the tag
+    /// What hides text without a control character is gone too: the tag
     /// characters (which can spell instructions no one sees), both blocks of variation selectors, the soft hyphen and
     /// the letters that draw as blank — the same set torqcli's `history::hidden` shows escaped.
     #[test]

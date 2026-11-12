@@ -43,7 +43,7 @@ pub enum Request {
 }
 
 /// What the service (and, for the first five, the task's process) says. Strict, as `Request` is: a kind or a field one
-/// side does not know is refused, never guessed at (the review of the rebased branch, C8). Both sides are one
+/// side does not know is refused, never guessed at. Both sides are one
 /// system's build: a switch that changes either restarts the service (its unit names the new programs), so a
 /// client and the service it reaches differ only for a moment, and then say so rather than misread.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

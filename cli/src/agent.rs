@@ -227,7 +227,7 @@ pub(crate) fn run(args: &[String]) -> Result<i32> {
         // With its own process namespace (the launcher), nothing of a session outlives it.
         let frozen = Frozen::hold(&launch[0])?;
         let shared = share_acls(&dir, uid, &agent, &me);
-        // Thawed whatever the walk did, and both said when both fail (the review of the rebased branch, C13: the
+        // Thawed whatever the walk did, and both said when both fail (the
         // walk's own error was lost behind the thaw's).
         let thawed = frozen.thaw();
         match (shared, thawed) {
@@ -280,7 +280,7 @@ pub(crate) fn parse_ask(args: &[String]) -> Result<Asked> {
 }
 
 /// One line read as the question (`ask` alone): whatever it holds, no shell reads it. At most 8 KiB: a longer
-/// one is refused, never cut unsaid (C13).
+/// one is refused, never cut unsaid.
 fn question_from<R: std::io::BufRead>(r: &mut R) -> Result<String> {
     use std::io::Read;
     const MAX: u64 = 8 * 1024;
@@ -342,8 +342,8 @@ struct Keys {
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// The signals that would end `torq ask` with the terminal still in its key mode (the review of the rebased
-/// branch, B8): blocked before any thread starts, so that every later thread has them blocked too, and read from a
+/// The signals that would end `torq ask` with the terminal still in its key mode:
+/// blocked before any thread starts, so that every later thread has them blocked too, and read from a
 /// signalfd instead. One that comes puts the terminal back and ends as its signal would (128 + its number).
 struct Signals(nix::sys::signalfd::SignalFd);
 
@@ -432,7 +432,7 @@ impl Keys {
                     eprintln!("agent: stopping (Ctrl-C again to leave now)");
                     said_stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     // On a thread of its own: the service answers a stop once the task is over, and a second
-                    // Ctrl-C must be read meanwhile. A stop not taken is said (B8).
+                    // Ctrl-C must be read meanwhile. A stop not taken is said.
                     let agent = agent.clone();
                     std::thread::spawn(move || {
                         if let Err(e) = agent.stop() {
@@ -522,7 +522,7 @@ pub(crate) fn ask(args: &[String]) -> Result<i32> {
     let signals = std::io::stdin().is_terminal().then(Signals::hold).flatten();
     let answer = agent.ask(&text, None)?;
     let keys = if std::io::stdin().is_terminal() { Keys::watch(agent.clone(), signals) } else { None };
-    // Stopped by the person (Ctrl-C): 130, as when they leave, whatever the task's own end (B8).
+    // Stopped by the person (Ctrl-C): 130, as when they leave, whatever the task's own end.
     let stopped = || keys.as_ref().is_some_and(|k| k.stopped.load(std::sync::atomic::Ordering::Relaxed));
     let mut failed = false;
     for e in answer {
@@ -726,8 +726,8 @@ mod tests {
         assert_eq!(i.key(0x03, t), KeyDoes::Leave, "the second Ctrl-C");
     }
 
-    /// The signals that would end `torq ask` with the terminal raw are held and read instead (the review of the
-    /// rebased branch, B8): a SIGTERM sent to this thread is read from the signalfd as its number, and the thread is
+    /// The signals that would end `torq ask` with the terminal raw are held and read instead:
+    /// a SIGTERM sent to this thread is read from the signalfd as its number, and the thread is
     /// let go of them after (Drop). Sent to this thread alone, so the test's other threads are untouched.
     #[test]
     fn a_signal_is_read_not_taken() {
@@ -739,7 +739,7 @@ mod tests {
         assert!(!SigSet::thread_get_mask().unwrap().contains(Signal::SIGTERM), "let go again");
     }
 
-    /// A question read from input past 8 KiB is refused, not cut unsaid; one within is taken whole (C13). And the
+    /// A question read from input past 8 KiB is refused, not cut unsaid; one within is taken whole. And the
     /// client names the person's own unit, not a placeholder.
     #[test]
     fn a_long_question_is_refused_and_the_unit_named() {

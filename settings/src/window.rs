@@ -318,8 +318,8 @@ pub enum Message {
     OpenAgent,
     /// Open the agent's window about something (ADR-051 4): a question, that thing attached.
     AskAgent(Handoff),
-    /// The same about the failure beside it, or the draft's changes: built when pressed, not at every frame (the
-    /// review of the rebased branch, C15: a draft's diff was cleaned at every redraw).
+    /// The same about the failure beside it, or the draft's changes: built when pressed, not at every frame (a
+    /// draft's diff was cleaned at every redraw).
     AskAgentFailure,
     AskAgentDraft,
     /// What became of opening the agent's window (an error, said on the page).
@@ -1141,7 +1141,7 @@ impl Settings {
         Task::none()
     }
 
-    /// A program the page starts that could not start, said on the page (the review of the rebased branch, B12).
+    /// A program the page starts that could not start, said on the page.
     fn said_if_not(&mut self, r: anyhow::Result<()>) {
         if let Err(e) = r {
             self.note = Some((app::said(&e), true));

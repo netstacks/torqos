@@ -401,7 +401,7 @@ impl Broker {
 
     /// Session `id`, if it is agent `a`'s own and of its own kind: a session is its agent account's (ADR-051 3), and
     /// another agent's is none of this one's to cite; the resident agent's is cited by the resident account alone, and
-    /// another program's of the agent account by the agent account alone (the review of the rebased branch, B1). A
+    /// another program's of the agent account by the agent account alone. A
     /// session's id is in the ledger for every account to read: without this, a coding tool would cite the resident
     /// agent's untainted session and use a secret no person was asked about. As `session::judge` does for proposals.
     fn agents_session(&self, a: &AgentOf, id: &str) -> Result<crate::session::Record> {

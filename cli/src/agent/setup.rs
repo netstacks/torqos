@@ -170,7 +170,7 @@ pub(crate) fn output_within(mut c: std::process::Command, limit: std::time::Dura
     use std::io::Read;
     const KEPT: usize = 64 * 1024;
     let mut child = c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
-    // Read while it runs (the review of the rebased branch, B7): output past a pipe's size would block it until the
+    // Read while it runs: output past a pipe's size would block it until the
     // limit. The first KEPT bytes kept, the rest read and dropped.
     let mut stdout = child.stdout.take()?;
     let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(output_within(failed, std::time::Duration::from_secs(5)), None);
     }
 
-    /// Output past what a pipe holds is read while the program runs (the review of the rebased branch, B7): a crash
+    /// Output past what a pipe holds is read while the program runs: a crash
     /// summary over 64 KiB was never read, the program blocked writing it until the time limit. Kept up to 64 KiB,
     /// the rest read and dropped; not UTF-8, read as it can be.
     #[test]

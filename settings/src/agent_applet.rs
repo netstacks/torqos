@@ -60,7 +60,7 @@ struct Applet {
     /// torqcli's question about a Decline, waiting for the person's answer.
     declining: Option<(String, agentkit::Reply)>,
     /// The proposal whose Decline is in flight, from the press until it ends: one at a time, and only its own end
-    /// clears its question (the review of the rebased branch, B10).
+    /// clears its question.
     decline_seq: Option<u64>,
 }
 
@@ -122,7 +122,7 @@ impl Applet {
             }
             let mut answer = widget::column::with_capacity(4).spacing(spacing.space_xxs);
             if !t.answer.is_empty() {
-                // Named as the agent's own words, apart from the rows TorqOS draws (B13).
+                // Named as the agent's own words, apart from the rows TorqOS draws.
                 answer = answer.push(widget::text::caption(crate::agentkit::AGENTS_WORDS));
                 answer = answer.push(widget::text::body(conversation::shown(&t.answer, SHOWN)).width(Length::Fill));
             }
@@ -164,7 +164,7 @@ impl Applet {
     }
 
     /// A program of the person's, raised if it runs: with an activation token when the compositor gives one. One that
-    /// cannot start is said in the popup (the review of the rebased branch, B12).
+    /// cannot start is said in the popup.
     fn launch(&mut self, exec: &str) {
         let asked = self.tokens.as_ref().is_some_and(|tx| tx.send(TokenRequest { app_id: <Self as cosmic::Application>::APP_ID.to_string(), exec: exec.to_string() }).is_ok());
         // No token to be had (none asked for, or its subscription gone): started without one.

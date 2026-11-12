@@ -38,7 +38,7 @@ pub fn hidden(c: char) -> bool {
             | '\u{fe00}'..='\u{fe0f}'   // variation selectors
             | '\u{3164}' | '\u{ffa0}' | '\u{2800}' | '\u{115f}' | '\u{1160}' // blank-looking letters
             | '\u{e0000}'..='\u{e007f}' // tag characters
-            | '\u{e0100}'..='\u{e01ef}' // variation selectors, the supplement (the review's B5)
+            | '\u{e0100}'..='\u{e01ef}' // variation selectors, the supplement
         )
 }
 

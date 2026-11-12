@@ -15,8 +15,8 @@ use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// How many task records are kept in their directory: past it, the oldest go as a session starts (the review of
-/// the rebased branch, B1). Each holds a whole question and every call.
+/// How many task records are kept in their directory: past it, the oldest go as a session starts.
+/// Each holds a whole question and every call.
 pub const RECORDS_KEPT: usize = 32;
 
 /// Where a harness run with home `home` keeps its task records.
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(v["tainted"], false, "written at once, before anything is read");
     }
     /// The records are bounded: past `RECORDS_KEPT` the oldest go when a session starts. And `forget_all` erases them,
-    /// and nothing else in the directory (the review of the rebased branch, B1: each holds a whole question, and
+    /// and nothing else in the directory (each holds a whole question, and
     /// `torq ask --forget` left them all).
     #[test]
     fn records_are_bounded_and_forgotten() {

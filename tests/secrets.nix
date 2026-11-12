@@ -253,7 +253,7 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"su -s /bin/sh torq-agent-dev -c '{ssh} git@git.example.test echo signed-in'")
         journal = machine.succeed("journalctl -u torq-secrets --no-pager")
         assert "torq-agent-dev: " in journal and "untrusted" in journal, journal
-        # Refused by the broker for this secret, as tainted, and on the record (the review of the rebased branch, B17: a
+        # Refused by the broker for this secret, as tainted, and on the record (a
         # failed ssh alone could be anything).
         refused = [json.loads(l) for l in machine.succeed("torq-broker log --json --brief").splitlines()]
         refused = [e for e in refused if e["kind"] == "secret_use_refused" and e["data"].get("secret") == "deploy" and e["data"].get("user") == "dev"]

@@ -227,7 +227,7 @@ pkgs.testers.runNixOSTest {
         assert prop("ControlGroup") == "/system.slice/system-torq\\x2dagent.slice/torq-agent@alice.service", prop("ControlGroup")
 
     with subtest("the resident account itself proposes, and nothing more: no apply, decline, trust or revert, nor another's folder"):
-        # The review of the rebased branch, B14: the agent account is tested so in agents-per-person; the resident
+        # The agent account is tested so in agents-per-person; the resident
         # account, the person's same agent, here (and in broker/src/socket.rs's the_resident_account_is_the_persons_one_agent).
         def broker(user, request):
             cmd = f"printf '%s\\n' {shlex.quote(json.dumps(request))} | socat -t 30 - UNIX-CONNECT:/run/torq/broker.sock"
@@ -256,7 +256,7 @@ pkgs.testers.runNixOSTest {
         assert as_user("alice", "torq agent run -- ls -A /run/credentials").strip() == "", "the units' credentials hidden"
         # The agent account outside the sandbox too (su, as an administrator's sudo -u would be): the unit's
         # credential and its state are the resident account's (ADR-051 3 amended 2026-11-11), not the agent's.
-        # The control: the credential is there, root's to read, so what is refused below is refused, not missing (C16).
+        # The control: the credential is there, root's to read, so what is refused below is refused, not missing.
         machine.succeed(f"test -s /run/credentials/{unit}/model-key")
         machine.fail(f"su -s /bin/sh torq-agent-alice -c 'cat /run/credentials/{unit}/model-key'")
         machine.fail("sudo -u torq-agent-alice cat /run/credentials/torq-agent@alice.service/model-key")
@@ -278,7 +278,7 @@ pkgs.testers.runNixOSTest {
             machine.fail(f"{who} 'kill -0 {main}'")
             machine.fail(f"{who} 'ls /proc/{main}/root/'")
             machine.fail(f"{who} 'cat /proc/{main}/environ'")
-        # The control: what the agent account is refused there, root reads (the review of the rebased branch, C16: a
+        # The control: what the agent account is refused there, root reads (a
         # read of /proc/<pid>/mem at offset 0 fails for anyone, so it showed nothing).
         machine.succeed(f"cat /proc/{main}/environ > /dev/null && ls /proc/{main}/root/ > /dev/null")
         assert main != "0"
@@ -287,7 +287,7 @@ pkgs.testers.runNixOSTest {
         assert "only your resident agent holds" in out and "torq ask" in out, out
         # The key is checked where it is read, at each start (step 5's second review): readable by others, or a
         # link, and the resident agent does not start, saying why; put right, it starts again.
-        # Each refusal read from the journal after its own restart, not an earlier one's (C16: the same words twice).
+        # Each refusal read from the journal after its own restart, not an earlier one's (the same words twice).
         def journal_after(cursor, text):
             # Waited for: journald may write it a moment after the restart has failed.
             machine.wait_until_succeeds(f"journalctl -u {unit} --no-pager --after-cursor={shlex.quote(cursor)} | grep -q {shlex.quote(text)}", timeout=30)
@@ -308,7 +308,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"systemctl is-active {unit}")
 
     with subtest("what the resident rule rests on, at run time: tracing only one's own descendants, no user manager for either account"):
-        # The review of the rebased branch, B16: agent-assertions checks the configuration; this, the running machine.
+        # agent-assertions checks the configuration; this, the running machine.
         assert machine.succeed("sysctl -n kernel.yama.ptrace_scope").strip() in ("1", "2", "3")
         sibling = machine.succeed("setpriv --reuid torq-agent-alice --regid torq-agent-alice --clear-groups -- sleep 600 >/dev/null 2>&1 & echo $!").strip()
         machine.wait_until_succeeds(f"test \"$(ps -o user= -p {sibling})\" = torq-agent-alice", timeout=10)
@@ -396,7 +396,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a frozen service cannot hold the terminal: Ctrl-C twice, or once and 5 s, gets alice out"):
         # Each key sent once torq ask reads keys (its terminal out of canonical mode), and the second once the first
-        # is taken (it says it is stopping): waited for, not slept (the review of the rebased branch, B18).
+        # is taken (it says it is stopping): waited for, not slept.
         def reading_keys(s):
             tty = machine.succeed(f"su - alice -c 'tmux display -p -t {s} \"#{{pane_tty}}\"'").strip()
             machine.wait_until_succeeds(f"stty -F {tty} -a | grep -q -- -icanon", timeout=30)

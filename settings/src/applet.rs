@@ -506,7 +506,7 @@ const AGENT_UNOPENED: &str = "The agent's window did not open";
 /// What a notification says when TorqOS Settings, a log-out or a restart could not be started from the panel.
 const SETTINGS_UNOPENED: &str = "TorqOS could not open that";
 
-/// A program the panel starts that could not start: said in a notification (the review of the rebased branch, B12).
+/// A program the panel starts that could not start: said in a notification.
 fn told(r: anyhow::Result<()>) {
     if let Err(e) = r {
         notify(SETTINGS_UNOPENED.to_string(), app::said(&e), "overview");

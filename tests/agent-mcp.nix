@@ -55,7 +55,7 @@ let
         p.stdin.flush()
         if not reply:
             return None
-        # Bounded (the review of the rebased branch, C16): a torq-mcp that never answers fails here, said, not at the
+        # Bounded: a torq-mcp that never answers fails here, said, not at the
         # test's global timeout.
         ready, _, _ = select.select([p.stdout], [], [], 30)
         assert ready, f"torq-mcp gave no answer to {msg.get('method')} within 30 s"

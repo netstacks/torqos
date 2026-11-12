@@ -619,7 +619,7 @@ mod tests {
         res.resident = true;
         assert_eq!(p(&res), ["propose", "--base=c", "--actor", "agent", "--agent", "torq-agent-viper", "--resident", "--diff", "/run/d"]);
         assert_eq!(s(&res), ["session-start", "--agent", "torq-agent-viper", "--resident"]);
-        // A report into a session too (session::taint, B1): the resident agent's said, as at its start.
+        // A report into a session too (session::taint): the resident agent's said, as at its start.
         let t = |c: &Caller| with_identity(&["session-taint".into(), "x".into()], "session-taint", c, None, None, None).unwrap();
         assert_eq!(t(&res), ["session-taint", "x", "--agent", "torq-agent-viper", "--resident"]);
         // The agent account, even were it found in the unit's control group: never resident.
@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(p(&a), ["propose", "--base=c", "--actor", "agent", "--agent", "torq-agent-viper", "--resident", "--diff", "/run/d"]);
         assert_eq!(s(&a), ["session-start", "--agent", "torq-agent-viper", "--resident"]);
         let t = with_identity(&["session-taint".into(), "x".into()], "session-taint", &a, None, None, None).unwrap();
-        assert_eq!(t, ["session-taint", "x", "--agent", "torq-agent-viper", "--resident"], "a report into its session too (B1)");
+        assert_eq!(t, ["session-taint", "x", "--agent", "torq-agent-viper", "--resident"], "a report into its session too");
         // A person is never resident, whatever were set.
         let mut v = who(1000);
         v.resident = true;

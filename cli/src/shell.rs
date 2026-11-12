@@ -574,7 +574,7 @@ impl Machine for Real<'_> {
         let log = run::start_log()?;
         let seq_s = seq.to_string();
         // Shown as Apply shows it: what the change does, as the broker had git write it, not only the proposer's own
-        // words (the review of the rebased branch, C14).
+        // words.
         let p = done(run::broker_json(broker(self.cli, &["show", &seq_s])?, &log)?, "decline")?;
         let by = p["data"]["caller"].as_str().or(p["actor"].as_str()).unwrap_or("?");
         let files: Vec<String> = p["data"]["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(|f| history::one_line(f, 80)).collect();

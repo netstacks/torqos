@@ -52,7 +52,7 @@ struct Running {
 }
 
 /// How long one event may take to reach a client. A client that stops reading is taken as gone after it, and
-/// nothing more is written to it (the review of the rebased branch, B2): otherwise the relay would block on the
+/// nothing more is written to it: otherwise the relay would block on the
 /// full connection, the task on its full pipe, and the agent would stay running for good.
 const WRITE_WAIT: Duration = Duration::from_secs(10);
 
@@ -196,7 +196,7 @@ impl Agent {
                 Err(e) => refuse(format!("not a request: {e}")),
                 Ok(Request::Ask { text, context }) => {
                     // A second ask on a connection whose own task runs is refused ending with `status`, not `done`: a
-                    // `done` here would read as its running task's end (the review of the rebased branch, C7).
+                    // `done` here would read as its running task's end.
                     if self.running().is_some_and(|r| r.conn == id) {
                         out.send(&Event::Error { text: "this connection's task is still running: wait for its done, or stop it".into() });
                         out.send(&self.status());
@@ -214,7 +214,7 @@ impl Agent {
                 Ok(Request::Forget) => {
                     // Under the task slot's lock: a task starting now reads the memory after this.
                     let slot = self.running.lock().unwrap_or_else(|p| p.into_inner());
-                    // The memory and every task's own record (each a whole question, the review's B1): both forgotten.
+                    // The memory and every task's own record (each a whole question): both forgotten.
                     let forgot = if slot.is_some() { Err(anyhow::anyhow!("a task is running: stop it first, or wait")) } else { self.memory.forget().and_then(|()| torq_agent::session::forget_all(&torq_agent::session::records_dir(&self.home))) };
                     drop(slot);
                     match forgot {
@@ -241,10 +241,10 @@ impl Agent {
         }
         // The memory read with the slot held: a `forget` before this is honoured.
         let task = Task { question: text.clone(), context, memory: self.memory.recent() };
-        // Everything that can fail before the slot is taken (the review of the rebased branch, C4): a failure after
+        // Everything that can fail before the slot is taken: a failure after
         // it would leave the agent "running" for good.
         let line = serde_json::to_string(&task)?;
-        // Within what the harness reads (C17): a question near the request's own bound, with the conversation kept, is
+        // Within what the harness reads: a question near the request's own bound, with the conversation kept, is
         // refused here, said, rather than accepted and failed by the harness.
         if line.len() > MAX_LINE {
             bail!("the question, what is attached and the conversation kept are longer than {MAX_LINE} bytes together: ask shorter, or forget the conversation first");
@@ -340,8 +340,8 @@ impl Agent {
     }
 
     /// End the running task — only connection `of`'s, when it is given — read once: a disconnect that comes as its
-    /// own task ends never takes the next one, started meanwhile by someone else (the review of the rebased branch,
-    /// C3). Waits, at most 5 s, for that task to be over.
+    /// own task ends never takes the next one, started meanwhile by someone else.
+    /// Waits, at most 5 s, for that task to be over.
     fn stop_task(&self, of: Option<u64>) {
         let Some(r) = self.running() else { return };
         if of.is_some_and(|c| c != r.conn) {
@@ -446,7 +446,7 @@ fn agent(args: &[String]) -> Result<Agent> {
         memory: memory::Memory::new(Path::new(&state)),
         running: Mutex::new(None),
         procs: unit_procs(&format!("/torq-agent@{person}.service")).or_else(|| {
-            // Said once, at the start (the review of the rebased branch, C5): without it, a task's leftovers are not swept.
+            // Said once, at the start: without it, a task's leftovers are not swept.
             eprintln!("torq-agent-service: this unit's processes cannot be listed (its control group's cgroup.procs): what a task leaves running is not swept");
             None
         }),
@@ -823,7 +823,7 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
         assert_eq!(unit_procs("/torq-agent@alice.service"), None);
     }
 
-    /// `forget` erases the tasks' own records too, each a whole question (the review of the rebased branch, B1).
+    /// `forget` erases the tasks' own records too, each a whole question.
     #[test]
     fn forget_erases_the_tasks_records() {
         let (_a, sock, d) = agent("true", me());
@@ -834,7 +834,7 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
         assert!(!s.record.exists(), "forgotten with the memory");
     }
 
-    /// A client that asks and never reads does not keep the agent running (the review of the rebased branch, B2):
+    /// A client that asks and never reads does not keep the agent running:
     /// its connection is given up after `WRITE_WAIT`, the task's output still drained, and the slot is free.
     #[test]
     fn a_client_that_never_reads_holds_nothing() {
@@ -853,8 +853,8 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
         std::io::Read::read_to_end(&mut c, &mut rest).expect("the end, not a timeout");
     }
 
-    /// Any tainted line counts, whatever its word, and a line left out may have been one (the review of the rebased
-    /// branch, B4): the answer after it is not remembered as the agent's own.
+    /// Any tainted line counts, whatever its word, and a line left out may have been one:
+    /// the answer after it is not remembered as the agent's own.
     #[test]
     fn a_taint_with_a_bad_word_still_taints() {
         for line in [r#"'{"type":"tainted","why":"not a word!"}'"#, &format!("'{}'", "x".repeat(MAX_LINE + 10))] {
@@ -865,7 +865,7 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
         }
     }
 
-    /// A second ask on a connection whose task runs ends with `status`, so its task's `done` stays the only one (C7).
+    /// A second ask on a connection whose task runs ends with `status`, so its task's `done` stays the only one.
     #[test]
     fn a_second_ask_on_a_busy_connection_is_no_done() {
         let (a, sock, _d) = agent(r#"read -r t; sleep 2; printf '%s\n' '{"type":"say","text":"first"}'"#, me());
@@ -879,7 +879,7 @@ printf '%s\n' '{{"type":"say","text":"bye"}}'"#,
     }
 
     /// A question that fits a request but not, with the conversation kept, the task the harness reads is refused at
-    /// the service and said (C17), never handed over to fail there.
+    /// the service and said, never handed over to fail there.
     #[test]
     fn a_task_too_long_for_the_harness_is_refused_first() {
         let (a, sock, d) = agent("read -r t; echo started > \"$HOME/started\"", me());
