@@ -8,7 +8,7 @@
 //!   file that is not a plain file of JSON (a link, a directory, text that is not an object) is left alone,
 //!   and said so.
 //! - `~/.claude/skills/torqos`: a link to the system's skill (`/etc/torq/skills/torqos`). Made where nothing
-//!   is, or where TorqOS's own link was (to exactly that path); anything else there is the person's,
+//!   is; a link there to exactly that path is TorqOS's own; anything else there is the person's,
 //!   left alone, and said so.
 //!
 //! Advice for the tool, which it may rewrite: the limits are the broker's, never in these files.
@@ -92,12 +92,6 @@ fn server(home: &Path, mcp: &str) -> Result<()> {
     written.context("writing it")
 }
 
-/// Whether a link's target is TorqOS's own skill: exactly where TorqOS links it, and nothing else (the review of the
-/// rebased branch, C1: a prefix took any link into /nix/store or /etc/torq, `..` and all, as TorqOS's to replace).
-fn ours(target: &Path) -> bool {
-    target == Path::new(SKILL)
-}
-
 /// A directory of the agent's own, made (0700) if missing; anything else there is not followed.
 fn own_dir(p: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
@@ -120,13 +114,11 @@ fn skill_link(home: &Path, skill: &Path) -> Result<Option<String>> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", at.display())),
         Ok(m) if m.file_type().is_symlink() => {
             let target = std::fs::read_link(&at).with_context(|| format!("reading {}", at.display()))?;
+            // TorqOS's own link is to exactly `skill`; any other is the person's, whatever it points into.
             if target == skill {
                 return Ok(None);
             }
-            if !ours(&target) {
-                return Ok(Some(format!("{}: yours (a link to {}), left as it is: TorqOS's skill is not linked", at.display(), target.display())));
-            }
-            std::fs::remove_file(&at).with_context(|| format!("replacing {}", at.display()))?;
+            return Ok(Some(format!("{}: yours (a link to {}), left as it is: TorqOS's skill is not linked", at.display(), target.display())));
         }
         Ok(_) => return Ok(Some(format!("{}: yours, left as it is: TorqOS's skill is not linked", at.display()))),
     }
@@ -199,17 +191,16 @@ mod tests {
         assert_eq!(std::fs::read_dir(other.path()).unwrap().count(), 0);
     }
 
-    /// The skill's place: TorqOS's own link (to exactly where TorqOS links it) replaced, anything else left alone
-    /// as the person's, a link into the store or /etc/torq included (C1).
+    /// The skill's place: TorqOS's own link (to exactly the skill) kept, anything else left alone as the person's, a
+    /// link into the store or /etc/torq included.
     #[test]
     fn the_skill_link_is_torqs_or_left_alone() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join(".claude/skills")).unwrap();
         let at = d.path().join(".claude/skills/torqos");
-        let now = Path::new("/run/current-system/sw/share/torq/skills/torqos");
         std::os::unix::fs::symlink(SKILL_AT, &at).unwrap();
-        assert!(claude_code(d.path(), MCP, now).is_empty());
-        assert_eq!(std::fs::read_link(&at).unwrap(), now, "TorqOS's own, put where the skill is now");
+        assert!(claude_code(d.path(), MCP, Path::new(SKILL_AT)).is_empty());
+        assert_eq!(std::fs::read_link(&at).unwrap(), Path::new(SKILL_AT));
         for theirs in ["/home/alice/my-skill", "/nix/store/aaaa-someones-skill/torqos", "/etc/torq/../../home/alice/x", "/etc/torq/skills/other"] {
             std::fs::remove_file(&at).unwrap();
             std::os::unix::fs::symlink(theirs, &at).unwrap();
