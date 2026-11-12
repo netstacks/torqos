@@ -254,6 +254,8 @@ pkgs.testers.runNixOSTest {
         assert as_user("alice", "torq agent run -- ls -A /run/credentials").strip() == "", "the units' credentials hidden"
         # The agent account outside the sandbox too (su, as an administrator's sudo -u would be): the unit's
         # credential and its state are the resident account's (ADR-051 3 amended 2026-11-11), not the agent's.
+        # The control: the credential is there, root's to read, so what is refused below is refused, not missing (C16).
+        machine.succeed(f"test -s /run/credentials/{unit}/model-key")
         machine.fail(f"su -s /bin/sh torq-agent-alice -c 'cat /run/credentials/{unit}/model-key'")
         machine.fail("sudo -u torq-agent-alice cat /run/credentials/torq-agent@alice.service/model-key")
         mem = "/var/lib/torq-agent-memory/alice"
@@ -274,21 +276,30 @@ pkgs.testers.runNixOSTest {
             machine.fail(f"{who} 'kill -0 {main}'")
             machine.fail(f"{who} 'ls /proc/{main}/root/'")
             machine.fail(f"{who} 'cat /proc/{main}/environ'")
-        machine.fail(f"su -s /bin/sh torq-agent-alice -c 'head -c1 /proc/{main}/mem'")
+        # The control: what the agent account is refused there, root reads (the review of the rebased branch, C16: a
+        # read of /proc/<pid>/mem at offset 0 fails for anyone, so it showed nothing).
+        machine.succeed(f"cat /proc/{main}/environ > /dev/null && ls /proc/{main}/root/ > /dev/null")
         assert main != "0"
         # One question at a terminal runs as any program of the agent's: it cannot use the key, and says so.
         out = machine.execute("su - alice -c 'torq doctor hello' 2>&1")[1]
         assert "only your resident agent holds" in out and "torq ask" in out, out
         # The key is checked where it is read, at each start (step 5's second review): readable by others, or a
         # link, and the resident agent does not start, saying why; put right, it starts again.
+        # Each refusal read from the journal after its own restart, not an earlier one's (C16: the same words twice).
+        def journal_after(cursor, text):
+            machine.succeed(f"journalctl -u {unit} --no-pager --after-cursor={shlex.quote(cursor)} | grep -q {shlex.quote(text)}")
+        def cursor():
+            return machine.succeed(f"journalctl -u {unit} -n 0 --show-cursor --no-pager | sed -n 's/^-- cursor: //p'").strip()
         for bad in ["chmod 644 /var/lib/torq/secrets/model.key", "chown alice /var/lib/torq/secrets/model.key"]:
             machine.succeed(bad)
+            c = cursor()
             machine.fail(f"systemctl restart {unit}")
-            machine.succeed(f"journalctl -u {unit} --no-pager | grep -q 'must be root.s and readable by no one else'")
+            journal_after(c, "must be root's and readable by no one else")
             machine.succeed("chown root:root /var/lib/torq/secrets/model.key && chmod 600 /var/lib/torq/secrets/model.key")
         machine.succeed("mv /var/lib/torq/secrets/model.key /var/lib/torq/secrets/real.key && ln -s real.key /var/lib/torq/secrets/model.key")
+        c = cursor()
         machine.fail(f"systemctl restart {unit}")
-        machine.succeed(f"journalctl -u {unit} --no-pager | grep -q 'is not a plain file'")
+        journal_after(c, "is not a plain file")
         machine.succeed("rm /var/lib/torq/secrets/model.key && mv /var/lib/torq/secrets/real.key /var/lib/torq/secrets/model.key")
         machine.succeed(f"systemctl reset-failed {unit}; systemctl start {unit}")
         machine.succeed(f"systemctl is-active {unit}")

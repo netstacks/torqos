@@ -102,8 +102,10 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test -x /run/current-system/sw/bin/torq-agent-ui")
 
     with subtest("the applet's looking does not start the agent: only asking does"):
-        # It has looked (every 10 s) for well over a minute of the session by now.
+        # It has looked (every 10 s) for well over a minute of the session by now: it runs, so it has had its looks
+        # (C16: that it ran is the evidence; the look itself leaves no trace by design, so none can be shown).
         machine.sleep(25)
+        machine.succeed("pgrep -u alice -f torq-agent-applet")
         assert machine.succeed(f"systemctl show -P ActiveState {unit}").strip() == "inactive"
 
     with subtest("from her session, the client the UIs share reaches her own agent"):

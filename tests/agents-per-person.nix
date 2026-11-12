@@ -135,7 +135,9 @@ pkgs.testers.runNixOSTest {
         sa = start("torq-agent-alice")
         code, v = propose("torq-agent-bob", packages("bob", ["fd"]), "on alice's agent's session", session=sa, resident=True)
         assert code == 1 and "not torq-agent-bob's" in v["error"], (code, v)
-        machine.fail(f"su -s /bin/sh torq-agent-bob -c 'torqcli agent session taint {sa} read_journal'")
+        # Refused for that reason, not any (the review of the rebased branch, C16: the exit code alone).
+        code, out = machine.execute(f"su -s /bin/sh torq-agent-bob -c 'torqcli agent session taint {sa} read_journal' 2>&1")
+        assert code != 0 and "not torq-agent-bob's" in out, (code, out)
         machine.succeed(f"jq -e '.tainted == false and .agent == \"torq-agent-alice\"' /var/lib/torq/state/sessions/{sa}.json")
         # alice's own agent, under her trust: applied (the trust works; it is bob's agent it does not cover).
         code, v = propose("torq-agent-alice", packages("alice", ["tree"]), "tree for alice", session=sa, resident=True)
@@ -240,7 +242,7 @@ pkgs.testers.runNixOSTest {
         code, v = propose("torq-agent-carol", packages("carol", ["htop"]), "an impostor")
         assert code == 1 and "not a person's account" in v["error"], (code, v)
         code, v = ask("torq-agent-carol", {"args": ["--json", "session-start"]})
-        assert code == 1, (code, v)
+        assert code == 1 and "not a person's account" in v["error"], (code, v)
         machine.succeed("torq-broker verify")
   '';
 }

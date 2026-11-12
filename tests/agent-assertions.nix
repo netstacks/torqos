@@ -57,8 +57,9 @@ let
       then "claude-code allowed: the agent's alone"
       else throw "agent-assertions: claude-code allowed: ${builtins.toJSON { inherit ms names; }}")
     # What the broker's resident rule rests on (ADR-051 step 5's review): said, where the agent is resident.
-    (refuses "a delegated resident unit" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.Delegate = true; } "no Delegate or DelegateSubgroup")
-    (refuses "a resident unit's subgroup" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.DelegateSubgroup = "x"; } "no Delegate or DelegateSubgroup")
+    # Each the per-instance assertion's own message, which the template's check (below) does not share (C16).
+    (refuses "a delegated resident unit" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.Delegate = true; } "systemd.services.\"torq-agent@dev\": no Delegate or DelegateSubgroup")
+    (refuses "a resident unit's subgroup" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@dev".serviceConfig.DelegateSubgroup = "x"; } "systemd.services.\"torq-agent@dev\": no Delegate or DelegateSubgroup")
     (refuses "a delegated template" { torq.agent.doctor = doctorOn; systemd.services."torq-agent@".serviceConfig.Delegate = true; } "in any torq-agent@ unit")
     (refuses "a lingering agent" { torq.agent.doctor = doctorOn; users.users.torq-agent-dev.linger = true; } "neither account has a user manager of its own")
     (refuses "tracing allowed" { torq.agent.doctor = doctorOn; boot.kernel.sysctl."kernel.yama.ptrace_scope" = lib.mkForce 0; } "kernel.yama.ptrace_scope")

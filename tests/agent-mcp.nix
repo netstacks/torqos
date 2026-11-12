@@ -40,7 +40,7 @@ let
   # ~/.claude.json and the skill, starts the MCP server it names, speaks MCP to it, and says what it got.
   claude = pkgs.writeScriptBin "claude" ''
     #!${pkgs.python3}/bin/python3
-    import json, os, subprocess, sys
+    import json, os, select, subprocess, sys
     home = os.environ["HOME"]
     out = {"cwd": os.getcwd(), "user": os.environ.get("USER")}
     cfg = json.load(open(os.path.join(home, ".claude.json")))
@@ -53,7 +53,13 @@ let
     def rpc(msg, reply=True):
         p.stdin.write(json.dumps(msg) + "\n")
         p.stdin.flush()
-        return json.loads(p.stdout.readline()) if reply else None
+        if not reply:
+            return None
+        # Bounded (the review of the rebased branch, C16): a torq-mcp that never answers fails here, said, not at the
+        # test's global timeout.
+        ready, _, _ = select.select([p.stdout], [], [], 30)
+        assert ready, f"torq-mcp gave no answer to {msg.get('method')} within 30 s"
+        return json.loads(p.stdout.readline())
     init = rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "stand-in", "version": "0"}}})
     out["version"] = init["result"]["protocolVersion"]
     rpc({"jsonrpc": "2.0", "method": "notifications/initialized"}, reply=False)
