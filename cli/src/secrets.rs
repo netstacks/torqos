@@ -260,8 +260,43 @@ pub fn people_with_rules(repo: &Repo, rev: &str) -> Result<Vec<String>> {
     Ok(people)
 }
 
-/// `show system secrets`: each secret, whose, whether it has a value, and what it may be used for.
-pub fn shown(repo: &Repo, kept: &[Kept]) -> Result<String> {
+/// A secret as `show system secrets` lists it: whose, whether it has a value, and its rule. Never the value:
+/// nothing that makes one of these has read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    /// Whose it is (None: the system's).
+    pub owner: Option<String>,
+    pub name: String,
+    pub has_value: bool,
+    /// What it may be used for, and by whom (None: nothing yet).
+    pub rule: Option<Rule>,
+}
+
+impl Listed {
+    /// What it is and what it may be used for, in the list's words.
+    pub fn said(&self) -> String {
+        let value = if self.has_value { "has a value" } else { "no value yet" };
+        let Some(r) = &self.rule else { return format!("{value}; used for nothing") };
+        let kind = match r.kind {
+            Kind::Token => "token",
+            Kind::SshKey => "SSH key",
+        };
+        let mut uses = Vec::new();
+        if let Some(h) = &r.https {
+            uses.push(format!("https to {}", h.hosts.join(", ")));
+        }
+        if let Some(s) = &r.ssh {
+            uses.push(format!("ssh to {}", s.hosts.join(", ")));
+        }
+        let who = if r.actors.iter().any(|a| a == w::AGENT) { format!("the agent too, approved {}", r.approve.word()) } else { "not the agent".to_string() };
+        let uses = if uses.is_empty() { "used for nothing".to_string() } else { uses.join("; ") };
+        format!("{kind}, {value}; {uses}; {who}")
+    }
+}
+
+/// Every secret, the system's first, then each person's by name. A rules file that cannot be read is said (Err)
+/// where its secrets would come, and those of its secrets that have a value are still listed.
+pub fn listed(repo: &Repo, kept: &[Kept]) -> Result<Vec<Result<Listed, String>>> {
     let head = repo.head()?;
     let mut owners: Vec<Option<String>> = vec![None];
     let mut people = people_with_rules(repo, &head)?;
@@ -269,52 +304,48 @@ pub fn shown(repo: &Repo, kept: &[Kept]) -> Result<String> {
     people.sort();
     people.dedup();
     owners.extend(people.into_iter().map(Some));
-    let mut out = String::new();
+    let mut out = Vec::new();
     for owner in owners {
-        let rules = match read(repo, &head, owner.as_deref()) {
+        let mut rules = match read(repo, &head, owner.as_deref()) {
             Ok(r) => r,
             Err(e) => {
-                out.push_str(&format!("! {e:#}\n"));
+                out.push(Err(format!("{e:#}")));
                 Rules::new()
             }
         };
-        let mut names: Vec<&String> = rules.keys().collect();
         let valued: Vec<&String> = kept.iter().filter(|(u, _)| *u == owner).map(|(_, n)| n).collect();
-        names.extend(valued.iter().copied());
+        let mut names: Vec<String> = rules.keys().chain(valued.iter().copied()).cloned().collect();
         names.sort();
         names.dedup();
-        if names.is_empty() {
-            continue;
-        }
-        out.push_str(&match &owner {
-            None => "The system's secrets:\n".to_string(),
-            Some(u) => format!("{u}'s secrets:\n"),
-        });
-        for n in names {
-            let value = if valued.contains(&n) { "has a value" } else { "no value yet" };
-            let Some(r) = rules.get(n) else {
-                out.push_str(&format!("  {n:<20} {value}; used for nothing\n"));
+        out.extend(names.into_iter().map(|name| Ok(Listed { owner: owner.clone(), has_value: valued.contains(&&name), rule: rules.remove(&name), name })));
+    }
+    Ok(out)
+}
+
+/// `show system secrets`: each secret, whose, whether it has a value, and what it may be used for.
+pub fn shown(repo: &Repo, kept: &[Kept]) -> Result<String> {
+    let mut out = String::new();
+    let mut headed: Option<Option<String>> = None;
+    for l in listed(repo, kept)? {
+        let l = match l {
+            Ok(l) => l,
+            Err(e) => {
+                out.push_str(&format!("! {e}\n"));
                 continue;
-            };
-            let kind = match r.kind {
-                Kind::Token => "token",
-                Kind::SshKey => "SSH key",
-            };
-            let mut uses = Vec::new();
-            if let Some(h) = &r.https {
-                uses.push(format!("https to {}", h.hosts.join(", ")));
             }
-            if let Some(s) = &r.ssh {
-                uses.push(format!("ssh to {}", s.hosts.join(", ")));
-            }
-            let who = if r.actors.iter().any(|a| a == w::AGENT) { format!("the agent too, approved {}", r.approve.word()) } else { "not the agent".to_string() };
-            let uses = if uses.is_empty() { "used for nothing".to_string() } else { uses.join("; ") };
-            out.push_str(&format!("  {n:<20} {kind}, {value}; {uses}; {who}\n"));
-            // Where a program sends its request for each host (ADR-052): the daemon puts the secret in.
-            for h in r.https.iter().flat_map(|x| x.hosts.iter()) {
-                let whose = owner.as_ref().map_or_else(|| "system".to_string(), |u| format!("user/{u}"));
-                out.push_str(&format!("  {:<20} use: http://127.0.0.1:{}/{whose}/{n}/{h}/\n", "", w::PORT));
-            }
+        };
+        if headed.as_ref() != Some(&l.owner) {
+            out.push_str(&match &l.owner {
+                None => "The system's secrets:\n".to_string(),
+                Some(u) => format!("{u}'s secrets:\n"),
+            });
+            headed = Some(l.owner.clone());
+        }
+        out.push_str(&format!("  {:<20} {}\n", l.name, l.said()));
+        // Where a program sends its request for each host (ADR-052): the daemon puts the secret in.
+        for h in l.rule.iter().flat_map(|r| r.https.iter()).flat_map(|x| x.hosts.iter()) {
+            let whose = l.owner.as_ref().map_or_else(|| "system".to_string(), |u| format!("user/{u}"));
+            out.push_str(&format!("  {:<20} use: http://127.0.0.1:{}/{whose}/{}/{h}/\n", "", w::PORT, l.name));
         }
     }
     if out.is_empty() {

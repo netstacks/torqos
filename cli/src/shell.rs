@@ -157,6 +157,23 @@ impl Real<'_> {
             v["seq"].as_u64().unwrap_or(0)
         ))
     }
+
+    /// The secrets that have a value, as the broker lists them (never a value), its output to `log`: a page
+    /// that looks again and again has a log of its own (`run::watch_log`).
+    pub(crate) fn kept_secrets(&self, log: &Path) -> Result<Vec<crate::secrets::Kept>> {
+        let v = done(run::broker_json(broker(self.cli, &["secrets"])?, log)?, "show system secrets")?;
+        Ok(v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| {
+                let name = k["name"].as_str()?.to_string();
+                match &k["owner"] {
+                    serde_json::Value::String(s) if s == "system" => Some((None, name)),
+                    o => Some((Some(o["person"].as_str()?.to_string()), name)),
+                }
+            })
+            .collect())
+    }
 }
 
 impl Machine for Real<'_> {
@@ -440,19 +457,7 @@ impl Machine for Real<'_> {
     }
 
     fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
-        let log = run::start_log()?;
-        let v = done(run::broker_json(broker(self.cli, &["secrets"])?, &log)?, "show system secrets")?;
-        Ok(v.as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|k| {
-                let name = k["name"].as_str()?.to_string();
-                match &k["owner"] {
-                    serde_json::Value::String(s) if s == "system" => Some((None, name)),
-                    o => Some((Some(o["person"].as_str()?.to_string()), name)),
-                }
-            })
-            .collect())
+        self.kept_secrets(&run::start_log()?)
     }
 
     fn backup_key(&self, name: &str, me: &str) -> Result<String> {

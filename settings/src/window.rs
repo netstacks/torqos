@@ -1105,7 +1105,7 @@ impl Settings {
                 Tab::Earlier => tasks.push(self.read(At::Read, COMMITS.into())),
             },
             Page::Desktop => tasks.push(cosmic::task::future(async { Message::DesktopLoaded(blocking(app::desktop_status).await) })),
-            Page::Secrets => tasks.push(self.read(At::Read, secrets::SHOWN.into())),
+            Page::Secrets => tasks.push(secrets::load()),
             Page::Apps => {
                 tasks.push(cosmic::task::future(async { Message::Apps(blocking(app::installed_apps).await) }));
                 tasks.push(self.read(At::Read, ACTIVE.into()));

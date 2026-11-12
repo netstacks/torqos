@@ -3396,6 +3396,23 @@ mod tests {
             shown,
             "The system's secrets:\n  ci                   token, has a value; https to api.github.com; the agent too, approved first-use\n                       use: http://127.0.0.1:7800/system/ci/api.github.com/\ndev's secrets:\n  deploy               SSH key, no value yet; ssh to github.com; not the agent\n"
         );
+        // The same reading, each secret apart (TorqOS Settings' rows): whose, its value or none, its rule.
+        use torq_wire::secrets::{Approve, Kind};
+        let listed: Vec<crate::secrets::Listed> = crate::secrets::listed(&s.repo, &m.kept).unwrap().into_iter().map(Result::unwrap).collect();
+        let row = |l: &crate::secrets::Listed| (l.owner.clone(), l.name.clone(), l.has_value, l.rule.as_ref().map(|r| (r.kind, r.approve)), l.said());
+        assert_eq!(
+            listed.iter().map(row).collect::<Vec<_>>(),
+            [
+                (None, "ci".to_string(), true, Some((Kind::Token, Approve::FirstUse)), "token, has a value; https to api.github.com; the agent too, approved first-use".to_string()),
+                (Some("dev".to_string()), "deploy".to_string(), false, Some((Kind::SshKey, Approve::Never)), "SSH key, no value yet; ssh to github.com; not the agent".to_string()),
+            ]
+        );
+        // A rules file that cannot be read is said where its secrets would come; a value of its owner's is still listed.
+        sh(d.path(), "printf '%s' '{\"gh\":{\"kind\":\"token\"},\"gh\":{\"kind\":\"token\"}}' > users/dev/secrets.json && git add -A && git commit -qm twice");
+        let broken = crate::secrets::listed(&s.repo, &[(Some("dev".into()), "gh".into())]).unwrap();
+        assert!(matches!(&broken[1], Err(why) if why.starts_with("users/dev/secrets.json: ")), "{broken:?}");
+        assert_eq!(broken[2], Ok(crate::secrets::Listed { owner: Some("dev".into()), name: "gh".into(), has_value: true, rule: None }));
+        sh(d.path(), "git reset -q --hard HEAD~1");
         // A change starts from what is there; an SSH host comes with its key, as the person knows it.
         s.exec("request system secret allow deploy ssh gitlab.com user dev").unwrap();
         let (diff, ..) = m.commits.borrow().last().unwrap().clone();
