@@ -481,12 +481,6 @@ impl Repo {
         Ok(Some(ProposedFile { mode: mode.to_string(), size, content }))
     }
 
-    /// The commit before `commit` (its first parent): what an undo of `commit` brings back.
-    pub fn parent(&self, commit: &str) -> Result<String> {
-        revision(commit)?;
-        Ok(self.git(&["rev-parse", &format!("{commit}^")])?.trim().to_string())
-    }
-
     /// A file as HEAD has it: None when HEAD has none at `path`; refused when it is not a regular
     /// file or is larger than `max_bytes`.
     pub fn file_at_head(&self, path: &str, max_bytes: u64) -> Result<Option<Vec<u8>>> {

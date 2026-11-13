@@ -3763,6 +3763,39 @@ fn a_change_that_makes_a_secret_never_even_tainted_is_known_for_it() {
     assert!(e.contains("not the system's"), "{e}");
 }
 
+/// An undo is judged by what it leaves, not by the change it undoes: a change that only moved the line saying
+/// `never-even-tainted` has the word on both its sides, and undone after the person took the word away it would
+/// put the word back where it first stood, with no password asked.
+#[test]
+fn an_undo_that_would_bring_never_even_tainted_back_is_refused_by_what_it_leaves() {
+    let (cfg, b) = setup("true");
+    let propose = |name: &str, body: &str| {
+        let d = write_diff(cfg.path(), name, body);
+        b.propose_on(Some(&b.repo.head().unwrap()), &d, "Secret gh", Actor::User, false).unwrap()
+    };
+    let word = "    \"approve\": \"never-even-tainted\",\n";
+    let between = "    \"actors\": [\n      \"torq-agent\"\n    ],\n    \"https\": {\n      \"hosts\": [\n        \"api.github.com\"\n      ]\n    },\n";
+    let added = |text: &str| text.lines().map(|l| format!("+{l}\n")).collect::<String>();
+    let kept = |text: &str| text.lines().map(|l| format!(" {l}\n")).collect::<String>();
+    let first = format!("{{\n  \"gh\": {{\n{word}{between}    \"kind\": \"token\"\n  }}\n}}\n");
+    let p = propose("1.diff", &format!("--- /dev/null\n+++ b/users/alice/secrets.json\n@@ -0,0 +1,14 @@\n{}", added(&first)));
+    b.apply(p.body.seq, "alice", false).unwrap();
+    // The line moved, and nothing else: the word on both sides.
+    let moved = propose("2.diff", &format!("--- a/users/alice/secrets.json\n+++ b/users/alice/secrets.json\n@@ -2,12 +2,12 @@\n   \"gh\": {{\n-{word}{}+{word}     \"kind\": \"token\"\n   }}\n", kept(between)));
+    assert!(moved.body.data.get("standing").is_none(), "it says nothing new");
+    let moved = b.apply(moved.body.seq, "alice", false).unwrap();
+    // The person takes the word away.
+    let gone = propose("3.diff", &format!("--- a/users/alice/secrets.json\n+++ b/users/alice/secrets.json\n@@ -10,4 +10,3 @@\n     }},\n-{word}     \"kind\": \"token\"\n   }}\n"));
+    b.apply(gone.body.seq, "alice", false).unwrap();
+    let rules = |b: &Broker| String::from_utf8(b.repo.file_at("HEAD", "users/alice/secrets.json", 65536).unwrap().unwrap().content).unwrap();
+    assert!(!rules(&b).contains("never-even-tainted"));
+    let before = b.repo.head().unwrap();
+    let e = format!("{:#}", b.revert(moved.body.seq, "alice").unwrap_err());
+    assert!(e.contains("never-even-tainted again") && e.contains("asks your password"), "{e}");
+    assert_eq!(b.repo.head().unwrap(), before, "nothing was undone");
+    assert!(!rules(&b).contains("never-even-tainted"));
+}
+
 /// KNOWN-GAPS 6t: a build that fails because Nix found its own cache damaged (as a power cut mid-build leaves it)
 /// is run again once with the cache removed. A damaged database elsewhere (the store's) is left alone, and so is a
 /// fault Nix reports as ignored and carries on past (the command then failed for a reason of its own): the change

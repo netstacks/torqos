@@ -3480,14 +3480,6 @@ impl Broker {
         }
         policy::check_secret_rules(a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()), approved_by)?;
         let commit = a.body.data["commit"].as_str().context("applied entry has no commit")?.to_string();
-        // An undo of a person's own change asks no password, and brings back what was there: never a
-        // `never-even-tainted` the change took away, which is set only with one.
-        for f in a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).filter(|f| f.rsplit('/').next() == Some(torq_wire::secrets::PERSON_RULES)) {
-            let at = |rev: &str| -> Result<Option<Vec<u8>>> { Ok(self.repo.file_at(rev, f, torq_wire::secrets::MAX_FILE)?.map(|x| x.content)) };
-            if let Some(n) = torq_wire::secrets::standing_added(at(&commit)?.as_deref(), at(&self.repo.parent(&commit)?)?.as_deref()).first() {
-                bail!("refused: undoing change {applied_seq} would make secret {n} never-even-tainted again: set it anew (request system secret approve {n} never-even-tainted), which asks your password");
-            }
-        }
         let next_seq = self.ledger.read_all()?.len() as u64 + 1;
         let msg = format!(
             "Undo: {}\n\nReverts: {commit}\nApproved-By: {approved_by}\nLedger-Entry: {next_seq}",
@@ -3516,7 +3508,19 @@ impl Broker {
         // Two cases, each said with what to do: the file is already one TorqOS no longer takes (a desktop an earlier
         // TorqOS saved, with another program's settings, not yet saved again), or the undo would make it one.
         let already = self.check_user_data_at_head(&files).is_err();
-        let checked = |c: String| match self.check_user_data_at_head(&files) {
+        // And never a `never-even-tainted` that is not there now. An undo of a person's own change asks no password,
+        // and that word is set only with one. Judged by what the undo leaves against what is there now, not by the
+        // change undone: a change that only moved the word has it on both its sides.
+        let standing = || -> Result<()> {
+            for f in files.iter().filter(|f| f.rsplit('/').next() == Some(torq_wire::secrets::PERSON_RULES)) {
+                let at = |rev: &str| -> Result<Option<Vec<u8>>> { Ok(self.repo.file_at(rev, f, torq_wire::secrets::MAX_FILE)?.map(|x| x.content)) };
+                if let Some(n) = torq_wire::secrets::standing_added(at(&before)?.as_deref(), at("HEAD")?.as_deref()).first() {
+                    bail!("refused: undoing change {applied_seq} would make secret {n} never-even-tainted again: set it anew (request system secret approve {n} never-even-tainted), which asks your password");
+                }
+            }
+            Ok(())
+        };
+        let checked = |c: String| match self.check_user_data_at_head(&files).and_then(|()| standing()) {
             Ok(()) => Ok(c),
             Err(e) if already => Err(e.context(
                 "refused: this undo leaves a file of yours that TorqOS no longer takes as it is (a desktop saved by an earlier \
