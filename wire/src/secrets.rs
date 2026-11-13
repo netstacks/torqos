@@ -42,7 +42,9 @@ pub enum Kind {
     SshKey,
 }
 
-/// When a person is asked before the agent uses the secret. A tainted session is always asked.
+/// When a person is asked before the agent uses the secret. A tainted session is always asked, but under the last:
+/// `never-even-tainted`, a person's own standing word for one secret of theirs (never the system's), which a commit
+/// sets only with their password.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Approve {
@@ -50,6 +52,7 @@ pub enum Approve {
     #[default]
     FirstUse,
     Never,
+    NeverEvenTainted,
 }
 
 impl Approve {
@@ -58,11 +61,12 @@ impl Approve {
             Approve::EachUse => "each-use",
             Approve::FirstUse => "first-use",
             Approve::Never => "never",
+            Approve::NeverEvenTainted => "never-even-tainted",
         }
     }
 
     pub fn from_word(w: &str) -> Option<Approve> {
-        [Approve::EachUse, Approve::FirstUse, Approve::Never].into_iter().find(|a| a.word() == w)
+        [Approve::EachUse, Approve::FirstUse, Approve::Never, Approve::NeverEvenTainted].into_iter().find(|a| a.word() == w)
     }
 }
 
@@ -236,7 +240,23 @@ pub fn parse(bytes: &[u8]) -> Result<Rules, String> {
     if let Some((name, _)) = rules.iter().find(|(_, r)| r.actors.iter().any(|a| a == AGENT)) {
         return Err(format!("secret {name}: {AGENT:?} says no one's agent in the system's rules: name each agent that may use it by its account, {AGENT}-<person>"));
     }
+    // Whether a tainted session's use is asked is the person's own to give up, for a secret of their own: an
+    // administrator's rule cannot give it up for the people whose agents it names.
+    if let Some((name, _)) = rules.iter().find(|(_, r)| r.approve == Approve::NeverEvenTainted) {
+        return Err(format!("secret {name}: \"{}\" is a person's own to say, of their own secret: not the system's", Approve::NeverEvenTainted.word()));
+    }
     Ok(rules)
+}
+
+/// The secrets of a person's own rules that are `never-even-tainted` in `after` and are not in `before`: what a
+/// change to the rules newly lets the agent use unasked from a session that read untrusted text. A file that is not
+/// a rules file names none: nothing is used by it.
+pub fn standing_added(before: Option<&[u8]>, after: Option<&[u8]>) -> Vec<String> {
+    let standing = |b: Option<&[u8]>| -> Vec<String> {
+        b.and_then(|b| parse_person(b).ok()).unwrap_or_default().into_iter().filter(|(_, r)| r.approve == Approve::NeverEvenTainted).map(|(n, _)| n).collect()
+    };
+    let was = standing(before);
+    standing(after).into_iter().filter(|n| !was.contains(n)).collect()
 }
 
 /// A person's own rules file: as the system's, and only the agent besides them may use their secrets. Another
@@ -458,6 +478,24 @@ mod tests {
         assert!(parse(br#"{"t":{"kind":"token","actors":["torq-agent-sam"]}}"#).is_ok(), "a system secret may be sam's agent's");
         let e = parse(br#"{"t":{"kind":"token","actors":["sam","torq-agent"]}}"#).unwrap_err();
         assert!(e.contains("no one's agent") && e.contains("torq-agent-<person>"), "{e}");
+    }
+
+    /// `never-even-tainted` is a person's own, of their own secret: the system's rules cannot say it; and a change
+    /// that newly says it is known for what it is, whatever else it changes.
+    #[test]
+    fn never_even_tainted_is_a_persons_own_word() {
+        let net = br#"{"t":{"kind":"token","actors":["torq-agent"],"approve":"never-even-tainted"}}"#;
+        let never = br#"{"t":{"kind":"token","actors":["torq-agent"],"approve":"never"}}"#;
+        assert_eq!(parse_person(net).unwrap()["t"].approve, Approve::NeverEvenTainted);
+        let e = parse(br#"{"t":{"kind":"token","actors":["torq-agent-sam"],"approve":"never-even-tainted"}}"#).unwrap_err();
+        assert!(e.contains("not the system's"), "{e}");
+        assert_eq!(Approve::from_word("never-even-tainted"), Some(Approve::NeverEvenTainted));
+        assert_eq!(standing_added(Some(never), Some(net)), ["t"]);
+        assert_eq!(standing_added(None, Some(net)), ["t"], "a new file");
+        assert!(standing_added(Some(net), Some(net)).is_empty(), "said already: nothing new");
+        assert!(standing_added(Some(net), Some(never)).is_empty() && standing_added(Some(net), None).is_empty(), "taken back");
+        let two = br#"{"t":{"kind":"token","approve":"never-even-tainted"},"u":{"kind":"token","approve":"never-even-tainted"}}"#;
+        assert_eq!(standing_added(Some(net), Some(two)), ["u"]);
     }
 
     /// A throwaway key, made for this test alone (ssh-keygen -t ed25519 -N ""), and its public half as ssh-keygen wrote it.

@@ -224,6 +224,7 @@ fn edit_unchecked(rules: &mut Rules, name: &str, act: &Act, known: &[String]) ->
                 Approve::EachUse => "a person approves each use by the agent".into(),
                 Approve::FirstUse => "a person approves the agent's first use in each session".into(),
                 Approve::Never => "the agent uses it without asking (a tainted session still asks)".into(),
+                Approve::NeverEvenTainted => "the agent uses it without ever asking, EVEN FROM A SESSION THAT READ UNTRUSTED TEXT (it asks your password)".into(),
             })
         }
         Act::Delete => {
@@ -339,10 +340,12 @@ impl Listed {
         }
         // Which agents: a person's own secret, their own (`torq-agent`); a system secret, each by its account.
         let agents: Vec<&str> = r.actors.iter().map(String::as_str).filter(|a| *a == w::AGENT || a.starts_with(&format!("{}-", w::AGENT))).collect();
+        // Marked wherever the secret is listed: this one asks no one, whatever its session read.
+        let standing = if r.approve == Approve::NeverEvenTainted { " [!! NEVER ASKS, EVEN TAINTED]" } else { "" };
         let who = match agents.as_slice() {
             [] => "not the agent".to_string(),
-            [a] if *a == w::AGENT => format!("the agent too, approved {}", r.approve.word()),
-            some => format!("{} too, approved {}", some.join(", "), r.approve.word()),
+            [a] if *a == w::AGENT => format!("the agent too, approved {}{standing}", r.approve.word()),
+            some => format!("{} too, approved {}{standing}", some.join(", "), r.approve.word()),
         };
         let uses = if uses.is_empty() { "used for nothing".to_string() } else { uses.join("; ") };
         format!("{kind}, {value}; {uses}; {who}")
