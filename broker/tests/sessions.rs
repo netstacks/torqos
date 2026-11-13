@@ -632,3 +632,43 @@ fn a_slow_resolver_holds_up_no_other_session() {
     assert!(t.elapsed() < std::time::Duration::from_millis(1500), "held up {:?}", t.elapsed());
     assert_eq!(waiting.join().unwrap().unwrap(), false, "the slow one starts too, untainted");
 }
+
+/// The approval design, part 3: a grant covers secret uses, and nothing else. Under one, however wide, no proposal
+/// applies: a change stays a proposal a person applies. Trust in proposals is a grant of its own, beside it.
+#[test]
+fn a_grant_of_secret_uses_applies_no_proposal() {
+    let (dir, b) = setup(&[]);
+    let secrets = session::grant_secret(&b, "casey", session::Covers::AllSecrets, session::Scope::Minutes(480), false).unwrap();
+    let s = session::start(&b).unwrap();
+    let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
+    assert!(session::apply_trusted(&b, &p).unwrap().is_none(), "it waits for a person");
+    assert_eq!(kinds(&b, "applied"), 0);
+    let g = session::grant(&b, "casey", 30).unwrap();
+    assert_eq!(g.body.data["covers"], json!("proposals"), "trust says what it covers");
+    let a = session::apply_trusted(&b, &p).unwrap().expect("applied under trust");
+    assert_eq!(a.body.data["trust"], json!(g.body.seq), "under the trust, not the other grant");
+    // Ending the trust leaves the other grant, and the other way round.
+    session::revoke(&b, "casey").unwrap().expect("revoked");
+    let left = session::active(&b.ledger.read_all().unwrap());
+    assert_eq!(left.iter().map(|g| g.seq).collect::<Vec<_>>(), [secrets.body.seq]);
+    assert!(session::revoke(&b, "casey").unwrap().is_none(), "no trust left to revoke: the secrets' grant is not it");
+}
+
+/// A ledger from before grants said what they cover: its `trust_granted` entries verify as they were written, and
+/// are read as trust in proposals, which is all a grant was.
+#[test]
+fn a_grant_from_before_covers_proposals() {
+    let text = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../wire/tests/fixtures/session-trust.jsonl")).unwrap();
+    let entries: Vec<torq_broker::ledger::Entry> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    torq_broker::ledger::verify_entries(&entries).unwrap();
+    let at = entries.iter().position(|e| e.body.kind == "trust_granted").expect("the fixture has a grant");
+    assert!(entries[at].body.data.get("covers").is_none(), "written before grants said what they cover");
+    let then = &entries[..=at];
+    torq_broker::ledger::verify_entries(then).unwrap();
+    let g = session::unsettled(then);
+    assert_eq!(g.len(), 1);
+    assert_eq!((&g[0].covers, g[0].tainted_too, g[0].session, g[0].seq), (&session::Covers::Proposals, false, false, entries[at].body.seq));
+    let when = chrono::DateTime::parse_from_rfc3339(&entries[at].body.ts).unwrap().with_timezone(&chrono::Utc);
+    assert!(!g[0].covers_use(false, "gh", false, None, when), "and lets no secret be used");
+    assert!(session::unsettled(&entries).len() <= 1, "settled as the ledger goes on to say");
+}

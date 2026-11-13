@@ -33,7 +33,7 @@ impl Default for Store {
 }
 
 /// Whose a secret is.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Owner {
     System,
@@ -41,6 +41,14 @@ pub enum Owner {
 }
 
 impl Owner {
+    /// The secret `name` of this owner, as the broker's own records name it: `system/<name>`, `user/<person>/<name>`.
+    pub(crate) fn key(&self, name: &str) -> String {
+        match self {
+            Owner::System => format!("system/{name}"),
+            Owner::Person(p) => format!("user/{p}/{name}"),
+        }
+    }
+
     /// `--user <name>`, or none: the system's.
     pub fn of(user: Option<&str>) -> Result<Owner> {
         match user {
@@ -59,7 +67,7 @@ impl Owner {
         }
     }
 
-    fn tier(&self) -> Tier {
+    pub(crate) fn tier(&self) -> Tier {
         match self {
             Owner::System => Tier::System,
             Owner::Person(_) => Tier::User,
@@ -67,14 +75,14 @@ impl Owner {
     }
 
     /// How the ledger and the messages say it.
-    fn whose(&self, name: &str) -> String {
+    pub(crate) fn whose(&self, name: &str) -> String {
         match self {
             Owner::System => format!("the system's secret {name}"),
             Owner::Person(p) => format!("{p}'s secret {name}"),
         }
     }
 
-    fn data(&self, name: &str) -> serde_json::Value {
+    pub(crate) fn data(&self, name: &str) -> serde_json::Value {
         match self {
             Owner::System => json!({ "secret": name, "owner": "system" }),
             Owner::Person(p) => json!({ "secret": name, "owner": "user", "user": p }),
@@ -358,12 +366,11 @@ fn may(owner: &Owner, r: &torq_wire::secrets::Rule, actor: &str, agent: Option<&
 }
 
 /// Why `u` may not happen by these rules (Err), or the rule that lets it. `agent`: whose agent `u.actor` is, if
-/// one. `tainted`: whether the agent's session read untrusted text (None: no session, which is tainted too, as
-/// an agent's proposal naming none is). Until a person can approve a use (step 4), the agent's uses are those
-/// its rule lets without asking, from a session that read nothing untrusted; anything else is refused, never
-/// let through.
-pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, agent: Option<&AgentOf>, tainted: Option<bool>) -> Result<&'a torq_wire::secrets::Rule> {
-    use torq_wire::secrets::{Approve, Kind};
+/// one. What is refused here no person is asked about and no grant lets through: a secret with no rule, a host or
+/// an operation its rule does not name, an account its rule does not let. Whether a person is asked first is
+/// `asks`.
+pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, agent: Option<&AgentOf>) -> Result<&'a torq_wire::secrets::Rule> {
+    use torq_wire::secrets::Kind;
     let whose = u.owner.whose(&u.name);
     let r = rules.get(&u.name).with_context(|| format!("{whose} has no rule: it is used for nothing"))?;
     match (u.ssh, r.kind) {
@@ -376,15 +383,24 @@ pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, agent: Option<
     if !may(&u.owner, r, &u.actor, agent) {
         bail!("{} may not use {whose}", u.actor);
     }
-    if agent.is_some() {
-        match tainted {
-            None => bail!("the agent's request names no session (X-Torq-Session): a person approves such a use, and approving is not built yet"),
-            Some(true) => bail!("the agent's session read untrusted text: a person approves each of its uses, and approving is not built yet"),
-            Some(false) if r.approve != Approve::Never => bail!("{whose} is used by the agent with a person's approval ({}), and approving is not built yet", r.approve.word()),
-            Some(false) => {}
-        }
-    }
     Ok(r)
+}
+
+/// Why a person is asked before the agent's use of `whose` under rule `r`, unless a grant covers it (the approval
+/// design, part 2), or None: it goes without asking. `tainted`: whether the agent's session read untrusted text
+/// (None: the use names no session, which is asked as a tainted one is). `first`: no use of the secret in this
+/// session has gone through yet. Only the person's own standing word, `never-even-tainted`, lets a tainted use
+/// through unasked.
+pub fn asks(whose: &str, r: &torq_wire::secrets::Rule, tainted: Option<bool>, first: bool) -> Option<String> {
+    use torq_wire::secrets::Approve;
+    match (r.approve, tainted) {
+        (Approve::NeverEvenTainted, _) => None,
+        (_, None) => Some("the agent's request names no session (X-Torq-Session): a person approves such a use".into()),
+        (_, Some(true)) => Some("the agent's session read untrusted text: a person approves each of its uses".into()),
+        (Approve::EachUse, Some(false)) => Some(format!("{whose} is used by the agent with a person's approval ({})", r.approve.word())),
+        (Approve::FirstUse, Some(false)) if first => Some(format!("{whose} is used by the agent with a person's approval ({})", r.approve.word())),
+        (Approve::FirstUse | Approve::Never, Some(false)) => None,
+    }
 }
 
 impl Broker {
@@ -422,7 +438,7 @@ impl Broker {
     }
 
     /// The rules `owner`'s secrets have now (the repository's HEAD): none is none; a file that is not one, refused.
-    fn rules_of(&self, owner: &Owner) -> Result<torq_wire::secrets::Rules> {
+    pub(crate) fn rules_of(&self, owner: &Owner) -> Result<torq_wire::secrets::Rules> {
         let (path, parse): (String, fn(&[u8]) -> std::result::Result<torq_wire::secrets::Rules, String>) = match owner {
             Owner::System => (torq_wire::secrets::SYSTEM_RULES.into(), torq_wire::secrets::parse),
             Owner::Person(p) => (format!("users/{p}/{}", torq_wire::secrets::PERSON_RULES), torq_wire::secrets::parse_person),
@@ -433,20 +449,32 @@ impl Broker {
         }
     }
 
+    /// The session an agent's use names, as the broker holds it now; none for a use that names none.
+    fn session_of(&self, u: &Use, of: Option<&AgentOf>) -> Result<Option<crate::session::Record>> {
+        match (&u.session, of) {
+            (Some(id), Some(a)) => Ok(Some(self.agents_session(a, id)?)),
+            (Some(_), None) => bail!("refused: a session is the agent's; a person's use names none"),
+            (None, _) => Ok(None),
+        }
+    }
+
     /// One use of a secret, for the daemon (ADR-052, step 2): judged by its rule, the agent's first use in each
     /// session on the record (and every refusal of the agent's, once per session, secret and reason), and its
     /// value. Every use the daemon logs itself. No broker lock: a rebuild does not hold a use up.
     pub fn use_secret(&self, u: &Use) -> Result<Granted> {
-        let _l = Lock::acquire_named(&self.state_dir, "secrets.lock", 10)?;
+        self.use_secret_for(u, "")
+    }
+
+    /// `use_secret`, with the agent's own words for what it is for (`agent_says`): shown to the person who is asked,
+    /// as the agent's. An agent's use that a person is asked about (`asks`, and no grant of theirs covering it)
+    /// waits here for their answer, with no lock held, and is refused at its time (ask.rs).
+    pub fn use_secret_for(&self, u: &Use, agent_says: &str) -> Result<Granted> {
+        let mut lock = Lock::acquire_named(&self.state_dir, "secrets.lock", 10)?;
         let of = self.agent_of(&u.actor);
         let agent = of.is_some();
-        let tainted = match (&u.session, &of) {
-            (Some(id), Some(a)) => Some(self.agents_session(a, id)?.tainted),
-            (Some(_), None) => bail!("refused: a session is the agent's; a person's use names none"),
-            (None, _) => None,
-        };
+        let session = self.session_of(u, of.as_ref())?;
+        let tainted = session.as_ref().map(|s| s.tainted);
         let rules = self.rules_of(&u.owner)?;
-        let judged = may_use(&rules, u, of.as_ref(), tainted).cloned();
         let note = |kind: &str, reason: String, extra: serde_json::Value| -> Result<Entry> {
             let mut data = u.owner.data(&u.name);
             data["session"] = json!(u.session);
@@ -458,28 +486,86 @@ impl Broker {
             }
             self.ledger.append(NewEntry { actor: if agent { "agent".into() } else { "user".into() }, approved_by: None, kind: kind.into(), tier: u.owner.tier().to_string(), tainted: tainted.unwrap_or(agent), reason, data })
         };
-        let whose = match &u.owner {
-            Owner::System => "system".to_string(),
-            Owner::Person(p) => format!("user/{p}"),
-        };
-        let key = format!("{whose}/{}|{}", u.name, u.session.as_deref().unwrap_or("-"));
+        let whose = u.owner.whose(&u.name);
+        let key = format!("{}|{}", u.owner.key(&u.name), u.session.as_deref().unwrap_or("-"));
         let mut seen = Seen::read(&self.state_dir);
-        let rule = match judged {
-            Ok(h) => h,
-            Err(e) => {
-                // On the record: the agent's first refusal in a session for a secret that has a rule, and no more
-                // than REFUSALS_AN_HOUR of them: names it made up, or a refusal it repeats, are the daemon's log's.
-                let why: String = said(&format!("{e:#}"));
+        // On the record: the agent's first refusal in a session for a secret that has a rule, and no more
+        // than REFUSALS_AN_HOUR of them: names it made up, or a refusal it repeats, are the daemon's log's.
+        let refused = |seen: &mut Seen, e: anyhow::Error| -> anyhow::Error {
+            let why: String = said(&format!("{e:#}"));
+            let recorded = (|| -> Result<()> {
                 if agent && rules.contains_key(&u.name) && seen.first(&format!("refused|{key}")) && seen.refusal_allowed() {
-                    note("secret_use_refused", format!("The agent's use of {} refused", u.owner.whose(&u.name)), json!({ "error": why }))?;
+                    note("secret_use_refused", format!("The agent's use of {whose} refused"), json!({ "error": why }))?;
+                }
+                seen.write(&self.state_dir)
+            })();
+            recorded.err().unwrap_or(e)
+        };
+        let mut rule = match may_use(&rules, u, of.as_ref()) {
+            Ok(r) => r.clone(),
+            Err(e) => return Err(refused(&mut seen, e)),
+        };
+        // The grant the use goes under, if a person's lets it go unasked; and whether a person was asked.
+        let (mut under, mut asked) = (None, false);
+        if let Some(why) = of.as_ref().and_then(|_| asks(&whose, &rule, tainted, !seen.has(&format!("first|{key}")))) {
+            let a = of.as_ref().context("an agent's use")?;
+            if session.as_ref().is_some_and(|s| s.denied.contains(&u.owner.key(&u.name))) {
+                return Err(refused(&mut seen, anyhow::anyhow!("refused: {} said not to be asked again in this session about {whose}", a.person)));
+            }
+            under = crate::session::covering(self, &a.person, u.owner == Owner::System, &u.name, tainted.unwrap_or(true), session.as_ref().map(|s| s.started.as_str()))?;
+            if under.is_none() {
+                let facts = crate::ask::Facts {
+                    person: a.person.clone(),
+                    agent: a.account.clone(),
+                    caller: u.actor.clone(),
+                    owner: u.owner.clone(),
+                    secret: u.name.clone(),
+                    host: u.host.clone(),
+                    ssh: u.ssh,
+                    session: u.session.clone(),
+                    tainted: tainted.unwrap_or(true),
+                    why: why.clone(),
+                };
+                let n = match self.open_ask(&lock, facts, agent_says) {
+                    Ok(n) => n,
+                    Err(e) => return Err(refused(&mut seen, e.context("refused"))),
+                };
+                // The wait holds no lock: other uses, answers and the broker's own work go on beside it.
+                drop(lock);
+                self.wait_for_answer(n);
+                lock = Lock::acquire_named(&self.state_dir, "secrets.lock", 10)?;
+                match self.close_ask(&lock, n)? {
+                    crate::ask::Outcome::Approved => {}
+                    crate::ask::Outcome::Denied(by) => bail!("refused: {by} denied this use of {whose}"),
+                    crate::ask::Outcome::TimedOut => bail!("refused: no one answered in time ({why})"),
+                }
+                // What was approved is the use as the person was shown it. Judged again as things stand now: a rule
+                // changed while it waited, or a session that has since read untrusted text, is not what they saw.
+                if self.session_of(u, of.as_ref())?.map(|s| s.tainted) != tainted {
+                    bail!("refused: the agent's session read untrusted text while this use waited: it is asked again");
+                }
+                rule = may_use(&self.rules_of(&u.owner)?, u, of.as_ref())?.clone();
+                seen = Seen::read(&self.state_dir);
+                asked = true;
+            }
+        }
+        if agent {
+            // The first use in a session is on the record once; under a grant, once for that grant, naming it. A
+            // use a person approved is on the record as that already.
+            let first = match under {
+                Some(g) => format!("first|{key}|grant {g}"),
+                None => format!("first|{key}"),
+            };
+            if seen.first(&first) {
+                if !asked {
+                    let (how, extra) = match under {
+                        Some(g) => (format!(" under grant #{g}"), json!({ "grant": g })),
+                        None => (String::new(), json!({})),
+                    };
+                    note("secret_first_use", format!("The agent used {whose} for the first time in its session{how}"), extra)?;
                 }
                 seen.write(&self.state_dir)?;
-                return Err(e);
             }
-        };
-        if agent && seen.first(&format!("first|{key}")) {
-            note("secret_first_use", format!("The agent used {} for the first time in its session", u.owner.whose(&u.name)), json!({}))?;
-            seen.write(&self.state_dir)?;
         }
         let (header, prefix) = rule.https.map(|h| (h.header, h.prefix)).unwrap_or_default();
         let known = rule.ssh.map(|s| s.known.into_iter().filter(|l| l.split(' ').next() == Some(u.host.as_str())).collect()).unwrap_or_default();
@@ -518,6 +604,11 @@ impl Seen {
         fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?.write_all(&serde_json::to_vec(self)?)?;
         fs::rename(&part, Self::path(dir))?;
         Ok(())
+    }
+
+    /// Whether `key` is remembered.
+    fn has(&self, key: &str) -> bool {
+        self.keys.iter().any(|k| k == key)
     }
 
     /// Whether `key` is new (and now remembered).
@@ -600,35 +691,54 @@ mod tests {
         let r = rules();
         let sam = || Owner::Person("sam".into());
         let sams = agent("sam");
-        assert!(may_use(&r, &u(sam(), "mine", "api.github.com", "sam", None), None, None).is_ok(), "its owner's own");
-        assert!(may_use(&r, &u(sam(), "gh", "api.github.com", "torq-agent-sam", Some("s")), Some(&sams), Some(false)).is_ok(), "sam's agent, as the rule lets it");
-        assert!(may_use(&r, &u(sam(), "gh", "api.github.com", "torq-resident-sam", Some("s")), Some(&sams), Some(false)).is_ok(), "sam's resident agent: the same agent");
-        for (use_, of, tainted, why) in [
-            (u(sam(), "gh", "api.github.com", "torq-agent-viper", Some("s")), Some(agent("viper")), Some(false), "not another person's agent"),
-            (u(sam(), "gh", "api.github.com", "torq-agent", Some("s")), None, Some(false), "an account that is no one's agent"),
-            (u(sam(), "mine", "api.github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), Some(false), "not the agent's"),
-            (u(sam(), "mine", "api.github.com", "viper", None), None, None, "not another person's"),
-            (u(sam(), "gh", "evil.example.com", "sam", None), None, None, "not to another host"),
-            (u(sam(), "key", "github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), Some(false), "an SSH key is never sent"),
-            (u(sam(), "none", "api.github.com", "sam", None), None, None, "no rule"),
-            (u(sam(), "gh", "api.github.com", "torq-agent-sam", None), Some(sams.clone()), None, "no session"),
-            (u(sam(), "gh", "api.github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), Some(true), "a tainted session"),
-            (u(sam(), "asks", "api.github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), Some(false), "approval needed"),
+        assert!(may_use(&r, &u(sam(), "mine", "api.github.com", "sam", None), None).is_ok(), "its owner's own");
+        assert!(may_use(&r, &u(sam(), "gh", "api.github.com", "torq-agent-sam", Some("s")), Some(&sams)).is_ok(), "sam's agent, as the rule lets it");
+        assert!(may_use(&r, &u(sam(), "gh", "api.github.com", "torq-resident-sam", Some("s")), Some(&sams)).is_ok(), "sam's resident agent: the same agent");
+        for (use_, of, why) in [
+            (u(sam(), "gh", "api.github.com", "torq-agent-viper", Some("s")), Some(agent("viper")), "not another person's agent"),
+            (u(sam(), "gh", "api.github.com", "torq-agent", Some("s")), None, "an account that is no one's agent"),
+            (u(sam(), "mine", "api.github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), "not the agent's"),
+            (u(sam(), "mine", "api.github.com", "viper", None), None, "not another person's"),
+            (u(sam(), "gh", "evil.example.com", "sam", None), None, "not to another host"),
+            (u(sam(), "key", "github.com", "torq-agent-sam", Some("s")), Some(sams.clone()), "an SSH key is never sent"),
+            (u(sam(), "none", "api.github.com", "sam", None), None, "no rule"),
         ] {
-            assert!(may_use(&r, &use_, of.as_ref(), tainted).is_err(), "{why}");
+            assert!(may_use(&r, &use_, of.as_ref()).is_err(), "{why}");
         }
         // The system's: each agent by its account, each person by name, and no one else.
         let system = parse(br#"{"gh":{"kind":"token","https":{"hosts":["api.github.com"]},"actors":["torq-agent-sam","viper"],"approve":"never"}}"#).unwrap();
-        let sys = |actor: &str, of: Option<&AgentOf>| may_use(&system, &u(Owner::System, "gh", "api.github.com", actor, of.map(|_| "s")), of, of.map(|_| false)).is_ok();
+        let sys = |actor: &str, of: Option<&AgentOf>| may_use(&system, &u(Owner::System, "gh", "api.github.com", actor, of.map(|_| "s")), of).is_ok();
         assert!(sys("torq-agent-sam", Some(&sams)) && sys("torq-resident-sam", Some(&sams)), "sam's agent, named");
         assert!(sys("viper", None), "viper, named");
         assert!(!sys("torq-agent-viper", Some(&agent("viper"))), "viper's agent is not named");
         assert!(!sys("sam", None), "nor is sam");
         // SSH: a key, for the hosts its rule names; a token signs for nothing.
         let ssh = |name: &str, host: &str| Use { ssh: true, ..u(sam(), name, host, "torq-agent-sam", Some("s")) };
-        assert!(may_use(&r, &ssh("key", "github.com"), Some(&sams), Some(false)).is_ok());
-        assert!(may_use(&r, &ssh("key", "gitlab.com"), Some(&sams), Some(false)).is_err());
-        assert!(may_use(&r, &ssh("gh", "api.github.com"), Some(&sams), Some(false)).is_err());
+        assert!(may_use(&r, &ssh("key", "github.com"), Some(&sams)).is_ok());
+        assert!(may_use(&r, &ssh("key", "gitlab.com"), Some(&sams)).is_err());
+        assert!(may_use(&r, &ssh("gh", "api.github.com"), Some(&sams)).is_err());
+    }
+
+    /// When a person is asked (the approval design, part 2): the rule says each use; or the first, and it is; or
+    /// the use names no session; or its session is tainted, whatever the rule says, but for the person's own
+    /// standing word. What was refused while approving was not built is asked now.
+    #[test]
+    fn a_person_is_asked_in_these_cases_and_no_others() {
+        use torq_wire::secrets::{Approve, Kind, Rule};
+        let rule = |approve| Rule { approve, ..Rule::new(Kind::Token) };
+        let asked = |approve, tainted, first| asks("sam's secret gh", &rule(approve), tainted, first).is_some();
+        assert!(asked(Approve::EachUse, Some(false), true) && asked(Approve::EachUse, Some(false), false), "each use");
+        assert!(asked(Approve::FirstUse, Some(false), true), "the first use in the session");
+        assert!(!asked(Approve::FirstUse, Some(false), false), "not the ones after");
+        assert!(!asked(Approve::Never, Some(false), true) && !asked(Approve::Never, Some(false), false));
+        for approve in [Approve::EachUse, Approve::FirstUse, Approve::Never] {
+            assert!(asked(approve, None, false), "no session: {approve:?}");
+            assert!(asked(approve, Some(true), false), "a tainted session: {approve:?}");
+        }
+        for (tainted, first) in [(Some(false), true), (Some(true), true), (None, true), (Some(true), false)] {
+            assert!(!asked(Approve::NeverEvenTainted, tainted, first), "never-even-tainted: {tainted:?}");
+        }
+        assert!(asks("x", &rule(Approve::Never), Some(true), false).unwrap().contains("untrusted text"));
     }
 }
 

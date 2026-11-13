@@ -211,6 +211,8 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
         ("cancel-scheduled", Some(seq)) => scheduled_by(&settings.state_dir, seq),
         // Whose agent proposed it: whom it served when it proposed, as the broker ledgered it (ADR-051 3).
         ("decline", Some(seq)) => agent_served(&settings.state_dir, seq),
+        // Whom a waiting use is asked of: the broker's own record of it, never the caller's word.
+        ("secret-approve" | "secret-deny", Some(n)) => torq_broker::ask::person_asked(&settings.state_dir, n),
         _ => sub.try_get_one::<String>("user").ok().flatten().cloned(),
     };
     let change = match (name, seq) {
@@ -233,7 +235,17 @@ fn answer(reply: &Reply) -> std::result::Result<i32, Refusal> {
                 return Err(refused(anyhow::anyhow!("from the desktop a system change is approved in its dialog, not by a password in the request")));
             }
             let secret = sub.try_get_one::<String>("name").ok().flatten().map(|n| (n.as_str(), user.as_deref()));
-            approve_in_dialog(pid, uid, &approval_text(name, &settings.state_dir, seq, secret)).map_err(&refused)?;
+            // A grant's dialog says all of what is granted: for how long, and whether it holds under taint.
+            let grant = (name == "secret-grant").then(|| {
+                let how_long = sub.try_get_one::<u32>("minutes").ok().flatten().map_or("in its sessions running now".to_string(), |m| format!("for {m} minutes"));
+                let even = if sub.try_get_one::<bool>("tainted-too").ok().flatten().copied().unwrap_or(false) { ", EVEN FROM A SESSION THAT READ UNTRUSTED TEXT" } else { "" };
+                format!("{how_long}{even}")
+            });
+            let text = match grant {
+                Some(g) => crate::printable(&format!("Let your agent use {} without asking, {g}", secret.map_or("all your own secrets".to_string(), |(n, u)| if u.is_some() { format!("your secret {n}") } else { format!("the system's secret {n}") }))),
+                None => approval_text(name, &settings.state_dir, seq, secret),
+            };
+            approve_in_dialog(pid, uid, &text).map_err(&refused)?;
         }
         Gate::Password => match req.password.as_deref() {
             None => return Err(Refusal { json, code: socket::NEED_PASSWORD, why: format!("this needs {}'s password", who.name) }),
@@ -379,7 +391,7 @@ fn change(state_dir: &Path, seq: u64, kind: &str) -> Option<Change> {
     }
     let tier: Tier = serde_json::from_value(json!(e.body.tier)).ok()?;
     let files = e.body.data["files"].as_array()?.iter().filter_map(|f| f.as_str().map(String::from)).collect();
-    Some(Change { tier, files })
+    Some(Change { tier, files, standing: kind == "proposal" && e.body.data["standing"].as_array().is_some_and(|s| !s.is_empty()) })
 }
 
 /// One JSON line, no longer than the limit, all of it within the time: each read may wait only

@@ -20,6 +20,12 @@ pub const DAEMON: &str = "torq-secrets";
 /// Where the daemon listens: one loopback port, a path for each use (`/system/<secret>/<host>/…`,
 /// `/user/<person>/<secret>/<host>/…`).
 pub const PORT: u16 = 7800;
+/// How long a use of a secret waits at the broker for its person's answer (the approval design, part 2): the
+/// broker refuses it then, and whoever asked for the use waits a little longer than this.
+pub const ASK_WAIT_SECONDS: u64 = 120;
+/// The header an agent's request says what the use is for in, in its own words: shown to the person asked as
+/// the agent's, never sent on to the host.
+pub const REASON_HEADER: &str = "x-torq-reason";
 /// The header an agent's request names its session in.
 pub const SESSION_HEADER: &str = "x-torq-session";
 

@@ -329,7 +329,7 @@ impl<'a> Scheduler<'a> {
         }
         let tier: crate::policy::Tier = serde_json::from_value(json!(p.body.tier)).context("the proposal's tier")?;
         let files = p.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
-        if !who.admin && !crate::socket::theirs(by, &crate::socket::Change { tier, files }) {
+        if !who.admin && !crate::socket::theirs(by, &crate::socket::Change { tier, files, standing: false }) {
             return Ok(Some(format!("its approver {by} is no longer an administrator ({})", crate::socket::ADMINS)));
         }
         Ok(None)

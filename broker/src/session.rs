@@ -74,6 +74,12 @@ pub struct Record {
     /// another program's is told to the resident agent as its own. False for a record from before.
     #[serde(default)]
     pub resident: bool,
+    /// How many of its secret uses a person has been asked about (ask.rs): past the most, no more are asked.
+    #[serde(default)]
+    pub asks: u32,
+    /// The secrets a person said not to ask about again in this session, each as `Owner::key` says it.
+    #[serde(default)]
+    pub denied: Vec<String>,
 }
 
 /// A proposal that cited a session, and the change it became if a person's trust applied it.
@@ -197,7 +203,7 @@ pub fn start(b: &Broker) -> Result<Record> {
         None => (false, vec![]),
         Some(why) => (true, vec![why.to_string()]),
     };
-    let r = Record { id, started: now(), tainted, tainted_by, agent: agent.into(), proposals: vec![], resident: b.resident() };
+    let r = Record { id, started: now(), tainted, tainted_by, agent: agent.into(), proposals: vec![], resident: b.resident(), asks: 0, denied: vec![] };
     write(b, &r)?;
     Ok(r)
 }
@@ -283,7 +289,80 @@ pub fn cite(b: &Broker, id: &str, seq: u64, applied: Option<u64>) -> Result<()> 
     write(b, &r)
 }
 
-/// A person's trust, granted and not yet revoked or expired on the record.
+/// A person is asked about one more secret use of session `id`: counted in its record, and the count given.
+pub(crate) fn count_ask(b: &Broker, id: &str) -> Result<u32> {
+    let _l = lock(b)?;
+    let mut r = read(b, id)?.context("refused: no such session")?;
+    r.asks = r.asks.saturating_add(1);
+    write(b, &r)?;
+    Ok(r.asks)
+}
+
+/// A person said not to ask again in session `id` about the secret `key`: its uses are refused at once from now.
+/// A session whose record is gone has nothing left to refuse.
+pub(crate) fn deny_rest(b: &Broker, id: &str, key: &str) -> Result<()> {
+    let _l = lock(b)?;
+    let Some(mut r) = read(b, id)? else { return Ok(()) };
+    if !r.denied.iter().any(|k| k == key) {
+        r.denied.push(key.into());
+        write(b, &r)?;
+    }
+    Ok(())
+}
+
+/// The longest a person's grant of secret uses lasts, and the longest a session it was given for is covered.
+pub const SECRET_GRANT_MAX_MINUTES: u32 = 480;
+
+/// What a grant covers: the one thing, and nothing else. A grant of secret uses applies no proposal, and trust in
+/// proposals lets no secret be used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Covers {
+    /// The agent's untainted proposals in the person's own folder (ADR-042 7).
+    Proposals,
+    /// The agent's uses of one secret: the person's own of that name, or (`system`) the system's.
+    Secret { name: String, system: bool },
+    /// The agent's uses of every secret of the person's own; never a system secret.
+    AllSecrets,
+}
+
+impl Covers {
+    /// As a `trust_*` entry says it (`data.covers`).
+    fn word(&self) -> String {
+        match self {
+            Covers::Proposals => "proposals".into(),
+            Covers::Secret { name, .. } => format!("secret {name}"),
+            Covers::AllSecrets => "all-secrets".into(),
+        }
+    }
+
+    /// From a `trust_granted` entry's data. One that says nothing is from before grants covered anything else:
+    /// proposals. One that says what no torq knows covers nothing (None).
+    fn read(data: &serde_json::Value) -> Option<Covers> {
+        match data.get("covers") {
+            None => Some(Covers::Proposals),
+            Some(c) => match c.as_str()? {
+                "proposals" => Some(Covers::Proposals),
+                "all-secrets" => Some(Covers::AllSecrets),
+                w => {
+                    let name = w.strip_prefix("secret ").filter(|n| torq_wire::secrets::name_ok(n))?;
+                    Some(Covers::Secret { name: name.into(), system: data["owner"] == json!("system") })
+                }
+            },
+        }
+    }
+
+    /// The most minutes such a grant lasts.
+    fn max_minutes(&self) -> u32 {
+        match self {
+            Covers::Proposals => TRUST_MAX_MINUTES,
+            Covers::Secret { .. } | Covers::AllSecrets => SECRET_GRANT_MAX_MINUTES,
+        }
+    }
+}
+
+/// A person's grant to their own agent, not yet revoked or expired on the record: trust in its proposals, or leave
+/// to use a secret without asking (the approval design, parts 3 and 4).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Grant {
     /// Its `trust_granted` entry.
@@ -294,17 +373,41 @@ pub struct Grant {
     /// When it was granted: its entry's time. A grant lasts no longer than its minutes from then,
     /// whatever its `until` says (a ledger from elsewhere is someone else's text: the audit of 0.3.0).
     pub at: String,
+    pub covers: Covers,
+    /// Whether its entry says it holds in a session that read untrusted text. Honoured only of one named secret
+    /// (`covers_use`), whatever an entry says.
+    pub tainted_too: bool,
+    /// Given for "this session": only the agent's sessions already started when it was granted.
+    pub session: bool,
 }
 
 impl Grant {
     fn over(&self, at: chrono::DateTime<chrono::Utc>) -> bool {
-        let minutes = i64::try_from(self.minutes.min(u64::from(TRUST_MAX_MINUTES))).unwrap_or(0);
+        let minutes = i64::try_from(self.minutes.min(u64::from(self.covers.max_minutes()))).unwrap_or(0);
         let ends = chrono::DateTime::parse_from_rfc3339(&self.at).map(|t| t + chrono::Duration::minutes(minutes));
         let until = chrono::DateTime::parse_from_rfc3339(&self.until);
         match (until, ends) {
             (Ok(u), Ok(e)) => u.min(e) <= at,
             _ => true,
         }
+    }
+
+    /// Whether it lets the agent use the secret `name` (the system's, or its person's own) without asking, at `at`.
+    /// `tainted`: the use's session read untrusted text, or the use names none. `started`: when its session did.
+    pub fn covers_use(&self, system: bool, name: &str, tainted: bool, started: Option<&str>, at: chrono::DateTime<chrono::Utc>) -> bool {
+        let what = match &self.covers {
+            Covers::Secret { name: n, system: s } => n == name && *s == system,
+            Covers::AllSecrets => !system,
+            Covers::Proposals => false,
+        };
+        // Under taint, only a grant that says so, and only of one named secret: never of all.
+        let taint = !tainted || (self.tainted_too && matches!(self.covers, Covers::Secret { .. }));
+        // "This session": one that was running when the person said so, and for no longer than a grant may last.
+        let scope = !self.session
+            || started.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).is_some_and(|s| {
+                chrono::DateTime::parse_from_rfc3339(&self.at).is_ok_and(|g| s <= g) && at < s + chrono::Duration::minutes(SECRET_GRANT_MAX_MINUTES.into())
+            });
+        what && taint && scope && !self.over(at)
     }
 }
 
@@ -315,12 +418,16 @@ pub fn unsettled(entries: &[Entry]) -> Vec<Grant> {
         .iter()
         .filter(|e| e.body.kind == "trust_granted" && !settled(e.body.seq))
         .filter_map(|e| {
+            let covers = Covers::read(&e.body.data)?;
             Some(Grant {
                 seq: e.body.seq,
                 person: e.body.data["person"].as_str()?.into(),
                 minutes: e.body.data["minutes"].as_u64()?,
                 until: e.body.data["until"].as_str()?.into(),
                 at: e.body.ts.clone(),
+                tainted_too: e.body.data["tainted_too"] == json!(true),
+                session: e.body.data["scope"] == json!("session"),
+                covers,
             })
         })
         .collect()
@@ -337,14 +444,18 @@ pub fn active(entries: &[Entry]) -> Vec<Grant> {
 fn settle_locked(b: &Broker) -> Result<()> {
     let now = chrono::Utc::now();
     for g in unsettled(&b.ledger.read_all()?).into_iter().filter(|g| g.over(now)) {
+        let what = match g.covers {
+            Covers::Proposals => "trust in the agent".to_string(),
+            _ => format!("leave for the agent to use {} without asking", said(&g.covers)),
+        };
         b.ledger.append(NewEntry {
             actor: "broker".into(),
             approved_by: None,
             kind: "trust_expired".into(),
             tier: Tier::User.to_string(),
             tainted: false,
-            reason: format!("{}'s trust in the agent ended at {}", g.person, g.until),
-            data: json!({ "grant": g.seq, "person": g.person, "until": g.until }),
+            reason: format!("{}'s {what} ended at {}", g.person, g.until),
+            data: json!({ "grant": g.seq, "person": g.person, "until": g.until, "covers": g.covers.word() }),
         })?;
     }
     Ok(())
@@ -356,32 +467,125 @@ pub fn settle_trust(b: &Broker) -> Result<()> {
     settle_locked(b)
 }
 
-/// `person` trusts the agent's user-tier proposals in their own folder for `minutes`. (Over the
-/// socket: only that person, with their password.)
-pub fn grant(b: &Broker, person: &str, minutes: u32) -> Result<Entry> {
+/// What a grant of secret uses covers, as a person reads it.
+fn said(c: &Covers) -> String {
+    match c {
+        Covers::Proposals => "its proposals".into(),
+        Covers::Secret { name, system: true } => format!("the system's secret {name}"),
+        Covers::Secret { name, system: false } => format!("their secret {name}"),
+        Covers::AllSecrets => "all their own secrets".into(),
+    }
+}
+
+/// A grant on the record: `person`'s, to their own agent, of `covers`, for `minutes`. One of each at a time.
+/// `extra`: what else its entry says. Under the sessions' lock, never the broker's.
+fn grant_of(b: &Broker, person: &str, covers: Covers, minutes: u32, reason: String, extra: serde_json::Value) -> Result<Entry> {
     if !policy::user_name_ok(person) {
         bail!("{person:?} is not a person's name");
-    }
-    if !(1..=TRUST_MAX_MINUTES).contains(&minutes) {
-        bail!("refused: trust lasts 1 to {TRUST_MAX_MINUTES} minutes, not {minutes}");
     }
     if !b.agent_limits.has_agent(person) {
         bail!("refused: {person} has no agent (torq.agent.people), so there is nothing to trust it with");
     }
     let _l = lock(b)?;
     settle_locked(b)?;
-    if let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person) {
-        bail!("refused: {person} trusts the agent already, until {} (#{}): revoke it first", g.until, g.seq);
+    if let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person && g.covers == covers) {
+        let what = if covers == Covers::Proposals { "trusts the agent already".to_string() } else { format!("lets the agent use {} already", said(&covers)) };
+        bail!("refused: {person} {what}, until {} (#{}): revoke it first", g.until, g.seq);
     }
     let until = (chrono::Utc::now() + chrono::Duration::minutes(minutes.into())).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut data = json!({ "person": person, "minutes": minutes, "until": until, "covers": covers.word() });
+    if let serde_json::Value::Object(x) = extra {
+        for (k, v) in x {
+            data[k] = v;
+        }
+    }
+    b.ledger.append(NewEntry { actor: Actor::User.to_string(), approved_by: Some(person.into()), kind: "trust_granted".into(), tier: Tier::User.to_string(), tainted: false, reason, data })
+}
+
+/// `person` trusts the agent's user-tier proposals in their own folder for `minutes`. (Over the
+/// socket: only that person, with their password.)
+pub fn grant(b: &Broker, person: &str, minutes: u32) -> Result<Entry> {
+    if !(1..=TRUST_MAX_MINUTES).contains(&minutes) {
+        bail!("refused: trust lasts 1 to {TRUST_MAX_MINUTES} minutes, not {minutes}");
+    }
+    grant_of(b, person, Covers::Proposals, minutes, format!("{person} lets the agent's proposals in their own folder apply without asking, for {minutes} minutes"), json!({}))
+}
+
+/// How long a grant of secret uses is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// 1 to `SECRET_GRANT_MAX_MINUTES`.
+    Minutes(u32),
+    /// The agent's sessions running now, for as long as a grant may last.
+    Session,
+}
+
+/// `person` lets their own agent use a secret (`covers`: one, or all their own) without asking. (Over the socket:
+/// only that person, with their password.) What it never does: it gives the agent no secret its rule does not —
+/// a use is still judged by its rule first, its host and its actors (`secrets::may_use`) — and under taint it
+/// holds only as `tainted_too`, which is of one named secret, for minutes.
+pub fn grant_secret(b: &Broker, person: &str, covers: Covers, scope: Scope, tainted_too: bool) -> Result<Entry> {
+    use torq_wire::secrets::AGENT;
+    let minutes = match scope {
+        Scope::Minutes(m) if (1..=SECRET_GRANT_MAX_MINUTES).contains(&m) => m,
+        Scope::Minutes(m) => bail!("refused: such a grant lasts 1 to {SECRET_GRANT_MAX_MINUTES} minutes, not {m}"),
+        Scope::Session => SECRET_GRANT_MAX_MINUTES,
+    };
+    let mut extra = json!({});
+    match &covers {
+        Covers::Proposals => bail!("refused: trust in proposals is `trust-grant`'s"),
+        Covers::AllSecrets if tainted_too => bail!("refused: all secrets at once are never used unasked from a session that read untrusted text: tainted-too is of one named secret"),
+        Covers::AllSecrets if scope == Scope::Session => bail!("refused: all secrets at once are let for minutes, not for a session"),
+        Covers::AllSecrets => {}
+        Covers::Secret { .. } if tainted_too && scope == Scope::Session => bail!("refused: tainted-too is for minutes, not for a session"),
+        Covers::Secret { name, system } => {
+            // A grant widens no rule: said here so that a person is not left thinking it did.
+            let owner = if *system { crate::secrets::Owner::System } else { crate::secrets::Owner::Person(person.into()) };
+            let rules = b.rules_of(&owner)?;
+            let rule = rules.get(name).with_context(|| format!("refused: no rule for a secret {name} of {}", if *system { "the system's" } else { "theirs" }))?;
+            let named = if *system { b.agent_limits.agents.iter().any(|(a, p)| p == person && rule.actors.contains(a)) } else { rule.actors.iter().any(|a| a == AGENT) };
+            if !named {
+                bail!("refused: the rule of secret {name} does not let {person}'s agent use it: a grant widens no rule");
+            }
+            extra["owner"] = if *system { "system".into() } else { "user".into() };
+        }
+    }
+    if scope == Scope::Session {
+        extra["scope"] = "session".into();
+    }
+    if tainted_too {
+        extra["tainted_too"] = true.into();
+    }
+    let how_long = match scope {
+        Scope::Minutes(m) => format!("for {m} minutes"),
+        Scope::Session => "in its sessions running now".into(),
+    };
+    let even = if tainted_too { ", even from a session that read untrusted text" } else { "" };
+    grant_of(b, person, covers.clone(), minutes, format!("{person} lets the agent use {} without asking, {how_long}{even}", said(&covers)), extra)
+}
+
+/// The grant that lets `person`'s agent make this use without asking, if one holds (`Grant::covers_use`): its entry.
+pub fn covering(b: &Broker, person: &str, system: bool, name: &str, tainted: bool, started: Option<&str>) -> Result<Option<u64>> {
+    let _l = lock(b)?;
+    settle_locked(b)?;
+    let now = chrono::Utc::now();
+    Ok(active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person && g.covers_use(system, name, tainted, started, now)).map(|g| g.seq))
+}
+
+/// `trust_revoked` for grant `g`, by its person. Under the sessions' lock (held).
+fn revoke_locked(b: &Broker, g: &Grant) -> Result<Entry> {
+    let what = match g.covers {
+        Covers::Proposals => "trust in the agent".to_string(),
+        _ => format!("leave for the agent to use {} without asking", said(&g.covers)),
+    };
     b.ledger.append(NewEntry {
         actor: Actor::User.to_string(),
-        approved_by: Some(person.into()),
-        kind: "trust_granted".into(),
+        approved_by: Some(g.person.clone()),
+        kind: "trust_revoked".into(),
         tier: Tier::User.to_string(),
         tainted: false,
-        reason: format!("{person} lets the agent's proposals in their own folder apply without asking, for {minutes} minutes"),
-        data: json!({ "person": person, "minutes": minutes, "until": until }),
+        reason: format!("{} revoked their {what}", g.person),
+        data: json!({ "grant": g.seq, "person": g.person, "covers": g.covers.word() }),
     })
 }
 
@@ -391,16 +595,22 @@ pub fn grant(b: &Broker, person: &str, minutes: u32) -> Result<Entry> {
 pub fn revoke(b: &Broker, person: &str) -> Result<Option<Entry>> {
     let _l = lock(b)?;
     settle_locked(b)?;
-    let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person) else { return Ok(None) };
-    Ok(Some(b.ledger.append(NewEntry {
-        actor: Actor::User.to_string(),
-        approved_by: Some(person.into()),
-        kind: "trust_revoked".into(),
-        tier: Tier::User.to_string(),
-        tainted: false,
-        reason: format!("{person} revoked their trust in the agent"),
-        data: json!({ "grant": g.seq, "person": person }),
-    })?))
+    let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person && g.covers == Covers::Proposals) else { return Ok(None) };
+    Ok(Some(revoke_locked(b, &g)?))
+}
+
+/// End `person`'s grants of secret uses now: those of the secret `name` (their own or the system's), or with none
+/// named, every one. No use starts under them after.
+pub fn revoke_secrets(b: &Broker, person: &str, name: Option<&str>) -> Result<Vec<Entry>> {
+    let _l = lock(b)?;
+    settle_locked(b)?;
+    let theirs = |g: &Grant| match (&g.covers, name) {
+        (Covers::Proposals, _) => false,
+        (_, None) => true,
+        (Covers::Secret { name: n, .. }, Some(name)) => n == name,
+        (Covers::AllSecrets, Some(_)) => false,
+    };
+    active(&b.ledger.read_all()?).iter().filter(|g| g.person == person && theirs(g)).map(|g| revoke_locked(b, g)).collect()
 }
 
 /// What of proposal `p` could cut the machine off, if anything (`cuts_off`, recorded when proposed).
@@ -420,7 +630,8 @@ pub fn cited(p: &Entry) -> Option<&str> {
 /// None: not one.
 fn trusted_by(b: &Broker, p: &Entry) -> Option<String> {
     let e = &p.body;
-    if e.kind != "proposal" || e.actor != Actor::Agent.to_string() || e.tainted || e.tier != Tier::User.to_string() || cited(p).is_none() || cuts_off(p).is_some() {
+    // Nor one that makes a secret `never-even-tainted`: that asks its person's password, which trust never stands in for.
+    if e.kind != "proposal" || e.actor != Actor::Agent.to_string() || e.tainted || e.tier != Tier::User.to_string() || cited(p).is_none() || cuts_off(p).is_some() || e.data.get("standing").is_some() {
         return None;
     }
     let files: Vec<String> = e.data["files"].as_array()?.iter().filter_map(|f| f.as_str().map(String::from)).collect();
@@ -435,7 +646,7 @@ fn trusted_by(b: &Broker, p: &Entry) -> Option<String> {
     if e.data["via"].as_str() != Some("socket") || e.data["caller"].as_str().is_none_or(|c| Some(c) != b.resident_of(&person)) {
         return None;
     }
-    socket::theirs(&person, &socket::Change { tier: Tier::User, files }).then_some(person)
+    socket::theirs(&person, &socket::Change { tier: Tier::User, files, standing: false }).then_some(person)
 }
 
 /// Apply proposal `p` now if a person's trust covers it (`trusted_by`, and their grant holding): as
@@ -463,7 +674,7 @@ pub fn apply_trusted(b: &Broker, p: &Entry) -> Result<Option<Entry>> {
         if cited(&p).map(|s| read(b, s)).transpose()?.flatten().is_none_or(|r| r.tainted) {
             return Ok(None);
         }
-        let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person) else { return Ok(None) };
+        let Some(g) = active(&b.ledger.read_all()?).into_iter().find(|g| g.person == person && g.covers == Covers::Proposals) else { return Ok(None) };
         (p, person, g.seq)
     };
     let e = b.apply_locked(&lock, p.body.seq, &person, false, None, Some(("trust", grant)))?;
@@ -481,12 +692,80 @@ mod tests {
     /// elsewhere is someone else's text (the audit of 0.3.0).
     #[test]
     fn a_grant_lasts_its_minutes_whatever_its_until_says() {
-        let g = |at: &str, minutes: u64, until: &str| Grant { seq: 1, person: "casey".into(), minutes, until: until.into(), at: at.into() };
+        let g = |at: &str, minutes: u64, until: &str| Grant { seq: 1, person: "casey".into(), minutes, until: until.into(), at: at.into(), covers: Covers::Proposals, tainted_too: false, session: false };
         let now = chrono::DateTime::parse_from_rfc3339("2026-11-08T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
         assert!(g("2026-11-08T10:00:00Z", 60, "2099-01-01T00:00:00Z").over(now), "60 minutes from 10:00 is over at 12:00");
         assert!(!g("2026-11-08T11:30:00Z", 60, "2099-01-01T00:00:00Z").over(now));
         assert!(g("2026-11-08T11:30:00Z", 6000, "2099-01-01T00:00:00Z").over(now + chrono::Duration::minutes(61)), "never more than the most a grant may be");
         assert!(g("2026-11-08T11:30:00Z", 60, "2026-11-08T11:45:00Z").over(now), "nor past its until");
         assert!(g("not a time", 60, "2099-01-01T00:00:00Z").over(now), "unreadable is over");
+    }
+
+    fn secret_grant(covers: Covers, tainted_too: bool, session: bool) -> Grant {
+        Grant { seq: 1, person: "casey".into(), minutes: 480, until: "2026-11-08T20:00:00Z".into(), at: "2026-11-08T12:00:00Z".into(), covers, tainted_too, session }
+    }
+
+    fn at(t: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(t).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    /// A grant covers the one thing it says: one secret is not another, a person's own of a name is not the system's
+    /// of that name, all is the person's own and never a system secret, and trust in proposals lets no secret be used.
+    #[test]
+    fn a_grant_covers_what_it_says_and_nothing_else() {
+        let now = at("2026-11-08T12:30:00Z");
+        let own = secret_grant(Covers::Secret { name: "gh".into(), system: false }, false, false);
+        assert!(own.covers_use(false, "gh", false, None, now));
+        assert!(!own.covers_use(false, "other", false, None, now), "another secret");
+        assert!(!own.covers_use(true, "gh", false, None, now), "the system's of the same name");
+        let all = secret_grant(Covers::AllSecrets, false, false);
+        assert!(all.covers_use(false, "gh", false, None, now) && all.covers_use(false, "other", false, None, now));
+        assert!(!all.covers_use(true, "gh", false, None, now), "all is their own, never the system's");
+        let system = secret_grant(Covers::Secret { name: "gh".into(), system: true }, false, false);
+        assert!(system.covers_use(true, "gh", false, None, now) && !system.covers_use(false, "gh", false, None, now));
+        assert!(!secret_grant(Covers::Proposals, false, false).covers_use(false, "gh", false, None, now), "trust in proposals is of proposals");
+        assert!(!own.covers_use(false, "gh", false, None, at("2026-11-08T20:00:00Z")), "over at its time");
+    }
+
+    /// Under taint a grant holds only if it says so, and only of one named secret: `all` never does, whatever its
+    /// entry says.
+    #[test]
+    fn taint_is_waived_only_by_a_named_secrets_grant_that_says_so() {
+        let now = at("2026-11-08T12:30:00Z");
+        let named = |too| secret_grant(Covers::Secret { name: "gh".into(), system: false }, too, false);
+        assert!(named(true).covers_use(false, "gh", true, None, now));
+        assert!(!named(false).covers_use(false, "gh", true, None, now), "it does not say so");
+        assert!(!secret_grant(Covers::AllSecrets, false, false).covers_use(false, "gh", true, None, now));
+        assert!(!secret_grant(Covers::AllSecrets, true, false).covers_use(false, "gh", true, None, now), "all is never tainted-too");
+    }
+
+    /// "This session" is a session that was running when the person said so: not one started after, not a use that
+    /// names none, and not past the longest a grant lasts from the session's start.
+    #[test]
+    fn a_session_grant_is_of_the_sessions_running_then() {
+        let g = secret_grant(Covers::Secret { name: "gh".into(), system: false }, false, true);
+        let now = at("2026-11-08T12:30:00Z");
+        assert!(g.covers_use(false, "gh", false, Some("2026-11-08T11:00:00Z"), now));
+        assert!(!g.covers_use(false, "gh", false, Some("2026-11-08T12:10:00Z"), now), "started after the grant");
+        assert!(!g.covers_use(false, "gh", false, None, now), "no session");
+        assert!(!g.covers_use(false, "gh", false, Some("not a time"), now));
+        assert!(!g.covers_use(false, "gh", false, Some("2026-11-08T11:00:00Z"), at("2026-11-08T19:00:00Z")), "eight hours from the session's start");
+    }
+
+    /// What an entry says it covers. One from before grants covered anything else says nothing, and is trust in
+    /// proposals; one that says what no torq knows is no grant; tainted-too on `all` is not read as one.
+    #[test]
+    fn what_an_entry_covers() {
+        assert_eq!(Covers::read(&json!({ "person": "casey", "minutes": 30 })), Some(Covers::Proposals));
+        assert_eq!(Covers::read(&json!({ "covers": "proposals" })), Some(Covers::Proposals));
+        assert_eq!(Covers::read(&json!({ "covers": "all-secrets" })), Some(Covers::AllSecrets));
+        assert_eq!(Covers::read(&json!({ "covers": "secret gh", "owner": "user" })), Some(Covers::Secret { name: "gh".into(), system: false }));
+        assert_eq!(Covers::read(&json!({ "covers": "secret gh", "owner": "system" })), Some(Covers::Secret { name: "gh".into(), system: true }));
+        for unknown in [json!({ "covers": "everything" }), json!({ "covers": "secret ../x" }), json!({ "covers": 7 }), json!({ "covers": "secret " })] {
+            assert_eq!(Covers::read(&unknown), None, "{unknown}");
+        }
+        for c in [Covers::Proposals, Covers::AllSecrets, Covers::Secret { name: "gh".into(), system: false }] {
+            assert_eq!(Covers::read(&json!({ "covers": c.word(), "owner": "user" })), Some(c));
+        }
     }
 }

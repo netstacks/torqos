@@ -3726,6 +3726,43 @@ fn a_persons_secrets_rules_are_theirs_alone_at_the_broker() {
     assert!(b.propose_on(Some(&b.repo.head().unwrap()), &d, "twice", Actor::User, false).is_err());
 }
 
+/// `never-even-tainted` (the approval design, part 3): a change that newly says it of a person's own secret is known
+/// for it when it is proposed (`standing`, which the socket asks their password by); one that takes it back, or
+/// leaves it as it was, is not; and an undo, which asks no password, never brings it back.
+#[test]
+fn a_change_that_makes_a_secret_never_even_tainted_is_known_for_it() {
+    let (cfg, b) = setup("true");
+    let rule = |approve: &str, host: &str| format!("{{\"gh\": {{\"kind\": \"token\", \"https\": {{\"hosts\": [\"{host}\"]}}, \"actors\": [\"torq-agent\"], \"approve\": \"{approve}\"}}}}");
+    let propose = |name: &str, body: String| {
+        let d = write_diff(cfg.path(), name, &body);
+        b.propose_on(Some(&b.repo.head().unwrap()), &d, "Secret gh", Actor::User, false).unwrap()
+    };
+    let change = |from: String, to: String| format!("--- a/users/alice/secrets.json\n+++ b/users/alice/secrets.json\n@@ -1 +1 @@\n-{from}\n+{to}\n");
+    let p = propose("1.diff", format!("--- /dev/null\n+++ b/users/alice/secrets.json\n@@ -0,0 +1 @@\n+{}\n", rule("never", "api.github.com")));
+    assert!(p.body.data.get("standing").is_none(), "nothing standing in it");
+    b.apply(p.body.seq, "alice", false).unwrap();
+    let up = propose("2.diff", change(rule("never", "api.github.com"), rule("never-even-tainted", "api.github.com")));
+    assert_eq!(up.body.data["standing"], serde_json::json!(["users/alice/secrets.json: gh"]));
+    b.apply(up.body.seq, "alice", false).unwrap();
+    let same = propose("3.diff", change(rule("never-even-tainted", "api.github.com"), rule("never-even-tainted", "uploads.github.com")));
+    assert!(same.body.data.get("standing").is_none(), "said already: nothing new to ask a password for");
+    b.apply(same.body.seq, "alice", false).unwrap();
+    let down = propose("4.diff", change(rule("never-even-tainted", "uploads.github.com"), rule("first-use", "uploads.github.com")));
+    assert!(down.body.data.get("standing").is_none(), "taking it back asks nothing");
+    let taken = b.apply(down.body.seq, "alice", false).unwrap();
+    let before = b.repo.head().unwrap();
+    let e = format!("{:#}", b.revert(taken.body.seq, "alice").unwrap_err());
+    assert!(e.contains("never-even-tainted again") && e.contains("asks your password"), "{e}");
+    assert_eq!(b.repo.head().unwrap(), before, "nothing was undone");
+    // A new file that says it, and the system's rules, which never may.
+    let d = write_diff(cfg.path(), "5.diff", &format!("--- /dev/null\n+++ b/users/bob/secrets.json\n@@ -0,0 +1 @@\n+{}\n", rule("never-even-tainted", "api.github.com")));
+    let new = b.propose_on(Some(&b.repo.head().unwrap()), &d, "Secret gh", Actor::User, false).unwrap();
+    assert_eq!(new.body.data["standing"], serde_json::json!(["users/bob/secrets.json: gh"]));
+    let d = write_diff(cfg.path(), "6.diff", "--- /dev/null\n+++ b/secrets/system.json\n@@ -0,0 +1 @@\n+{\"gh\": {\"kind\": \"token\", \"approve\": \"never-even-tainted\"}}\n");
+    let e = format!("{:#}", b.propose_on(Some(&b.repo.head().unwrap()), &d, "The system's", Actor::User, false).unwrap_err());
+    assert!(e.contains("not the system's"), "{e}");
+}
+
 /// KNOWN-GAPS 6t: a build that fails because Nix found its own cache damaged (as a power cut mid-build leaves it)
 /// is run again once with the cache removed. A damaged database elsewhere (the store's) is left alone, and so is a
 /// fault Nix reports as ignored and carries on past (the command then failed for a reason of its own): the change

@@ -137,6 +137,9 @@ pub enum Gate {
 pub struct Change {
     pub tier: Tier,
     pub files: Vec<String>,
+    /// Whether it newly makes a secret of a person's own `never-even-tainted` (a proposal's `standing`): theirs to
+    /// do, with their password.
+    pub standing: bool,
 }
 
 /// Flags no caller may send: the broker's settings (they are /etc/torq/broker.json's), who is
@@ -198,7 +201,7 @@ pub fn caller(uid: u32, passwd: &str, group: &str, agents: &crate::agent::Limits
 
 /// Read-only commands: open to every account (the ledger says what changed, never a secret: a
 /// password's hash is kept outside it).
-const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups", "scheduled", "session", "trust", "secrets"];
+const OBSERVE: &[&str] = &["log", "verify", "status", "show", "remote", "snapshots", "backups", "scheduled", "session", "trust", "secrets", "secret-grants"];
 
 /// What `cmd` needs from `who`: `change` is what it acts on (`apply`, `revert`), `user` whose
 /// password it sets (`password`). An `apply --confirm` is `apply-confirmed`: while it waits, no
@@ -249,6 +252,16 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         // Trust in the agent with their own folder: theirs alone to give, with their password; ending it, at any time.
         "trust-grant" => Gate::Password,
         "trust-revoke" => Gate::Open,
+        // Leave for their agent to use a secret without asking (the approval design, part 3): as trust is, theirs
+        // alone to give, with their password, so that no program running as them gives it quietly; ended at any time.
+        "secret-grant" => Gate::Password,
+        "secret-revoke" => Gate::Open,
+        // The uses that wait for their answer: each person their own (`with_identity` says whose).
+        "secret-waiting" => Gate::Open,
+        // An answer to a waiting use: the person its agent serves (`user`: the waiting use's own word for whom),
+        // and no one else. Not an administrator: their password is no answer for someone else's agent.
+        "secret-approve" | "secret-deny" if user == Some(who.name.as_str()) => Gate::Open,
+        "secret-approve" | "secret-deny" => Gate::Refused("a waiting use is answered by the person whose agent asks, and by no one else".into()),
         // A person's, not everyone's: it goes to the network, as root (the review of pull).
         "fetch-incoming" => Gate::Open,
         "apply-confirmed" => match change {
@@ -261,6 +274,9 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
             None => Gate::Refused("no such change".into()),
             Some(c) if c.tier == Tier::Forbidden => Gate::Refused("that change touches what no one may change".into()),
             // A person's own settings are theirs: no password (KNOWN-GAPS 6a — someone else's are not).
+            // But for making a secret of theirs `never-even-tainted`: it outlives the moment, as a grant does, and
+            // no program running as them says it quietly.
+            Some(c) if theirs(&who.name, c) && c.standing => Gate::Password,
             Some(c) if theirs(&who.name, c) => Gate::Open,
             Some(_) => admins_only(),
         },
@@ -372,7 +388,7 @@ pub fn with_identity(args: &[String], cmd: &str, who: &Caller, diff: Option<&str
             a.extend(["--approved-by".into(), who.name.clone()]);
         }
         "secret-delete" | "secret-show" => a.extend(["--approved-by".into(), who.name.clone()]),
-        "apply" | "revert" | "schedule" | "cancel-scheduled" | "decline" | "trust-grant" | "trust-revoke" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
+        "apply" | "revert" | "schedule" | "cancel-scheduled" | "decline" | "trust-grant" | "trust-revoke" | "secret-grant" | "secret-revoke" | "secret-waiting" | "secret-approve" | "secret-deny" | "confirm" | "reconcile" | "repair" | "remote-clear" | "restore-data" | "ledger-acknowledge" | "snapshot-take" | "snapshot-delete" | "backup-restore" => a.extend(["--approved-by".into(), who.name.clone()]),
         _ => {}
     }
     Ok(a)
@@ -465,7 +481,7 @@ mod tests {
         caller(uid, PASSWD, GROUP, &agents(), &residents()).unwrap()
     }
     fn change(tier: Tier, files: &[&str]) -> Change {
-        Change { tier, files: files.iter().map(|f| f.to_string()).collect() }
+        Change { tier, files: files.iter().map(|f| f.to_string()).collect(), standing: false }
     }
 
     #[test]
@@ -968,5 +984,64 @@ mod tests {
         assert!(with_identity(&["backup-key".into()], "backup-key", &who(1000), None, None, None).is_err(), "a key comes in the request");
         let r = with_identity(&["backup-restore".into(), "--name=home".into(), "--path=/home/sam".into()], "backup-restore", &who(1000), None, None, None).unwrap();
         assert_eq!(r.last().map(String::as_str), Some("viper"));
+    }
+
+    /// The approval design, part 2: a waiting use of a secret is answered by the person its agent serves (`user`:
+    /// the broker's own record of the use), and by no one else: not the agent's two accounts, not another person,
+    /// not an administrator, not a service. An answer needs no password; who gave it is the kernel's word.
+    #[test]
+    fn a_waiting_use_is_answered_by_its_person_alone() {
+        for cmd in ["secret-approve", "secret-deny"] {
+            assert_eq!(gate(&who(1000), cmd, None, Some("viper")), Gate::Open, "{cmd}: viper's agent asks viper");
+            assert_eq!(gate(&who(1001), cmd, None, Some("sam")), Gate::Open, "{cmd}");
+            // viper's agent account, viper's resident account, sam, a service, the secrets daemon: none of them viper.
+            for uid in [990, 980, 1001, 65534, 989] {
+                assert!(matches!(gate(&who(uid), cmd, None, Some("viper")), Gate::Refused(_)), "{cmd} {uid}");
+            }
+            assert!(matches!(gate(&who(1000), cmd, None, Some("sam")), Gate::Refused(_)), "{cmd}: an administrator is not sam");
+            assert!(matches!(gate(&who(991), cmd, None, Some("sam")), Gate::Refused(_)), "{cmd}: sam's agent is not sam");
+            for uid in [1000, 1001, 990] {
+                assert!(matches!(gate(&who(uid), cmd, None, None), Gate::Refused(_)), "{cmd} {uid}: no such use");
+            }
+            let a = with_identity(&[cmd.to_string(), "7".into()], cmd, &who(1001), None, None, None).unwrap();
+            assert_eq!(a, [cmd, "7", "--approved-by", "sam"]);
+        }
+        assert!(check_args(&["secret-approve".into(), "7".into(), "--approved-by=viper".into()]).is_err());
+    }
+
+    /// The approval design, part 3: leave for their agent to use a secret unasked is a person's own to give, with
+    /// their password, as trust is; taken back without one. Never the agent's, either account, nor a service's.
+    #[test]
+    fn a_grant_of_secret_uses_is_a_persons_with_their_password() {
+        for uid in [1000, 1001] {
+            assert_eq!(gate(&who(uid), "secret-grant", None, None), Gate::Password, "{uid}");
+            assert_eq!(gate(&who(uid), "secret-revoke", None, None), Gate::Open, "{uid}");
+            assert_eq!(gate(&who(uid), "secret-waiting", None, None), Gate::Open, "{uid}");
+        }
+        for cmd in ["secret-grant", "secret-revoke", "secret-waiting"] {
+            for uid in [990, 980, 65534, 989] {
+                assert!(matches!(gate(&who(uid), cmd, None, Some("viper")), Gate::Refused(_)), "{cmd} {uid}");
+            }
+            let a = with_identity(&[cmd.to_string()], cmd, &who(1001), None, None, None).unwrap();
+            assert_eq!(a, [cmd, "--approved-by", "sam"], "whose it is, is the kernel's answer");
+        }
+        for uid in [1000, 1001, 990] {
+            assert_eq!(gate(&who(uid), "secret-grants", None, None), Gate::Open, "what is granted is on the record for all: {uid}");
+        }
+    }
+
+    /// `never-even-tainted` outlives the moment, as a grant does: a person's own change that newly says it of a
+    /// secret of theirs asks their password, where any other change of their own rules asks nothing. Never an
+    /// administrator's to make for them.
+    #[test]
+    fn making_a_secret_never_even_tainted_asks_the_persons_password() {
+        let mut c = change(Tier::User, &["users/sam/secrets.json"]);
+        assert_eq!(gate(&who(1001), "apply", Some(&c), None), Gate::Open);
+        c.standing = true;
+        for cmd in ["apply", "schedule"] {
+            assert_eq!(gate(&who(1001), cmd, Some(&c), None), Gate::Password, "{cmd}");
+            assert!(matches!(gate(&who(1000), cmd, Some(&c), None), Gate::Refused(_)), "{cmd}: never an administrator's");
+            assert!(matches!(gate(&who(991), cmd, Some(&c), None), Gate::Refused(_)), "{cmd}: never the agent's");
+        }
     }
 }

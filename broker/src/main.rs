@@ -89,7 +89,12 @@ enum Cmd {
     SecretDelete { name: String, user: Option<String>, approved_by: String },
     SecretShow { name: String, user: Option<String>, approved_by: String },
     Secrets,
-    SecretUse { name: String, user: Option<String>, host: String, client_port: Option<u16>, server_port: Option<u16>, session: Option<String>, grant: Option<String>, ssh: bool },
+    SecretUse { name: String, user: Option<String>, host: String, client_port: Option<u16>, server_port: Option<u16>, session: Option<String>, grant: Option<String>, ssh: bool, reason: Option<String> },
+    SecretGrant { name: Option<String>, user: Option<String>, minutes: Option<u32>, tainted_too: bool, approved_by: String },
+    SecretRevoke { name: Option<String>, approved_by: String },
+    SecretGrants,
+    SecretWaiting { approved_by: String },
+    SecretAnswer { n: u64, approved: bool, rest: bool, place: String, approved_by: String },
     SecretAgent { client_port: u16, server_port: u16, session: Option<String> },
     AdoptKey { url: String },
     AdoptInspect { url: String },
@@ -247,7 +252,23 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("backups").about("The backups the configuration declares (ADR-038): whether each has its key, the snapshots its repository holds, and how it last ran. Read only."))
         .subcommand(Command::new("backup-key").about("Keep a declared backup's key (its passphrase, read from a file) root's alone, outside the config repo, where its passwordFile points; ledgered without the key.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("key-file").long("key-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
         .subcommand(Command::new("backup-restore").about("Put a path back from a declared backup (ADR-038): restic restores it where only root can reach it, then its owner writes it, what is there set aside; ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("snapshot").long("snapshot").help("A snapshot's id [default: latest].")).arg(Arg::new("path").long("path").required(true)).arg(by()))
-        .subcommand(Command::new("secret-use").about("For the secrets daemon alone (ADR-052): one use of a secret, judged by its rule, the caller read from the kernel's table of the loopback connection (or from the grant of its agent socket); its value printed.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("host").long("host").required(true)).arg(Arg::new("client-port").long("client-port").value_parser(value_parser!(u16))).arg(Arg::new("server-port").long("server-port").value_parser(value_parser!(u16))).arg(Arg::new("session").long("session")).arg(Arg::new("grant").long("grant").conflicts_with_all(["client-port", "server-port", "session"])).arg(Arg::new("ssh").long("ssh").action(ArgAction::SetTrue).help("A signature for SSH to the host, not an HTTPS request")))
+        .subcommand(Command::new("secret-use").about("For the secrets daemon alone (ADR-052): one use of a secret, judged by its rule, the caller read from the kernel's table of the loopback connection (or from the grant of its agent socket); its value printed.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("host").long("host").required(true)).arg(Arg::new("client-port").long("client-port").value_parser(value_parser!(u16))).arg(Arg::new("server-port").long("server-port").value_parser(value_parser!(u16))).arg(Arg::new("session").long("session")).arg(Arg::new("grant").long("grant").conflicts_with_all(["client-port", "server-port", "session"])).arg(Arg::new("ssh").long("ssh").action(ArgAction::SetTrue).help("A signature for SSH to the host, not an HTTPS request")).arg(Arg::new("reason").long("reason").help("The agent's own words for what the use is for: shown to the person asked as the agent's, one cleaned line")))
+        .subcommand(
+            Command::new("secret-grant")
+                .about("The approver lets their own agent use a secret without asking (ADR-051, ADR-052 4): one secret (--name; --user: their own, else the system's) for MINUTES (1 to 480) or for its sessions running now (--session), or all their own (--all) for MINUTES; ledgered.")
+                .arg(Arg::new("name").long("name").required_unless_present("all"))
+                .arg(Arg::new("all").long("all").action(ArgAction::SetTrue).conflicts_with_all(["name", "user", "session", "tainted-too"]))
+                .arg(Arg::new("user").long("user"))
+                .arg(Arg::new("minutes").long("minutes").value_parser(value_parser!(u32)).required_unless_present("session"))
+                .arg(Arg::new("session").long("session").action(ArgAction::SetTrue).conflicts_with_all(["minutes", "tainted-too"]))
+                .arg(Arg::new("tainted-too").long("tainted-too").action(ArgAction::SetTrue).help("It holds in a session that read untrusted text too: one named secret, for minutes"))
+                .arg(by()),
+        )
+        .subcommand(Command::new("secret-revoke").about("End the approver's grants of secret uses now: of one secret (--name), or all of them (ledgered).").arg(Arg::new("name").long("name")).arg(by()))
+        .subcommand(Command::new("secret-grants").about("The grants of secret uses that hold now: whose, what each covers, and until when."))
+        .subcommand(Command::new("secret-waiting").about("The agent's uses of secrets that wait for the approver's answer.").arg(by()))
+        .subcommand(Command::new("secret-approve").about("Approve the waiting use SEQ, once (only the person whose agent asks; ledgered).").arg(Arg::new("seq").required(true).value_parser(value_parser!(u64))).arg(Arg::new("where").long("where").default_value("terminal")).arg(by()))
+        .subcommand(Command::new("secret-deny").about("Deny the waiting use SEQ (only the person whose agent asks; ledgered).").arg(Arg::new("seq").required(true).value_parser(value_parser!(u64))).arg(Arg::new("rest-of-session").long("rest-of-session").action(ArgAction::SetTrue).help("And do not ask again about this secret in this session")).arg(Arg::new("where").long("where").default_value("terminal")).arg(by()))
         .subcommand(Command::new("secret-agent").about("For the secrets daemon alone (ADR-052): an SSH agent socket granted to the one connected (read from the kernel), and the keys it may use (public halves only).").arg(Arg::new("client-port").long("client-port").required(true).value_parser(value_parser!(u16))).arg(Arg::new("server-port").long("server-port").required(true).value_parser(value_parser!(u16))).arg(Arg::new("session").long("session")))
         .subcommand(Command::new("secrets").about("The secrets that have a value (ADR-052): whose, and their names. Never a value."))
         .subcommand(Command::new("secret-set").about("Keep a secret's value (read from a file) encrypted, root's alone, outside the config repo: the system's, or with --user a person's own; ledgered without the value.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("value-file").long("value-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
@@ -317,7 +338,13 @@ fn parse_cli() -> Cli {
         "fetch-incoming" => Cmd::FetchIncoming,
         "backups" => Cmd::Backups,
         "secrets" => Cmd::Secrets,
-        "secret-use" => Cmd::SecretUse { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), host: s(sub, "host").unwrap_or_default(), client_port: sub.get_one::<u16>("client-port").copied(), server_port: sub.get_one::<u16>("server-port").copied(), session: s(sub, "session"), grant: s(sub, "grant"), ssh: sub.get_flag("ssh") },
+        "secret-use" => Cmd::SecretUse { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), host: s(sub, "host").unwrap_or_default(), client_port: sub.get_one::<u16>("client-port").copied(), server_port: sub.get_one::<u16>("server-port").copied(), session: s(sub, "session"), grant: s(sub, "grant"), ssh: sub.get_flag("ssh"), reason: s(sub, "reason") },
+        "secret-grant" => Cmd::SecretGrant { name: s(sub, "name"), user: s(sub, "user"), minutes: sub.get_one::<u32>("minutes").copied(), tainted_too: sub.get_flag("tainted-too"), approved_by: by(sub) },
+        "secret-revoke" => Cmd::SecretRevoke { name: s(sub, "name"), approved_by: by(sub) },
+        "secret-grants" => Cmd::SecretGrants,
+        "secret-waiting" => Cmd::SecretWaiting { approved_by: by(sub) },
+        "secret-approve" => Cmd::SecretAnswer { n: seq(sub).unwrap_or_default(), approved: true, rest: false, place: s(sub, "where").unwrap_or_default(), approved_by: by(sub) },
+        "secret-deny" => Cmd::SecretAnswer { n: seq(sub).unwrap_or_default(), approved: false, rest: sub.get_flag("rest-of-session"), place: s(sub, "where").unwrap_or_default(), approved_by: by(sub) },
         "secret-agent" => Cmd::SecretAgent { client_port: *sub.get_one::<u16>("client-port").unwrap_or(&0), server_port: *sub.get_one::<u16>("server-port").unwrap_or(&0), session: s(sub, "session") },
         "secret-set" => Cmd::SecretSet { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), value_file: p(sub, "value-file").unwrap_or_default(), approved_by: by(sub) },
         "secret-delete" => Cmd::SecretDelete { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), approved_by: by(sub) },
@@ -378,6 +405,11 @@ fn main() {
         }
         std::process::exit(if busy { BUSY } else { REFUSED });
     }
+}
+
+/// The trust in an agent's proposals that holds now: of every grant, those that cover proposals.
+fn proposals_trust(entries: &[Entry]) -> Vec<torq_broker::session::Grant> {
+    torq_broker::session::active(entries).into_iter().filter(|g| g.covers == torq_broker::session::Covers::Proposals).collect()
 }
 
 fn print_entry(e: &Entry) -> Result<()> {
@@ -453,7 +485,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
     // afterwards (ADR-036): best-effort, never failing the command.
     let writes = matches!(
         cli.cmd,
-        Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. } | Cmd::SessionStart | Cmd::SessionTaint { .. } | Cmd::TrustGrant { .. } | Cmd::TrustRevoke { .. }
+        Cmd::Init | Cmd::Setup | Cmd::Password { .. } | Cmd::Propose { .. } | Cmd::Apply { .. } | Cmd::Confirm { .. } | Cmd::SessionStart | Cmd::SessionTaint { .. } | Cmd::TrustGrant { .. } | Cmd::TrustRevoke { .. } | Cmd::SecretGrant { .. } | Cmd::SecretRevoke { .. } | Cmd::SecretAnswer { .. }
             | Cmd::ExpireConfirm { .. } | Cmd::Schedule { .. } | Cmd::RunScheduled { .. } | Cmd::CancelScheduled { .. } | Cmd::Decline { .. } | Cmd::ResumeScheduled | Cmd::Revert { .. } | Cmd::Reconcile { .. } | Cmd::Repair { .. } | Cmd::RemoteClear { .. } | Cmd::RestoreData { .. } | Cmd::Acknowledge { .. } | Cmd::SnapshotTake { .. } | Cmd::SnapshotDelete { .. } | Cmd::BackupKey { .. } | Cmd::BackupRestore { .. } | Cmd::SecretSet { .. } | Cmd::SecretDelete { .. } | Cmd::SecretShow { .. }
     );
     let _push = writes.then_some(PushAfter(&b, b.ledger.read_all().map_or(0, |l| l.len())));
@@ -570,7 +602,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         }
         Cmd::Secrets => println!("{}", serde_json::to_string(&b.kept_secrets())?),
         // Always JSON, as show is: the value for the daemon to put in one request, and nothing else.
-        Cmd::SecretUse { name, user, host, client_port, server_port, session, grant, ssh } => {
+        Cmd::SecretUse { name, user, host, client_port, server_port, session, grant, ssh, reason } => {
             no_core()?;
             use torq_broker::secrets::{Owner, Use};
             // Who: the kernel's answer for the loopback connection, or the grant of the agent socket it came through
@@ -584,7 +616,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 _ => anyhow::bail!("refused: a use names its connection (--client-port and --server-port) or its grant"),
             };
             let u = Use { owner: Owner::of(user.as_deref())?, name, host, actor, session, ssh };
-            let g = b.use_secret(&u)?;
+            let g = b.use_secret_for(&u, reason.as_deref().unwrap_or_default())?;
             println!("{}", json!({ "value": g.value, "header": g.header, "prefix": g.prefix, "known": g.known, "actor": u.actor }));
         }
         Cmd::SecretAgent { client_port, server_port, session } => {
@@ -683,7 +715,45 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             (Some(e), false) => println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq),
             (None, false) => println!("{} has no trust in the agent to revoke", printable(&approved_by)),
         },
-        Cmd::Trust => println!("{}", json!({ "trust": torq_broker::session::active(&b.ledger.read_all()?) })),
+        Cmd::Trust => println!("{}", json!({ "trust": proposals_trust(&b.ledger.read_all()?) })),
+        Cmd::SecretGrant { name, user, minutes, tainted_too, approved_by } => {
+            use torq_broker::session::{grant_secret, Covers, Scope};
+            // A person's own secret is the approver's own, and no one else's: whose, the socket says from the kernel.
+            if user.as_deref().is_some_and(|u| u != approved_by) {
+                anyhow::bail!("refused: a grant is of one's own secrets, or the system's: not another person's");
+            }
+            let covers = name.map_or(Covers::AllSecrets, |name| Covers::Secret { name, system: user.is_none() });
+            let e = grant_secret(&b, &approved_by, covers, minutes.map_or(Scope::Session, Scope::Minutes), tainted_too)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{}): until {}", printable(&e.body.reason), e.body.seq, e.body.data["until"].as_str().unwrap_or("?"));
+        }
+        Cmd::SecretRevoke { name, approved_by } => {
+            let ended = torq_broker::session::revoke_secrets(&b, &approved_by, name.as_deref())?;
+            if json {
+                println!("{}", json!({ "revoked": ended }));
+                return Ok(());
+            }
+            for e in &ended {
+                println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+            }
+            if ended.is_empty() {
+                println!("{} has no such grant to revoke", printable(&approved_by));
+            }
+        }
+        Cmd::SecretGrants => {
+            let grants: Vec<_> = torq_broker::session::active(&b.ledger.read_all()?).into_iter().filter(|g| g.covers != torq_broker::session::Covers::Proposals).collect();
+            println!("{}", json!({ "grants": grants }));
+        }
+        Cmd::SecretWaiting { approved_by } => println!("{}", json!({ "waiting": b.waiting_asks(&approved_by)? })),
+        Cmd::SecretAnswer { n, approved, rest, place, approved_by } => {
+            let e = b.answer_ask(n, &approved_by, approved, rest, &place)?;
+            if json {
+                return print_entry(&e);
+            }
+            println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+        }
         Cmd::Show { seq } => {
             let mut e = b.ledger.get(seq)?;
             // A proposal's diff and what it does, from beside the ledger, as if they were in it: what a
@@ -841,7 +911,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                         "store_modified": s.store_modified,
                         "remote_alarm": s.remote_alarm.as_ref().map(|a| json!({ "at": a.at, "why": a.why })),
                         // A person's trust in the agent, while it holds: shown, not a problem.
-                        "trust": torq_broker::session::active(&b.ledger.read_all().unwrap_or_default()),
+                        "trust": proposals_trust(&b.ledger.read_all().unwrap_or_default()),
                     })
                 );
                 std::process::exit(if s.busy.is_some() { BUSY } else if problems.is_empty() { OK } else { REFUSED });

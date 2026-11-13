@@ -11,6 +11,7 @@
 #![forbid(dead_code)]
 
 pub mod agent;
+pub mod ask;
 pub mod backup;
 pub mod at;
 pub mod config;
@@ -92,6 +93,8 @@ pub struct Broker {
     backup: backup::Backups,
     /// Where the values of the secrets are, and what encrypts them (ADR-052, secrets.rs).
     secrets: secrets::Store,
+    /// How long a use of a secret waits for its person (ask.rs).
+    ask_wait: std::time::Duration,
     /// The config repo's remote, if the owner named one (ADR-036).
     remote: Option<String>,
 }
@@ -706,6 +709,7 @@ impl Broker {
             residents: Default::default(),
             backup: backup::Backups::default(),
             secrets: secrets::Store::default(),
+            ask_wait: std::time::Duration::from_secs(ask::WAIT_SECONDS),
             remote: None,
         }
     }
@@ -1945,20 +1949,27 @@ impl Broker {
     /// (`policy::user_leaf_ok`), at most `USER_DATA_MAX` bytes. Deleting one is always fine. The
     /// NixOS module reading the file is still the authority on what the data means; this makes sure
     /// it is the right kind of data, refused now rather than failing the rebuild.
-    fn check_user_data(&self, diff_path: &Path, files: &[String]) -> Result<()> {
+    /// What it gives back: each secret of a person's own rules the change newly makes `never-even-tainted`
+    /// (`users/<p>/secrets.json: <name>`), which a person's own apply asks their password for (socket.rs).
+    fn check_user_data(&self, diff_path: &Path, files: &[String]) -> Result<Vec<String>> {
         let (paths, most) = Self::data_files(files);
         if paths.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
+        let mut standing = Vec::new();
         for (path, file) in self.repo.proposed_files(diff_path, &paths, most)? {
             if let Some(f) = file {
                 Self::data_ok(&path, &f)?;
                 if path == torq_wire::secrets::SYSTEM_RULES {
                     self.system_rules_name_real_agents(&path, &f.content)?;
                 }
+                if path.rsplit('/').next() == Some(torq_wire::secrets::PERSON_RULES) {
+                    let head = self.repo.file_at("HEAD", &path, torq_wire::secrets::MAX_FILE)?;
+                    standing.extend(torq_wire::secrets::standing_added(head.as_ref().map(|h| h.content.as_slice()), Some(&f.content)).into_iter().map(|n| format!("{path}: {n}")));
+                }
             }
         }
-        Ok(())
+        Ok(standing)
     }
 
     /// The system's secrets' rules, as a change leaves them, give a secret only to agent accounts the broker's map
@@ -2437,15 +2448,15 @@ impl Broker {
         let copy = self.state_dir.join("proposing.diff");
         fs::write(&copy, &diff)?;
         let checked = self.repo.diff_files(&copy).and_then(|files| {
-            self.check_user_data(&copy, &files)?;
+            let standing = self.check_user_data(&copy, &files)?;
             // The agent's proposals: only what its list allows (ADR-041), judged by what changes.
             let judged = if actor == Actor::Agent { self.agent_check(self.acting_agent()?.0, &copy, &files)? } else { Ok(vec![]) };
             // What it does, as git writes it: what a person is shown before applying it.
             let effect = self.repo.proposal_effect(&copy)?;
-            Ok((files, judged, effect))
+            Ok((files, judged, effect, standing))
         });
         let _ = fs::remove_file(&copy);
-        let (files, judged, effect) = checked?;
+        let (files, judged, effect, standing) = checked?;
         if files.is_empty() {
             bail!("diff changes no files");
         }
@@ -2480,6 +2491,10 @@ impl Broker {
         }
         if !cuts_off.is_empty() {
             data["cuts_off"] = cuts_off.into();
+        }
+        // What of it newly lets the agent use a secret unasked even from a tainted session: its apply asks a password.
+        if !standing.is_empty() {
+            data["standing"] = standing.into();
         }
         self.ledger.append(NewEntry { actor: actor.to_string(), approved_by: None, kind: "proposal".into(), tier: tier.to_string(), tainted, reason: reason.into(), data })
     }
@@ -3040,7 +3055,7 @@ impl Broker {
         // was shown (ADR-053); then its files, tier and the agent's list are judged again below, as always.
         let rechecked_on = self.recheck_on_head(&p, tmp)?;
         let files = self.repo.diff_files(&tmp)?;
-        self.check_user_data(&tmp, &files)?;
+        let standing = self.check_user_data(&tmp, &files)?;
         let tier = policy::tier_for_paths(&files);
         let actor = if p.body.actor == "agent" { Actor::Agent } else { Actor::User };
         policy::check_allowed(tier)?;
@@ -3050,7 +3065,10 @@ impl Broker {
         // something here (the audit of M3, H1). Refused, never judged again: a proposal is to be made anew.
         let said: std::collections::BTreeSet<&str> = p.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).collect();
         let does: std::collections::BTreeSet<&str> = files.iter().map(String::as_str).collect();
-        if said != does || p.body.tier != tier.to_string() {
+        let stood: Vec<String> = p.body.data["standing"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
+        // And what the gate asked a password for: a rule made `never-even-tainted` here that the proposal was not
+        // judged to make is one no password was asked for.
+        if said != does || p.body.tier != tier.to_string() || stood != standing {
             let _ = fs::remove_file(&tmp);
             let why = format!("proposal {proposal_seq} no longer does what it was judged on: it said {} ({}), and would now change {} ({tier}); propose it again", said.into_iter().collect::<Vec<_>>().join(" "), p.body.tier, does.into_iter().collect::<Vec<_>>().join(" "));
             // Once each: a person repeating this adds nothing to the record. (A scheduled run's own refusal
@@ -3462,6 +3480,14 @@ impl Broker {
         }
         policy::check_secret_rules(a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()), approved_by)?;
         let commit = a.body.data["commit"].as_str().context("applied entry has no commit")?.to_string();
+        // An undo of a person's own change asks no password, and brings back what was there: never a
+        // `never-even-tainted` the change took away, which is set only with one.
+        for f in a.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).filter(|f| f.rsplit('/').next() == Some(torq_wire::secrets::PERSON_RULES)) {
+            let at = |rev: &str| -> Result<Option<Vec<u8>>> { Ok(self.repo.file_at(rev, f, torq_wire::secrets::MAX_FILE)?.map(|x| x.content)) };
+            if let Some(n) = torq_wire::secrets::standing_added(at(&commit)?.as_deref(), at(&self.repo.parent(&commit)?)?.as_deref()).first() {
+                bail!("refused: undoing change {applied_seq} would make secret {n} never-even-tainted again: set it anew (request system secret approve {n} never-even-tainted), which asks your password");
+            }
+        }
         let next_seq = self.ledger.read_all()?.len() as u64 + 1;
         let msg = format!(
             "Undo: {}\n\nReverts: {commit}\nApproved-By: {approved_by}\nLedger-Entry: {next_seq}",
