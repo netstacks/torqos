@@ -1321,13 +1321,15 @@ Its §5 lists claims without a test.
      open), Codex and opencode, removing the link when the tool is no longer chosen.
 
 6zzs. **An agent's use of a secret is asked of its person at a terminal only; the dialog is not built (ADR-052 4;
-  the approval design, `docs/DESIGN-agent-approval.md`, its build steps 2 and 3 built 2026-11-13, not yet run in a
-  VM).** `torq-agent` in a person's rules is their own agent, and a system rule names each agent's account. A use
-  that asks (the rule says each use, or the first; no session; a tainted session) now waits at the broker for up
-  to two minutes for the person the agent serves, who answers with `request system secret approve <n>` or
-  `deny <n>` (`show system secrets waiting`); a grant (`request system secret allow <name> session`, `… for
-  <minutes> [tainted-too]`, `allow all for <minutes>`; their password) or the rule's `never-even-tainted` lets
-  uses through unasked (`broker/src/ask.rs`, `broker/src/session.rs`; `broker/tests/secrets.rs`). What is not there:
+  the approval design, `docs/DESIGN-agent-approval.md`, its build steps 2, 3 and 5 built 2026-11-13, not yet run
+  in a VM).** `torq-agent` in a person's rules is their own agent, and a system rule names each agent's account. A
+  use that asks (the rule says each use, or the first; no session; a tainted session) waits for up to two minutes
+  for the person the agent serves, who answers with `request system secret approve <n>` or `deny <n> [session]`
+  (`show system secrets waiting`). No request and no connection waits at the broker: the use is given a number,
+  and the secrets daemon asks the broker about it again once a second. A grant (`request system secret allow
+  <name> session`, `… for <minutes> [tainted-too]`, `allow all for <minutes>`; their password) or the rule's
+  `never-even-tainted` lets uses through unasked (`broker/src/ask.rs`, `broker/src/session.rs`;
+  `broker/tests/secrets.rs`). What is not there, and what a person should know:
    - no dialog and no notification: the panel applet does not show a waiting use, so a person who is not looking
      at a terminal learns of it only when it has timed out. The Secrets page shows and ends no grant;
    - every program run as `torq-agent-<person>` (a coding tool, `torq agent run`) starts its session tainted
@@ -1335,15 +1337,25 @@ Its §5 lists claims without a test.
      or `never-even-tainted` covers it. It cannot borrow the resident agent's clean session, though its id is in
      the ledger: a use or an SSH socket cites only its own kind of session;
    - the resident agent, whose session can start untainted, has no tool that sends an HTTPS request or signs;
+   - the limit of three waiting uses is one agent's across both its accounts: a coding tool holding all three
+     has the resident agent's asks refused meanwhile ("3 uses are waiting for you already"), and the other way
+     round;
+   - a denial "for the rest of the session" (`deny <n> session`) ends with the session: the agent can start a
+     new one, which may ask about that secret again. What bounds the asking is the hour, not the session: a
+     person is asked about one agent's uses at most 30 times in an hour of the clock (10 of them for uses that
+     name no session), so up to 60 either side of an hour's turn. While such a denial holds, a grant given
+     after it does not let that session's uses through either: the no was said for that session;
    - an SSH login that waits for its person waits inside the login: a server that gives a login less than two
      minutes (OpenSSH's `LoginGraceTime` is 120 s by default) may hang up first, and the use, if then approved, is
-     on the record as approved though nothing came of it;
+     on the record as approved though nothing came of it. So is any approved use whose program went away
+     before the daemon asked again;
+   - at most 24 uses wait at the daemon at once (three each for eight agents); one more is turned away, and its
+     ask at the broker runs out unanswerable in effect: a yes to it lets nothing through;
    - where an answer was given (`dialog`, `terminal`) is the word of the program that sent it, run as the person;
      the broker does not check it. Who answered is the kernel's word;
-   - uses that name no session are counted together for the limit of ten asks, by agent and hour, since there is
-     no session to count them in; and the agent's own words for a use reach the person only for HTTPS
-     (`X-Torq-Reason`), not for SSH;
+   - the agent's own words for a use reach the person only for HTTPS (`X-Torq-Reason`), not for SSH;
    - "this session", for a grant given at a terminal, is every session of the person's agent already running
      when it was given (a terminal names no one session); the broker knows no end of a session but the eight
      hours a grant may last.
-  `tests/secrets.nix` states the waiting, the answers and the time-out; its edits of 2026-11-13 have not run.
+  `tests/secrets.nix` states the waiting, the answers, the time-out and four uses waiting at once beside a
+  person's own; its edits of 2026-11-13 have not run.

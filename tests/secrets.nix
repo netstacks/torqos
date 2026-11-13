@@ -85,6 +85,8 @@ pkgs.testers.runNixOSTest {
   nodes.machine = { pkgs, lib, nodes, ... }: {
     imports = [ self.nixosModules.default ];
     torq.user = "dev";
+    # Two people's agents: uses of both wait at once (the subtest of four waiting uses).
+    torq.agent.people = [ "dev" "sam" ];
     torq.desktop.enable = false;
     users.users.root.hashedPasswordFile = lib.mkForce null;
     users.users.dev.hashedPasswordFile = lib.mkForce null;
@@ -166,15 +168,15 @@ pkgs.testers.runNixOSTest {
         assert code == 0, (code, v)
         return v["waiting"]
 
-    def begin(user, path, *flags):
+    def begin(user, path, *flags, tag=""):
         """A request through the daemon, as `user`, left running: it waits for a person's answer."""
         args = " ".join(shlex.quote(f) for f in flags)
-        cmd = f"curl -s -o /tmp/b-{user} -w '%{{http_code}}' {args} http://127.0.0.1:7800{path} > /tmp/s-{user}"
-        machine.succeed(f"rm -f /tmp/s-{user}; su -s /bin/sh {user} -c {shlex.quote(cmd)} >&2 &")
+        cmd = f"curl -s -o /tmp/b-{user}{tag} -w '%{{http_code}}' {args} http://127.0.0.1:7800{path} > /tmp/s-{user}{tag}"
+        machine.succeed(f"rm -f /tmp/s-{user}{tag}; su -s /bin/sh {user} -c {shlex.quote(cmd)} >&2 &")
 
-    def ended(user):
-        machine.wait_until_succeeds(f"test -s /tmp/s-{user}", timeout=60)
-        return int(machine.succeed(f"cat /tmp/s-{user}").strip()), machine.succeed(f"cat /tmp/b-{user}")
+    def ended(user, tag=""):
+        machine.wait_until_succeeds(f"test -s /tmp/s-{user}{tag}", timeout=60)
+        return int(machine.succeed(f"cat /tmp/s-{user}{tag}").strip()), machine.succeed(f"cat /tmp/b-{user}{tag}")
 
     with subtest("dev's agent account (a coding tool's, not the resident agent) starts tainted: each use waits for dev, and only dev answers"):
         # One agent per person (ADR-051 3): `torq-agent` in dev's rules is dev's agent, torq-agent-dev. Only the
@@ -248,6 +250,47 @@ pkgs.testers.runNixOSTest {
     with subtest("an answer that cannot be checked for the value is not passed on"):
         status, body, _ = use("dev", "/user/dev/gh/api.example.test/gzip")
         assert status == 502 and "compressed" in body, (status, body)
+
+    with subtest("four uses wait at once, from two agents, and hold no connection to the broker: a person's own use is served beside them"):
+        # The broker's socket gives one account four connections, and every use comes from the daemon's one
+        # account. A use that waits holds none: the daemon is told its number and asks again about it.
+        import time
+        code, v = ask("sam", {"args": ["--json", "secret-set", "--name", "gh", "--user", "sam"], "key": "sam-token-1"})
+        assert code == 0, (code, v)
+        diff = f"--- /dev/null\n+++ b/users/sam/secrets.json\n@@ -0,0 +1 @@\n+{rules}\n"
+        code, p = ask("sam", {"args": ["--json", "propose", f"--base={head()}", "--reason=gh for sam's agent"], "diff": diff})
+        assert code == 0, (code, p)
+        code, v = ask("sam", {"args": ["--json", "apply", str(p["seq"])]})
+        assert code == 0, (code, v)
+        code, sams = ask("torq-agent-sam", {"args": ["--json", "session-start"]})
+        assert code == 0, (code, sams)
+        for i in range(3):
+            begin("torq-agent-dev", "/user/dev/gh/api.example.test/echo", "-H", f"X-Torq-Session: {session}", tag=f"-w{i}")
+        begin("torq-agent-sam", "/user/sam/gh/api.example.test/echo", "-H", f"X-Torq-Session: {sams['session']}", tag="-w3")
+        for _ in range(30):
+            if len(waiting("dev")) == 3 and len(waiting("sam")) == 1:
+                break
+            time.sleep(1)
+        assert len(waiting("dev")) == 3 and len(waiting("sam")) == 1, (waiting("dev"), waiting("sam"))
+        # All four wait. A person's own uses go through beside them, at once, one after another.
+        n = len(requests())
+        for _ in range(4):
+            status, body, _ = use("dev", "/user/dev/gh/api.example.test/echo")
+            assert status == 200, (status, body)
+        assert len(requests()) == n + 4, "each was sent"
+        # A fourth of one agent's is refused at once, in these words; it does not wait.
+        status, body, _ = use("torq-agent-dev", "/user/dev/gh/api.example.test/echo", "-H", f"X-Torq-Session: {session}")
+        assert status == 403 and "3 uses are waiting for you already" in body, (status, body)
+        for w in waiting("dev"):
+            code, v = ask("dev", {"args": ["--json", "secret-deny", str(w["n"])]})
+            assert code == 0, (code, v)
+        code, v = ask("sam", {"args": ["--json", "secret-approve", str(waiting("sam")[0]["n"])]})
+        assert code == 0 and v["kind"] == "secret_use_approved" and v["approved_by"] == "sam", (code, v)
+        for i in range(3):
+            status, body = ended("torq-agent-dev", tag=f"-w{i}")
+            assert status == 403 and "denied" in body, (i, status, body)
+        status, body = ended("torq-agent-sam", tag="-w3")
+        assert status == 200 and "sam-token-1" not in body and requests()[-1]["headers"]["Authorization"] == "Bearer sam-token-1", (status, body)
 
     with subtest("a session tainted by what it read too is asked; with no answer in two minutes the use is refused, and recorded as timed out"):
         code, _ = ask("torq-agent-dev", {"args": ["--json", "session-taint", session, "--source", "web"]})
