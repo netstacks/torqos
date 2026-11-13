@@ -742,12 +742,20 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         }
         Cmd::SecretRevoke { name, approved_by } => {
             let ended = torq_broker::session::revoke_secrets(&b, &approved_by, name.as_deref())?;
+            // One secret's grants ended, a grant of all their own still lets that secret be used: said, with its end.
+            let all_until = match &name {
+                Some(_) => torq_broker::session::active(&b.ledger.read_all()?).into_iter().find(|g| g.person == approved_by && g.covers == torq_broker::session::Covers::AllSecrets).map(|g| g.until),
+                None => None,
+            };
             if json {
-                println!("{}", json!({ "revoked": ended }));
+                println!("{}", json!({ "revoked": ended, "all_until": all_until }));
                 return Ok(());
             }
             for e in &ended {
                 println!("{} (ledger #{})", printable(&e.body.reason), e.body.seq);
+            }
+            if let Some(until) = &all_until {
+                println!("a grant of all {}'s own secrets still holds, until {}", printable(&approved_by), printable(until));
             }
             if ended.is_empty() {
                 println!("{} has no such grant to revoke", printable(&approved_by));

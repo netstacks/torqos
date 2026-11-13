@@ -660,6 +660,7 @@ fn a_grant_lets_its_secrets_uses_through_until_it_ends() {
     assert!(session::grant_secret(&a.m.b, "alice", Covers::Secret { name: "none".into(), system: false }, Scope::Minutes(5), false).is_err(), "a secret with no rule");
     assert!(session::grant_secret(&a.m.b, "alice", Covers::Proposals, Scope::Minutes(5), false).is_err(), "trust in proposals is not given here");
     let g = session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(480), false).unwrap();
+    assert!(g.body.reason.contains("alice lets the agent use their secret each without asking, for 480 minutes"), "{}", g.body.reason);
     assert_eq!((g.body.kind.as_str(), g.body.approved_by.as_deref(), g.body.data["covers"].as_str(), g.body.data["owner"].as_str(), g.body.data["minutes"].as_u64()), ("trust_granted", Some("alice"), Some("secret each"), Some("user"), Some(480)));
     assert!(session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(5), false).is_err(), "one at a time");
     assert_eq!(used(&a.m.b, &a.clean("each")).unwrap().value, VALUE);
@@ -686,7 +687,9 @@ fn what_a_grant_never_covers() {
     let a = Asked::new();
     let named = |name: &str, system: bool| Covers::Secret { name: name.into(), system };
     session::grant_secret(&a.m.b, "alice", Covers::AllSecrets, Scope::Minutes(480), false).unwrap();
-    session::grant_secret(&a.m.b, "alice", named("sys", true), Scope::Minutes(480), false).unwrap();
+    // Whose secret a grant is of is said in its entry, which the terminal prints and the dialog words alike.
+    let g = session::grant_secret(&a.m.b, "alice", named("sys", true), Scope::Minutes(480), false).unwrap();
+    assert!(g.body.reason.contains("the system's secret sys") && g.body.data["owner"] == "system", "{}", g.body.reason);
     let system = |name: &str, u: Use| Use { owner: Owner::System, name: name.into(), ..u };
     // A system secret whose rule does not name this agent: no grant is given of it, and none widens its rule.
     let e = format!("{:#}", session::grant_secret(&a.m.b, "alice", named("bobs", true), Scope::Minutes(5), false).unwrap_err());
