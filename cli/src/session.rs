@@ -98,6 +98,11 @@ pub trait Machine {
     fn secret_value(&self, name: &str, user: Option<&str>, act: &crate::secrets::Act, me: &str) -> Result<String>;
     /// The secrets that have a value, as the broker lists them: never a value.
     fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>>;
+    /// A grant of secret uses to your agent, its end, or your answer to a use that waits: the broker's to take
+    /// (a grant asks your password), and what it said.
+    fn secret_approval(&self, a: &crate::secrets::Approval) -> Result<String>;
+    /// `show system secrets waiting` (your agent's uses that wait for you) or `allowed` (the grants that hold).
+    fn secret_approvals(&self, waiting: bool) -> Result<String>;
     /// `host`'s keys as the person running this knows them (their known_hosts, port 22), as `<host> <type> <key>`
     /// lines; none: they have not connected to it and checked it.
     fn known_host_keys(&self, host: &str) -> Result<Vec<String>>;
@@ -680,7 +685,7 @@ impl<'a> Session<'a> {
                 }
                 Ok(out)
             }
-            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowSecrets | Op::ShowRemote | Op::ShowDesktop => {
+            Op::ShowCommits { .. } | Op::ShowRollback { .. } | Op::ShowAlarms { .. } | Op::ShowServices | Op::ShowPackages { .. } | Op::ShowLedger { .. } | Op::ShowVersion | Op::ShowUptime | Op::ShowInterfaces { .. } | Op::ShowStorage | Op::ShowUsers | Op::ShowProposals | Op::ShowSnapshots | Op::ShowBackups | Op::ShowSecrets | Op::ShowSecretsAllowed | Op::ShowSecretsWaiting | Op::ShowRemote | Op::ShowDesktop => {
                 self.show_operational(op)
             }
             Op::ClearCommit => self.clear_commit(),
@@ -1089,6 +1094,8 @@ impl<'a> Session<'a> {
             Op::ShowSnapshots => self.machine.snapshots(),
             Op::ShowBackups => self.machine.backups(),
             Op::ShowSecrets => crate::secrets::shown(&self.repo, &self.machine.secrets_kept()?),
+            Op::ShowSecretsAllowed => self.machine.secret_approvals(false),
+            Op::ShowSecretsWaiting => self.machine.secret_approvals(true),
             Op::ShowRemote => self.machine.remote(),
             Op::ShowDesktop => Ok(crate::desktop::shown(&crate::desktop::status(&self.repo, &self.me, &crate::desktop::Paths::of_home()?)?)),
             Op::ShowServices => {
@@ -1385,6 +1392,18 @@ impl<'a> Session<'a> {
             syntax::Request::SnapshotTake => self.machine.snapshot_take(&self.me),
             syntax::Request::BackupKey { name } => self.machine.backup_key(&name, &self.me),
             syntax::Request::Secret { name, user, act } => self.secret(&name, user.as_deref(), &act),
+            syntax::Request::SecretApproval(a) => {
+                use crate::secrets::Approval;
+                match &a {
+                    Approval::Grant { user: Some(u), .. } if *u != self.me => bail!("{u}'s secrets are theirs alone: you let your agent use your own, or a system secret it is named for"),
+                    // `all` reads as every secret: with a secret of that name it could be meant either way, so it is not guessed.
+                    Approval::Grant { name: None, .. } if crate::secrets::read(&self.repo, &self.repo.head()?, Some(&self.me))?.contains_key("all") => {
+                        bail!("you have a secret named all, and `allow all` means every secret of yours: not done, as it could be meant either way. Rename that secret to grant them all at once.")
+                    }
+                    _ => {}
+                }
+                self.machine.secret_approval(&a)
+            }
             syntax::Request::Restore { name, snapshot, path } => self.machine.restore_backup(&name, snapshot.as_deref(), &path, &self.me),
             syntax::Request::SnapshotDelete { change } => self.machine.snapshot_delete(change, &self.me),
             syntax::Request::Pull => self.pull(),
@@ -2964,6 +2983,12 @@ mod tests {
             self.secret_calls.borrow_mut().push(format!("{} {name} {user:?} by {me}", act.verb()));
             Ok(format!("{} {name}\n", act.verb()))
         }
+        fn secret_approval(&self, a: &crate::secrets::Approval) -> Result<String> {
+            Ok(format!("asked the broker: {}\n", a.args().join(" ")))
+        }
+        fn secret_approvals(&self, waiting: bool) -> Result<String> {
+            Ok(if waiting { crate::secrets::waiting_shown(&serde_json::json!({})) } else { crate::secrets::allowed_shown(&serde_json::json!({})) })
+        }
         fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
             Ok(self.kept.clone())
         }
@@ -3363,6 +3388,29 @@ mod tests {
     /// The test repo, then two commits of software: `OLD` (rollback 1), then `NOW` (rollback 0).
     const OLD: u64 = 1_790_000_000;
     const NOW: u64 = 1_793_000_000;
+    /// A grant of secret uses, its end and an answer go to the broker as they were typed, and it decides. Not from
+    /// here: a grant of another person's secret; and `allow all` by a person who has a secret named all, which
+    /// could be meant either way and is not guessed.
+    #[test]
+    fn a_grant_goes_to_the_broker_unless_it_could_mean_two_things() {
+        let d = repo();
+        let m = Fake::default();
+        let mut s = session(d.path(), None, &m);
+        assert_eq!(s.exec("request system secret allow gh for 30 tainted-too user dev").unwrap(), "asked the broker: secret-grant --name gh --user dev --minutes 30 --tainted-too\n");
+        assert_eq!(s.exec("request system secret allow all for 30").unwrap(), "asked the broker: secret-grant --all --minutes 30\n");
+        assert_eq!(s.exec("request system secret allow revoke gh").unwrap(), "asked the broker: secret-revoke --name gh\n");
+        assert_eq!(s.exec("request system secret approve 3").unwrap(), "asked the broker: secret-approve 3 --where terminal\n");
+        assert_eq!(s.exec("request system secret deny 3").unwrap(), "asked the broker: secret-deny 3 --where terminal\n");
+        let e = format!("{:#}", s.exec("request system secret allow gh session user sam").unwrap_err());
+        assert!(e.contains("theirs alone"), "{e}");
+        sh(d.path(), "mkdir -p users/dev && printf '{\"all\":{\"kind\":\"token\"}}\\n' > users/dev/secrets.json && git add -A && git commit -q -m rules");
+        let e = format!("{:#}", s.exec("request system secret allow all for 30").unwrap_err());
+        assert!(e.contains("could be meant either way"), "{e}");
+        assert_eq!(s.exec("request system secret allow revoke all").unwrap(), "asked the broker: secret-revoke\n", "ending them all is never in doubt");
+        assert_eq!(s.exec("show system secrets waiting").unwrap(), "(no use of a secret is waiting for you)\n");
+        assert_eq!(s.exec("show system secrets allowed").unwrap(), "(no agent is let use a secret without asking)\n");
+    }
+
     /// ADR-052: a person's own secret is theirs; its rules are commits of their own file, the system's of the
     /// system's; no one else's is set, read or changed from here, and an administrator may delete only its value.
     #[test]

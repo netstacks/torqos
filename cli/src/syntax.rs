@@ -71,6 +71,10 @@ pub enum Op {
     ShowBackups,
     /// The secrets: whose, whether each has a value, what each may be used for (ADR-052).
     ShowSecrets,
+    /// `show system secrets allowed`: the grants of secret uses that hold.
+    ShowSecretsAllowed,
+    /// `show system secrets waiting`: your agent's uses that wait for your answer.
+    ShowSecretsWaiting,
     ShowServices,
     /// `show system ledger [<count>]`: the ledger itself — every change, refused and failed ones too.
     ShowLedger { count: Option<usize> },
@@ -148,6 +152,8 @@ pub enum Request {
     BackupKey { name: String },
     /// A secret (ADR-052): its value set, deleted or shown, or its rule changed; `user`: a person's own, not the system's.
     Secret { name: String, user: Option<String>, act: crate::secrets::Act },
+    /// A grant of secret uses to your agent, its end, or your answer to a use that waits (the broker's, ledgered).
+    SecretApproval(crate::secrets::Approval),
     /// Put a path back from a declared backup (`None`: its newest snapshot).
     Restore { name: String, snapshot: Option<String>, path: String },
     /// This machine's key for the remote (ADR-036), made the first time.
@@ -276,6 +282,8 @@ pub fn render(op: &Op) -> String {
         Op::ShowSnapshots => "show system snapshots".into(),
         Op::ShowBackups => "show system backups".into(),
         Op::ShowSecrets => "show system secrets".into(),
+        Op::ShowSecretsAllowed => "show system secrets allowed".into(),
+        Op::ShowSecretsWaiting => "show system secrets waiting".into(),
         Op::ShowServices => "show services".into(),
         Op::ShowLedger { count: None } => "show system ledger".into(),
         Op::ShowLedger { count: Some(n) } => format!("show system ledger {n}"),
@@ -300,6 +308,7 @@ pub fn render(op: &Op) -> String {
             Request::SnapshotTake => "request system snapshot take".into(),
             Request::BackupKey { name } => format!("request system backup key {}", quote(name)),
             Request::Secret { name, user, act } => format!("request system secret {} {name}{}{}", act.verb(), act.rest(), user.as_ref().map(|u| format!(" user {}", quote(u))).unwrap_or_default()),
+            Request::SecretApproval(a) => format!("request system secret {}", a.line()),
             Request::Restore { name, snapshot: None, path } => format!("request system restore {} {path}", quote(name)),
             Request::Restore { name, snapshot: Some(s), path } => format!("request system restore {} {s} {path}", quote(name)),
             Request::SnapshotDelete { change } => format!("request system snapshot delete {change}"),
@@ -410,6 +419,20 @@ mod tests {
             (Mode::Operational, Op::Request(Request::SnapshotTake)),
             (Mode::Operational, Op::Request(Request::BackupKey { name: "nas".into() })),
             (Mode::Operational, Op::ShowSecrets),
+            (Mode::Operational, Op::ShowSecretsAllowed),
+            (Mode::Operational, Op::ShowSecretsWaiting),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Grant { name: Some("gh".into()), user: Some("dev".into()), minutes: None, tainted_too: false }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Grant { name: Some("gh".into()), user: Some("dev".into()), minutes: Some(480), tainted_too: true }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Grant { name: Some("ci".into()), user: None, minutes: Some(5), tainted_too: false }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Grant { name: None, user: None, minutes: Some(30), tainted_too: false }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Revoke { name: None }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Revoke { name: Some("gh".into()) }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: true }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: false }))),
+            (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: Some("dev".into()), act: crate::secrets::Act::Approve(torq_wire::secrets::Approve::NeverEvenTainted) })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "all".into(), user: None, act: crate::secrets::Act::Allow(crate::secrets::Grant::Https("api.github.com".into())) })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "revoke".into(), user: Some("dev".into()), act: crate::secrets::Act::Allow(crate::secrets::Grant::Agent(None)) })),
+            (Mode::Operational, Op::Request(Request::Secret { name: "7".into(), user: None, act: crate::secrets::Act::Approve(torq_wire::secrets::Approve::Never) })),
             (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: None, act: crate::secrets::Act::Set })),
             (Mode::Operational, Op::Request(Request::Secret { name: "deploy".into(), user: Some("dev".into()), act: crate::secrets::Act::SetFile("/home/dev/.ssh/id_ed25519".into()) })),
             (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: Some("dev".into()), act: crate::secrets::Act::Show })),
@@ -483,6 +506,61 @@ mod tests {
             (Mode::Operational, Op::Help { topic: vec![] }),
             (Mode::Configuration, Op::Help { topic: v("show system") }),
         ]
+    }
+
+    /// The approval design's commands beside the ones `allow` and `approve` had: each line means one thing. A
+    /// secret named as one of the new words keeps every command it had; where the two would meet, the line is
+    /// refused or reads as the new word, never as either.
+    #[test]
+    fn a_grant_and_an_answer_are_never_mistaken_for_a_rule() {
+        use crate::secrets::{Act, Approval, Grant};
+        use torq_wire::secrets::Approve;
+        let read = |line: &str| parse_line(Mode::Operational, &line.split(' ').map(String::from).collect::<Vec<_>>()).map(|(op, _)| op);
+        let request = |line: &str| match read(&format!("request system secret {line}")) {
+            Ok(Op::Request(r)) => r,
+            other => panic!("{line}: {other:?}"),
+        };
+        let grant = |name: Option<&str>, user: Option<&str>, minutes: Option<u32>, tainted_too: bool| Request::SecretApproval(Approval::Grant { name: name.map(String::from), user: user.map(String::from), minutes, tainted_too });
+        let rule = |name: &str, user: Option<&str>, act: Act| Request::Secret { name: name.into(), user: user.map(String::from), act };
+        assert_eq!(request("allow gh session user dev"), grant(Some("gh"), Some("dev"), None, false));
+        assert_eq!(request("allow gh for 1"), grant(Some("gh"), None, Some(1), false));
+        assert_eq!(request("allow gh for 480 tainted-too user dev"), grant(Some("gh"), Some("dev"), Some(480), true));
+        assert_eq!(request("allow all for 30"), grant(None, None, Some(30), false));
+        assert_eq!(request("allow revoke"), Request::SecretApproval(Approval::Revoke { name: None }));
+        assert_eq!(request("allow revoke all"), Request::SecretApproval(Approval::Revoke { name: None }));
+        assert_eq!(request("allow revoke gh"), Request::SecretApproval(Approval::Revoke { name: Some("gh".into()) }));
+        assert_eq!(request("approve 7"), Request::SecretApproval(Approval::Answer { n: 7, approved: true }));
+        assert_eq!(request("deny 7"), Request::SecretApproval(Approval::Answer { n: 7, approved: false }));
+        // All is never tainted-too, never for a session, never someone's; a grant lasts 1 to 480 minutes.
+        for no in ["allow all for 30 tainted-too", "allow all session", "allow all for 30 user dev", "allow all", "allow gh for 0", "allow gh for 481", "allow gh for", "allow gh session tainted-too", "allow gh tainted-too", "approve gh", "approve 0", "deny gh", "deny", "allow revoke gh all", "allow revoke all gh"] {
+            assert!(read(&format!("request system secret {no}")).is_err(), "{no}");
+        }
+        // The commands there were, as they were: of any secret, one named as a new word too.
+        assert_eq!(request("allow gh agent dev"), rule("gh", None, Act::Allow(Grant::Agent(Some("dev".into())))));
+        assert_eq!(request("allow gh agent user dev"), rule("gh", Some("dev"), Act::Allow(Grant::Agent(None))));
+        assert_eq!(request("approve gh never user dev"), rule("gh", Some("dev"), Act::Approve(Approve::Never)));
+        assert_eq!(request("approve gh never-even-tainted user dev"), rule("gh", Some("dev"), Act::Approve(Approve::NeverEvenTainted)));
+        assert_eq!(request("approve 7 each-use"), rule("7", None, Act::Approve(Approve::EachUse)), "a secret named 7: its rule, not an answer");
+        for name in ["all", "revoke", "session", "for", "tainted-too", "deny", "allowed", "waiting"] {
+            assert_eq!(request(&format!("allow {name} https api.github.com user dev")), rule(name, Some("dev"), Act::Allow(Grant::Https("api.github.com".into()))), "{name}");
+            assert_eq!(request(&format!("allow {name} ssh github.com")), rule(name, None, Act::Allow(Grant::Ssh("github.com".into()))), "{name}");
+            assert_eq!(request(&format!("allow {name} agent dev")), rule(name, None, Act::Allow(Grant::Agent(Some("dev".into())))), "{name}");
+            assert_eq!(request(&format!("allow {name} agent user dev")), rule(name, Some("dev"), Act::Allow(Grant::Agent(None))), "{name}");
+            assert_eq!(request(&format!("disallow {name} agent user dev")), rule(name, Some("dev"), Act::Disallow(Grant::Agent(None))), "{name}");
+            assert_eq!(request(&format!("approve {name} first-use")), rule(name, None, Act::Approve(Approve::FirstUse)), "{name}");
+            assert_eq!(request(&format!("delete {name}")), rule(name, None, Act::Delete), "{name}");
+        }
+        // A secret named as a word of a grant is granted by that name where the name stands...
+        assert_eq!(request("allow session session"), grant(Some("session"), None, None, false));
+        assert_eq!(request("allow for for 5"), grant(Some("for"), None, Some(5), false));
+        // ...but `all` and `revoke` stand where the name does, and are read as themselves: `all` is every secret,
+        // and never a grant of the one secret so named; `revoke for` ends the grants of a secret named for.
+        assert_eq!(request("allow all for 5"), grant(None, None, Some(5), false));
+        assert_eq!(request("allow revoke for"), Request::SecretApproval(Approval::Revoke { name: Some("for".into()) }));
+        assert!(read("request system secret allow revoke for 5").is_err() && read("request system secret allow revoke session user dev").is_err());
+        assert_eq!(read("show system secrets allowed").unwrap(), Op::ShowSecretsAllowed);
+        assert_eq!(read("show system secrets waiting").unwrap(), Op::ShowSecretsWaiting);
+        assert_eq!(read("show system secrets").unwrap(), Op::ShowSecrets);
     }
 
     /// Every operation, rendered as it is typed, parses back to itself.

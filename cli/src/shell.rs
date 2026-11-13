@@ -456,6 +456,24 @@ impl Machine for Real<'_> {
             .collect())
     }
 
+    fn secret_approval(&self, a: &crate::secrets::Approval) -> Result<String> {
+        let log = run::start_log()?;
+        let me = me()?;
+        let mut args = a.args();
+        args.extend(["--approved-by".into(), me]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        Ok(a.said(&done(run::broker_json(broker(self.cli, &args)?, &log)?, &format!("request system secret {}", a.line()))?))
+    }
+
+    fn secret_approvals(&self, waiting: bool) -> Result<String> {
+        let log = run::start_log()?;
+        if !waiting {
+            return Ok(crate::secrets::allowed_shown(&done(run::broker_json(broker(self.cli, &["secret-grants"])?, &log)?, "show system secrets allowed")?));
+        }
+        let me = me()?;
+        Ok(crate::secrets::waiting_shown(&done(run::broker_json(broker(self.cli, &["secret-waiting", "--approved-by", &me])?, &log)?, "show system secrets waiting")?))
+    }
+
     fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
         self.kept_secrets(&run::start_log()?)
     }
