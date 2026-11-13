@@ -427,8 +427,9 @@ mod tests {
             (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Grant { name: None, user: None, minutes: Some(30), tainted_too: false }))),
             (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Revoke { name: None }))),
             (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Revoke { name: Some("gh".into()) }))),
-            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: true }))),
-            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: false }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: true, rest: false }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: false, rest: false }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: false, rest: true }))),
             (Mode::Operational, Op::Request(Request::Secret { name: "gh".into(), user: Some("dev".into()), act: crate::secrets::Act::Approve(torq_wire::secrets::Approve::NeverEvenTainted) })),
             (Mode::Operational, Op::Request(Request::Secret { name: "all".into(), user: None, act: crate::secrets::Act::Allow(crate::secrets::Grant::Https("api.github.com".into())) })),
             (Mode::Operational, Op::Request(Request::Secret { name: "revoke".into(), user: Some("dev".into()), act: crate::secrets::Act::Allow(crate::secrets::Grant::Agent(None)) })),
@@ -529,10 +530,11 @@ mod tests {
         assert_eq!(request("allow revoke"), Request::SecretApproval(Approval::Revoke { name: None }));
         assert_eq!(request("allow revoke all"), Request::SecretApproval(Approval::Revoke { name: None }));
         assert_eq!(request("allow revoke gh"), Request::SecretApproval(Approval::Revoke { name: Some("gh".into()) }));
-        assert_eq!(request("approve 7"), Request::SecretApproval(Approval::Answer { n: 7, approved: true }));
-        assert_eq!(request("deny 7"), Request::SecretApproval(Approval::Answer { n: 7, approved: false }));
+        assert_eq!(request("approve 7"), Request::SecretApproval(Approval::Answer { n: 7, approved: true, rest: false }));
+        assert_eq!(request("deny 7"), Request::SecretApproval(Approval::Answer { n: 7, approved: false, rest: false }));
+        assert_eq!(request("deny 7 session"), Request::SecretApproval(Approval::Answer { n: 7, approved: false, rest: true }));
         // All is never tainted-too, never for a session, never someone's; a grant lasts 1 to 480 minutes.
-        for no in ["allow all for 30 tainted-too", "allow all session", "allow all for 30 user dev", "allow all", "allow gh for 0", "allow gh for 481", "allow gh for", "allow gh session tainted-too", "allow gh tainted-too", "approve gh", "approve 0", "deny gh", "deny", "allow revoke gh all", "allow revoke all gh"] {
+        for no in ["allow all for 30 tainted-too", "allow all session", "allow all for 30 user dev", "allow all", "allow gh for 0", "allow gh for 481", "allow gh for", "allow gh session tainted-too", "allow gh tainted-too", "approve gh", "approve 0", "deny gh", "deny", "deny 7 session user dev", "approve 7 session", "allow revoke gh all", "allow revoke all gh"] {
             assert!(read(&format!("request system secret {no}")).is_err(), "{no}");
         }
         // The commands there were, as they were: of any secret, one named as a new word too.

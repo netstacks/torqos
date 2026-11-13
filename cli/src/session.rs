@@ -1400,6 +1400,11 @@ impl<'a> Session<'a> {
                     Approval::Grant { name: None, .. } if crate::secrets::read(&self.repo, &self.repo.head()?, Some(&self.me))?.contains_key("all") => {
                         bail!("you have a secret named all, and `allow all` means every secret of yours: not done, as it could be meant either way. Rename that secret to grant them all at once.")
                     }
+                    // No `user`: the system's secret, as every command of a secret reads. Where there is none of that
+                    // name and the person has one of their own, the line they meant is said.
+                    Approval::Grant { name: Some(n), user: None, .. } if !crate::secrets::read(&self.repo, &self.repo.head()?, None)?.contains_key(n) && crate::secrets::read(&self.repo, &self.repo.head()?, Some(&self.me))?.contains_key(n) => {
+                        bail!("the system has no secret {n}; you have one of your own by that name: request system secret {} user {}", a.line(), self.me)
+                    }
                     _ => {}
                 }
                 self.machine.secret_approval(&a)
@@ -3401,12 +3406,20 @@ mod tests {
         assert_eq!(s.exec("request system secret allow revoke gh").unwrap(), "asked the broker: secret-revoke --name gh\n");
         assert_eq!(s.exec("request system secret approve 3").unwrap(), "asked the broker: secret-approve 3 --where terminal\n");
         assert_eq!(s.exec("request system secret deny 3").unwrap(), "asked the broker: secret-deny 3 --where terminal\n");
+        assert_eq!(s.exec("request system secret deny 3 session").unwrap(), "asked the broker: secret-deny 3 --where terminal --rest-of-session\n");
         let e = format!("{:#}", s.exec("request system secret allow gh session user sam").unwrap_err());
         assert!(e.contains("theirs alone"), "{e}");
         sh(d.path(), "mkdir -p users/dev && printf '{\"all\":{\"kind\":\"token\"}}\\n' > users/dev/secrets.json && git add -A && git commit -q -m rules");
         let e = format!("{:#}", s.exec("request system secret allow all for 30").unwrap_err());
         assert!(e.contains("could be meant either way"), "{e}");
         assert_eq!(s.exec("request system secret allow revoke all").unwrap(), "asked the broker: secret-revoke\n", "ending them all is never in doubt");
+        // No `user` is the system's secret: with none of that name and one of their own, the line they meant is said.
+        let e = format!("{:#}", s.exec("request system secret allow all for 5 tainted-too").unwrap_err());
+        assert!(!e.contains("user dev"), "{e}");
+        sh(d.path(), "printf '{\"mine\":{\"kind\":\"token\"}}\\n' > users/dev/secrets.json && git commit -qam mine");
+        let e = format!("{:#}", s.exec("request system secret allow mine for 5 tainted-too").unwrap_err());
+        assert!(e.ends_with("you have one of your own by that name: request system secret allow mine for 5 tainted-too user dev"), "{e}");
+        assert_eq!(s.exec("request system secret allow other for 5").unwrap(), "asked the broker: secret-grant --name other --minutes 5\n", "a name of no one's goes to the broker, which says so");
         assert_eq!(s.exec("show system secrets waiting").unwrap(), "(no use of a secret is waiting for you)\n");
         assert_eq!(s.exec("show system secrets allowed").unwrap(), "(no agent is let use a secret without asking)\n");
     }
