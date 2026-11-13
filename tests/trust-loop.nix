@@ -121,9 +121,10 @@ pkgs.testers.runNixOSTest {
         machine.succeed("GIT_DIR=/nonexistent torq-broker status")
 
     with subtest("agent cannot touch policy"):
-        # With its base, so it is refused for what it touches, not for leaving the base out.
+        # With its base, and as an agent this machine has (dev's, the owner's: ADR-051 3), so it is
+        # refused for what it touches, not for leaving either out.
         head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
-        out = machine.fail(f"torq-broker propose --actor agent --base {head} "
+        out = machine.fail(f"torq-broker propose --actor agent --agent torq-agent-dev --base {head} "
                            "--diff /etc/torq-test/policy.diff --reason 'loosen permissions' 2>&1")
         assert "forbidden" in out, out
 
