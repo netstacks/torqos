@@ -1,16 +1,18 @@
 //! A use of a secret that waits for a person (the approval design, part 2; ADR-051, ADR-052 4).
 //!
-//! The broker is one process for each request, so a use that waits and the answer to it are two processes that
-//! meet in a file. The waiting use is kept here, in the broker's state directory (root's, 0700; each file 0600),
+//! The broker is one process for each request, and none of them waits: a use that must ask is given a number and
+//! its caller told so at once; the answer to it is another request, and the caller asking again about its number
+//! (the secrets daemon, about once a second) is a third. They meet in a file.
+//! The waiting use is kept here, in the broker's state directory (root's, 0700; each file 0600),
 //! under a number: `secret-asks/<n>.json`. The person the agent serves, and no one else, answers it by that number
-//! (`answer`: the socket's gate lets only their uid ask, and this checks the name again); the waiting use reads its
-//! file a few times a second, with no lock held, for at most two minutes.
+//! (`answer_ask`: the socket's gate lets only their uid ask, and this checks the name again). No connection to the
+//! broker and no lock is held while a use waits, for at most two minutes.
 //!
 //! Every change of a waiting use is made under the secrets' short lock: it is opened, answered, ended at its time,
 //! and taken away there. An unanswered file is a use whose outcome is not yet on the record; whoever ends it writes
 //! the one entry and removes or marks the file in the same hold of the lock. So each asked use has exactly one of
 //! `secret_use_approved`, `secret_use_denied` and `secret_use_timed_out`, whichever of an answer and the time came
-//! first, and whether or not the process that waited is still there: one whose waiter died, or that a reboot left
+//! first, and whether or not anyone still asks about it: one whose caller went away, or that a reboot left
 //! behind, is ended as timed out by the next use, answer or listing.
 //!
 //! What is kept of a use is in two parts that never mix: what the broker knows for itself (`Facts`), and the
@@ -34,8 +36,12 @@ pub const WAITING_EACH: usize = 3;
 pub const ASKS_A_SESSION: u32 = 10;
 /// The most of the agent's own words that are kept and shown: one line of this many characters.
 pub const REASON_MAX: usize = 200;
-/// How often a waiting use looks for its answer.
-const LOOK_EVERY: std::time::Duration = std::time::Duration::from_millis(200);
+/// The most uses of one agent's a person is asked about in an hour, whatever sessions they name: an agent starts a
+/// new session when it likes, so the count by session alone bounds nothing. Three sessions' worth: room for
+/// honest work, and an end to an agent that asks until someone says yes.
+pub const ASKS_AN_HOUR: u32 = 30;
+/// How long an answered use is kept past its time for the use to come back for its answer.
+const COLLECT_SECONDS: i64 = 30;
 
 /// What the broker knows of a waiting use for itself: nothing here is the agent's to word.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +92,8 @@ pub struct Ask {
 /// How a use that waited ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Approved,
+    /// As the person was shown it: whether its session had read untrusted text then.
+    Approved { tainted: bool },
     Denied(String),
     TimedOut,
 }
@@ -120,6 +127,17 @@ impl Ask {
     }
 }
 
+impl Ask {
+    /// Whether, answered, it is still kept at `now` for its use to come back for the answer: its times a use's own,
+    /// and its time over by no more than `COLLECT_SECONDS`.
+    fn kept_for_its_answer(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        match (parsed(&self.asked), parsed(&self.until)) {
+            (Some(a), Some(u)) => a <= now && u - a <= chrono::Duration::seconds(WAIT_SECONDS as i64) && now < u + chrono::Duration::seconds(COLLECT_SECONDS),
+            _ => false,
+        }
+    }
+}
+
 /// The waiting use `n`, if its file is there and is one (never through a link).
 fn read(state_dir: &Path, n: u64) -> Option<Ask> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -142,6 +160,7 @@ fn put(state_dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     f.write_all(bytes)?;
     f.sync_all()?;
     std::fs::rename(&part, d.join(name))?;
+    std::fs::File::open(&d)?.sync_all()?;
     Ok(())
 }
 
@@ -169,9 +188,14 @@ pub fn person_asked(state_dir: &Path, n: u64) -> Option<String> {
     read(state_dir, n).map(|a| a.facts.person)
 }
 
-/// The asks of uses that name no session, counted by agent and hour: `no-session.json`.
+/// How many of an agent's uses a person was asked about in an hour of the clock (`asked.json`): all of them, and
+/// those that named no session.
 #[derive(Default, Serialize, Deserialize)]
-struct Unsessioned(std::collections::BTreeMap<String, (String, u32)>);
+struct Asked {
+    hour: String,
+    asks: u32,
+    no_session: u32,
+}
 
 impl Broker {
     /// How long a use waits (tests: a moment).
@@ -180,7 +204,8 @@ impl Broker {
         self
     }
 
-    fn asks_lock(&self) -> Result<Lock> {
+    /// The secrets' short lock: every use is judged under it, and every change of a waiting use is made under it.
+    pub(crate) fn asks_lock(&self) -> Result<Lock> {
         Lock::acquire_named(&self.state_dir, "secrets.lock", 10)
     }
 
@@ -218,14 +243,22 @@ impl Broker {
     }
 
     /// Every use whose time is over, ended: one never answered is on the record as timed out, and its file goes;
-    /// one answered whose waiter never came back for it only goes. Under the secrets' lock (held).
+    /// one answered goes once the use it was for has had `COLLECT_SECONDS` more to come back for the answer (an
+    /// answer given in the last moment is still one). Under the secrets' lock (held).
     fn end_stale(&self, _held: &Lock) -> Result<()> {
         let now = chrono::Utc::now();
         for a in all(&self.state_dir).into_iter().filter(|a| !a.live(now)) {
+            if a.answer.is_some() && a.kept_for_its_answer(now) {
+                continue;
+            }
             // Its number is not given again, even should the count of them be lost: the count is kept past it.
             if a.n > last_given(&self.state_dir) {
                 put(&self.state_dir, "next", a.n.to_string().as_bytes())?;
             }
+            // On the record, then gone. Should the file not go (the store's directory damaged), this fails, and so
+            // does every later use, answer and listing until it is mended: each try would record the use as timed
+            // out again. Left so: taking the file away first would lose the entry instead, and a store that cannot
+            // be written is the machine's fault to mend, not a state to run on.
             if a.answer.is_none() {
                 self.record_ask(&a, "secret_use_timed_out", None, false)?;
             }
@@ -235,31 +268,36 @@ impl Broker {
     }
 
     /// A use begins to wait, under the secrets' lock (held): its number. Refused, in the design's words, when
-    /// `WAITING_EACH` of this agent's wait already, or its session has asked `ASKS_A_SESSION` times.
+    /// `WAITING_EACH` of this agent's wait already, when a person was asked `ASKS_AN_HOUR` times about this agent
+    /// this hour, or `ASKS_A_SESSION` times about its session.
     pub(crate) fn open_ask(&self, held: &Lock, facts: Facts, agent_says: &str) -> Result<u64> {
         self.end_stale(held)?;
         let kept = all(&self.state_dir);
         if kept.iter().filter(|a| a.facts.agent == facts.agent && a.answer.is_none()).count() >= WAITING_EACH {
             bail!("{WAITING_EACH} uses are waiting for you already");
         }
-        let asked = match &facts.session {
-            Some(id) => crate::session::count_ask(self, id)?,
-            None => {
-                let file = dir(&self.state_dir).join("no-session.json");
-                let mut seen: Unsessioned = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-                let hour = chrono::Utc::now().format("%Y-%m-%dT%H").to_string();
-                let count = seen.0.entry(facts.agent.clone()).or_default();
-                if count.0 != hour {
-                    *count = (hour, 0);
-                }
-                count.1 = count.1.saturating_add(1);
-                let n = count.1;
-                put(&self.state_dir, "no-session.json", &serde_json::to_vec(&seen)?)?;
-                n
-            }
+        // By the agent and the hour of the clock (so twice the most can fall either side of an hour's turn).
+        let file = dir(&self.state_dir).join("asked.json");
+        let mut every: std::collections::BTreeMap<String, Asked> = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let hour = chrono::Utc::now().format("%Y-%m-%dT%H").to_string();
+        let count = every.entry(facts.agent.clone()).or_default();
+        if count.hour != hour {
+            *count = Asked { hour, asks: 0, no_session: 0 };
+        }
+        count.asks = count.asks.saturating_add(1);
+        if facts.session.is_none() {
+            count.no_session = count.no_session.saturating_add(1);
+        }
+        let (asks, no_session) = (count.asks, count.no_session);
+        put(&self.state_dir, "asked.json", &serde_json::to_vec(&every)?)?;
+        if asks > ASKS_AN_HOUR {
+            bail!("a person was asked {ASKS_AN_HOUR} times about this agent's uses this hour: no more are asked until the next, and a use that would ask is refused");
+        }
+        let (in_session, of) = match &facts.session {
+            Some(id) => (crate::session::count_ask(self, id)?, "this session"),
+            None => (no_session, "uses that name no session, this hour"),
         };
-        if asked > ASKS_A_SESSION {
-            let of = if facts.session.is_some() { "this session" } else { "uses that name no session, this hour" };
+        if in_session > ASKS_A_SESSION {
             bail!("a person was asked {ASKS_A_SESSION} times about {of}: no more are asked, and a use that would ask is refused");
         }
         // A number is never given twice, whatever was left behind: past the last given (`end_stale` keeps that past
@@ -273,29 +311,23 @@ impl Broker {
         Ok(n)
     }
 
-    /// Wait for use `n`'s answer, or its time: no lock is held, and nothing is decided here (`close_ask` does).
-    pub(crate) fn wait_for_answer(&self, n: u64) {
-        let until = std::time::Instant::now() + self.ask_wait.min(std::time::Duration::from_secs(WAIT_SECONDS));
-        while std::time::Instant::now() < until && read(&self.state_dir, n).is_some_and(|a| a.answer.is_none()) {
-            std::thread::sleep(LOOK_EVERY.min(self.ask_wait));
+    /// How waiting use `n` stands, for the use that asks again about it (`same`: whether the facts kept of `n` are
+    /// that use's own: a number is no key to another use's answer). Under the secrets' lock (held). None: it
+    /// still waits. Answered: as answered, and its file gone, so an answer is spent once. Gone, or its time over
+    /// unanswered: timed out, and on the record as that, here or by whoever ended it first.
+    pub(crate) fn look_at_ask(&self, held: &Lock, n: u64, same: impl Fn(&Facts) -> bool) -> Result<Option<Outcome>> {
+        self.end_stale(held)?;
+        let Some(a) = read(&self.state_dir, n) else { return Ok(Some(Outcome::TimedOut)) };
+        if !same(&a.facts) {
+            bail!("refused: the use that waits as {n} is not this use");
         }
-    }
-
-    /// How use `n` ended, under the secrets' lock (held), and its file gone. Answered: as answered, however late
-    /// the waiter looks (the answer was taken in time, and is on the record). Not answered: timed out, and on the
-    /// record as that, here or by whoever ended it first.
-    pub(crate) fn close_ask(&self, _held: &Lock, n: u64) -> Result<Outcome> {
-        let Some(a) = read(&self.state_dir, n) else { return Ok(Outcome::TimedOut) };
         let outcome = match &a.answer {
-            Some(w) if w.approved => Outcome::Approved,
+            None => return Ok(None),
+            Some(w) if w.approved => Outcome::Approved { tainted: a.facts.tainted },
             Some(w) => Outcome::Denied(w.by.clone()),
-            None => {
-                self.record_ask(&a, "secret_use_timed_out", None, false)?;
-                Outcome::TimedOut
-            }
         };
         std::fs::remove_file(dir(&self.state_dir).join(format!("{n}.json")))?;
-        Ok(outcome)
+        Ok(Some(outcome))
     }
 
     /// `by` answers waiting use `n`: approved, or denied (`rest`: and its secret not asked about again in its
@@ -324,16 +356,19 @@ impl Broker {
         // On the record first, as every answer the broker acts on is: stopped between, the ledger says a little
         // too much (an approval no use came of), never too little.
         let e = self.record_ask(&a, if approved { "secret_use_approved" } else { "secret_use_denied" }, Some(&answer), rest)?;
-        if let (true, Some(id)) = (rest, &a.facts.session) {
-            crate::session::deny_rest(self, id, &a.facts.owner.key(&a.facts.secret))?;
-        }
-        a.answer = Some(answer);
-        let n = a.n;
-        if let Err(e) = serde_json::to_vec(&a).map_err(anyhow::Error::from).and_then(|b| put(&self.state_dir, &format!("{n}.json"), &b)) {
-            // The answer could not be given to the use that waits: the use is taken away, so that it ends refused
-            // and no second outcome is written for it.
-            std::fs::remove_file(dir(&self.state_dir).join(format!("{n}.json"))).context("taking away a use whose answer could not be written")?;
-            return Err(e.context("the answer was recorded and could not be given: the use is refused"));
+        let file = dir(&self.state_dir).join(format!("{n}.json"));
+        let given = (|| -> Result<()> {
+            if let (true, Some(id)) = (rest, &a.facts.session) {
+                crate::session::deny_rest(self, id, &a.facts.owner.key(&a.facts.secret))?;
+            }
+            a.answer = Some(answer);
+            put(&self.state_dir, &format!("{n}.json"), &serde_json::to_vec(&a)?)
+        })();
+        if let Err(why) = given {
+            // The answer is on the record and could not be carried out whole. The use is taken away, so that it
+            // ends refused: left waiting, it would get a second entry (timed out, or approved by another answer).
+            std::fs::remove_file(&file).context("taking away a use whose answer could not be given")?;
+            return Err(why.context("the answer was recorded and could not be given: the use is refused"));
         }
         Ok(e)
     }

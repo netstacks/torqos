@@ -89,7 +89,7 @@ enum Cmd {
     SecretDelete { name: String, user: Option<String>, approved_by: String },
     SecretShow { name: String, user: Option<String>, approved_by: String },
     Secrets,
-    SecretUse { name: String, user: Option<String>, host: String, client_port: Option<u16>, server_port: Option<u16>, session: Option<String>, grant: Option<String>, ssh: bool, reason: Option<String> },
+    SecretUse { name: String, user: Option<String>, host: String, client_port: Option<u16>, server_port: Option<u16>, session: Option<String>, grant: Option<String>, ssh: bool, reason: Option<String>, waiting: Option<u64> },
     SecretGrant { name: Option<String>, user: Option<String>, minutes: Option<u32>, tainted_too: bool, approved_by: String },
     SecretRevoke { name: Option<String>, approved_by: String },
     SecretGrants,
@@ -252,7 +252,7 @@ fn command_line() -> clap::Command {
         .subcommand(Command::new("backups").about("The backups the configuration declares (ADR-038): whether each has its key, the snapshots its repository holds, and how it last ran. Read only."))
         .subcommand(Command::new("backup-key").about("Keep a declared backup's key (its passphrase, read from a file) root's alone, outside the config repo, where its passwordFile points; ledgered without the key.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("key-file").long("key-file").required(true).value_parser(value_parser!(PathBuf))).arg(by()))
         .subcommand(Command::new("backup-restore").about("Put a path back from a declared backup (ADR-038): restic restores it where only root can reach it, then its owner writes it, what is there set aside; ledgered.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("snapshot").long("snapshot").help("A snapshot's id [default: latest].")).arg(Arg::new("path").long("path").required(true)).arg(by()))
-        .subcommand(Command::new("secret-use").about("For the secrets daemon alone (ADR-052): one use of a secret, judged by its rule, the caller read from the kernel's table of the loopback connection (or from the grant of its agent socket); its value printed.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("host").long("host").required(true)).arg(Arg::new("client-port").long("client-port").value_parser(value_parser!(u16))).arg(Arg::new("server-port").long("server-port").value_parser(value_parser!(u16))).arg(Arg::new("session").long("session")).arg(Arg::new("grant").long("grant").conflicts_with_all(["client-port", "server-port", "session"])).arg(Arg::new("ssh").long("ssh").action(ArgAction::SetTrue).help("A signature for SSH to the host, not an HTTPS request")).arg(Arg::new("reason").long("reason").help("The agent's own words for what the use is for: shown to the person asked as the agent's, one cleaned line")))
+        .subcommand(Command::new("secret-use").about("For the secrets daemon alone (ADR-052): one use of a secret, judged by its rule, the caller read from the kernel's table of the loopback connection (or from the grant of its agent socket); its value printed, or {\"waiting\": N} for a use that waits for its person, which is asked about again with --waiting N.").arg(Arg::new("name").long("name").required(true)).arg(Arg::new("user").long("user")).arg(Arg::new("host").long("host").required(true)).arg(Arg::new("client-port").long("client-port").value_parser(value_parser!(u16))).arg(Arg::new("server-port").long("server-port").value_parser(value_parser!(u16))).arg(Arg::new("session").long("session")).arg(Arg::new("grant").long("grant").conflicts_with_all(["client-port", "server-port", "session"])).arg(Arg::new("ssh").long("ssh").action(ArgAction::SetTrue).help("A signature for SSH to the host, not an HTTPS request")).arg(Arg::new("reason").long("reason").help("The agent's own words for what the use is for: shown to the person asked as the agent's, one cleaned line")).arg(Arg::new("waiting").long("waiting").value_parser(value_parser!(u64)).help("The number this very use was told it waits under: how it stands now")))
         .subcommand(
             Command::new("secret-grant")
                 .about("The approver lets their own agent use a secret without asking (ADR-051, ADR-052 4): one secret (--name; --user: their own, else the system's) for MINUTES (1 to 480) or for its sessions running now (--session), or all their own (--all) for MINUTES; ledgered.")
@@ -338,7 +338,7 @@ fn parse_cli() -> Cli {
         "fetch-incoming" => Cmd::FetchIncoming,
         "backups" => Cmd::Backups,
         "secrets" => Cmd::Secrets,
-        "secret-use" => Cmd::SecretUse { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), host: s(sub, "host").unwrap_or_default(), client_port: sub.get_one::<u16>("client-port").copied(), server_port: sub.get_one::<u16>("server-port").copied(), session: s(sub, "session"), grant: s(sub, "grant"), ssh: sub.get_flag("ssh"), reason: s(sub, "reason") },
+        "secret-use" => Cmd::SecretUse { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), host: s(sub, "host").unwrap_or_default(), client_port: sub.get_one::<u16>("client-port").copied(), server_port: sub.get_one::<u16>("server-port").copied(), session: s(sub, "session"), grant: s(sub, "grant"), ssh: sub.get_flag("ssh"), reason: s(sub, "reason"), waiting: sub.get_one::<u64>("waiting").copied() },
         "secret-grant" => Cmd::SecretGrant { name: s(sub, "name"), user: s(sub, "user"), minutes: sub.get_one::<u32>("minutes").copied(), tainted_too: sub.get_flag("tainted-too"), approved_by: by(sub) },
         "secret-revoke" => Cmd::SecretRevoke { name: s(sub, "name"), approved_by: by(sub) },
         "secret-grants" => Cmd::SecretGrants,
@@ -602,7 +602,7 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
         }
         Cmd::Secrets => println!("{}", serde_json::to_string(&b.kept_secrets())?),
         // Always JSON, as show is: the value for the daemon to put in one request, and nothing else.
-        Cmd::SecretUse { name, user, host, client_port, server_port, session, grant, ssh, reason } => {
+        Cmd::SecretUse { name, user, host, client_port, server_port, session, grant, ssh, reason, waiting } => {
             no_core()?;
             use torq_broker::secrets::{Owner, Use};
             // Who: the kernel's answer for the loopback connection, or the grant of the agent socket it came through
@@ -616,7 +616,18 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
                 _ => anyhow::bail!("refused: a use names its connection (--client-port and --server-port) or its grant"),
             };
             let u = Use { owner: Owner::of(user.as_deref())?, name, host, actor, session, ssh };
-            let g = b.use_secret_for(&u, reason.as_deref().unwrap_or_default())?;
+            let g = match waiting {
+                Some(n) => b.resume_use(&u, n)?,
+                None => b.begin_use(&u, reason.as_deref().unwrap_or_default())?,
+            };
+            // A use that waits for its person says so, with its number: the daemon asks again about it.
+            let g = match g {
+                torq_broker::secrets::Used::Granted(g) => g,
+                torq_broker::secrets::Used::Waiting(n) => {
+                    println!("{}", json!({ "waiting": n }));
+                    return Ok(());
+                }
+            };
             println!("{}", json!({ "value": g.value, "header": g.header, "prefix": g.prefix, "known": g.known, "actor": u.actor }));
         }
         Cmd::SecretAgent { client_port, server_port, session } => {
