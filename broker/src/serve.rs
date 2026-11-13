@@ -311,11 +311,18 @@ fn approval_text(cmd: &str, state_dir: &Path, seq: Option<u64>, secret: Option<(
         other => return crate::printable(&format!("Approve `{other}` on this machine")),
     };
     let Some(e) = entry else { return format!("{verb} a change to this machine") };
+    change_text(verb, &e)
+}
+
+/// What the dialog says of a change: the broker's facts of it first, among them what of it makes a secret
+/// `never-even-tainted` (the reason given for a change is its proposer's to word, and a program running as the
+/// person can propose one); then that reason, as theirs. Cut to what a dialog shows.
+fn change_text(verb: &str, e: &torq_broker::ledger::Entry) -> String {
     let by = e.body.data["caller"].as_str().unwrap_or(&e.body.actor);
     let files: Vec<&str> = e.body.data["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).collect();
     let shown = files.iter().take(3).copied().collect::<Vec<_>>().join(", ");
     let more = if files.len() > 3 { format!(" and {} more", files.len() - 3) } else { String::new() };
-    let what = format!("{verb} change #{} ({} tier), proposed by {by}, to {shown}{more}. It says: \"{}\"", e.body.seq, e.body.tier, e.body.reason);
+    let what = format!("{verb} change #{} ({} tier), proposed by {by}, to {shown}{more}. {}It says: \"{}\"", e.body.seq, e.body.tier, torq_wire::secrets::standing_said(&e.body.data), e.body.reason);
     crate::printable(&what).chars().take(400).collect()
 }
 
@@ -517,5 +524,26 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A change that makes a secret never-even-tainted says so in the dialog, in the broker's words and before
+    /// the proposer's own, whatever those are and however long: they are cut, never the broker's.
+    #[test]
+    fn the_dialog_says_what_never_asks_before_the_proposers_reason() {
+        let entry = |data: serde_json::Value, reason: &str| -> torq_broker::ledger::Entry {
+            serde_json::from_value(json!({ "seq": 7, "ts": "2026-11-13T12:00:00Z", "actor": "user", "approved_by": null, "kind": "proposal", "tier": "user", "tainted": false, "reason": reason, "data": data, "prev_hash": "", "hash": "" })).unwrap()
+        };
+        let plain = change_text("Apply", &entry(json!({ "files": ["users/sam/secrets.json"], "caller": "sam" }), "Secret gh: one more host"));
+        assert_eq!(plain, "Apply change #7 (user tier), proposed by sam, to users/sam/secrets.json. It says: \"Secret gh: one more host\"");
+        let reason = format!("Secret gh: one more host{}", " and nothing else at all".repeat(40));
+        let said = change_text("Apply", &entry(json!({ "files": ["users/sam/secrets.json"], "caller": "sam", "standing": ["users/sam/secrets.json: gh"] }), &reason));
+        let (facts, theirs) = said.split_once("It says: ").expect("the proposer's words, after");
+        assert!(facts.contains("THE AGENT WILL USE secret gh (users/sam/secrets.json) WITHOUT ASKING, EVEN FROM A SESSION THAT READ UNTRUSTED TEXT"), "{said}");
+        assert!(theirs.starts_with("\"Secret gh: one more host") && said.chars().count() == 400, "{said}");
     }
 }

@@ -1228,6 +1228,8 @@ fn apply_warning(body: &serde_json::Value) -> (String, Option<u32>) {
     }
     let cuts: Vec<String> = body["data"]["cuts_off"].as_array().into_iter().flatten().filter_map(|s| s.as_str()).map(|s| history::one_line(s, 80)).collect();
     let confirm = (!cuts.is_empty()).then_some(CUTS_OFF_MINUTES);
+    // What of it makes a secret never-even-tainted: the broker's word for it, whatever reason the change gives.
+    why.push_str(&torq_wire::secrets::standing_said(&body["data"]));
     if body["tier"] != "user" {
         why.push_str("This changes the system (all users). ");
     }
@@ -1290,6 +1292,8 @@ fn a_person_is_told_why_before_applying() {
     let (w, c) = apply_warning(&json!({"tier": "system", "tainted": false, "actor": "agent", "data": {"cuts_off": ["networking.wireless.enable"]}}));
     assert!(w.contains("networking.wireless.enable") && w.contains("commit confirmed"), "{w}");
     assert_eq!(c, Some(CUTS_OFF_MINUTES));
+    let (w, _) = apply_warning(&json!({"tier": "user", "tainted": false, "actor": "user", "data": {"standing": ["users/dev/secrets.json: gh"]}}));
+    assert_eq!(w, "THE AGENT WILL USE secret gh (users/dev/secrets.json) WITHOUT ASKING, EVEN FROM A SESSION THAT READ UNTRUSTED TEXT. ");
     let (w, _) = apply_warning(&json!({"tier": "system", "tainted": false, "actor": "user", "data": {}}));
     assert!(w.contains("all users"));
     assert_eq!(agent_session(Some("a".repeat(32))), Some("a".repeat(32)));

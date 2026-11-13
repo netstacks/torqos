@@ -265,6 +265,26 @@ pub fn standing_added(before: Option<&[u8]>, after: Option<&[u8]>) -> Vec<String
     standing(after).into_iter().filter(|n| !was.contains(n)).collect()
 }
 
+/// What a change's entry says it makes `never-even-tainted` (its `standing`, as the broker recorded it), said for
+/// the person about to approve it, in words that are not the proposer's: empty when it makes nothing so. The one
+/// wording, for the dialog and the terminal.
+pub fn standing_said(data: &serde_json::Value) -> String {
+    let which: Vec<String> = data["standing"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.as_str())
+        .map(|s| match s.split_once(": ") {
+            Some((file, name)) => format!("secret {name} ({file})"),
+            None => s.to_string(),
+        })
+        .collect();
+    if which.is_empty() {
+        return String::new();
+    }
+    format!("THE AGENT WILL USE {} WITHOUT ASKING, EVEN FROM A SESSION THAT READ UNTRUSTED TEXT. ", which.join(", "))
+}
+
 /// A person's own rules file: as the system's, and only the agent besides them may use their secrets. Another
 /// person is given a secret as a system secret, by an administrator.
 pub fn parse_person(bytes: &[u8]) -> Result<Rules, String> {
