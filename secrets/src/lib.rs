@@ -84,22 +84,109 @@ struct Granted {
 /// Ask the broker for a use (`secret-use`): what it granted, or why not. The value is in this answer, and in
 /// nothing kept.
 fn ask_broker(route: &http::Route, client_port: u16, session: Option<&str>, reason: Option<&str>) -> Result<std::result::Result<Granted, String>> {
+    use_at_broker(use_args(route, client_port, session, reason), true)
+}
+
+/// What the broker is asked for a use: each of the program's own words (its session, its reason) one argument with
+/// its flag, so that one beginning with `-` is still that word and never a flag of its own.
+fn use_args(route: &http::Route, client_port: u16, session: Option<&str>, reason: Option<&str>) -> Vec<String> {
     let mut args = vec!["--json".to_string(), "secret-use".into(), "--name".into(), route.name.clone(), "--host".into(), route.host.clone()];
     args.extend(["--client-port".into(), client_port.to_string(), "--server-port".into(), PORT.to_string()]);
     if let Some(u) = &route.user {
         args.extend(["--user".into(), u.clone()]);
     }
     if let Some(s) = session {
-        args.extend(["--session".into(), s.to_string()]);
+        args.push(format!("--session={s}"));
     }
     // The agent's own words for what the use is for: the broker cleans them, and shows them as the agent's.
     if let Some(r) = reason {
-        args.extend(["--reason".into(), r.to_string()]);
+        args.push(format!("--reason={r}"));
     }
-    broker(args)
+    args
 }
 
-/// How long the broker has for its own work on a request, besides any wait for a person.
+/// The most uses that wait here for a person at once, each a thread asking the broker again about once a second.
+/// More are turned away: with the 16 that do not wait they stay well inside the unit's tasks.
+const WAITING_AT_ONCE: usize = 24;
+static WAITING: AtomicUsize = AtomicUsize::new(0);
+/// The turn to ask the broker again about a use that waits: one at a time, so that of the few connections the
+/// broker's socket gives one account, waiting uses never hold more than one, and a use that does not wait is
+/// always served beside them.
+static ASKING_AGAIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// How often a waiting use asks the broker again.
+const ASK_AGAIN_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A use that waits for a person, counted while it does. One that came in on a request's slot (`slot`) gives the
+/// slot back for as long: a request that only waits must not keep those that would not wait from being served.
+struct Waiting(bool);
+
+impl Waiting {
+    fn begin(slot: bool) -> Option<Waiting> {
+        if WAITING.fetch_add(1, Ordering::SeqCst) >= WAITING_AT_ONCE {
+            WAITING.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        if slot {
+            RUNNING.fetch_sub(1, Ordering::SeqCst);
+        }
+        Some(Waiting(slot))
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        WAITING.fetch_sub(1, Ordering::SeqCst);
+        if self.0 {
+            RUNNING.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// A use carried to its end. `ask(None)` asks the broker for it; while the broker answers that it waits for a
+/// person (`{"waiting": n}`), `ask(Some(n))` asks again about that number, every `every`, for `at_most`: the
+/// broker ends the wait itself well inside that. No connection is held between two askings. A try that cannot
+/// reach the broker is made again: the use still waits there. `begin`: what counts the wait, or turns it away.
+fn carry<G>(mut ask: impl FnMut(Option<u64>) -> Result<std::result::Result<serde_json::Value, String>>, mut begin: impl FnMut() -> Option<G>, every: std::time::Duration, at_most: std::time::Duration) -> Result<std::result::Result<serde_json::Value, String>> {
+    let number = |v: &serde_json::Value| v.get("waiting").and_then(|n| n.as_u64());
+    let n = match ask(None)? {
+        Ok(v) => match number(&v) {
+            Some(n) => n,
+            None => return Ok(Ok(v)),
+        },
+        Err(why) => return Ok(Err(why)),
+    };
+    let Some(_counted) = begin() else { return Ok(Err("too many uses wait for a person at once: try again in a while".into())) };
+    let until = std::time::Instant::now() + at_most;
+    while std::time::Instant::now() < until {
+        std::thread::sleep(every);
+        match ask(Some(n)) {
+            Ok(Ok(v)) if number(&v) == Some(n) => {}
+            Ok(answer) => return Ok(answer),
+            Err(_) => {}
+        }
+    }
+    Ok(Err("no one answered in time".into()))
+}
+
+/// `args`, a `secret-use`, asked of the broker and carried to its end (`carry`): what it granted, or why not.
+fn use_at_broker<T: serde::de::DeserializeOwned>(args: Vec<String>, slot: bool) -> Result<std::result::Result<T, String>> {
+    let ask = |waiting: Option<u64>| {
+        let mut args = args.clone();
+        let _turn = waiting.map(|n| {
+            args.push(format!("--waiting={n}"));
+            // A turn another thread died holding is still a turn.
+            ASKING_AGAIN.lock().unwrap_or_else(|gone| gone.into_inner())
+        });
+        broker::<serde_json::Value>(args)
+    };
+    let at_most = std::time::Duration::from_secs(torq_wire::secrets::ASK_WAIT_SECONDS + BROKER_SECONDS);
+    Ok(match carry(ask, || Waiting::begin(slot), ASK_AGAIN_EVERY, at_most)? {
+        Ok(v) => Ok(serde_json::from_value(v).context("the broker's answer")?),
+        Err(why) => Err(why),
+    })
+}
+
+/// How long the broker has to answer one request. None waits for a person: a use that does is asked about again.
 const BROKER_SECONDS: u64 = 30;
 
 /// One request of the broker's (the daemon's account may ask only `secret-use` and `secret-agent`): its answer as
@@ -107,9 +194,8 @@ const BROKER_SECONDS: u64 = 30;
 fn broker<T: serde::de::DeserializeOwned>(args: Vec<String>) -> Result<std::result::Result<T, String>> {
     use std::io::BufRead;
     let mut s = std::os::unix::net::UnixStream::connect(SOCKET).with_context(|| format!("reaching the broker at {SOCKET}"))?;
-    // A use may wait at the broker for its person's answer: the daemon waits longer, so that the broker's own time
-    // ends the wait and says why, never a hang-up from here.
-    s.set_read_timeout(Some(std::time::Duration::from_secs(torq_wire::secrets::ASK_WAIT_SECONDS + BROKER_SECONDS)))?;
+
+    s.set_read_timeout(Some(std::time::Duration::from_secs(BROKER_SECONDS)))?;
     writeln!(s, "{}", serde_json::to_string(&BrokerRequest { args, ..Default::default() })?)?;
     let (mut out, mut code) = (String::new(), None);
     for line in BufReader::new(s).lines() {
@@ -141,14 +227,14 @@ fn ask_ssh(key: &agent::Key, grant: &str, host: &str) -> Result<std::result::Res
     if let Some(u) = key.owner.get("person").and_then(|p| p.as_str()) {
         args.extend(["--user".into(), u.into()]);
     }
-    Ok(broker::<Use>(args)?.map(|u| (u.value, u.known)))
+    Ok(use_at_broker::<Use>(args, false)?.map(|u| (u.value, u.known)))
 }
 
 /// `POST /ssh-agent`: an agent socket for the one connected, granted by the broker (who, read from the kernel).
 fn agent_socket(req: &http::Request, client_port: u16) -> Vec<u8> {
     let mut args = vec!["--json".to_string(), "secret-agent".into(), "--client-port".into(), client_port.to_string(), "--server-port".into(), PORT.to_string()];
     if let Some(s) = req.header(torq_wire::secrets::SESSION_HEADER) {
-        args.extend(["--session".into(), s.to_string()]);
+        args.push(format!("--session={s}"));
     }
     let g: agent::Granted = match broker(args) {
         Ok(Ok(g)) => g,
@@ -292,4 +378,81 @@ fn whose(r: &http::Route) -> String {
 /// Every use, to the journal (the daemon's log, ADR-052 3): who, which secret, what, and how it went. Never a value.
 pub(crate) fn log(line: &str) {
     eprintln!("{}", line.chars().filter(|c| !c.is_control()).collect::<String>());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+
+    /// A use that waits is asked about again under its number until the broker says how it ended; what the broker
+    /// says then is the answer, a value or a refusal. A try that does not reach the broker is made again.
+    #[test]
+    fn a_waiting_use_is_asked_about_again_until_it_ends() {
+        let script = |answers: Vec<Result<std::result::Result<serde_json::Value, String>>>| {
+            let mut answers = answers.into_iter();
+            let mut asked = Vec::new();
+            let out = carry(
+                |n| {
+                    asked.push(n);
+                    answers.next().unwrap_or_else(|| Ok(Ok(json!({ "waiting": 7 }))))
+                },
+                || Some(()),
+                Duration::from_millis(1),
+                Duration::from_millis(200),
+            );
+            (out.unwrap(), asked)
+        };
+        let waiting = || Ok(Ok(json!({ "waiting": 7 })));
+        let (out, asked) = script(vec![Ok(Ok(json!({ "value": "v" })))]);
+        assert_eq!((out, asked), (Ok(json!({ "value": "v" })), vec![None]), "a use that does not wait is asked once");
+        let (out, asked) = script(vec![waiting(), waiting(), Err(anyhow::anyhow!("the broker is busy")), waiting(), Ok(Ok(json!({ "value": "v" })))]);
+        assert_eq!((out, asked), (Ok(json!({ "value": "v" })), vec![None, Some(7), Some(7), Some(7), Some(7)]));
+        let (out, _) = script(vec![waiting(), Ok(Err("refused: sam denied this use".into()))]);
+        assert_eq!(out, Err("refused: sam denied this use".into()));
+        let (out, _) = script(vec![Ok(Err("refused: sam may not use it".into()))]);
+        assert_eq!(out, Err("refused: sam may not use it".into()));
+        // The broker ends a wait itself; should it never, the daemon does not ask for ever.
+        let t = std::time::Instant::now();
+        let (out, asked) = script(vec![]);
+        assert_eq!(out, Err("no one answered in time".into()));
+        assert!(asked.len() > 2 && asked[1..].iter().all(|n| *n == Some(7)) && t.elapsed() < Duration::from_secs(5), "{asked:?}");
+        // A use that cannot be counted among the waiting is turned away, and not asked about again.
+        let mut asked = 0;
+        let out = carry(
+            |_| {
+                asked += 1;
+                waiting()
+            },
+            || None::<()>,
+            Duration::from_millis(1),
+            Duration::from_millis(50),
+        );
+        assert!(out.unwrap().unwrap_err().contains("too many uses wait") && asked == 1);
+    }
+
+    /// Waiting uses are counted apart from the requests being served, and give their request's slot back while
+    /// they wait: a request that only waits keeps none that would not wait from being served. At most so many wait.
+    #[test]
+    fn a_waiting_use_gives_its_slot_back() {
+        // Each waiting use came in on a slot of its own; two more requests are being served.
+        RUNNING.store(WAITING_AT_ONCE + 2, Ordering::SeqCst);
+        let held: Vec<Waiting> = (0..WAITING_AT_ONCE).map(|_| Waiting::begin(true).expect("room")).collect();
+        assert_eq!(RUNNING.load(Ordering::SeqCst), 2, "each gave its slot back");
+        assert!(Waiting::begin(true).is_none() && Waiting::begin(false).is_none(), "and no more wait");
+        drop(held);
+        assert_eq!((RUNNING.load(Ordering::SeqCst), WAITING.load(Ordering::SeqCst)), (WAITING_AT_ONCE + 2, 0), "taken again when the wait is over");
+        RUNNING.store(0, Ordering::SeqCst);
+    }
+
+    /// A program's own words go to the broker each as one argument with its flag: a reason or a session that
+    /// begins with a dash is still that word, not a flag, and does not fail the use.
+    #[test]
+    fn a_reason_beginning_with_a_dash_is_one_argument() {
+        let route = http::route("/user/dev/gh/api.example.test/x").unwrap();
+        let args = use_args(&route, 4242, Some("--json"), Some("-rf / --user=root"));
+        assert_eq!(args, ["--json", "secret-use", "--name", "gh", "--host", "api.example.test", "--client-port", "4242", "--server-port", "7800", "--user", "dev", "--session=--json", "--reason=-rf / --user=root"]);
+        assert!(!use_args(&route, 4242, None, None).iter().any(|a| a.starts_with("--session") || a.starts_with("--reason")));
+    }
 }
