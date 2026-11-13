@@ -83,7 +83,7 @@ struct Granted {
 
 /// Ask the broker for a use (`secret-use`): what it granted, or why not. The value is in this answer, and in
 /// nothing kept.
-fn ask_broker(route: &http::Route, client_port: u16, session: Option<&str>) -> Result<std::result::Result<Granted, String>> {
+fn ask_broker(route: &http::Route, client_port: u16, session: Option<&str>, reason: Option<&str>) -> Result<std::result::Result<Granted, String>> {
     let mut args = vec!["--json".to_string(), "secret-use".into(), "--name".into(), route.name.clone(), "--host".into(), route.host.clone()];
     args.extend(["--client-port".into(), client_port.to_string(), "--server-port".into(), PORT.to_string()]);
     if let Some(u) = &route.user {
@@ -92,15 +92,24 @@ fn ask_broker(route: &http::Route, client_port: u16, session: Option<&str>) -> R
     if let Some(s) = session {
         args.extend(["--session".into(), s.to_string()]);
     }
+    // The agent's own words for what the use is for: the broker cleans them, and shows them as the agent's.
+    if let Some(r) = reason {
+        args.extend(["--reason".into(), r.to_string()]);
+    }
     broker(args)
 }
+
+/// How long the broker has for its own work on a request, besides any wait for a person.
+const BROKER_SECONDS: u64 = 30;
 
 /// One request of the broker's (the daemon's account may ask only `secret-use` and `secret-agent`): its answer as
 /// `T`, or why it refused.
 fn broker<T: serde::de::DeserializeOwned>(args: Vec<String>) -> Result<std::result::Result<T, String>> {
     use std::io::BufRead;
     let mut s = std::os::unix::net::UnixStream::connect(SOCKET).with_context(|| format!("reaching the broker at {SOCKET}"))?;
-    s.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    // A use may wait at the broker for its person's answer: the daemon waits longer, so that the broker's own time
+    // ends the wait and says why, never a hang-up from here.
+    s.set_read_timeout(Some(std::time::Duration::from_secs(torq_wire::secrets::ASK_WAIT_SECONDS + BROKER_SECONDS)))?;
     writeln!(s, "{}", serde_json::to_string(&BrokerRequest { args, ..Default::default() })?)?;
     let (mut out, mut code) = (String::new(), None);
     for line in BufReader::new(s).lines() {
@@ -202,7 +211,7 @@ fn one(stream: &TcpStream) -> Vec<u8> {
         Ok(r) => r,
         Err(why) => return http::refusal(400, &why),
     };
-    let granted = match ask_broker(&route, peer.port(), req.header(torq_wire::secrets::SESSION_HEADER)) {
+    let granted = match ask_broker(&route, peer.port(), req.header(torq_wire::secrets::SESSION_HEADER), req.header(torq_wire::secrets::REASON_HEADER)) {
         Ok(Ok(g)) => g,
         Ok(Err(why)) => {
             log(&format!("refused: {} {} for {}: {why}", req.method, route.host, whose(&route)));

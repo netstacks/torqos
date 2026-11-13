@@ -168,7 +168,7 @@ pub fn route(target: &str) -> Result<Route, String> {
 }
 
 /// The headers that go on to the host: not HTTP's own between this machine and the daemon, not the session's
-/// name, not the one the secret goes in (the daemon sets it, no one else), and asking for no compression, so that
+/// name nor the agent's reason (they are for the broker), not the one the secret goes in (the daemon sets it, no one else), and asking for no compression, so that
 /// what comes back can be checked for the secret.
 pub fn forwarded(req: &Request, secret_header: &str) -> Vec<(String, String)> {
     const DROPPED: &[&str] = &["host", "connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade", "content-length", "expect", "accept-encoding", "proxy-authorization", "proxy-connection"];
@@ -176,7 +176,7 @@ pub fn forwarded(req: &Request, secret_header: &str) -> Vec<(String, String)> {
         .iter()
         .filter(|(k, _)| {
             let k = k.to_ascii_lowercase();
-            !DROPPED.contains(&k.as_str()) && k != torq_wire::secrets::SESSION_HEADER && !k.starts_with("proxy-") && !k.eq_ignore_ascii_case(secret_header)
+            !DROPPED.contains(&k.as_str()) && k != torq_wire::secrets::SESSION_HEADER && k != torq_wire::secrets::REASON_HEADER && !k.starts_with("proxy-") && !k.eq_ignore_ascii_case(secret_header)
         })
         .cloned()
         .collect()
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn the_secrets_header_is_the_daemons_alone() {
-        let r = one("GET /system/ci/a.com/ HTTP/1.1\r\nauthorization: Bearer mine\r\nAccept-Encoding: gzip\r\nProxy-Foo: x\r\nAccept: */*\r\n\r\n").unwrap();
+        let r = one("GET /system/ci/a.com/ HTTP/1.1\r\nauthorization: Bearer mine\r\nAccept-Encoding: gzip\r\nProxy-Foo: x\r\nX-Torq-Session: 0123\r\nX-Torq-Reason: deploying\r\nAccept: */*\r\n\r\n").unwrap();
         let kept: Vec<String> = forwarded(&r, "Authorization").into_iter().map(|(k, _)| k).collect();
         assert_eq!(kept, ["Accept"], "the program's own Authorization is dropped: the secret's goes in its place");
     }
