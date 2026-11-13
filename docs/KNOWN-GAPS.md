@@ -1320,15 +1320,30 @@ Its §5 lists claims without a test.
    - **Not in this step**: "Start Claude Code" from the agent's window (a folder to choose and a terminal to
      open), Codex and opencode, removing the link when the tool is no longer chosen.
 
-6zzs. **No agent can use a secret yet, with one agent per person (ADR-052, amended 2026-11-12; the approval
-  design, `docs/DESIGN-agent-approval.md`).** `torq-agent` in a person's rules is their own agent, and a system rule
-  names each agent's account (`broker/tests/secrets.rs`, `tests/secrets.nix`). But a use is let through only from
-  an untainted session, with the rule asking no approval, and:
+6zzs. **An agent's use of a secret is asked of its person at a terminal only; the dialog is not built (ADR-052 4;
+  the approval design, `docs/DESIGN-agent-approval.md`, its build steps 2 and 3 built 2026-11-13, not yet run in a
+  VM).** `torq-agent` in a person's rules is their own agent, and a system rule names each agent's account. A use
+  that asks (the rule says each use, or the first; no session; a tainted session) now waits at the broker for up
+  to two minutes for the person the agent serves, who answers with `request system secret approve <n>` or
+  `deny <n>` (`show system secrets waiting`); a grant (`request system secret allow <name> session`, `… for
+  <minutes> [tainted-too]`, `allow all for <minutes>`; their password) or the rule's `never-even-tainted` lets
+  uses through unasked (`broker/src/ask.rs`, `broker/src/session.rs`; `broker/tests/secrets.rs`). What is not there:
+   - no dialog and no notification: the panel applet does not show a waiting use, so a person who is not looking
+     at a terminal learns of it only when it has timed out. The Secrets page shows and ends no grant;
    - every program run as `torq-agent-<person>` (a coding tool, `torq agent run`) starts its session tainted
-     (`not-the-resident-agent`, 6zzo), so each of its uses waits for a person, and approving is not built: refused.
-     It cannot borrow the resident agent's clean session either, though its id is in the ledger: a use or an SSH
-     socket cites only its own kind of session (the review of the rebased branch, B1; before that fix, it could);
-   - the resident agent, whose session can start untainted, has no tool that sends an HTTPS request or signs.
-  So until approval is built (the design's parts 2 and 3, waiting on the owner), a secret is used only by its
-  person. The daemon's path for an agent's use is tested up to its refusal; the path for a use let through is
-  tested only for the person's own uses and in `broker/tests/secrets.rs` (a resident's session there).
+     (`not-the-resident-agent`, 6zzo), so each of its uses asks unless a `tainted-too` grant of that one secret
+     or `never-even-tainted` covers it. It cannot borrow the resident agent's clean session, though its id is in
+     the ledger: a use or an SSH socket cites only its own kind of session;
+   - the resident agent, whose session can start untainted, has no tool that sends an HTTPS request or signs;
+   - an SSH login that waits for its person waits inside the login: a server that gives a login less than two
+     minutes (OpenSSH's `LoginGraceTime` is 120 s by default) may hang up first, and the use, if then approved, is
+     on the record as approved though nothing came of it;
+   - where an answer was given (`dialog`, `terminal`) is the word of the program that sent it, run as the person;
+     the broker does not check it. Who answered is the kernel's word;
+   - uses that name no session are counted together for the limit of ten asks, by agent and hour, since there is
+     no session to count them in; and the agent's own words for a use reach the person only for HTTPS
+     (`X-Torq-Reason`), not for SSH;
+   - "this session", for a grant given at a terminal, is every session of the person's agent already running
+     when it was given (a terminal names no one session); the broker knows no end of a session but the eight
+     hours a grant may last.
+  `tests/secrets.nix` states the waiting, the answers and the time-out; its edits of 2026-11-13 have not run.

@@ -160,27 +160,62 @@ pkgs.testers.runNixOSTest {
         status, body, _ = use("dev", "/user/dev/gh/api.example.test/echo", "-X", "POST", "--data-binary", '{"a": 1}')
         assert status == 200 and requests()[-1]["body"] == '{"a": 1}' and requests()[-1]["method"] == "POST", requests()[-1]
 
-    with subtest("dev's agent account (a coding tool's, not the resident agent) starts tainted: each use asks, and asking is not built yet"):
+    def waiting(person):
+        """The uses that wait for `person`, as the broker tells them over its socket."""
+        code, v = ask(person, {"args": ["--json", "secret-waiting"]})
+        assert code == 0, (code, v)
+        return v["waiting"]
+
+    def begin(user, path, *flags):
+        """A request through the daemon, as `user`, left running: it waits for a person's answer."""
+        args = " ".join(shlex.quote(f) for f in flags)
+        cmd = f"curl -s -o /tmp/b-{user} -w '%{{http_code}}' {args} http://127.0.0.1:7800{path} > /tmp/s-{user}"
+        machine.succeed(f"rm -f /tmp/s-{user}; su -s /bin/sh {user} -c {shlex.quote(cmd)} >&2 &")
+
+    def ended(user):
+        machine.wait_until_succeeds(f"test -s /tmp/s-{user}", timeout=60)
+        return int(machine.succeed(f"cat /tmp/s-{user}").strip()), machine.succeed(f"cat /tmp/b-{user}")
+
+    with subtest("dev's agent account (a coding tool's, not the resident agent) starts tainted: each use waits for dev, and only dev answers"):
         # One agent per person (ADR-051 3): `torq-agent` in dev's rules is dev's agent, torq-agent-dev. Only the
-        # resident agent starts a session untainted, and it has no tool that sends HTTPS; every other program of the
-        # agent account is tainted from its first request (`not-the-resident-agent`), so its uses wait for a person
-        # (the approval design, parts 2 and 3: not built). Refused, sending nothing, its refusal on the record once.
+        # resident agent starts a session untainted; every other program of the agent account is tainted from its
+        # first request (`not-the-resident-agent`), so its use waits at the broker for dev (the approval design,
+        # part 2), under a number, and sends nothing until dev says yes.
         code, s = ask("torq-agent-dev", {"args": ["--json", "session-start"]})
         assert code == 0, (code, s)
         session = s["session"]
         n = len(requests())
-        for _ in range(2):
-            status, body, _ = use("torq-agent-dev", "/user/dev/gh/api.example.test/echo", "-H", f"X-Torq-Session: {session}")
-            assert status == 403 and "untrusted" in body and "dev-token-1" not in body, (status, body)
+        begin("torq-agent-dev", "/user/dev/gh/api.example.test/echo", "-H", f"X-Torq-Session: {session}", "-H", "X-Torq-Reason: listing the repositories")
+        machine.wait_until_succeeds("su - dev -c 'torqcli show system secrets waiting' | grep -q 'ITS SESSION READ UNTRUSTED TEXT'", timeout=30)
+        w = waiting("dev")
+        assert len(w) == 1 and w[0]["facts"]["secret"] == "gh" and w[0]["facts"]["host"] == "api.example.test" and w[0]["facts"]["tainted"] and w[0]["agent_says"] == "listing the repositories", w
+        assert waiting("sam") == [], "asked of dev alone"
+        assert len(requests()) == n, "nothing sent while it waits"
+        # The agent's own account and another person are refused (dev is this machine's only administrator).
+        for other in ["torq-agent-dev", "sam"]:
+            code, v = ask(other, {"args": ["--json", "secret-approve", str(w[0]["n"])]})
+            assert code == 1, (other, code, v)
+        code, v = ask("dev", {"args": ["--json", "secret-deny", str(w[0]["n"])]})
+        assert code == 0 and v["kind"] == "secret_use_denied" and v["approved_by"] == "dev" and v["data"]["where"] == "terminal", (code, v)
+        status, body = ended("torq-agent-dev")
+        assert status == 403 and "denied" in body and "dev-token-1" not in body, (status, body)
         assert len(requests()) == n, "nothing sent"
-        ledger = machine.succeed("torq-broker log")
-        assert ledger.count("secret_use_refused") == 1 and "secret_first_use" not in ledger, ledger
-        assert "dev-token-1" not in ledger
+        # Approved, it is sent, once, and is on the record as approved: never the value.
+        begin("torq-agent-dev", "/user/dev/gh/api.example.test/echo", "-H", f"X-Torq-Session: {session}")
+        machine.wait_until_succeeds("su - dev -c 'torqcli show system secrets waiting' | grep -q 'request system secret approve'", timeout=30)
+        k = waiting("dev")[0]["n"]
+        out = machine.succeed(f"su - dev -c 'torqcli request system secret approve {k}'")
+        assert "approved" in out, out
+        status, body = ended("torq-agent-dev")
+        assert status == 200 and "dev-token-1" not in body and requests()[-1]["headers"]["Authorization"] == "Bearer dev-token-1", (status, body)
+        ledger = machine.succeed("torq-broker log --json")
+        assert "secret_use_approved" in ledger and "dev-token-1" not in ledger and "listing the repositories" not in ledger
 
     with subtest("nowhere else, by no one else, and not without a session"):
         n = len(requests())
         for user, path, flags in [
             ("torq-agent-dev", "/user/dev/gh/other.example.test/echo", ["-H", f"X-Torq-Session: {session}"]),
+            # No session: dev is asked, as for a tainted one, and with no answer it is refused at its two minutes.
             ("torq-agent-dev", "/user/dev/gh/api.example.test/echo", []),
             ("sam", "/user/dev/gh/api.example.test/echo", []),
             ("dev", "/system/gh/api.example.test/echo", []),
@@ -214,11 +249,12 @@ pkgs.testers.runNixOSTest {
         status, body, _ = use("dev", "/user/dev/gh/api.example.test/gzip")
         assert status == 502 and "compressed" in body, (status, body)
 
-    with subtest("a session tainted by what it read too: refused, as asking is not built yet"):
+    with subtest("a session tainted by what it read too is asked; with no answer in two minutes the use is refused, and recorded as timed out"):
         code, _ = ask("torq-agent-dev", {"args": ["--json", "session-taint", session, "--source", "web"]})
         assert code == 0
         status, body, _ = use("torq-agent-dev", "/user/dev/gh/api.example.test/echo", "-H", f"X-Torq-Session: {session}")
-        assert status == 403 and "untrusted" in body, (status, body)
+        assert status == 403 and "untrusted" in body and "no one answered" in body, (status, body)
+        assert "secret_use_timed_out" in machine.succeed("torq-broker log --json")
 
     with subtest("an SSH key, from a file, for the host the person checked: its key in the rule (step 3)"):
         machine.succeed("su - dev -c " + shlex.quote("mkdir -p ~/.ssh && ssh-keygen -q -t ed25519 -N \"\" -C deploy -f ~/.ssh/deploy"))
@@ -249,15 +285,18 @@ pkgs.testers.runNixOSTest {
         ssh = f"SSH_AUTH_SOCK={sock} ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/tmp/agent-known -o IdentitiesOnly=no"
         listed = machine.succeed(f"su -s /bin/sh torq-agent-dev -c 'SSH_AUTH_SOCK={sock} ssh-add -l'")
         assert "torq:dev/deploy" in listed, listed
-        # Its session started tainted (not the resident agent): each signature waits for a person, not built yet.
-        machine.fail(f"su -s /bin/sh torq-agent-dev -c '{ssh} git@git.example.test echo signed-in'")
+        # Its session started tainted (not the resident agent): each signature waits for dev, who says no here.
+        machine.succeed(f"rm -f /tmp/ssh-agent-dev; su -s /bin/sh torq-agent-dev -c '{ssh} git@git.example.test echo signed-in; echo $? > /tmp/ssh-agent-dev' >&2 &")
+        machine.wait_until_succeeds("su - dev -c 'torqcli show system secrets waiting' | grep -q 'to sign in over SSH to git.example.test'", timeout=60)
+        w = waiting("dev")
+        assert len(w) == 1 and w[0]["facts"]["secret"] == "deploy" and w[0]["facts"]["ssh"] and w[0]["facts"]["tainted"], w
+        code, v = ask("dev", {"args": ["--json", "secret-deny", str(w[0]["n"])]})
+        # Denied by dev for this secret, and on the record (a failed ssh alone could be anything).
+        assert code == 0 and v["kind"] == "secret_use_denied" and v["data"]["secret"] == "deploy" and v["data"]["user"] == "dev", (code, v)
+        machine.wait_until_succeeds("test -s /tmp/ssh-agent-dev", timeout=60)
+        assert machine.succeed("cat /tmp/ssh-agent-dev").strip() != "0", "not signed in"
         journal = machine.succeed("journalctl -u torq-secrets --no-pager")
-        assert "torq-agent-dev: " in journal and "untrusted" in journal, journal
-        # Refused by the broker for this secret, as tainted, and on the record (a
-        # failed ssh alone could be anything).
-        refused = [json.loads(l) for l in machine.succeed("torq-broker log --json --brief").splitlines()]
-        refused = [e for e in refused if e["kind"] == "secret_use_refused" and e["data"].get("secret") == "deploy" and e["data"].get("user") == "dev"]
-        assert len(refused) == 1 and "untrusted" in refused[0]["data"].get("error", ""), refused
+        assert "torq-agent-dev: " in journal and "denied" in journal, journal
         ledger = machine.succeed("torq-broker log")
         assert "dev's secret deploy for the first time" not in ledger and "PRIVATE KEY" not in ledger, ledger
         # The socket answers its own account alone; it takes no key, nor gives one.

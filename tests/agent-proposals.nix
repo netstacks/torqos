@@ -231,7 +231,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"su - dev -c 'tmux send-keys -t t {PASSWORD} Enter'")
         machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t t' | grep -q 'apply without asking'", timeout=60)
         g = kinds("trust_granted")[-1]
-        assert g["approved_by"] == "dev" and g["data"]["person"] == "dev" and g["data"]["minutes"] == 30, g
+        assert g["approved_by"] == "dev" and g["data"]["person"] == "dev" and g["data"]["minutes"] == 30 and g["data"]["covers"] == "proposals", g
         out = machine.succeed("su - sam -c 'torqcli show system alarms'")
         assert "the agent's proposals in dev's folder apply without asking until" in out, out
 
