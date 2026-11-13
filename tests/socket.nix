@@ -161,7 +161,8 @@ pkgs.testers.runNixOSTest {
         assert code == 77, (code, v)
         code, v = secret("sam", "show", "gh", "sam", password="Sam-sock-7742")
         assert code == 0 and v["value"] == "sam-token-1", (code, v)
-        for who, pw in [("dev", "Torq-sock-2210"), ("torq-agent", None)]:
+        # (The agent is sam's own: the nearest to the secret, and still not its owner.)
+        for who, pw in [("dev", "Torq-sock-2210"), ("torq-agent-sam", None)]:
             for cmd in ["set", "show"]:
                 code, v = secret(who, cmd, "gh", "sam", key="other", password=pw)
                 assert code == 1, (who, cmd, code, v)
@@ -171,15 +172,16 @@ pkgs.testers.runNixOSTest {
         assert code == 77, (code, v)
         code, v = secret("dev", "set", "ci", key="ci-token-2", password="Torq-sock-2210")
         assert code == 0 and v["tier"] == "system", (code, v)
-        for who in ["sam", "torq-agent"]:
+        # (dev's agent: an administrator's agent is no administrator.)
+        for who in ["sam", "torq-agent-dev"]:
             for cmd in ["set", "show", "delete"]:
                 code, v = secret(who, cmd, "ci", key="x")
                 assert code == 1, (who, cmd, code, v)
         # The agent sees which secrets there are, never a value, nor the store.
-        code, v = answer(ask("torq-agent", {"args": ["--json", "secrets"]}))
+        code, v = answer(ask("torq-agent-sam", {"args": ["--json", "secrets"]}))
         assert code == 0 and {"owner": "system", "name": "ci"} in v and {"owner": {"person": "sam"}, "name": "gh"} in v, (code, v)
-        machine.fail(f"su -s /bin/sh torq-agent -c 'ls {store}'")
-        machine.fail(f"su -s /bin/sh torq-agent -c 'cat {f}'")
+        machine.fail(f"su -s /bin/sh torq-agent-sam -c 'ls {store}'")
+        machine.fail(f"su -s /bin/sh torq-agent-sam -c 'cat {f}'")
         # Deleted: their own by them; anyone's by an administrator, with their password.
         code, v = secret("sam", "set", "old", "sam", key="old-3")
         assert code == 0, (code, v)
@@ -218,10 +220,10 @@ pkgs.testers.runNixOSTest {
         sysrules = "--- /dev/null\n+++ b/secrets/system.json\n@@ -0,0 +1 @@\n+{\"ci\": {\"kind\": \"token\", \"https\": {\"hosts\": [\"localhost\"]}}}\n"
         code, v = answer(ask("dev", {"args": ["--json", "propose", f"--base={head()}", "--reason=bad"], "diff": sysrules}))
         assert code == 1 and "secrets/system.json" in v["error"], (code, v)
-        # The agent proposes neither file, even for a person whose packages it may propose.
+        # The agent proposes neither file, even for the person whose packages it may propose (sam's own).
         for diff in [changed("users/sam/secrets.json", good.replace('"api.github.com"', '"api.github.com", "evil.example.com"')),
                      sysrules.replace("localhost", "api.github.com")]:
-            code, v = answer(ask("torq-agent", {"args": ["--json", "propose", f"--base={head()}", "--reason=wider"], "diff": diff}))
+            code, v = answer(ask("torq-agent-sam", {"args": ["--json", "propose", f"--base={head()}", "--reason=wider"], "diff": diff}))
             assert code == 1, (code, v)
 
     with subtest("a refused or busy request is an answer, not a failed unit: a switch must not fail for one"):
