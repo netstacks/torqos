@@ -8,6 +8,7 @@
 #![forbid(dead_code)]
 
 pub mod agent;
+pub mod clean;
 pub mod desktop;
 pub mod releases;
 pub mod secrets;

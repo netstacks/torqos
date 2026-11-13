@@ -8,7 +8,8 @@
 #![cfg_attr(not(test), forbid(dead_code))]
 #![cfg_attr(test, deny(dead_code))]
 
-pub mod clean;
+// The cleaning is torq-wire's: the broker cleans an agent's text with the same one.
+pub use torq_wire::clean;
 pub mod doctor;
 pub mod link;
 pub mod machine;
