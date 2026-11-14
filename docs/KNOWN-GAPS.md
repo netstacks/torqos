@@ -1110,7 +1110,7 @@ Its §5 lists claims without a test.
      brings what none of them has (an out-of-tree driver, `boot.extraModulePackages`) needs the
      network at its first build. Setup says so before a new machine's build starts, naming the driver
      (`cli/src/setup.rs` `own_drivers`, 2026-11-12; the sentence's reading of the hardware file is
-     unit-tested, its printing is not, and no such hardware has been tried). For Broadcom's
+     unit-tested, and since 2026-11-14 the sentence adopt and setup print from the files they write (`notice_before_build`) too; no such hardware has been tried). For Broadcom's
      `broadcom_sta` the sentence says another thing: that driver is unfree, which TorqOS refuses unless
      told otherwise (`modules/unfree.nix`), so the first build fails with a network or without one
      (2026-11-13, `setup::driver_notice`, unit-tested). Still open of ADR-048
