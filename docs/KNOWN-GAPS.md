@@ -1234,6 +1234,13 @@ Its §5 lists claims without a test.
      daemon), and given up 30 seconds after that whatever the daemon says: taken down, its slot freed (at most 3
      open at once). The thread reading the daemon's signals for it ends at the daemon's next signal about any
      notification. A daemon that never sends another keeps that one idle thread, holding nothing of the crash.
+     **On screen, much less than that** (read in cosmic-notifications 1.11.0, `src/app.rs`, 2026-11-13, not seen
+     running): no urgency hint means normal, whose popup the daemon cuts to 5 s by its default setting
+     (`max_timeout_normal`); then the notification moves to the daemon's list, which the notifications applet shows, and
+     stays there until the 10 minutes are over (the daemon sends no close for that move; that its button works from the list is not seen). The popup's
+     layer surface asks for no keyboard (`KeyboardInteractivity::None`), so it cannot take the keyboard from the
+     approval dialog. Not known: whether a person's own setting (`max_timeout_normal` unset) keeps it up longer, and
+     whether the daemon places a popup over the dialog.
    - **The agent's window is raised only from a crash notification.** Its click carries the compositor's
      activation token (the notification daemon's `ActivationToken` signal), which is set in the window's unit.
      The Ask the agent buttons of the panel applet, the tunnels applet and TorqOS Settings pass none yet (each
