@@ -2682,6 +2682,105 @@ vouches for, that only proposes, every change ledgered and undone in one command
     (`is_agent`: a commit proposes and stops); the launcher, `--hold-frozen` and the shares are the agent
     account's, as before (the resident gets no ACL to a shared folder: it never reaches one).
   - Names: a person in `torq.agent.people` has at most 17 characters (`torq-resident-` and the name fit 31).
+- **Amended 2026-11-13 — approving what a person's agent does: one mechanism, the grant and the waiting ask (decided
+  by the owner, 2026-11-12; built 2026-11-13; ADR-052's amendment of the same day uses it for secrets).** The
+  owner's fixed points: "one agent per user"; "whatever user is running the agent is the one that should be
+  approving the tool calls for the agent, especially for secrets"; they "need to be able to auto-approve or blanket
+  approve, bypass permissions … for a regular user to an agent"; "the agent should still be fenced off from making
+  any changes to the system itself". This amendment and ADR-052's replace the design note
+  `docs/DESIGN-agent-approval.md`, which is deleted with them. Where the code's comments say "the approval design":
+  its part 1 is ADR-052's amendment of 2026-11-12 (whose agent a rule names), part 2 is the waiting ask here and
+  "when a use asks" in ADR-052, part 3 is the grant here and "what a grant of secret uses covers" in ADR-052, and
+  part 4 is the next paragraph.
+  - **One mechanism, in two ADRs.** This ADR owns the mechanism: the grant, the waiting ask, and the rule that an
+    agent's accounts never answer. What uses it: session trust (ADR-042 7), which is a grant that covers
+    proposals; grants of secret uses and the asking before a use (ADR-052); later the screen grant (decision 6),
+    which is not built. Nothing has approval machinery of its own. Of the resident agent's tool calls, the
+    observe tools run without asking and `propose_change` is a proposal, applied by a person. A coding tool's own
+    permission prompts are its own, in the terminal of the person who started it, and its "skip permissions"
+    mode stays allowed (decision 5): what it changes in the system is only proposed.
+  - **The grant** (`broker/src/session.rs`). One type and one family of ledger entries: `trust_granted` with
+    `data.covers` (`proposals`, `secret <name>` or `all-secrets`), `trust_revoked` and `trust_expired`. An entry
+    from before, which says no `covers`, is trust in proposals.
+    - A person gives one, to their own agent and no one else's. A person with no agent is refused.
+    - Giving one asks the person's own password; ending one asks none. Why: a grant outlives the moment, and the
+      password keeps a program running as the person from granting quietly on their behalf. From the desktop the
+      broker raises COSMIC's dialog itself (ADR-045 5), and the dialog's text is the broker's: what is granted,
+      for how long, and in capitals when it holds in a session that read untrusted text.
+    - One grant of a thing at a time: a second of the same is refused until the first is revoked or over.
+    - It ends at its time (60 minutes at most for proposals, 480 for secret uses), whatever its entry's `until`
+      says, or when the person ends it. The broker writes `trust_expired` at the next operation that looks.
+    - It covers the one thing it names. A grant of secret uses applies no proposal, and trust in proposals lets
+      no secret be used (`broker/tests/sessions.rs`).
+  - **The waiting ask** (`broker/src/ask.rs`). A thing that needs a person is kept in the broker's state directory
+    under a number, for at most 2 minutes (`torq_wire::secrets::ASK_WAIT_SECONDS`). Today the one such thing is a
+    use of a secret.
+    - No request and no connection waits at the broker. The asker is told its number at once and asks again
+      about it (the secrets daemon, once a second). As first designed the request itself waited; that held one
+      of the four connections the socket gives an account, and two agents' waiting uses refused everyone's.
+    - Only the person the agent serves answers. The socket's gate takes the person from the broker's own record
+      of the ask and the caller from the kernel (`SO_PEERCRED`); the broker checks the name again. An
+      administrator is not asked in their place, and the agent's accounts never answer.
+    - The first answer stands. With none in 2 minutes the thing is refused.
+    - Each asked use has exactly one entry: `secret_use_approved`, `secret_use_denied` or
+      `secret_use_timed_out`, with who answered and where (`dialog` or `terminal`). Where is the word of the
+      program that sent the answer, run as the person, and is not checked; who is the kernel's word.
+    - A one-off answer asks no password: a person's own secrets are already theirs to change without one.
+    - What is kept of an ask is in two parts that never mix. The broker's facts: the person, the agent account
+      and the account that called (the agent's, or the resident's), whose secret and its name, the host, HTTPS
+      or SSH, the session, and whether that session read untrusted text. And the agent's own words: one line
+      of at most 200 characters, its control and bidirectional characters taken out (torq-wire's cleaning). An
+      answer names the number, so it acts on the facts. The agent's words are never in the ledger.
+    - Against a flood of asks: at most 3 uses of one agent wait at once, across both its accounts, and one more
+      is refused at once ("3 uses are waiting for you already"); a person is asked at most 10 times about one
+      session, and 30 times an hour about one agent whatever sessions it names (10 of them for uses that name
+      none); and a denial can be for the rest of the session (`secret_use_denied` with `for: session`). A use
+      refused by a limit is on the ledger as refusals were: once for each session and secret (ADR-052, step 2).
+  - **Where a person answers, as built.** At a terminal: `show system secrets waiting`, then
+    `request system secret approve <n>` or `deny <n> [session]`. On the desktop: TorqOS's panel applet
+    (`torq-applet`, `settings/src/applet.rs`), whose popup is the dialog.
+    - Why the popup, and not a window of its own: the applet already runs for the person's whole session and
+      already asks the broker; a popup is one surface, so one dialog at a time is its shape; a window would be a
+      new program with a menu entry and a single-instance name to keep (KNOWN-GAPS 6zzm), and the applet would
+      still be needed to watch and to notify.
+    - The applet asks the broker what waits for the person (`secret-waiting`) every 10 seconds, and every 2
+      while a use is shown; only for a person who has an agent account. Each asking is one request, so one
+      short-lived broker process, which takes the secrets' lock. Its cost has not been measured.
+    - A use that begins to wait gives a notification: fixed words and the broker's facts, never the agent's
+      words. Clicked, it opens the popup. The panel's mark has the warning badge while a use waits, and a press
+      on it opens the same dialog.
+    - The dialog shows the broker's facts first, as rows: the secret and whose it is; HTTPS or SSH and the host;
+      who asked ("your agent" for the resident account, "a coding tool run as your agent" for the agent
+      account); what is known of its session; then the time left. Under a line that says they are the agent's
+      own words and that nothing has checked them, it shows those words: plain text, in a fixed-width font,
+      broken into lines of 30 columns by `torq::app` and not by the widget, each line beginning with a mark.
+      So no line of the agent's can pass for a row.
+    - The buttons: **Allow once** (`secret-approve <n> --where dialog`); **Allow for…**, which sends the grant
+      and, only if it was given, the approval of this use (refused or its password not given, the use still
+      waits and the person is told); **Deny** (`secret-deny <n>`); and **Deny, and don't ask again this
+      session** (`--rest-of-session`), only where the use names a session.
+    - One dialog at a time: the lowest number is shown, with how many others wait, and the next only when that
+      one is over. A use that ends without an answer given there (answered at a terminal, or its time over)
+      gives way to a note that stands alone until it is read.
+    - Every button's message carries the number of the use it was drawn for. A press is taken only for the use
+      shown, not in its first second on the screen (when a use takes another's place, or the popup opens), and
+      not while an answer is on its way. So a click meant for what was there before lands on nothing.
+    - What the dialog says, which buttons it has and what each sends are decided in `torq::app` and tested
+      there (`cli/src/app.rs`, `approval_tests`); the settings crate lays them out.
+  - **Differs from the design note.** "Allow for…" on a use from a session that read untrusted text (every coding
+    tool's) offers only grants that hold there: this one secret for 60 or 480 minutes, in the destructive style
+    with a warning sentence. A use from a clean session is offered: the agent's sessions running now, 60
+    minutes, 480 minutes. The note offered all of them on every use; but a grant that does not say tainted-too
+    would be given, with a password, and the same session's next use would ask all the same. Whether to offer
+    them anyway is the owner's to say (KNOWN-GAPS 6zzs). "This session" is every session of the person's agent
+    running when the grant was given, for 8 hours at most: the broker knows no end of a session.
+  - **Tested, and not.** Broker and torqcli units (`broker/tests/secrets.rs`, `broker/tests/sessions.rs`,
+    `cli/src/app.rs`, `cli/src/secrets.rs`, the grammar's and the completion's tests), each new guard in torqcli
+    seen to fail with it broken. `tests/secrets.nix` (the asks, the answers, the time-out, the limits, a grant
+    at a terminal) and `tests/desktop.nix` (the applet sees a waiting use and raises its notification; the
+    answer the dialog sends is recorded as the dialog's) are written and have not run. The dialog has been
+    type-checked only: it has not been drawn or pressed on any machine, and no test clicks in the panel.
+    Whether COSMIC shows a popup the applet opens by itself, for a clicked notification, has not been tried.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed
@@ -2957,8 +3056,8 @@ vouches for, that only proposes, every change ledgered and undone in one command
     for the tests alone), uses it, and looks for it in every file of the machine; `tests/desktop.nix` has the
     non-dumpable client's approval. Both written, not yet run. The page itself has no test: nothing drives
     the window (KNOWN-GAPS 6zzr).
-- **Amended 2026-11-12 — whose agent, with one agent per person (ADR-051 3; the approval design's part 1,
-  `docs/DESIGN-agent-approval.md`, built on `work/agents`):** `torq-agent` in a person's own rules means that person's
+- **Amended 2026-11-12 — whose agent, with one agent per person (ADR-051 3; the approval design's part 1, a note
+  since replaced by ADR-051's amendment of 2026-11-13; built on `work/agents`):** `torq-agent` in a person's own rules means that person's
   own agent, both of its accounts (`torq-agent-<person>` and `torq-resident-<person>`, by the broker's map), and no
   other person's. The system's rules name each agent that may use a secret by its account (`actors [
   torq-agent-alice ]`, `request system secret allow <name> agent alice`); the bare word is refused there, as
@@ -2973,6 +3072,86 @@ vouches for, that only proposes, every change ledgered and undone in one command
   The Secrets page (step 5) follows it: a person's own secret offers their own agent, as before; a system
   secret shows each person's agent it names, each with the line that takes it back, offers the person's own,
   and leaves anyone else's to the command line (`allow <name> agent <person>`).
+- **Amended 2026-11-13 — step 4 built: when a use asks, what a grant of secret uses covers, and taint (the owner,
+  2026-11-12: "use your rec", and for taint both the recommendation and its second alternative). Amends Decision
+  4; the mechanism is ADR-051's (its amendment of this day).** What the amendment of 2026-11-12 said was not
+  built, is: an agent's use that needs a person now waits for one, and is no longer refused.
+  - **Who is asked:** the person the agent serves, and only them (ADR-051). For a system secret too: the
+    administrator decided that the agent may use it at all, by naming its account in the rule, and the person
+    running the agent approves each use.
+  - **When a use asks** (`broker/src/secrets.rs`, `asks`), where no grant covers it: the rule says `each-use`; or
+    it says `first-use` and this is the first use in the session; or the use names no session; or its session
+    read untrusted text. A person's own use never asks. Every program run as `torq-agent-<person>` starts its
+    session tainted (ADR-051 step 5), so a coding tool's use always asks unless a grant or the rule says
+    otherwise, below.
+  - **The wait:** 2 minutes. The HTTPS request or the SSH signature waits with it, at the daemon, which asks the
+    broker about the use's number once a second and holds no connection meanwhile; at most 24 uses wait at the
+    daemon at once. An approved use is judged again as things stand when it comes back for its answer (its rule,
+    its host, whether its session has since read untrusted text) and is let through once.
+  - **What a person can let their own agent use without asking** (a grant, ADR-051; their password):
+
+    | What | Command | How long |
+    |---|---|---|
+    | One secret, in the agent's sessions running now | `request system secret allow <name> session` | until those sessions are 8 hours old |
+    | One secret, for a time | `request system secret allow <name> for <minutes> [tainted-too]` | 1 to 480 minutes |
+    | All their own secrets, for a time | `request system secret allow all for <minutes>` | 1 to 480 minutes |
+    | One secret, always | the rule's `approve never`, or `never-even-tainted` (below): a commit to their rules | until they change it |
+
+    `user <you>` after the first two names a secret of the person's own; without it, a system secret whose rule
+    names their agent. Seen with `show system secrets allowed` and on the Secrets page; ended with
+    `request system secret allow revoke [<name>|all]`, there or at a terminal, or at its time. By name, that
+    line ends what the person allowed for every secret of the name, their own and the system's. With no name or
+    `all`, it ends every grant of secret uses they gave. No line ends the grant of all their own secrets alone.
+  - **What a grant never covers:** anything that changes the system, which stays a proposal applied by a person;
+    a secret whose rule does not name this agent (a grant widens no rule, and is refused, saying so); another
+    person's secrets or another person's agent; a host or an operation the rule does not name; reading a value
+    back, setting one or deleting one. A grant of all covers the person's own secrets and never a system one,
+    is for minutes and never for a session. A denial for the rest of a session holds against a grant given
+    after it, until that session is over.
+  - **Taint, the owner's two decisions (2026-11-12).** Decision 4 said a tainted session needs approval for every
+    use, whatever the rule says. That stands except where a person says otherwise in one of two ways, each of
+    one named secret, each with their password, and neither ever for all secrets.
+    1. **A grant that says `tainted-too`:** one named secret, for minutes (1 to 480), not for a session. It is
+       shown in capitals at the terminal and in the destructive style on the desktop, and its entry says
+       `tainted_too`. An entry that says it of all secrets is not honoured. Why: every coding tool is tainted from
+       its first request, so without this no blanket approval ever reached Claude Code's uses, which is what the
+       owner asked for.
+    2. **The rule's `never-even-tainted`**, standing: `request system secret approve <name> never-even-tainted
+       user <you>`, in a person's own rules only (the system's rules cannot say it). The commit that newly says
+       it asks their password, though their own rules otherwise change without one; the dialog and torqcli say
+       which secret and what it will do in the broker's words, ahead of the reason the change gives. Session
+       trust never applies such a change, and an undo that would bring the word back is refused. The secret is
+       marked wherever it is listed. It holds until they change it, so a person who works with a coding tool
+       does not grant again every 8 hours.
+
+    What still holds under both: the value goes only to the rule's hosts and is never in the agent's hands. A
+    prompt injection can then spend the credential at those hosts, as far as the credential reaches there, so
+    a narrow credential stays the person's lever (Decision 3). Not taken: taint always asks, whatever is granted.
+    It is safer against injection, but under it a coding tool's uses could never be approved in advance.
+  - **Whose agent, the reasons** (the amendment of 2026-11-12 has the rule). A person's `torq-agent` means both
+    accounts of their agent because the person sees one agent; what differs between the resident agent and a
+    coding tool is taint, not a second name. A system rule names each agent's account because a system
+    credential is the administrator's to lend: "every agent" would hand it to the agents of people added later,
+    with no one deciding to. Naming a person in `actors` is still that person's own use. A system rule that
+    still says the bare word fails to parse and says what to write instead; nothing is migrated by itself, as
+    there is no install base (the owner, 2026-11-12).
+  - **What is recorded:** each asked use once (ADR-051: approved, denied or timed out, by whom and where). A use
+    that goes under a grant names it: the agent's first use of a secret in each session under each grant is
+    `secret_first_use` with the grant's number. A use no one is asked about is on the ledger as before, the
+    first in each session. The daemon's own log has every use. Never the value, and never the agent's words.
+  - **The Secrets page** (step 5), as it is now: for the chosen secret, each grant that covers it (whose agent,
+    its end, and in the destructive style that it holds even from a session that read untrusted text), a
+    person's own with the torqcli line that ends it and a button that runs it; a grant of all their own
+    secrets once, at the top, with the line that ends everything they allowed; a secret whose rule is
+    `never-even-tainted` marked in the same style, and for a person's own secret that rule offered as torqcli's
+    line. Its caption no longer says the asking is not built. The applet's dialog is ADR-051's.
+  - **Limits, said plainly:** KNOWN-GAPS 6zzs. Among them: the resident agent, whose sessions can start clean,
+    has no tool that sends HTTPS or signs, so today every agent use that reaches the daemon is a coding tool's
+    or `torq agent run`'s; the agent's own words reach the person for HTTPS (`X-Torq-Reason`) and not for SSH.
+  - **Tested:** `broker/tests/secrets.rs` and the broker's units (each rule of asking, the answers, the first
+    answer, the time-out, the limits at their numbers, the grants and what they never cover, both taint
+    decisions); torqcli's units. `tests/secrets.nix` states the same at the socket and the terminal on a real
+    daemon and host, and `tests/desktop.nix` the applet; their edits of 2026-11-13 have not run.
 
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 
