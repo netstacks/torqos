@@ -625,8 +625,14 @@ Its §5 lists claims without a test.
    paths, each checked to be in the installer's store, and the registration) is read before the write
    too, 2026-11-13, `install.rs` `what_is_carried_is_checked_before_the_write`. What can still fail
    after the write is what needs the new disk: reading its partitions, mounting it, writing the files,
-   copying the store paths (a full disk). The disk is then cleared again, and the message says whether
-   it was or may hold part of TorqOS. And a disk's model is shown without
+   copying the store paths (a full disk). The tools those steps run and a place to mount are now checked
+   before the write too (2026-11-14, `install.rs` `ready_for_after`, tests
+   `the_tools_after_the_write_are_checked_before_it`). The disk is then cleared again, and the message
+   says plainly whether it was cleared (it holds no system) or may hold part of TorqOS (do not start
+   from it), and that the installer starts over and choosing the disk again is safe, as a new install
+   erases the whole disk (`after_failure`, test `a_failure_after_the_write_says_what_state_the_disk_is_in`).
+   Not checkable before: whether the new root file system has room for the carried paths, and whether
+   the kernel can mount ext4 and btrfs (a module not loaded yet shows in no list). And a disk's model is shown without
    control characters or direction overrides, so an escape sequence in a USB disk's INQUIRY string
    cannot redraw the list: `install.rs` `a_model_cannot_redraw_the_console`.) And the installer does not ignore SIGINT, SIGQUIT
    or SIGTERM itself (Rust has no safe way without a new crate): with the console's signal keys
