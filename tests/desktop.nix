@@ -273,7 +273,10 @@ pkgs.testers.runNixOSTest {
         assert len(waiting) == 1 and waiting[0]["facts"]["secret"] == "gh" and waiting[0]["facts"]["person"] == "alice" and waiting[0]["facts"]["tainted"], waiting
         n = waiting[0]["n"]
         # The applet has seen that very use (it asks every 10 seconds), and its notification went out without an
-        # error. (grep -c reads the whole journal: a grep that left early would break the pipe.)
+        # error. What the applet writes to its standard error is in the journal: cosmic-panel, which starts it,
+        # writes each line there under the applet's name ("cosmic-panel[…]: org.torqos.Applet: …"), as seen on
+        # the laptop's own journal for another applet's lines.
+        # (grep -c reads the whole journal: a grep that left early would break the pipe.)
         machine.wait_until_succeeds(f"journalctl -b --no-pager | grep -c 'torq-applet: use {n} of a secret waits for an answer' > /dev/null", timeout=60)
         machine.sleep(5)
         machine.screenshot("use-waiting")
@@ -283,10 +286,11 @@ pkgs.testers.runNixOSTest {
         assert code == 1, (code, v)
         code, v = in_her_session({"args": ["--json", "secret-approve", str(n), "--where", "dialog"]})
         assert code == 0 and v["kind"] == "secret_use_approved" and v["approved_by"] == "alice" and v["data"]["where"] == "dialog" and v["data"]["ask"] == n, (code, v)
-        # The use is let go: whatever the daemon then answers, it is not the broker's refusal (403).
+        # The use is let go, and the daemon tries to send it: there is no such host, which is the daemon's 502 (a
+        # send that failed), where the broker's refusal would have been its 403.
         machine.wait_until_succeeds("test -s /tmp/use.status", timeout=60)
         status, body = machine.succeed("cat /tmp/use.status").strip(), machine.succeed("cat /tmp/use.body")
-        assert status != "403" and "desk-token-1" not in body, (status, body)
+        assert status == "502" and "desk-token-1" not in body, (status, body)
         code, w = in_her_session({"args": ["--json", "secret-waiting"]})
         assert code == 0 and w["waiting"] == [], (code, w)
         ledger = machine.succeed("torq-broker log")

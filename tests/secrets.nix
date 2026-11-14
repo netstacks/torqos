@@ -345,8 +345,16 @@ pkgs.testers.runNixOSTest {
         tainted_too = {"args": ["--json", "secret-grant", "--name", "gh", "--user", "dev", "--minutes", "5", "--tainted-too"], "password": PASSWORD}
         code, v = ask("dev", tainted_too)
         assert code == 1 and "revoke it first" in v["error"], (code, v)
-        # Ended, by name and with no password; a secret dev never granted has nothing to end.
-        out = machine.succeed("su - dev -c 'torqcli request system secret allow revoke gh'")
+        # Ended, by name and with no password, as dev's own (`user dev`): with no `user` the line names the system's
+        # secret, and torqcli says the line dev meant; at the socket, the system's of that name is another grant,
+        # of which dev has none, and another person's is refused. A secret dev never granted has nothing to end.
+        machine.fail("su - dev -c 'torqcli request system secret allow revoke gh'")
+        code, v = ask("dev", {"args": ["--json", "secret-revoke", "--name", "gh"]})
+        assert code == 0 and v["revoked"] == [], (code, v)
+        code, v = ask("sam", {"args": ["--json", "secret-revoke", "--name", "gh", "--user", "dev"]})
+        assert code == 1, (code, v)
+        assert [g["seq"] for g in grants()] == [plain["seq"]], grants()
+        out = machine.succeed("su - dev -c 'torqcli request system secret allow revoke gh user dev'")
         assert "revoked" in out, out
         ended_grants = entries("trust_revoked")
         assert ended_grants[-1]["data"]["grant"] == plain["seq"] and ended_grants[-1]["approved_by"] == "dev", ended_grants[-1]
@@ -390,7 +398,15 @@ pkgs.testers.runNixOSTest {
         assert code == 0, (code, d)
         status, body = ended("torq-agent-sam", tag="-g3")
         assert status == 403 and len(requests()) == n + 1, (status, body)
-        # Ended with everything dev allowed: the next use asks again.
+        # A grant of all dev's own secrets beside it, ended alone (`allow all revoke`): the one of gh stays, and the
+        # use still goes through. Then everything dev allowed is ended, and the next use asks again.
+        code, every = ask("dev", {"args": ["--json", "secret-grant", "--all", "--minutes", "5"], "password": PASSWORD})
+        assert code == 0 and every["data"]["covers"] == "all-secrets", (code, every)
+        out = machine.succeed("su - dev -c 'torqcli request system secret allow all revoke'")
+        assert "revoked" in out, out
+        assert [g["seq"] for g in grants()] == [v["seq"]], grants()
+        status, body, _ = use("torq-agent-dev", gh, "-H", f"X-Torq-Session: {s3}")
+        assert status == 200, (status, body)
         out = machine.succeed("su - dev -c 'torqcli request system secret allow revoke all'")
         assert "revoked" in out, out
         assert grants() == []
