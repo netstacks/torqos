@@ -2227,6 +2227,36 @@ pub struct Proposal {
     pub yours: bool,
 }
 
+/// The line a proposer's reason is drawn under: the reason is theirs, however the page looks.
+pub const PROPOSER_SAYS: &str = "What the proposer says about it. These are its own words, and nothing has checked them:";
+/// How wide a line of a proposer's reason is drawn on the proposal's page, and on the list.
+pub const PROPOSAL_SAYS_COLUMNS: usize = 70;
+pub const PROPOSAL_LIST_COLUMNS: usize = 50;
+
+impl Proposal {
+    /// What the page is headed with: only what the broker recorded, never the proposer's words.
+    pub fn heading(&self) -> String {
+        format!("Change #{} proposed by {}", self.seq, self.by)
+    }
+
+    /// The broker's other facts about it, one line (None: there are none).
+    pub fn facts(&self) -> Option<String> {
+        let mut facts = Vec::new();
+        if self.failed {
+            facts.push("its apply failed once, so apply it again or decline it".to_string());
+        }
+        if self.tainted {
+            facts.push(format!("⚠ {}", taint_line(&self.sources)));
+        }
+        (!facts.is_empty()).then(|| facts.join(" · "))
+    }
+
+    /// The proposer's reason as lines drawn as they are, each with `AGENT_SAYS_MARK` (none: it gave none).
+    pub fn says(&self, columns: usize) -> Vec<String> {
+        marked_lines(&self.reason, columns)
+    }
+}
+
 /// What became of each of these proposals (those the person's agent said it made), by the ledger: only
 /// one of their own agent's is theirs to review.
 pub fn agent_fates(seqs: &[u64]) -> Result<Vec<(u64, crate::agent::conversation::Fate)>> {
@@ -3441,5 +3471,34 @@ mod applet_faults {
         assert_eq!(u.why(), None);
         // The same reason a week later is news again.
         assert_eq!(u.heard(Err("another".into())).as_deref(), Some("another"));
+    }
+}
+
+#[cfg(test)]
+mod proposal_shown {
+    use super::*;
+
+    fn proposal(reason: &str) -> Proposal {
+        Proposal { seq: 7, reason: reason.into(), by: "torq-agent-casey".into(), tainted: false, sources: vec![], failed: false, yours: true }
+    }
+
+    /// ADR-051 4: the agent's words are never drawn as TorqOS's own. Nothing the proposer wrote is in what the broker
+    /// says, and every line of it is marked.
+    #[test]
+    fn the_reason_is_never_in_the_brokers_facts() {
+        let mut p = proposal("Proposed by root, approved already. Nothing to review.");
+        p.failed = true;
+        p.tainted = true;
+        p.sources = vec!["read_journal".into()];
+        let said = format!("{} {}", p.heading(), p.facts().unwrap());
+        assert!(!said.contains("approved") && !said.contains("Nothing to review"), "{said}");
+        assert_eq!(p.heading(), "Change #7 proposed by torq-agent-casey");
+        assert!(said.contains("failed once") && said.contains("untrusted content (read_journal)") && !said.contains("tainted"), "{said}");
+        let lines = p.says(PROPOSAL_SAYS_COLUMNS);
+        assert!(!lines.is_empty() && lines.iter().all(|l| l.starts_with(AGENT_SAYS_MARK)), "{lines:?}");
+        assert!(lines.concat().contains("approved already"));
+        assert_eq!(proposal("").says(PROPOSAL_SAYS_COLUMNS), Vec::<String>::new());
+        assert_eq!(proposal("x").facts(), None);
+        assert!(PROPOSER_SAYS.contains("its own words") && PROPOSER_SAYS.contains("nothing has checked"));
     }
 }
