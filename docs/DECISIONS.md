@@ -2705,6 +2705,9 @@ vouches for, that only proposes, every change ledgered and undone in one command
       broker raises COSMIC's dialog itself (ADR-045 5), and the dialog's text is the broker's: what is granted,
       for how long, and in capitals when it holds in a session that read untrusted text.
     - One grant of a thing at a time: a second of the same is refused until the first is revoked or over.
+      Added 2026-11-14: `secret-grant --replace` ends the person's own grant of the same thing in the same step that
+      makes the new one, after every check and the password (so a grant refused, or a password cancelled, leaves the
+      old one as it was). Only the panel's dialog uses it; without it a second grant is still refused.
     - It ends at its time (60 minutes at most for proposals, 480 for secret uses), whatever its entry's `until`
       says, or when the person ends it. The broker writes `trust_expired` at the next operation that looks.
     - It covers the one thing it names. A grant of secret uses applies no proposal, and trust in proposals lets
@@ -2761,9 +2764,10 @@ vouches for, that only proposes, every change ledgered and undone in one command
       button, and the popup has no Enter or default action: nothing allows by default.
     - Where the person already allows the very secret asked about (their own grant of that secret holds, and
       this use asked all the same), the broker would refuse a second grant, and the use has two minutes. The dialog says
-      so with the offers of "Allow for…", and choosing one ends that grant first (no password), then asks for
-      the new one, then approves the use, each only if the one before was done. If the new grant is refused
-      or its password cancelled, the old one is gone, and the note says exactly that. This was chosen over
+      so with the offers of "Allow for…", and choosing one asks the password and sends the grant with `--replace`,
+      which ends the old one in the same step that makes the new one; then it approves the use, each only if the one
+      before was done. If the new grant is refused or its password cancelled, the old one stands, and the note says
+      so (amended 2026-11-14; first built as revoke, then grant, which left the person with neither). This was chosen over
       telling the person which line to type.
     - One dialog at a time: the lowest number is shown, with how many others wait (a line that is always
       there), and the next only when that one is over. What became of a use (the answer given, or that it was
