@@ -80,6 +80,8 @@ repository describes, with its history, but with this machine's own hardware, so
 password. Setup shows what is in the repository (its users, the Nix files it attaches, its SSH
 setting, and whether it turns development mode on) and asks you to confirm, because that
 configuration will run as root on this machine.
+If this machine's hardware needs a driver the installer does not carry, setup says so before the build,
+as it does for a new machine.
 
 ## Limits
 

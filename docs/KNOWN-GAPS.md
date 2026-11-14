@@ -1074,7 +1074,8 @@ Its §5 lists claims without a test.
      `broadcom_sta` the sentence says another thing: that driver is unfree, which TorqOS refuses unless
      told otherwise (`modules/unfree.nix`), so the first build fails with a network or without one
      (2026-11-13, `setup::driver_notice`, unit-tested). Still open of ADR-048
-     5's message: it is not said when adopting, and only a driver is recognised, not everything not carried.
+     5's message: only a driver is recognised, not everything not carried. Adopting says it too (2026-11-13,
+     the same function; its call in `adopt` is not unit-tested).
      The VM test builds change #1 for a machine none of the samples is (a VM, no firmware): 23
      derivations, from the disk alone. Real hardware (firmware, iwd) is proved on the Zenbook.
      A build that fails with no network starts setup over and offers Wi-Fi again (2026-11-13,

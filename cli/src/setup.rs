@@ -393,6 +393,10 @@ fn adopt(a: &Adopting) -> Result<()> {
     let _ = std::fs::remove_file(&file);
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?;
     writeln!(f, "{}", a.hash)?;
+    // The hardware file is this machine's own, so a driver it names is needed whatever the repository holds.
+    if let Some(notice) = driver_notice(&mine) {
+        println!("\n{notice}");
+    }
     println!();
     let ok = {
         let _p = crate::run::Progress::start("Building this machine's system and switching to it");
