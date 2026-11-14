@@ -476,8 +476,12 @@ Its §5 lists claims without a test.
    under a component that sorts first (`com.system76.Aaa`) filled `MAX_KEYS` ahead of the real settings, so every
    sync failed: one component now has at most 200 settings kept (`cli/src/desktop.rs` `MAX_COMPONENT_KEYS`,
    2026-11-12, its test `one_component_cannot_fill_the_limit`), and the rest of it is left alone. Still open,
-   the name being no identity: ten such components fill `MAX_KEYS` as one did, a few large files fill the
-   1 MiB of `MAX_TOTAL` the same way, and the 200 kept are saved as COSMIC's.
+   the name being no identity: the 200 kept are saved as COSMIC's. Components also take turns now
+   (2026-11-13, `local`, test `components_take_turns_at_the_limits`): the settings are kept one from each
+   component in turn, the smaller first within a turn, so ten such components, each with 200 settings or with
+   files as large as one may be, no longer fill `MAX_KEYS` or `MAX_TOTAL` ahead of COSMIC's own. Still open:
+   as many components as the limit (one setting each, or large ones) still fill it, which only a list of
+   the components COSMIC has would stop.
 6zzb. **COSMIC's own settings can be personal, and the saved desktop is readable by every account** (6r; the
    review of work/autosave). Kept on purpose, as the person's desktop, but not harmless: the wallpaper's path
    (`CosmicBackground/v1/all`, a folder in the home), custom shortcuts (`CosmicSettings.Shortcuts/v1/custom`,
