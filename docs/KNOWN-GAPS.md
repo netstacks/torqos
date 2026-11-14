@@ -402,7 +402,7 @@ Its §5 lists claims without a test.
    reset within a login), but not one a signal ended (an abort, a segfault, a kill): read in its source
    (cosmic-panel 1.11, launch-pad 1.0.1), not tested. A panic on the applet's main thread exits it with code 101, so
    it comes back. A panic in one of its own calls (each on a thread of its own, `off`) is answered as that call's
-   error ("the call stopped before it answered"; a notification's own thread excepted: that notification is lost);
+   error ("the call stopped before it answered"; a notification's own thread: a failure or panic is said in the journal and the notification tried once more after 5 s, `app::twice`; a second failure is only in the journal, and the popup still says what it was about);
    one in a library task (tokio's, zbus's executor, iced's SVG
    drawing) is caught by that library, which carries on, as it means to: ending the whole applet on any panic was
    tried and dropped for that reason. A death by a signal (seen only when the panel itself died, which starts its

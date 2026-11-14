@@ -2339,6 +2339,31 @@ impl Told {
     }
 }
 
+/// Run `attempt`, and once more after `pause` if it failed or panicked. Each failure goes to `say` (the journal),
+/// with which try it was, so a notification that could not be shown is never lost without a word. The last failure
+/// is returned. A second try may show a notification twice when the first failed after the daemon had shown it:
+/// that is the lesser fault.
+pub fn twice<T>(pause: std::time::Duration, mut attempt: impl FnMut() -> Result<T, String>, say: impl Fn(&str)) -> Result<T, String> {
+    let mut run = || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut attempt)).unwrap_or_else(|p| {
+            let what = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "no reason given".into());
+            Err(format!("it panicked: {what}"))
+        })
+    };
+    match run() {
+        Err(first) => {
+            say(&format!("failed ({first}); trying once more"));
+            std::thread::sleep(pause);
+            let second = run();
+            if let Err(e) = &second {
+                say(&format!("failed again ({e}); given up"));
+            }
+            second
+        }
+        done => done,
+    }
+}
+
 /// The person's agent's window (ADR-051 4): one a person, so this raises it if it is open.
 pub fn open_agent() -> Result<()> {
     spawn("torq-agent-ui", &[])
@@ -3500,5 +3525,38 @@ mod proposal_shown {
         assert_eq!(proposal("").says(PROPOSAL_SAYS_COLUMNS), Vec::<String>::new());
         assert_eq!(proposal("x").facts(), None);
         assert!(PROPOSER_SAYS.contains("its own words") && PROPOSER_SAYS.contains("nothing has checked"));
+    }
+}
+
+#[cfg(test)]
+mod tried_twice {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::time::Duration;
+
+    #[test]
+    fn a_failed_or_panicked_try_is_said_and_tried_once_more() {
+        let said = RefCell::new(Vec::new());
+        let say = |s: &str| said.borrow_mut().push(s.to_string());
+        let tries = Cell::new(0);
+        // Fails once, then works: said once, result is the second's.
+        let r = twice(Duration::ZERO, || { tries.set(tries.get() + 1); if tries.get() == 1 { Err("no bus".into()) } else { Ok(5) } }, say);
+        assert_eq!((r, tries.get(), said.borrow().len()), (Ok(5), 2, 1));
+        // Works at once: not said, not repeated.
+        said.borrow_mut().clear();
+        tries.set(0);
+        assert_eq!(twice(Duration::ZERO, || { tries.set(tries.get() + 1); Ok::<_, String>(1) }, say), Ok(1));
+        assert_eq!((tries.get(), said.borrow().len()), (1, 0));
+        // A panic is a failure like another: said with its words, tried again, and the thread lives.
+        tries.set(0);
+        let r: Result<u8, String> = twice(Duration::ZERO, || { tries.set(tries.get() + 1); if tries.get() == 1 { panic!("zbus broke") } else { Ok(2) } }, say);
+        assert_eq!(r, Ok(2));
+        assert!(said.borrow()[0].contains("it panicked: zbus broke"), "{:?}", said.borrow());
+        // Failing twice: both said, the last returned, and no third try.
+        said.borrow_mut().clear();
+        tries.set(0);
+        let r: Result<u8, String> = twice(Duration::ZERO, || { tries.set(tries.get() + 1); Err(format!("try {}", tries.get())) }, say);
+        assert_eq!((r, tries.get(), said.borrow().len()), (Err("try 2".into()), 2, 2));
+        assert!(said.borrow()[1].contains("given up"));
     }
 }

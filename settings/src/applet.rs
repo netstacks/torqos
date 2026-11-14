@@ -164,10 +164,13 @@ fn mark(badge: Option<Srgba>) -> icon::Handle {
 }
 
 /// A notification, and what clicking it opens (ADR-049 4): on a thread of its own, which waits for it to
-/// be clicked or closed.
+/// be clicked or closed. One that fails or panics is said in the journal and tried once more a few seconds later
+/// (`app::twice`); if that fails too, the journal has it. What the notification is about is also in the panel's popup.
 fn notify(summary: String, body: String, page: &'static str) {
     std::thread::spawn(move || {
-        let _ = send(&summary, &body, page);
+        let said = |what: &str| eprintln!("torq-applet: the notification \"{summary}\": {what}");
+        // The result is the last failure, which `twice` has already said.
+        drop(app::twice(Duration::from_secs(5), || send(&summary, &body, page).map_err(|e| e.to_string()), said));
     });
 }
 
