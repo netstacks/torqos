@@ -108,11 +108,8 @@ struct Window {
     note: Option<(String, bool)>,
     /// What an entry point attached (an alarm, a crash's summary…): sent with the next question, and then gone.
     attached: Option<String>,
-    /// torqcli's question about a Decline, waiting for the person's answer.
-    declining: Option<(String, agentkit::Reply)>,
-    /// The proposal whose Decline is in flight, from the press until it ends: one at a time, and only its own end
-    /// clears its question.
-    decline_seq: Option<u64>,
+    /// The Decline in flight and torqcli's question for it, waiting for the person's answer.
+    declining: torq::app::DeclineFlow<agentkit::Reply>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +191,7 @@ impl Window {
             let mut line = widget::row::with_capacity(2).align_y(Alignment::Center).spacing(spacing.space_xs).push(widget::text::body(row.text).width(Length::Fill));
             if row.review {
                 line = line.push(widget::button::standard("Review").on_press(Message::Review));
-                line = line.push(widget::button::destructive("Decline…").on_press_maybe(self.decline_seq.is_none().then_some(Message::Decline(row.seq))));
+                line = line.push(widget::button::destructive("Decline…").on_press_maybe((!self.declining.busy()).then_some(Message::Decline(row.seq))));
             }
             col = col.push(line);
         }
@@ -218,7 +215,7 @@ impl cosmic::Application for Window {
     }
 
     fn init(core: cosmic::Core, flags: Flags) -> (Self, Task<cosmic::Action<Message>>) {
-        let mut app = Window { core, client: Client::mine(), reach: Ok(None), brain: None, fates: vec![], remembered: None, looking: false, talk: Conversation::default(), question: String::new(), forgetting: false, note: None, attached: None, declining: None, decline_seq: None };
+        let mut app = Window { core, client: Client::mine(), reach: Ok(None), brain: None, fates: vec![], remembered: None, looking: false, talk: Conversation::default(), question: String::new(), forgetting: false, note: None, attached: None, declining: Default::default() };
         let title = match app.core.main_window_id() {
             Some(id) => app.set_window_title("TorqOS Agent".into(), id),
             None => Task::none(),
@@ -253,7 +250,7 @@ impl cosmic::Application for Window {
     /// Forget asks first: the agent's memory of the conversation is erased for good.
     fn dialog(&self) -> Option<Element<'_, Message>> {
         // A Decline's question, as torqcli asks it: the proposal, then yes or no.
-        if let Some((q, _)) = &self.declining {
+        if let Some(q) = self.declining.question() {
             let body = widget::container(widget::scrollable(widget::text::monotext(q.trim_end().to_string()).width(Length::Fill))).max_height(360.0);
             return Some(
                 widget::dialog()
@@ -308,11 +305,8 @@ impl cosmic::Application for Window {
             }
             Message::Question(s) => self.question = s,
             Message::Ask => {
-                let q = self.question.trim().to_string();
                 let Ok(client) = self.client.clone() else { return Task::none() };
-                if q.is_empty() || self.working() {
-                    return Task::none();
-                }
+                let Some(q) = torq::app::question_to_ask(&self.question, self.working()) else { return Task::none() };
                 self.question.clear();
                 self.note = None;
                 self.talk.asked(&q);
@@ -361,24 +355,20 @@ impl cosmic::Application for Window {
             Message::Review => self.said_if_not(torq::app::open_settings("proposals")),
             Message::Unattach => self.attached = None,
             Message::Decline(seq) => {
-                if self.decline_seq.is_some() {
+                if !self.declining.press(seq) {
                     return Task::none();
                 }
-                self.decline_seq = Some(seq);
                 self.note = None;
                 return agentkit::decline(seq, Message::DeclineAsked, Message::Declined);
             }
-            Message::DeclineAsked(seq, q, reply) if self.decline_seq == Some(seq) => self.declining = Some((q, reply)),
-            Message::DeclineAsked(..) => {}
+            Message::DeclineAsked(seq, q, reply) => self.declining.asked(seq, q, reply),
             Message::Answer(yes) => {
-                if let Some((_, reply)) = self.declining.take() {
+                if let Some(reply) = self.declining.answered() {
                     reply.send(yes);
                 }
             }
-            Message::Declined(seq, _) if self.decline_seq != Some(seq) => {}
+            Message::Declined(seq, _) if !self.declining.ended(seq) => {}
             Message::Declined(_, r) => {
-                self.decline_seq = None;
-                self.declining = None;
                 self.note = Some(match r {
                     Ok(said) => (conversation::shown(said.trim(), 600), false),
                     Err(e) => (e, true),

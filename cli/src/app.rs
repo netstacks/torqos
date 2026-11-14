@@ -2364,6 +2364,141 @@ pub fn twice<T>(pause: std::time::Duration, mut attempt: impl FnMut() -> Result<
     }
 }
 
+// ── What the panel, the agent's applet and window and the Secrets page decide (they only draw it) ──
+
+/// What the panel shows: the first that holds (ADR-049 2).
+pub enum Panel<'a> {
+    Confirm(&'a Confirm),
+    Needs(&'a Needs),
+    Alarm(&'a str),
+    /// Proposals waiting, and how many of them came from a session that read untrusted text.
+    Waiting(usize, usize),
+    Draft,
+    Well,
+    Unknown,
+}
+
+impl<'a> Panel<'a> {
+    /// The state of a look at the machine (None, or a look that failed: not known).
+    pub fn of(glance: &'a Option<Result<Glance, String>>) -> Panel<'a> {
+        let Some(Ok(g)) = glance else { return Panel::Unknown };
+        if let Some(c) = &g.confirm {
+            return Panel::Confirm(c);
+        }
+        if matches!(g.needs, Needs::LogOut(_) | Needs::Restart(_)) {
+            return Panel::Needs(&g.needs);
+        }
+        if let Some(a) = &g.alarm {
+            return Panel::Alarm(a);
+        }
+        if g.waiting.0 > 0 {
+            return Panel::Waiting(g.waiting.0, g.waiting.1);
+        }
+        if g.draft {
+            return Panel::Draft;
+        }
+        Panel::Well
+    }
+
+    /// What it says when it starts: summary, body, and the page of TorqOS Settings that has the detail.
+    pub fn notice(&self) -> Option<(String, String, &'static str)> {
+        match self {
+            Panel::Confirm(c) => Some((format!("Confirm change #{}", c.seq), format!("It rolls back at {} unless you confirm it.", c.deadline), "overview")),
+            Panel::Needs(n) => Some((match n { Needs::Restart(_) => "Restart needed".to_string(), _ => "Log out needed".to_string() }, n.line().unwrap_or_default(), "overview")),
+            Panel::Alarm(a) => Some(("TorqOS needs a look".to_string(), a.to_string(), "overview")),
+            Panel::Waiting(n, t) => Some((
+                if *n == 1 { "A proposal is waiting".to_string() } else { format!("{n} proposals are waiting") },
+                if *t > 0 { format!("{t} came from a session that read untrusted text.") } else { "Review it in TorqOS Settings.".to_string() },
+                "proposals",
+            )),
+            Panel::Draft | Panel::Well | Panel::Unknown => None,
+        }
+    }
+}
+
+/// The question to put to the agent from what a person typed (None: nothing is asked: it is empty, or the agent
+/// is working and takes one question at a time).
+pub fn question_to_ask(typed: &str, working: bool) -> Option<String> {
+    let q = typed.trim();
+    (!q.is_empty() && !working).then(|| q.to_string())
+}
+
+/// A Decline in flight, as the agent's applet and its window both run one: one at a time, torqcli's question held
+/// for the person's answer (`R`, the way back to torqcli) and given only to the Decline it came from.
+#[derive(Debug)]
+pub struct DeclineFlow<R> {
+    seq: Option<u64>,
+    asked: Option<(String, R)>,
+}
+
+impl<R> Default for DeclineFlow<R> {
+    fn default() -> Self {
+        DeclineFlow { seq: None, asked: None }
+    }
+}
+
+impl<R> DeclineFlow<R> {
+    /// A press on Decline for `seq`: whether it starts one. Not while another is in flight.
+    pub fn press(&mut self, seq: u64) -> bool {
+        let free = self.seq.is_none();
+        if free {
+            self.seq = Some(seq);
+        }
+        free
+    }
+
+    /// Whether a Decline is in flight (its buttons are drawn dead meanwhile).
+    pub fn busy(&self) -> bool {
+        self.seq.is_some()
+    }
+
+    /// torqcli's question for `seq`: kept only if `seq` is the one in flight.
+    pub fn asked(&mut self, seq: u64, question: String, back: R) {
+        if self.seq == Some(seq) {
+            self.asked = Some((question, back));
+        }
+    }
+
+    /// The question waiting for the person's answer.
+    pub fn question(&self) -> Option<&str> {
+        self.asked.as_ref().map(|(q, _)| q.as_str())
+    }
+
+    /// The person's answer: the way back to torqcli, once.
+    pub fn answered(&mut self) -> Option<R> {
+        self.asked.take().map(|(_, back)| back)
+    }
+
+    /// `seq`'s Decline ended: whether it is the one in flight (so its end is taken, and says what it said). Only its
+    /// own end clears the question.
+    pub fn ended(&mut self, seq: u64) -> bool {
+        let own = self.seq == Some(seq);
+        if own {
+            self.seq = None;
+            self.asked = None;
+        }
+        own
+    }
+}
+
+/// The secret the Secrets page acts on: whose (None: the system's) and its name. The one chosen from the list, or a
+/// new one: the person's own if they said so (and the system knows who they are), else the system's.
+pub fn secret_target(chosen: Option<&(Option<String>, String)>, mine: bool, me: Option<&str>, typed_name: &str) -> (Option<String>, String) {
+    match chosen {
+        Some(w) => w.clone(),
+        None => (if mine { me.map(String::from) } else { None }, typed_name.trim().to_string()),
+    }
+}
+
+/// "the system's secret ci", "your secret gh", "sam's secret gh".
+pub fn secret_whose(user: Option<&str>, name: &str, me: Option<&str>) -> String {
+    match user {
+        None => format!("the system's secret {name}"),
+        Some(u) if Some(u) == me => format!("your secret {name}"),
+        Some(u) => format!("{u}'s secret {name}"),
+    }
+}
+
 /// The person's agent's window (ADR-051 4): one a person, so this raises it if it is open.
 pub fn open_agent() -> Result<()> {
     spawn("torq-agent-ui", &[])
@@ -3558,5 +3693,86 @@ mod tried_twice {
         let r: Result<u8, String> = twice(Duration::ZERO, || { tries.set(tries.get() + 1); Err(format!("try {}", tries.get())) }, say);
         assert_eq!((r, tries.get(), said.borrow().len()), (Err("try 2".into()), 2, 2));
         assert!(said.borrow()[1].contains("given up"));
+    }
+}
+
+#[cfg(test)]
+mod moved_decisions {
+    use super::*;
+
+    fn glance() -> Glance {
+        Glance { version: "0".into(), well: true, alarm: None, confirm: None, draft: false, needs: Needs::Nothing, waiting: (0, 0), last: None }
+    }
+
+    #[test]
+    fn the_panel_shows_the_first_that_holds_and_says_untrusted_text_plainly() {
+        let name = |g: &Option<Result<Glance, String>>| match Panel::of(g) {
+            Panel::Confirm(_) => "confirm", Panel::Needs(_) => "needs", Panel::Alarm(_) => "alarm", Panel::Waiting(..) => "waiting", Panel::Draft => "draft", Panel::Well => "well", Panel::Unknown => "unknown",
+        };
+        assert_eq!(name(&None), "unknown");
+        assert_eq!(name(&Some(Err("down".into()))), "unknown");
+        let mut g = glance();
+        assert_eq!(name(&Some(Ok(g.clone()))), "well");
+        g.draft = true;
+        assert_eq!(name(&Some(Ok(g.clone()))), "draft");
+        g.waiting = (2, 1);
+        assert_eq!(name(&Some(Ok(g.clone()))), "waiting");
+        g.alarm = Some("disk".into());
+        assert_eq!(name(&Some(Ok(g.clone()))), "alarm");
+        g.needs = Needs::NextStart(vec!["x"]);
+        assert_eq!(name(&Some(Ok(g.clone()))), "alarm", "what waits for the next start asks nothing");
+        g.needs = Needs::LogOut(vec!["panel"]);
+        assert_eq!(name(&Some(Ok(g.clone()))), "needs");
+        g.confirm = Some(Confirm { seq: 9, deadline: "12:00".into(), at: None });
+        assert_eq!(name(&Some(Ok(g.clone()))), "confirm");
+        assert_eq!(Panel::of(&Some(Ok(g.clone()))).notice(), Some(("Confirm change #9".into(), "It rolls back at 12:00 unless you confirm it.".into(), "overview")));
+        g.confirm = None;
+        g.needs = Needs::Nothing;
+        g.alarm = None;
+        let (summary, body, page) = Panel::of(&Some(Ok(g.clone()))).notice().unwrap();
+        assert_eq!((summary.as_str(), body.as_str(), page), ("2 proposals are waiting", "1 came from a session that read untrusted text.", "proposals"));
+        g.waiting = (1, 0);
+        assert_eq!(Panel::of(&Some(Ok(g.clone()))).notice().unwrap().0, "A proposal is waiting");
+        g.waiting = (0, 0);
+        assert_eq!(Panel::of(&Some(Ok(g))).notice(), None);
+    }
+
+    #[test]
+    fn a_question_is_what_was_typed_and_only_when_the_agent_is_free() {
+        assert_eq!(question_to_ask("  what is up \n", false).as_deref(), Some("what is up"));
+        assert_eq!(question_to_ask("  \n", false), None);
+        assert_eq!(question_to_ask("hello", true), None);
+    }
+
+    #[test]
+    fn a_decline_runs_one_at_a_time_and_only_its_own_answer_is_taken() {
+        let mut d: DeclineFlow<&str> = DeclineFlow::default();
+        assert!(d.press(4) && d.busy());
+        assert!(!d.press(5), "a second press while one is in flight starts nothing");
+        d.asked(5, "decline #5?".into(), "back5");
+        assert_eq!(d.question(), None, "a question for another Decline is not shown");
+        d.asked(4, "decline #4?".into(), "back4");
+        assert_eq!(d.question(), Some("decline #4?"));
+        assert!(!d.ended(5));
+        assert_eq!(d.question(), Some("decline #4?"), "another's end leaves the question");
+        assert_eq!(d.answered(), Some("back4"));
+        assert_eq!(d.answered(), None, "an answer goes back once");
+        d.asked(4, "again".into(), "back4b");
+        assert!(d.ended(4) && !d.busy() && d.question().is_none());
+        assert!(d.press(5));
+    }
+
+    #[test]
+    fn the_secret_the_page_acts_on_and_whose_it_is_said_to_be() {
+        let chosen = (Some("sam".to_string()), "gh".to_string());
+        assert_eq!(secret_target(Some(&chosen), true, Some("cwdavis"), "other"), chosen, "the chosen one, whatever is typed");
+        assert_eq!(secret_target(None, true, Some("cwdavis"), "  ci "), (Some("cwdavis".into()), "ci".into()));
+        assert_eq!(secret_target(None, false, Some("cwdavis"), "ci"), (None, "ci".into()));
+        // Who they are not known: the system's, which the broker asks a password for.
+        assert_eq!(secret_target(None, true, None, "ci"), (None, "ci".into()));
+        assert_eq!(secret_whose(None, "ci", Some("me")), "the system's secret ci");
+        assert_eq!(secret_whose(Some("me"), "gh", Some("me")), "your secret gh");
+        assert_eq!(secret_whose(Some("sam"), "gh", Some("me")), "sam's secret gh");
+        assert_eq!(secret_whose(Some("me"), "gh", None), "me's secret gh");
     }
 }

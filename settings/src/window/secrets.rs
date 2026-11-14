@@ -91,10 +91,7 @@ impl Default for State {
 impl State {
     /// The secret the page acts on: whose, and its name (empty: a new one not named yet).
     fn which(&self) -> Which {
-        match &self.chosen {
-            Some(w) => w.clone(),
-            None => (if self.mine { self.me.clone() } else { None }, self.name.trim().to_string()),
-        }
+        app::secret_target(self.chosen.as_ref(), self.mine, self.me.as_deref(), &self.name)
     }
 
     /// The chosen secret as the list has it.
@@ -105,11 +102,7 @@ impl State {
 
     /// "the system's secret ci", "your secret gh", "sam's secret gh".
     fn whose(&self, (user, name): &Which) -> String {
-        match user {
-            None => format!("the system's secret {name}"),
-            Some(u) if Some(u) == self.me.as_ref() => format!("your secret {name}"),
-            Some(u) => format!("{u}'s secret {name}"),
-        }
+        app::secret_whose(user.as_deref(), name, self.me.as_deref())
     }
 }
 
