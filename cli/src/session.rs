@@ -461,11 +461,14 @@ pub fn words(line: &str) -> Result<Vec<String>> {
 
 /// Where the line's first pipe is: a `|` word outside a list's brackets. A list value that is exactly
 /// `|` is written inside them (`set … [ "|" ]`), because a word does not say whether it was quoted.
+/// Only a `set` or `delete` line (after `top`, if it has one) has lists: elsewhere a `[` is text
+/// (`help "[" | grep x`) and a pipe after it is a pipe.
 pub fn pipe_at(w: &[String]) -> Option<usize> {
+    let lists = matches!(w.iter().find(|x| *x != "top").map(String::as_str), Some("set" | "delete"));
     let mut open = false;
     for (i, x) in w.iter().enumerate() {
         match x.as_str() {
-            "[" if !open => open = true,
+            "[" if lists && !open => open = true,
             "]" => open = false,
             "|" if !open => return Some(i),
             _ => {}
@@ -3391,6 +3394,26 @@ mod tests {
         assert_eq!(words(r#"set a "say \"hi\"""#).unwrap(), ["set", "a", "say \"hi\""]);
         assert_eq!(words(r#"set a """#).unwrap(), ["set", "a", ""]);
         assert!(words(r#"set "open"#).is_err());
+    }
+
+    /// A `[` only opens a list in a `set` or `delete` line: elsewhere it is text, and a pipe after it is
+    /// still a pipe (a word does not say whether it was quoted).
+    #[test]
+    fn a_bracket_outside_set_does_not_swallow_a_pipe() {
+        for line in [r#"help "[" | grep x"#, r#"commit comment "[" | no-more"#, "show | grep [ | wc"] {
+            let w = words(line).unwrap();
+            let bar = w.iter().position(|x| x == "|");
+            assert_eq!(pipe_at(&w), bar, "{line}");
+        }
+        let line = crate::grammar::read_line(Mode::Operational, &words(r#"help "[" | grep x"#).unwrap()).unwrap();
+        assert_eq!(line.filters.len(), 1);
+        // Completion after it offers the filters, as after any pipe.
+        assert!(!crate::grammar::pipe_next(Mode::Operational, &words(r#"help "[" |"#).unwrap()).is_empty());
+        // In a `set` (also from `top`) a list's bar is still a value, and a list holding "[" is one.
+        for line in [r#"set a [ "|" ]"#, r#"top set a [ "|" ]"#, r#"delete a [ "|" ]"#, r#"set a [ "[" "|" ]"#] {
+            let w = words(line).unwrap();
+            assert_eq!(pipe_at(&w), None, "{line}");
+        }
     }
 
     #[test]

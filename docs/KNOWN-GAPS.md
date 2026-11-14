@@ -174,7 +174,7 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
 6q. **`| display set` loads back, with one exception:** a setting that is not a list and whose value is
    exactly `|` is refused when read back (a quoted word is not told apart from the syntax). A list
    value that is exactly `[`, `]` or `|` is written inside brackets (`set … [ "|" ]`), where it is a
-   value, and loads back (`cli/src/tree.rs` `display_set_entries`; `session::pipe_at` reads a `|`
+   value, and loads back (`cli/src/tree.rs` `display_set_entries`; `session::pipe_at` reads, in a `set` or `delete` line, a `|`
    inside a list's brackets as a value, and a `|` there that is not quoted is refused). A single
    value `|` would need words that say whether they were quoted, through the grammar, the filters
    and completion.
