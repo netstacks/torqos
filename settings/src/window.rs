@@ -1755,15 +1755,18 @@ impl Settings {
             Loaded::Got(list) => {
                 let mut section = settings::section().title("Waiting for you");
                 for p in list {
-                    let mut who = format!("Proposed by {}", p.by);
-                    if p.failed {
-                        who.push_str(" · its apply failed once — apply it again, or decline it");
+                    let mut text = widget::column::with_capacity(3).push(widget::text::body(p.heading()));
+                    if let Some(facts) = p.facts() {
+                        text = text.push(widget::text::caption(facts));
                     }
-                    if p.tainted {
-                        who.push_str(&format!(" · ⚠ tainted: {}", app::taint_line(&p.sources)));
+                    // The proposer's words: the first line of them, marked, in the font the page of the proposal uses.
+                    let says = p.says(app::PROPOSAL_LIST_COLUMNS);
+                    if let Some(first) = says.first() {
+                        let more = if says.len() > 1 { "…" } else { "" };
+                        text = text.push(widget::text::monotext(format!("{first}{more}")).size(12).wrapping(cosmic::iced::widget::text::Wrapping::None));
                     }
                     let row = settings::item_row(vec![
-                        widget::column::with_capacity(2).push(widget::text::body(format!("#{}  {}", p.seq, p.reason))).push(widget::text::caption(who)).width(Length::Fill).into(),
+                        text.width(Length::Fill).into(),
                         icon::from_name("go-next-symbolic").size(16).icon().into(),
                     ])
                     .spacing(spacing.space_s);
@@ -1788,15 +1791,22 @@ impl Settings {
         page = page.push(widget::button::text("‹ Proposals").on_press(Message::Back));
         if let Loaded::Got(list) = &self.proposals {
             if let Some(p) = list.iter().find(|p| p.seq == seq) {
-                page = page.push(widget::text::title3(p.reason.clone()));
-                let mut who = format!("#{} · proposed by {}", p.seq, p.by);
-                if p.failed {
-                    who.push_str(" · its apply failed once — apply it again, or decline it");
+                page = page.push(widget::text::title3(p.heading()));
+                if let Some(facts) = p.facts() {
+                    page = page.push(widget::text::caption(facts));
                 }
-                if p.tainted {
-                    who.push_str(&format!(" · ⚠ tainted: {}", app::taint_line(&p.sources)));
+                // Under the broker's facts and apart from them, as the approval dialog draws an agent's words: each
+                // line as `torq::app` broke it, never wrapped again here, so each keeps its mark.
+                let says = p.says(app::PROPOSAL_SAYS_COLUMNS);
+                if says.is_empty() {
+                    page = page.push(widget::text::caption("The proposer gave no reason."));
+                } else {
+                    let mut words = widget::column::with_capacity(says.len());
+                    for line in says {
+                        words = words.push(widget::text::monotext(line).size(12).wrapping(cosmic::iced::widget::text::Wrapping::None));
+                    }
+                    page = page.push(widget::text::caption(app::PROPOSER_SAYS)).push(widget::container(words).padding(spacing.space_xs).width(Length::Fill).class(cosmic::theme::Container::Secondary));
                 }
-                page = page.push(widget::text::caption(who));
             }
         }
         // Decline only on one of the person's own agent's (as on the list); torqcli shows it and asks first.

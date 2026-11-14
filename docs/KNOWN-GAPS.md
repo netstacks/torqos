@@ -401,19 +401,39 @@ Its §5 lists claims without a test.
    still carries niri until M4 rewrites it.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
-9. **An applet a signal ends stays gone until the panel starts again** (2026-11-10; corrected 2026-11-12). COSMIC
-   1.11's panel starts again an applet that exits with an error code (launch-pad, with a wait that doubles and is not
-   reset within a login), but not one a signal ended (an abort, a segfault, a kill): read in its source
-   (cosmic-panel 1.11, launch-pad 1.0.1), not tested. A panic on the applet's main thread exits it with code 101, so
-   it comes back. A panic in one of its own calls (each on a thread of its own, `off`) is answered as that call's
-   error ("the call stopped before it answered"; a notification's own thread excepted: that notification is lost);
-   one in a library task (tokio's, zbus's executor, iced's SVG
-   drawing) is caught by that library, which carries on, as it means to: ending the whole applet on any panic was
-   tried and dropped for that reason. A death by a signal (seen only when the panel itself died, which starts its
-   applets anew) still leaves the machine without TorqOS in the panel, and without its restarting of the approval
-   dialog after polkit is replaced, until the panel restarts or the person logs in again. A supervisor process
-   between the panel and the applet would cover it; not built. torqcli's own retry (cli/src/run.rs,
-   `NO_APPROVAL_AGENT`) still starts the dialog again for a terminal's command.
+9. **An applet a signal ends is started again by the panel, through a wrapper; the wrapper itself is not** (2026-11-10;
+   rewritten 2026-11-13, built, not run in a VM). COSMIC 1.11's panel starts an applet again only after an exit with a
+   code, never one a signal ended (an abort, a segfault, a kill). Read in the source (cosmic-panel 1.11.0
+   `space/wrapper_space.rs`, launch-pad `5b516ee`): launch-pad gives the panel's `on_exit` the exit code, None for a
+   death by a signal, and the panel restarts only `is_restarting && err_code.is_some()`, else stops the process; no
+   panel setting changes it. So the panel starts each TorqOS applet (TorqOS's, the agent's, the tunnels') as
+   `torq-applet-run <applet>` (the desktop item's Exec; `torq::app::run_applet`, `wrapper_exit`), which runs the real
+   applet as its child and exits with the child's own code, or 128 + the signal when a signal ended it. Its command
+   line is `torq-applet-run torq-applet`; the applet's own stays `torq-applet`. Descriptors (the panel's Wayland socket
+   among them) and the environment pass to the child untouched; a Wayland socket is new at each start, which is why
+   the panel, not the wrapper, must start it again. What this does not cover:
+   - **The wrapper itself killed by a signal** is the old gap: the panel does not start it again. The applet goes with
+     it (it asks the kernel for a SIGTERM when its parent dies, `app::with_wrapper`), and TorqOS is gone from the panel,
+     and the approval dialog's restart after polkit is replaced with it, until the panel restarts or the person logs in
+     again. `tests/desktop.nix` asserts this, so a COSMIC that changes it shows.
+   - **A stop by the panel** (an applet taken out of it) is a SIGTERM to the wrapper alone, then a SIGKILL if it takes
+     longer than the panel's timeout; the wrapper has no handler, so it ends at once, and the applet by the signal it
+     asked for. launch-pad passes `is_restarting = false` on that path, so nothing is started again (read, not run).
+   - **A person's own `kill` of the applet** (a SIGTERM, say) is a restart too.
+   - **A crash loop** is slowed by launch-pad: the wait before the n-th restart is 2^n ms times 0 or 1 ms, so about a
+     second at the tenth, about a minute at the sixteenth, and the count is not reset within a login. Enough against a
+     busy loop; it also means an applet that crashes about twenty times in one login stays gone. No backoff of the
+     wrapper's own.
+   - A panic on the applet's main thread exits with code 101, which the panel restarts without the wrapper. A panic in
+     one of its own calls (each on a thread of its own, `off`) is answered as that call's error ("the call stopped
+     before it answered"; a notification's own thread: a failure or panic is said in the journal and the notification
+     tried once more after 5 s, `app::twice`; a second failure is only in the journal, and the popup still says what it
+     was about); one in a library task (tokio's, zbus's executor, iced's SVG drawing) is caught by that library, which
+     carries on, as it means to: ending the whole applet on any panic was tried and dropped for that reason.
+   - **Not run:** the wrapper has been tested as functions and as a child of the test (`app::wrapper_tests`: the exit
+     mapping, a descriptor passing, the allow-list), not built as a binary or started by a panel. The parent-death
+     signal and the stop path are reasoned from the sources. torqcli's own retry (cli/src/run.rs, `NO_APPROVAL_AGENT`)
+     still starts the dialog again for a terminal's command.
 10. **Desktop VM tests on .52 (nested ESXi, software rendering).** COSMIC's launcher, app library and portal panic
    on wgpu validation errors there, and the desktop is slow enough that the first approval after login can come
    before COSMIC's dialog has registered with polkit (answered in 3 s, no dialog): once in three runs, the others
@@ -496,7 +516,7 @@ Its §5 lists claims without a test.
    Since `c6342be` (0.4.0-rc1), a switch that changes `torq-applet` or `torq-tunnels` ends the panel, and COSMIC's
    session starts it again with its applets, new from the system's path (`app::LIVE_PARTS`); an applet of 0.3.2
    does not, and keeps its old torqcli until the person logs in again. A save that fails or is refused is no longer
-   silent (2026-11-12), nor are settings it could not put on the desktop or apps it could not bring back: the
+   silent (2026-11-12), nor are settings it could not put on the desktop or apps it could not bring back (an install that failed, told once for each set of apps, 2026-11-13; before that, only a reconcile that could not run was told): the
    applet says why in a notification, once for each reason (again after a try worked),
    and in its popup until a try works.
 6zzp. **A value typed on the Secrets page is not wiped from the window's memory** (ADR-052 step 5, 2026-11-12;
@@ -1253,6 +1273,13 @@ Its §5 lists claims without a test.
      daemon), and given up 30 seconds after that whatever the daemon says: taken down, its slot freed (at most 3
      open at once). The thread reading the daemon's signals for it ends at the daemon's next signal about any
      notification. A daemon that never sends another keeps that one idle thread, holding nothing of the crash.
+     **On screen, much less than that** (read in cosmic-notifications 1.11.0, `src/app.rs`, 2026-11-13, not seen
+     running): no urgency hint means normal, whose popup the daemon cuts to 5 s by its default setting
+     (`max_timeout_normal`); then the notification moves to the daemon's list, which the notifications applet shows, and
+     stays there until the 10 minutes are over (the daemon sends no close for that move; that its button works from the list is not seen). The popup's
+     layer surface asks for no keyboard (`KeyboardInteractivity::None`), so it cannot take the keyboard from the
+     approval dialog. Not known: whether a person's own setting (`max_timeout_normal` unset) keeps it up longer, and
+     whether the daemon places a popup over the dialog.
    - **The agent's window is raised only from a crash notification.** Its click carries the compositor's
      activation token (the notification daemon's `ActivationToken` signal), which is set in the window's unit.
      The Ask the agent buttons of the panel applet, the tunnels applet and TorqOS Settings pass none yet (each

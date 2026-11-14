@@ -78,6 +78,9 @@ pkgs.testers.runNixOSTest {
         # And TorqOS in the panel (ADR-049): an applet COSMIC offers in its panel settings.
         machine.succeed("grep -qx X-CosmicApplet=true /run/current-system/sw/share/applications/org.torqos.Applet.desktop")
         machine.succeed("test -x /run/current-system/sw/bin/torq-applet")
+        # Started by the panel through the wrapper that makes a death by a signal an exit with a code.
+        machine.succeed("test -x /run/current-system/sw/bin/torq-applet-run")
+        machine.succeed("grep -qx 'Exec=torq-applet-run torq-applet' /run/current-system/sw/share/applications/org.torqos.Applet.desktop")
         # In the panel by default, running there: a new machine has it without anyone adding it.
         machine.wait_until_succeeds("pgrep -u alice -fx torq-applet", timeout=60)
 
@@ -90,6 +93,33 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-panel | grep -vx {panel}", timeout=60)
         machine.wait_until_succeeds("pgrep -u alice -fx torq-applet", timeout=60)
         machine.succeed("pgrep -u alice -fx cosmic-comp")
+
+    with subtest("an applet a signal ends is started again by the panel, through its wrapper; the wrapper's own death is the known gap"):
+        # The panel starts an applet again only after an exit with a code, read in cosmic-panel 1.11's source
+        # (launch-pad 1.0.1). The panel starts each TorqOS applet as `torq-applet-run <applet>` (the desktop item's
+        # Exec), whose child is the real applet and which exits with 128 + the signal when a signal ended it. The
+        # names: the wrapper's command line is "torq-applet-run torq-applet" and the applet's is "torq-applet", which
+        # is what `pgrep -fx torq-applet` finds, here and in the other tests.
+        for sig in ["KILL", "SEGV", "TERM"]:
+            applet = machine.succeed("pgrep -u alice -fx torq-applet").strip()
+            wrapper = machine.succeed(f"ps -o ppid= -p {applet}").strip()
+            assert machine.succeed(f"cat /proc/{wrapper}/cmdline | tr '\\0' ' '").strip() == "torq-applet-run torq-applet", wrapper
+            machine.succeed(f"kill -{sig} {applet}")
+            machine.wait_until_succeeds(f"pgrep -u alice -fx torq-applet | grep -vx {applet}", timeout=60)
+        # The wrapper itself killed: the applet goes with it (it asks for that), and the panel, which reads a
+        # death by a signal as no reason to start again, does not. The known gap, for the wrapper only: if this
+        # fails because the applet comes back, COSMIC changed, and the gap in KNOWN-GAPS is no longer one.
+        applet = machine.succeed("pgrep -u alice -fx torq-applet").strip()
+        wrapper = machine.succeed(f"ps -o ppid= -p {applet}").strip()
+        machine.succeed(f"kill -KILL {wrapper}")
+        machine.wait_until_fails(f"kill -0 {applet}", timeout=30)
+        machine.sleep(30)
+        machine.fail("pgrep -u alice -fx torq-applet")
+        # The panel starting again brings it back, as a log-in does (the subtest above).
+        panel = machine.succeed("pgrep -u alice -fx cosmic-panel").strip()
+        machine.succeed("pkill -u alice -fx cosmic-panel")
+        machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-panel | grep -vx {panel}", timeout=60)
+        machine.wait_until_succeeds("pgrep -u alice -fx torq-applet", timeout=60)
 
     with subtest("memory run short ends a program, it does not freeze the desktop"):
         machine.succeed("swapon --show=NAME --noheadings | grep -q zram")

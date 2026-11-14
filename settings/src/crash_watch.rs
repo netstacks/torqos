@@ -81,7 +81,9 @@ fn notify(c: &Crash, uid: u32) -> zbus::Result<()> {
     let bus = zbus::blocking::Proxy::new(&connection, "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications")?;
     // Only the notification daemon's own signals: the proxy listens to the name's owner.
     let signals = bus.receive_all_signals()?;
-    let hints = std::collections::HashMap::<&str, zbus::zvariant::Value>::new();
+    // Normal urgency, said and not left to the daemon's default: COSMIC's daemon cuts a normal popup to a few
+    // seconds on screen and keeps the notification in its list for `expires`; an urgent one it would leave up.
+    let hints = std::collections::HashMap::<&str, zbus::zvariant::Value>::from([("urgency", zbus::zvariant::Value::U8(1))]);
     let expires = i32::try_from(crash::EXPIRES.as_millis()).unwrap_or(i32::MAX);
     let id: u32 = bus.call("Notify", &("TorqOS", 0u32, "torqos", summary.as_str(), body.as_str(), vec![ASK, "Ask the agent about this crash"], hints, expires))?;
     let deadline = crash::give_up_at(Instant::now());

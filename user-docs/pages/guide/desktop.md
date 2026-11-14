@@ -99,10 +99,11 @@ For the second, `request system desktop save` first, then undo.
 ## Limits
 
 - **One machine so far.** Other hardware may behave differently.
-- **An applet that crashes hard stays gone.** The panel starts the TorqOS applet again when it
-  fails with an error. If it is killed instead (it aborts, or something ends it), TorqOS is missing
-  from the panel, and so is the approval dialog's automatic restart, until the panel restarts or you
-  log in again. Log out and in again to bring it back. (A terminal's commands still start the dialog
+- **An applet that crashes is started again, mostly.** The panel starts the TorqOS applets again when they
+  fail, or when a signal ends them (an abort, a kill), through a small program that runs each one. If
+  that small program itself is killed, or an applet crashes about twenty times in one login, TorqOS is
+  missing from the panel, and so is the approval dialog's automatic restart, until the panel restarts or
+  you log in again. Log out and in again to bring it back. (A terminal's commands still start the dialog
   themselves.)
 - **What fails is said.** If your desktop cannot be saved (or TorqOS refuses the save), a setting
   cannot be put on your desktop, or your apps cannot be brought back, the applet tells you why in a

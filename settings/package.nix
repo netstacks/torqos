@@ -78,7 +78,7 @@ rustPlatform.buildRustPackage {
       name = "org.torqos.Applet";
       desktopName = "TorqOS";
       comment = "This machine's state: a change to confirm, a restart or log-out it needs, alarms, proposals";
-      exec = "torq-applet";
+      exec = "torq-applet-run torq-applet";
       icon = "torqos";
       noDisplay = true;
       extraConfig = { X-CosmicApplet = "true"; X-CosmicHoverPopup = "Auto"; X-OverflowPriority = "10"; };
@@ -88,7 +88,7 @@ rustPlatform.buildRustPackage {
       name = "org.torqos.Agent";
       desktopName = "TorqOS Agent";
       comment = "Your agent: ask it, see what it is doing, stop it, review what it proposed";
-      exec = "torq-agent-applet";
+      exec = "torq-applet-run torq-agent-applet";
       icon = "torqos";
       noDisplay = true;
       extraConfig = { X-CosmicApplet = "true"; X-CosmicHoverPopup = "Auto"; X-OverflowPriority = "10"; };
@@ -109,7 +109,7 @@ rustPlatform.buildRustPackage {
       name = "org.torqos.Tunnels";
       desktopName = "SSH tunnels";
       comment = "Your SSH tunnels: start, stop and add them, and see whether each is up";
-      exec = "torq-tunnels";
+      exec = "torq-applet-run torq-tunnels";
       icon = "network-vpn-symbolic";
       noDisplay = true;
       extraConfig = { X-CosmicApplet = "true"; X-CosmicHoverPopup = "Auto"; X-OverflowPriority = "10"; };

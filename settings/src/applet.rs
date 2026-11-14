@@ -23,9 +23,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use torq::app::{self, Console, Glance, Needs};
+use torq::app::{self, Console, Glance, Needs, Panel};
 
 fn main() -> cosmic::iced::Result {
+    // Through the wrapper the panel starts it by (`torq-applet-run`): it ends with it, and not on its own if the wrapper is gone.
+    if !torq::app::with_wrapper() {
+        return Ok(());
+    }
     cosmic::applet::run::<Applet>(())
 }
 
@@ -100,7 +104,8 @@ enum Message {
     SyncDesktop,
     /// The settings that could not be put on the desktop, or why the sync failed.
     Synced(Result<Vec<String>, String>),
-    Reconciled(Result<(), String>),
+    /// The ids of the apps that could not be installed, or why the reconcile could not run.
+    Reconciled(Result<Vec<String>, String>),
     Answer(Result<Glance, String>),
     Confirm,
     Closed,
@@ -124,17 +129,6 @@ enum Message {
     UseNoteRead,
     PopupClosed(Id),
     Surface(cosmic::surface::Action<Message>),
-}
-
-/// What the panel shows: the first that holds (ADR-049 2).
-enum State<'a> {
-    Confirm(&'a app::Confirm),
-    Needs(&'a Needs),
-    Alarm(&'a str),
-    Waiting(usize, usize),
-    Draft,
-    Well,
-    Unknown,
 }
 
 /// A colour as SVG writes it.
@@ -163,10 +157,13 @@ fn mark(badge: Option<Srgba>) -> icon::Handle {
 }
 
 /// A notification, and what clicking it opens (ADR-049 4): on a thread of its own, which waits for it to
-/// be clicked or closed.
+/// be clicked or closed. One that fails or panics is said in the journal and tried once more a few seconds later
+/// (`app::twice`); if that fails too, the journal has it. What the notification is about is also in the panel's popup.
 fn notify(summary: String, body: String, page: &'static str) {
     std::thread::spawn(move || {
-        let _ = send(&summary, &body, page);
+        let said = |what: &str| eprintln!("torq-applet: the notification \"{summary}\": {what}");
+        // The result is the last failure, which `twice` has already said.
+        drop(app::twice(Duration::from_secs(5), || send(&summary, &body, page).map_err(|e| e.to_string()), said));
     });
 }
 
@@ -284,24 +281,8 @@ fn refresh_menu() {
 }
 
 impl Applet {
-    fn state(&self) -> State<'_> {
-        let Some(Ok(g)) = &self.glance else { return State::Unknown };
-        if let Some(c) = &g.confirm {
-            return State::Confirm(c);
-        }
-        if matches!(g.needs, Needs::LogOut(_) | Needs::Restart(_)) {
-            return State::Needs(&g.needs);
-        }
-        if let Some(a) = &g.alarm {
-            return State::Alarm(a);
-        }
-        if g.waiting.0 > 0 {
-            return State::Waiting(g.waiting.0, g.waiting.1);
-        }
-        if g.draft {
-            return State::Draft;
-        }
-        State::Well
+    fn state(&self) -> Panel<'_> {
+        Panel::of(&self.glance)
     }
 
     /// The badge: nothing when all is well; the theme's colours for what waits.
@@ -313,26 +294,11 @@ impl Applet {
             return mark(Some(c.warning_color()));
         }
         mark(match self.state() {
-            State::Confirm(_) | State::Needs(Needs::Restart(_)) => Some(c.warning_color()),
-            State::Alarm(_) => Some(c.destructive_color()),
-            State::Needs(_) | State::Waiting(..) | State::Draft => Some(c.accent_color()),
-            State::Well | State::Unknown => None,
+            Panel::Confirm(_) | Panel::Needs(Needs::Restart(_)) => Some(c.warning_color()),
+            Panel::Alarm(_) => Some(c.destructive_color()),
+            Panel::Needs(_) | Panel::Waiting(..) | Panel::Draft => Some(c.accent_color()),
+            Panel::Well | Panel::Unknown => None,
         })
-    }
-
-    /// What a state says when it starts: its words, and the page that has the detail.
-    fn tell(&self) -> Option<(String, String, &'static str)> {
-        match self.state() {
-            State::Confirm(c) => Some((format!("Confirm change #{}", c.seq), format!("It rolls back at {} unless you confirm it.", c.deadline), "overview")),
-            State::Needs(n) => Some((match n { Needs::Restart(_) => "Restart needed".to_string(), _ => "Log out needed".to_string() }, n.line().unwrap_or_default(), "overview")),
-            State::Alarm(a) => Some(("TorqOS needs a look".to_string(), a.to_string(), "overview")),
-            State::Waiting(n, t) => Some((
-                if n == 1 { "A proposal is waiting".to_string() } else { format!("{n} proposals are waiting") },
-                if t > 0 { format!("{t} came from a session that read untrusted content.") } else { "Review it in TorqOS Settings.".to_string() },
-                "proposals",
-            )),
-            State::Draft | State::Well | State::Unknown => None,
-        }
     }
 
     /// What became of an answer given here, or of a use that ended without one: a failure in the destructive style.
@@ -455,44 +421,44 @@ impl Applet {
         let line = |s: String| widget::text::body(s).width(Length::Fill);
         let mut open = "overview";
         match self.state() {
-            State::Confirm(c) => {
+            Panel::Confirm(c) => {
                 let left = c.at.map(|at| (at - self.now).max(0)).map(|s| format!("{}:{:02} left. ", s / 60, s % 60)).unwrap_or_default();
                 col = col.push(line(format!("{left}Change #{} rolls back at {} unless you confirm it.", c.seq, c.deadline)));
                 let both = matches!(&self.glance, Some(Ok(g)) if matches!(g.needs, Needs::Restart(_)));
                 col = col.push(widget::button::suggested(if both { "Confirm, then restart" } else { "Confirm" }).on_press_maybe(settled.then_some(Message::Confirm)));
             }
-            State::Needs(n) => {
+            Panel::Needs(n) => {
                 col = col.push(line(n.line().unwrap_or_default()));
                 col = col.push(match n {
                     Needs::Restart(_) => widget::button::suggested("Restart…").on_press_maybe(settled.then_some(Message::Restart)),
                     _ => widget::button::suggested("Log out…").on_press_maybe(settled.then_some(Message::LogOut)),
                 });
             }
-            State::Alarm(a) => {
+            Panel::Alarm(a) => {
                 col = col.push(line(a.to_string()));
                 // The agent can look at it with the person: the alarm attached (ADR-051 4).
                 col = col.push(widget::button::text("Ask the agent").on_press_maybe(settled.then(|| Message::AskAgent(a.to_string()))));
             }
-            State::Waiting(n, tainted) => {
+            Panel::Waiting(n, tainted) => {
                 open = "proposals";
                 let what = if n == 1 { "A proposal is".to_string() } else { format!("{n} proposals are") };
                 let mut s = format!("{what} waiting for you to approve or refuse.");
                 if tainted > 0 {
-                    s.push_str(&format!(" {tainted} came from a session that read untrusted content."));
+                    s.push_str(&format!(" {tainted} came from a session that read untrusted text."));
                 }
                 col = col.push(line(s));
             }
-            State::Draft => {
+            Panel::Draft => {
                 open = "changes";
                 col = col.push(line("You have changes not yet committed.".into()));
             }
-            State::Well => {
+            Panel::Well => {
                 col = col.push(line("This machine is exactly as its history says.".into()));
                 if let Some(Ok(Glance { last: Some(last), .. })) = &self.glance {
                     col = col.push(widget::text::caption(format!("Last change: {last}")));
                 }
             }
-            State::Unknown => {
+            Panel::Unknown => {
                 let s = match &self.glance {
                     Some(Err(e)) => format!("The broker did not answer: {e}"),
                     _ => "Asking the broker…".into(),
@@ -541,7 +507,7 @@ impl cosmic::Application for Applet {
     fn subscription(&self) -> Subscription<Message> {
         let mut all = vec![cosmic::iced::time::every(EVERY).map(|_| Message::Ask), cosmic::iced::time::every(SWITCH).map(|_| Message::Looked), cosmic::iced::time::every(DESKTOP).map(|_| Message::SyncDesktop)];
         // The countdown, only while there is one.
-        if matches!(self.state(), State::Confirm(_)) {
+        if matches!(self.state(), Panel::Confirm(_)) {
             all.push(cosmic::iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
         // The agent's uses of secrets that wait: sooner, and its dialog drawn again, while one is shown; drawn
@@ -595,7 +561,7 @@ impl cosmic::Application for Applet {
                 }
             }
             // Not while a commit confirmed waits: the broker takes no change until it is confirmed or rolled back.
-            Message::SyncDesktop if matches!(self.state(), State::Confirm(_)) => {}
+            Message::SyncDesktop if matches!(self.state(), Panel::Confirm(_)) => {}
             Message::SyncDesktop => return sync(),
             // What failed is said in its own words, once for each reason: the reasons differ (a change waiting to be
             // confirmed, the broker not answering, a refusal), so no one piece of advice fits them all.
@@ -612,14 +578,14 @@ impl cosmic::Application for Applet {
                 }
             }
             Message::Reconciled(outcome) => {
-                if let Some(why) = self.apps.heard(outcome) {
+                if let Some(why) = self.apps.heard(app::apps_outcome(outcome)) {
                     notify(APPS.to_string(), why, "apps");
                 }
             }
             Message::Tick => {
                 self.asking.tick(Instant::now());
                 self.now = app::now();
-                if let State::Confirm(c) = self.state() {
+                if let Panel::Confirm(c) = self.state() {
                     let (seq, deadline, left) = (c.seq, c.deadline.clone(), c.at.map(|at| at - self.now));
                     if left.is_some_and(|l| l <= WARN_SECONDS) && self.warned != Some(seq) {
                         self.warned = Some(seq);
@@ -642,7 +608,7 @@ impl cosmic::Application for Applet {
                 self.now = app::now();
                 // A failed ask says nothing of the state: what was said stands, and is not said again.
                 if !failed {
-                    let tell = self.tell();
+                    let tell = self.state().notice();
                     let key = tell.as_ref().map(|(s, b, _)| format!("{s}{b}"));
                     // Each state said once, when it starts: not the one the session opened on.
                     if key != self.told {
@@ -826,7 +792,7 @@ fn sync() -> Task<cosmic::Action<Message>> {
 }
 
 /// Bring the person's apps in line with the configuration, and answer why that failed. An app that could not be
-/// installed is not an error here: it is tried again at the next reconcile (`reconcile_apps`).
+/// installed is told once for each set of them (`app::apps_outcome`), and tried again at the next reconcile.
 fn reconcile() -> Task<cosmic::Action<Message>> {
     cosmic::task::future(async { Message::Reconciled(blocking(app::reconcile_apps).await) })
 }
