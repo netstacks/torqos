@@ -20,6 +20,10 @@ use torq::agent::handoff::{self, About, Handoff};
 use torq::tunnels::{self, State};
 
 fn main() -> cosmic::iced::Result {
+    // Through the wrapper the panel starts it by (`torq-applet-run`): it ends with it, and not on its own if the wrapper is gone.
+    if !torq::app::with_wrapper() {
+        return Ok(());
+    }
     cosmic::applet::run::<Applet>(())
 }
 

@@ -52,3 +52,9 @@ path = "src/agent_ui.rs"
 [[bin]]
 name = "torq-crash-watch"
 path = "src/crash_watch.rs"
+
+# How the panel starts the applets above: it runs one as a child and turns a death by a signal into an exit with a
+# code, which is what the panel starts an applet again after.
+[[bin]]
+name = "torq-applet-run"
+path = "src/applet_run.rs"

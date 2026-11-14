@@ -2499,6 +2499,96 @@ pub fn secret_whose(user: Option<&str>, name: &str, me: Option<&str>) -> String 
     }
 }
 
+// ── The wrapper the panel starts an applet through (`torq-applet-run`) ──
+//
+// COSMIC's panel starts an applet again only when it exits with a code, never when a signal ended it (KNOWN-GAPS,
+// "An applet a signal ends"). The wrapper runs the real applet as its child and exits with a code the panel
+// restarts on when a signal ended the child. The panel stops an applet it means to stop by a SIGTERM to the
+// wrapper alone (launch-pad), whose exit is then not looked at for a restart.
+
+/// The applets the wrapper runs: what the panel starts, by the name it finds on its PATH.
+pub const APPLETS: &[&str] = &["torq-applet", "torq-tunnels", "torq-agent-applet"];
+/// Set by the wrapper in its child's environment: the wrapper's own process number.
+pub const WRAPPER_PID: &str = "TORQ_APPLET_WRAPPER";
+
+/// The applet to run for the wrapper's first argument: one of `APPLETS`, and nothing else.
+pub fn applet_named(arg: Option<&str>) -> Option<&'static str> {
+    APPLETS.iter().copied().find(|a| Some(*a) == arg)
+}
+
+/// What the wrapper exits with for how its child ended: the child's own code, or 128 + the signal (the shell's
+/// way), so that a death by a signal is an exit with a code too. Never 0 for a signal.
+pub fn wrapper_exit(code: Option<i32>, signal: Option<i32>) -> u8 {
+    match (code, signal) {
+        (Some(c), _) => u8::try_from(c).unwrap_or(1),
+        (None, Some(s)) => u8::try_from(128 + s).unwrap_or(255),
+        (None, None) => 1,
+    }
+}
+
+/// Run `program` with `args`, as the child of this process, and wait: what to exit with (`wrapper_exit`). Its
+/// standard streams and every other descriptor it was given (the panel's Wayland socket) pass to the child as they
+/// are: nothing here opens, closes or marks one.
+fn run_child(program: &str, args: &[String], wrapper: u32) -> u8 {
+    use std::os::unix::process::ExitStatusExt as _;
+    let mut child = match std::process::Command::new(program).args(args).env(WRAPPER_PID, wrapper.to_string()).spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("torq-applet-run: starting {program}: {e}");
+            return 127;
+        }
+    };
+    match child.wait() {
+        Ok(status) => {
+            let exit = wrapper_exit(status.code(), status.signal());
+            if let Some(signal) = status.signal() {
+                eprintln!("torq-applet-run: {program} ended by signal {signal}: exiting {exit}, so that the panel starts it again");
+            }
+            exit
+        }
+        Err(e) => {
+            eprintln!("torq-applet-run: waiting for {program}: {e}");
+            1
+        }
+    }
+}
+
+/// `torq-applet-run <applet> [arguments…]`: the exit code for the panel.
+pub fn run_applet(args: &[String]) -> u8 {
+    let Some(applet) = applet_named(args.first().map(String::as_str)) else {
+        eprintln!("torq-applet-run: runs one of {}", APPLETS.join(", "));
+        return 2;
+    };
+    run_child(applet, &args[1..], std::process::id())
+}
+
+/// Whether an applet's parent is the wrapper that started it: `env` is `WRAPPER_PID` as found (None: started
+/// without a wrapper, so there is nothing to be the child of), `parent` the applet's parent now. A wrapper that died
+/// before the applet noticed leaves it with another parent.
+pub fn wrapper_still_there(env: Option<&str>, parent: u32) -> bool {
+    match env {
+        None => true,
+        Some(pid) => pid.parse::<u32>() == Ok(parent),
+    }
+}
+
+/// For an applet, first thing: it ends with its wrapper. The panel stops an applet with a SIGTERM to the wrapper
+/// alone, or a SIGKILL after a timeout, and the applet would outlive either. False: the wrapper is already gone,
+/// and the applet is to exit.
+pub fn with_wrapper() -> bool {
+    let env = std::env::var(WRAPPER_PID).ok();
+    if env.is_none() {
+        return true;
+    }
+    if let Err(e) = rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM)) {
+        // Said, and carried on: the applet runs, and only ends later than it should with a wrapper that is stopped.
+        eprintln!("torq: asking to end with the wrapper: {e}");
+    }
+    // After asking, so that a wrapper that dies between the two is seen here.
+    let parent = rustix::process::getppid().map_or(0, |p| p.as_raw_nonzero().get() as u32);
+    wrapper_still_there(env.as_deref(), parent)
+}
+
 /// The person's agent's window (ADR-051 4): one a person, so this raises it if it is open.
 pub fn open_agent() -> Result<()> {
     spawn("torq-agent-ui", &[])
@@ -2665,7 +2755,7 @@ const LIVE_PARTS: &[(&str, &[&str])] = &[
     ("cosmic-bg", &["cosmic-bg"]),
     ("cosmic-idle", &["cosmic-idle"]),
     ("cosmic-files-applet", &["cosmic-files-applet"]),
-    ("cosmic-panel", &["cosmic-panel", "cosmic-panel-button", "cosmic-applet-audio", "torq-applet", "torq-tunnels"]),
+    ("cosmic-panel", &["cosmic-panel", "cosmic-panel-button", "cosmic-applet-audio", "torq-applet", "torq-tunnels", "torq-agent-applet", "torq-applet-run"]),
 ];
 
 /// The live parts of the desktop `new` has other programs for than `old`.
@@ -2740,6 +2830,9 @@ mod live_parts {
             assert!(!matches!(*part, "cosmic-comp" | "cosmic-session" | "cosmic-greeter"), "{part}");
         }
         assert_eq!(LIVE_PARTS.last().unwrap().0, "cosmic-panel");
+        // The panel runs the applets through the wrapper: a new wrapper or applet is a new panel.
+        let panel = LIVE_PARTS.last().unwrap().1;
+        assert!(APPLETS.iter().chain(&["torq-applet-run"]).all(|p| panel.contains(p)), "{panel:?}");
     }
 }
 
@@ -3774,5 +3867,68 @@ mod moved_decisions {
         assert_eq!(secret_whose(Some("me"), "gh", Some("me")), "your secret gh");
         assert_eq!(secret_whose(Some("sam"), "gh", Some("me")), "sam's secret gh");
         assert_eq!(secret_whose(Some("me"), "gh", None), "me's secret gh");
+    }
+}
+
+#[cfg(test)]
+mod wrapper_tests {
+    use super::*;
+
+    #[test]
+    fn a_signal_is_an_exit_with_a_code_and_a_clean_exit_stays_clean() {
+        assert_eq!(wrapper_exit(Some(0), None), 0, "a clean exit is not restarted");
+        assert_eq!(wrapper_exit(Some(101), None), 101);
+        assert_eq!(wrapper_exit(None, Some(9)), 137);
+        assert_eq!(wrapper_exit(None, Some(11)), 139);
+        assert_eq!(wrapper_exit(None, Some(15)), 143);
+        assert_eq!(wrapper_exit(None, None), 1);
+    }
+
+    #[test]
+    fn only_torqoss_applets_are_run() {
+        for a in APPLETS {
+            assert_eq!(applet_named(Some(a)), Some(*a));
+        }
+        assert_eq!(applet_named(Some("sh")), None);
+        assert_eq!(applet_named(Some("/usr/bin/torq-applet")), None);
+        assert_eq!(applet_named(None), None);
+        assert_eq!(run_applet(&["sh".into(), "-c".into(), "exit 0".into()]), 2);
+        assert_eq!(run_applet(&[]), 2);
+    }
+
+    #[test]
+    fn the_child_ends_with_the_wrapper_it_names_and_only_that() {
+        assert!(wrapper_still_there(None, 5), "started by hand: nothing to leave");
+        assert!(wrapper_still_there(Some("42"), 42));
+        assert!(!wrapper_still_there(Some("42"), 1), "adopted by init: the wrapper is gone");
+        assert!(!wrapper_still_there(Some("not a number"), 42));
+    }
+
+
+    /// What the panel hands an applet (its Wayland socket) is a descriptor with no close-on-exec flag: it reaches the
+    /// applet through the wrapper only if the wrapper leaves it be.
+    #[test]
+    fn a_descriptor_the_panel_passed_reaches_the_applet() {
+        use std::os::fd::AsRawFd as _;
+        let file = std::fs::File::open("/dev/null").unwrap();
+        rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty()).unwrap();
+        let fd = file.as_raw_fd();
+        assert_eq!(run_child("sh", &["-c".into(), format!("test -e /proc/self/fd/{fd}")], std::process::id()), 0);
+        // The control: one marked close-on-exec, as std opens them, does not.
+        let other = std::fs::File::open("/dev/null").unwrap();
+        let fd = other.as_raw_fd();
+        assert_eq!(run_child("sh", &["-c".into(), format!("test -e /proc/self/fd/{fd}")], std::process::id()), 1);
+    }
+
+    #[test]
+    fn what_the_child_did_is_what_the_wrapper_exits_with() {
+        let sh = |script: &str| run_child("sh", &["-c".into(), script.into()], std::process::id());
+        assert_eq!(sh("exit 0"), 0);
+        assert_eq!(sh("exit 3"), 3);
+        assert_eq!(sh("kill -KILL $$"), 137);
+        assert_eq!(sh("kill -SEGV $$"), 139);
+        assert_eq!(run_child("torq-no-such-program", &[], 1), 127);
+        // The wrapper's own number reaches the child.
+        assert_eq!(sh(&format!("test \"${WRAPPER_PID}\" = {}", std::process::id())), 0);
     }
 }
