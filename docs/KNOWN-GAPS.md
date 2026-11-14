@@ -503,9 +503,15 @@ Its §5 lists claims without a test.
    the name being no identity: the 200 kept are saved as COSMIC's. Components also take turns now
    (2026-11-13, `local`, test `components_take_turns_at_the_limits`): the settings are kept one from each
    component in turn, the smaller first within a turn, so ten such components, each with 200 settings or with
-   files as large as one may be, no longer fill `MAX_KEYS` or `MAX_TOTAL` ahead of COSMIC's own. Still open:
-   as many components as the limit (one setting each, or large ones) still fill it, which only a list of
-   the components COSMIC has would stop.
+   files as large as one may be, no longer fill `MAX_KEYS` or `MAX_TOTAL` ahead of COSMIC's own. As many
+   components as the limit also no longer do (2026-11-14, `cli/src/desktop.rs` `KNOWN_COMPONENTS`, test
+   `known_components_are_kept_before_planted_ones`): the components COSMIC is known to have (an exact list of
+   the names a COSMIC session writes) are kept first, each taking turns with the others, and any other
+   component only takes what is left; 2000 planted one-file components, 16 files of `MAX_VALUE` (exactly
+   `MAX_TOTAL`) and a flood under every known name all leave each known component's settings kept. Still
+   open: a program writing under a known name is saved as COSMIC's (up to an equal turn); a COSMIC component
+   missing from the list is kept only while room is left, so the list needs adding to as COSMIC grows
+   (`scripts/bump-cosmic` does not do it).
 6zzb. **COSMIC's own settings can be personal, and the saved desktop is readable by every account** (6r; the
    review of work/autosave). Kept on purpose, as the person's desktop, but not harmless: the wallpaper's path
    (`CosmicBackground/v1/all`, a folder in the home), custom shortcuts (`CosmicSettings.Shortcuts/v1/custom`,

@@ -26,6 +26,25 @@ pub const MAX_TOTAL: usize = 1024 * 1024;
 /// under a name that sorts first) cannot fill `MAX_KEYS` and leave COSMIC's none. COSMIC's have tens.
 const MAX_COMPONENT_KEYS: usize = 200;
 
+/// The components COSMIC itself keeps settings in, by exact name (those a COSMIC session on TorqOS's
+/// desktop writes under `~/.config/cosmic`). `com.system76.` is a name any program can write under
+/// (KNOWN-GAPS 6zza), so a name is known only if it is in this list, never by its look; `local` keeps
+/// these components' settings before any other's, which only take what is left. A COSMIC component not
+/// listed is still kept while there is room: add it here.
+const KNOWN_COMPONENTS: &[&str] = &[
+    "com.system76.CosmicAppletAudio", "com.system76.CosmicAppletBattery", "com.system76.CosmicAppletTime",
+    "com.system76.CosmicAppLibrary", "com.system76.CosmicAppList", "com.system76.CosmicAudio",
+    "com.system76.CosmicBackground", "com.system76.CosmicComp", "com.system76.CosmicEdit", "com.system76.CosmicFiles",
+    "com.system76.CosmicIdle", "com.system76.CosmicNotifications", "com.system76.CosmicPanel",
+    "com.system76.CosmicPanelButton", "com.system76.CosmicPanel.Dock", "com.system76.CosmicPanel.Panel",
+    "com.system76.CosmicPortal", "com.system76.CosmicSettings", "com.system76.CosmicSettingsDaemon",
+    "com.system76.CosmicSettings.Shortcuts", "com.system76.CosmicSettings.Wallpaper",
+    "com.system76.CosmicSettings.WindowRules", "com.system76.CosmicStore", "com.system76.CosmicTerm",
+    "com.system76.CosmicTheme.Dark", "com.system76.CosmicTheme.Dark.Builder", "com.system76.CosmicTheme.Light",
+    "com.system76.CosmicTheme.Light.Builder", "com.system76.CosmicTheme.Mode", "com.system76.CosmicTk",
+    "com.system76.CosmicWorkspaces",
+];
+
 /// When a person's desktop is saved.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -153,23 +172,27 @@ pub fn local(cosmic: &Path) -> Local {
             }
         }
     }
-    // One setting from each component in turn (each component's in order of name), the smaller first within a
+    // The components COSMIC is known to have first (`KNOWN_COMPONENTS`), then any other; within each, one
+    // setting from each component in turn (each component's in order of name), the smaller first within a
     // turn, so that components with few or small settings are kept whole before one with many or large ones
     // takes what is left; and the same settings are kept each time, whatever order the folder lists them in.
+    // So a flood planted under unknown names takes only what the known components leave, and one planted under
+    // a known name takes no more than an equal turn with the rest.
     found.sort();
     let mut turn: BTreeMap<String, usize> = BTreeMap::new();
-    let mut found: Vec<(usize, u64, String, PathBuf)> = found
+    let mut found: Vec<(bool, usize, u64, String, PathBuf)> = found
         .into_iter()
         .map(|(key, path)| {
-            let n = turn.entry(key.split('/').next().unwrap_or_default().to_string()).or_default();
+            let component = key.split('/').next().unwrap_or_default();
+            let n = turn.entry(component.to_string()).or_default();
             *n += 1;
-            (*n, std::fs::metadata(&path).map_or(0, |m| m.len()), key, path)
+            (!KNOWN_COMPONENTS.contains(&component), *n, std::fs::metadata(&path).map_or(0, |m| m.len()), key, path)
         })
         .collect();
     found.sort();
     let mut total = 0;
     let mut kept: BTreeMap<String, usize> = BTreeMap::new();
-    for (_, _, key, path) in found {
+    for (_, _, _, key, path) in found {
         let of_component = kept.entry(key.split('/').next().unwrap_or_default().to_string()).or_default();
         match std::fs::read_to_string(&path) {
             Ok(text) if value_ok(&text) && *of_component < MAX_COMPONENT_KEYS && out.values.len() < MAX_KEYS && total + text.len() <= MAX_TOTAL => {
@@ -732,6 +755,67 @@ mod tests {
                 assert!(here.values.contains_key(k), "{k} kept, {files} files of {size} bytes planted in each of ten");
             }
             assert!(here.values.len() <= MAX_KEYS && here.values.values().map(String::len).sum::<usize>() <= MAX_TOTAL);
+        }
+    }
+
+    /// Known components first (KNOWN-GAPS 6zza): as many planted components as the limits, named to sort ahead of
+    /// COSMIC's own, leave every known component's settings kept: 2000 one-file ones (`MAX_KEYS`), 16 of
+    /// `MAX_VALUE` (exactly `MAX_TOTAL`), and a flood under every known name at once. An unknown component
+    /// still gets what is left.
+    #[test]
+    fn known_components_are_kept_before_planted_ones() {
+        let own: Vec<String> = KNOWN_COMPONENTS.iter().map(|c| format!("{c}/v1/real")).collect();
+        let plant = |c: &Path, comps: usize, files: usize, size: usize| {
+            for n in 0..comps {
+                let dir = c.join(format!("com.system76.A{n:05}/v1"));
+                std::fs::create_dir_all(&dir).unwrap();
+                for i in 0..files {
+                    std::fs::write(dir.join(format!("k{i}")), vec![b'x'; size]).unwrap();
+                }
+            }
+        };
+        for (comps, files, size) in [(MAX_KEYS, 1, 1), (MAX_TOTAL / MAX_VALUE, 1, MAX_VALUE), (10, MAX_COMPONENT_KEYS, 1)] {
+            let d = tempfile::tempdir().unwrap();
+            let c = d.path().join("cosmic");
+            for k in &own {
+                write_atomically(&c.join(k), b"M").unwrap();
+            }
+            plant(&c, comps, files, size);
+            let here = local(&c);
+            for k in &own {
+                assert!(here.values.contains_key(k), "{k} kept, {comps} components of {files} files of {size} bytes planted");
+            }
+            assert!(here.values.len() <= MAX_KEYS && here.values.values().map(String::len).sum::<usize>() <= MAX_TOTAL);
+            // What is left goes to the planted ones: the limit is used, not wasted.
+            assert!(here.values.len() > own.len(), "an unknown component still gets what is left");
+        }
+        // A flood under every known name: each known component still has its real setting.
+        let d = tempfile::tempdir().unwrap();
+        let c = d.path().join("cosmic");
+        for k in &own {
+            write_atomically(&c.join(k), b"M").unwrap();
+        }
+        for comp in KNOWN_COMPONENTS {
+            let dir = c.join(comp).join("v2");
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..MAX_COMPONENT_KEYS {
+                std::fs::write(dir.join(format!("a{i}")), b"x").unwrap();
+            }
+        }
+        let here = local(&c);
+        for k in &own {
+            assert!(here.values.contains_key(k), "{k} kept under a flood of every known name");
+        }
+        assert_eq!(here.values.len(), MAX_KEYS);
+    }
+
+    /// The list is COSMIC's own names only, each a name `key_ok` would accept, none twice.
+    #[test]
+    fn the_known_components_are_valid_and_unique() {
+        let set: BTreeSet<_> = KNOWN_COMPONENTS.iter().collect();
+        assert_eq!(set.len(), KNOWN_COMPONENTS.len());
+        for c in KNOWN_COMPONENTS {
+            assert!(key_ok(&format!("{c}/v1/x")), "{c}");
         }
     }
 
