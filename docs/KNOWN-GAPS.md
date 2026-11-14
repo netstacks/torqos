@@ -204,9 +204,17 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    that message, and waited for 2 seconds after the command ends, no longer, so a process it left behind
    cannot hold the broker. The same message about any other file, the store's database included, is left
    alone and the change fails as before; no other command (activation, boot, snapshots, timers) is run
-   again. Not covered: a cache damaged so that Nix fails without one of those messages; a `rebuild` set by
-   hand that switches before it builds; damage in a person's own `~/.cache/nix` (their `nix`, not the
-   broker's). (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
+   again. Since 2026-11-14 a third message counts, "malformed database schema" (what SQLite says of a damaged
+   schema when the file is opened; all three strings are in the libsqlite3 Nix 2.34 links, and Nix's own
+   format `<what>: <message> (in '<file>')` is in libnixstore; test `the_messages_of_a_damaged_cache`), and
+   a `rebuild` set by hand that switches before it builds is not run a second time: the links to the running
+   system and the system profile are compared before and after, and if either moved the cache is removed
+   but the command is not run again, so the change fails as any failed rebuild does (`may_run_again`, tests
+   `a_command_that_switched_is_not_run_again`, `a_rebuild_that_already_switched_is_not_run_again_on_a_damaged_cache`;
+   a command that switches in a way neither link shows, or fails before its switch has finished, is not
+   told apart). Not covered: a cache damaged so that Nix fails with none of those messages (a message not
+   in Nix's or SQLite's text on hand is not guessed); damage in a person's own `~/.cache/nix` (their
+   `nix`, not the broker's). (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
 6u. **Packages cannot be found by the command they install** (`rg` → ripgrep, `nvim` → neovim).
    `show packages <words>` searches names and descriptions (`nix search` on this machine's
    nixpkgs); which package holds a command needs an index that is not on the machine (nixpkgs'
