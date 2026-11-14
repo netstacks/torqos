@@ -437,6 +437,9 @@ pub fn words(line: &str) -> Result<Vec<String>> {
                     word(&mut out, std::mem::take(&mut cur))?;
                     any = false;
                 }
+                if in_list(&out) {
+                    bail!("a | inside [ ] is a value: quote it (\"|\")");
+                }
                 out.push("|".into());
             }
             c => {
@@ -456,9 +459,30 @@ pub fn words(line: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// A word from the text (not a pipe): a quoted `"|"` alone would read as one, so it is refused.
+/// Where the line's first pipe is: a `|` word outside a list's brackets. A list value that is exactly
+/// `|` is written inside them (`set … [ "|" ]`), because a word does not say whether it was quoted.
+pub fn pipe_at(w: &[String]) -> Option<usize> {
+    let mut open = false;
+    for (i, x) in w.iter().enumerate() {
+        match x.as_str() {
+            "[" if !open => open = true,
+            "]" => open = false,
+            "|" if !open => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether the words so far end inside a list's brackets (and no pipe came before them).
+fn in_list(w: &[String]) -> bool {
+    pipe_at(&[w, &["|".to_string()]].concat()).is_none()
+}
+
+/// A word from the text (not a pipe): a quoted `"|"` alone would read as one, so it is refused
+/// except inside a list's brackets, where `pipe_at` does not read it as one.
 fn word(out: &mut Vec<String>, w: String) -> Result<()> {
-    if w == "|" {
+    if w == "|" && !in_list(out) {
         bail!("\"|\" alone cannot be a word: it would read as a pipe");
     }
     out.push(w);
@@ -4093,6 +4117,31 @@ mod tests {
         for line in saved.lines() {
             s.exec(line).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
+    }
+
+    /// A list value that is exactly `|` comes back from `| display set` (KNOWN-GAPS 6q): written inside
+    /// brackets, it is a value, not a pipe, and a pipe outside brackets is still a pipe.
+    #[test]
+    fn a_bar_as_a_lists_value_comes_back_from_display_set() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", r#"set services httpd virtualHosts example.com serverAliases [ "|" a ]"#]);
+        let shown = s.exec("show | display set").unwrap();
+        assert!(shown.contains(r#"serverAliases [ "|" ]"#), "{shown}");
+        let (d2, m2) = (repo(), Fake::default());
+        let mut again = session(d2.path(), None, &m2);
+        again.exec("configure").unwrap();
+        for line in shown.lines() {
+            again.exec(line).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
+        assert_eq!(again.exec("show").unwrap(), s.exec("show").unwrap());
+        // `delete` names it the same way, and the pipe after a command is still a pipe.
+        again.exec(r#"delete services httpd virtualHosts example.com serverAliases [ "|" ]"#).unwrap();
+        assert!(!again.exec("show").unwrap().contains('|'));
+        assert!(again.exec("show | wc -l").is_ok());
+        // Unquoted inside a list it is not guessed at; the line is refused.
+        assert!(words("set a [ b | c ]").is_err());
+        assert_eq!(words(r#"show | grep "[" | wc"#).unwrap(), ["show", "|", "grep", "[", "|", "wc"]);
     }
 
     /// A NixOS setting commits as its nixos/ file, system tier, asked; a person's own packages,

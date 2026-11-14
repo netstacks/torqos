@@ -948,7 +948,7 @@ pub struct Line {
 
 /// Read a whole line.
 pub fn read_line(mode: Mode, w: &[String]) -> Result<Line> {
-    let bar = w.iter().position(|x| x == "|").unwrap_or(w.len());
+    let bar = crate::session::pipe_at(w).unwrap_or(w.len());
     let mut walked = walk(mode, &w[..bar])?;
     let Some(node) = walked.node().filter(|n| n.whole.is_some()) else { return Err(short(&walked).into()) };
     let mut segments: Vec<Vec<String>> = if bar < w.len() { w[bar + 1..].split(|x| x == "|").map(<[String]>::to_vec).collect() } else { vec![] };
@@ -1007,7 +1007,7 @@ pub fn pipe_help(mode: Mode, words: &[String]) -> Option<String> {
 /// command's own pipes, then the filters; after `| display`, the views; after `| compare rollback`,
 /// a configuration; after a filter's name, what it needs (its own options: not offered).
 pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String, Option<Value>)> {
-    let Some(bar) = words.iter().position(|x| x == "|") else { return vec![] };
+    let Some(bar) = crate::session::pipe_at(words) else { return vec![] };
     let Ok(mut walked) = walk(mode, &words[..bar]) else { return vec![] };
     let Some(node) = walked.node().filter(|n| n.whole.is_some() && n.pipes != Pipes::None) else { return vec![] };
     let mut segments: Vec<Vec<String>> = words[bar + 1..].split(|x| x == "|").map(<[String]>::to_vec).collect();

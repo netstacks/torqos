@@ -169,11 +169,13 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    torqcli does not check the rest of it (outputs, `configDir`, no extra modules or inputs): a
    flake.nix changed by hand beyond that line is still shown as TorqOS's own. It is changed only
    through the broker, as a system-tier change a person reads.
-6q. **`| display set` loads back, with one exception:** a value that is exactly `|` is refused when
-   read back (a quoted word is not told apart from the syntax: telling them apart means words that
-   say whether they were quoted, through the grammar, the filters and completion). A list value that
-   is exactly `[` or `]` was refused too; it is now written inside brackets (`set … [ "[" ]`), where
-   it is a value, and loads back (`cli/src/tree.rs` `display_set_entries`, 2026-11-12).
+6q. **`| display set` loads back, with one exception:** a setting that is not a list and whose value is
+   exactly `|` is refused when read back (a quoted word is not told apart from the syntax). A list
+   value that is exactly `[`, `]` or `|` is written inside brackets (`set … [ "|" ]`), where it is a
+   value, and loads back (`cli/src/tree.rs` `display_set_entries`; `session::pipe_at` reads a `|`
+   inside a list's brackets as a value, and a `|` there that is not quoted is refused). A single
+   value `|` would need words that say whether they were quoted, through the grammar, the filters
+   and completion.
    `save` / `load override` keep them all. `load set` saves the candidate as it goes:
    all or nothing for errors, not for a crash or a full disk midway.
 6r. **The config repo is readable by every user** (0755/0644; second audit, L4), and so is the Nix
