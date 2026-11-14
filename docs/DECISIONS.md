@@ -2796,6 +2796,18 @@ vouches for, that only proposes, every change ledgered and undone in one command
     answer the dialog sends is recorded as the dialog's) are written and have not run. The dialog has been
     type-checked only: it has not been drawn or pressed on any machine, and no test clicks in the panel.
     Whether COSMIC shows a popup the applet opens by itself, for a clicked notification, has not been tried.
+- **Amended: two second lines of the resident rule (2026-11-14).** *A missing model key*: systemd refuses the
+  agent's unit before any command of it runs when nothing is at `apiKeyFile` (it loads the credential for
+  `ExecCondition` and `ExecStartPre` too; tried on systemd 260.5), so a check inside the unit cannot say it.
+  Decided: the way to a start is left as it was, and a unit of its own (`torq-agent-key@<person>.service`,
+  the agent unit's `OnFailure`) says it afterwards in the agent unit's journal. Not chosen: a unit the agent's
+  would require before it starts, since a socket whose service's dependency fails is expected to be started again
+  at once until systemd's limit (not tried); and no way that hands the key over by TorqOS's own code. *Nothing delegated, a
+  package's unit files included*: a package's files cannot be read at evaluation without building the
+  package, so they are read in the units as built, by a build the system's build depends on
+  (`modules/agent-units-check.nix`). The evaluation's assertions stay: they answer at `commit check`, with
+  the option's name. `checks.agent-units`, `checks.agent-assertions`; the VM subtest for the key is written
+  and has not run. Open: KNOWN-GAPS 6zzo.
 
 ## ADR-052 — Secrets the agent may use and never read: `torq-secrets`
 - **Status:** accepted, 2026-11-10; its four questions settled by the owner the same day (below). Proposed

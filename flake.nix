@@ -185,6 +185,8 @@
         agent-run = import ./tests/agent-run.nix { inherit pkgs self; };
         agents-per-person = import ./tests/agents-per-person.nix { inherit pkgs self; };
         agent-assertions = import ./tests/agent-assertions.nix { inherit pkgs self; };
+        # "No delegation" in the units as built, a package's unit files included: small builds, no VM.
+        agent-units = import ./tests/agent-units.nix { inherit pkgs self; };
         doctor = import ./tests/doctor.nix { inherit pkgs self; };
         agent-proposals = import ./tests/agent-proposals.nix { inherit pkgs self; };
         agent-service = import ./tests/agent-service.nix { inherit pkgs self; };

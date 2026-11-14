@@ -24,8 +24,10 @@ let
   # Where the resident service runs (its socket, its unit): the resident accounts, and the broker's map of them.
   resident = cfg.service.enable && config.torq.agent.doctor.enable;
   # Any torq-agent@ unit this configuration writes (an instance or the template) whose text delegates its control
-  # group. A unit file a package brings (systemd.packages) is not in systemd.units, so not seen: KNOWN-GAPS 6zzo.
+  # group. A unit file a package brings (systemd.packages) is not in systemd.units, so not seen here: it is a file
+  # inside a built package, which evaluation cannot read. Those are read in the units as built (unitsCheck).
   delegatedUnits = lib.attrNames (lib.filterAttrs (n: u: lib.hasPrefix "torq-agent@" n && lib.hasInfix "Delegate" (if u.text or null == null then "" else u.text)) config.systemd.units);
+  unitsCheck = import ./agent-units-check.nix { inherit pkgs; };
   residents = lib.optionalAttrs resident (lib.listToAttrs (map (p: lib.nameValuePair (residentOf p) p) (lib.filter fits cfg.people)));
   # Claude Code for the agents (ADR-051 5, `torq agent tools`): the version dev mode pins (modules/dev.nix), unfree,
   # so only where `torq unfree` allows it — else the assertion below says so, and nothing unfree is evaluated.
@@ -301,6 +303,12 @@ in
         assertion = (config.boot.kernel.sysctl."kernel.yama.ptrace_scope" or 0) >= 1;
         message = "boot.kernel.sysctl.\"kernel.yama.ptrace_scope\": at least 1 where the agent is resident — a second line behind the uids: a program of the agent's may trace only its own descendants.";
       }];
+    # The same "nothing delegated", for what the assertions above cannot see: a unit file or drop-in a package
+    # brings (systemd.packages). Read in the directory /etc/systemd/system is made from, where the packages'
+    # files and this configuration's are together; the system's build depends on it, so a system that fails it
+    # is never built or switched to (modules/agent-units-check.nix). `commit check` only evaluates: it is the
+    # build that refuses.
+    system.checks = [ (unitsCheck config.environment.etc."systemd/system".source) ];
     # Only the person may connect (the socket theirs, 0600, in a directory root's) — and the service
     # answers only them, by the kernel's word (SO_PEERCRED), root included.
     # Each person's resident agent's own account (ADR-051 3, amended 2026-11-11): hidden — no password, no login,
