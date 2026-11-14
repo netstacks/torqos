@@ -466,6 +466,52 @@ mod tests {
         c.iter().map(|c| c.word.as_str()).collect()
     }
 
+    /// The commands that answer a waiting use, and that let an agent use a secret for a while: each word is offered
+    /// where it may be typed, Enter where the line is whole, and Tab finishes a word that is the only one. Their
+    /// help says a session "that read untrusted text", in a person's words.
+    #[test]
+    fn answers_and_allowances_are_offered() {
+        let s = schema();
+        let op = |line: &str, partial: &str| choices(&s, Mode::Operational, &w(line), partial);
+        let offered = |line: &str| op(line, "").into_iter().map(|c| c.word).collect::<Vec<_>>();
+        let help = |line: &str, word: &str| op(line, "").into_iter().find(|c| c.word == word).map(|c| c.help).unwrap_or_default();
+        assert_eq!(offered("show system secrets"), ["<[Enter]>", "allowed", "waiting", "|"]);
+        assert_eq!(offered("show system secrets waiting"), ["<[Enter]>", "|"]);
+        assert_eq!(offered("show system secrets allowed"), ["<[Enter]>", "|"]);
+        assert_eq!(offered("request system secret"), ["allow", "approve", "delete", "deny", "disallow", "set", "show"]);
+        // An answer: the use's number, asked for as a use's.
+        assert_eq!(offered("request system secret deny"), ["<use>"]);
+        assert_eq!(help("request system secret deny", "<use>"), "The waiting use's number, from show system secrets waiting");
+        assert_eq!(offered("request system secret deny 7"), ["<[Enter]>", "session"]);
+        assert_eq!(offered("request system secret deny 7 session"), ["<[Enter]>"]);
+        // A number after approve is a whole command (the yes), and may still be a secret so named; a name is not.
+        assert_eq!(offered("request system secret approve 7"), ["<[Enter]>", "each-use", "first-use", "never", "never-even-tainted"]);
+        assert_eq!(offered("request system secret approve gh"), ["each-use", "first-use", "never", "never-even-tainted"]);
+        // An allowance: one secret's for a session or for minutes, all one's own for minutes, and its end.
+        assert_eq!(offered("request system secret allow"), ["all", "revoke", "<secret>"]);
+        assert_eq!(offered("request system secret allow gh"), ["agent", "for", "https", "session", "ssh"]);
+        assert_eq!(offered("request system secret allow gh session"), ["<[Enter]>", "user"]);
+        assert_eq!(offered("request system secret allow gh for"), ["<minutes>"]);
+        assert_eq!(help("request system secret allow gh for", "<minutes>"), "How many minutes: 1 to 480");
+        assert_eq!(offered("request system secret allow gh for 60"), ["<[Enter]>", "tainted-too", "user"]);
+        assert_eq!(offered("request system secret allow gh for 60 tainted-too"), ["<[Enter]>", "user"]);
+        assert_eq!(offered("request system secret allow all"), ["agent", "for", "https", "ssh"]);
+        assert_eq!(offered("request system secret allow all for 60"), ["<[Enter]>"], "all of them is never tainted-too, and never someone's");
+        assert_eq!(offered("request system secret allow revoke"), ["<[Enter]>", "agent", "all", "https", "ssh", "<secret>"]);
+        assert_eq!(offered("request system secret allow revoke gh"), ["<[Enter]>"]);
+        assert_eq!(offered("request system secret allow revoke all"), ["<[Enter]>"]);
+        // Tab.
+        assert_eq!(tab(&op("show system secrets", "w")), [("waiting".to_string(), "waiting ".to_string())]);
+        assert_eq!(tab(&op("request system secret allow", "r")), [("revoke".to_string(), "revoke ".to_string())]);
+        assert_eq!(tab(&op("request system secret allow gh for 60", "t")), [("tainted-too".to_string(), "tainted-too ".to_string())]);
+        assert_eq!(tab(&op("request system secret", "de")).len(), 2, "delete and deny");
+        // No word of help here is one a person was never told.
+        for (line, word) in [("request system secret", "approve"), ("request system secret approve gh", "never"), ("request system secret approve gh", "never-even-tainted"), ("request system secret allow gh for 60", "tainted-too"), ("request system secret allow all", "for")] {
+            let h = help(line, word);
+            assert!(h.contains("read untrusted text") && !h.contains("tainted session"), "{word}: {h}");
+        }
+    }
+
     #[test]
     fn commands_of_each_mode() {
         let s = schema();
@@ -674,7 +720,7 @@ mod tests {
     fn question_mark_and_enter_agree_everywhere() {
         let s = schema();
         let sample = |p: &str| match p {
-            "<number>" | "<count>" | "<change>" | "<minutes>" | "<n>" => "1".to_string(),
+            "<number>" | "<count>" | "<change>" | "<use>" | "<minutes>" | "<n>" => "1".to_string(),
             "<user>" => "dev".into(),
             "<time>" => "10:00".into(),
             "<file>" => "services/x.nix".into(),

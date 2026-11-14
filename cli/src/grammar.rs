@@ -48,6 +48,8 @@ pub enum Value {
     Backup,
     /// A backup's snapshot (`latest`, or its id) — or, where it may be left out, the path after it.
     Snapshot,
+    /// The number of an agent's use of a secret that waits for its person (`show system secrets waiting`).
+    Use,
     /// A secret's name (ADR-052).
     Secret,
     /// A host a secret may be used for: a DNS name.
@@ -71,6 +73,7 @@ impl Value {
             Value::Interface => "<interface>",
             Value::Backup => "<backup>",
             Value::Snapshot => "<snapshot>",
+            Value::Use => "<use>",
             Value::Secret => "<secret>",
             Value::Host => "<host>",
             Value::Text => "<\"text\">",
@@ -93,6 +96,7 @@ impl Value {
             // As the ledger writes it (#85) or not.
             Value::Change => whole(w.strip_prefix('#').unwrap_or(w), "change numbers", 1, u64::MAX).map(drop),
             Value::Minutes => whole(w, "minutes", 1, 1440).map(drop),
+            Value::Use => whole(w.strip_prefix('#').unwrap_or(w), "the numbers of uses that wait", 1, u64::MAX).map(drop),
             Value::Time => crate::at::form(w),
             Value::User if !w.is_empty() => Ok(()),
             Value::File | Value::NixFile | Value::Interface if !w.is_empty() => Ok(()),
@@ -356,14 +360,14 @@ static REQUEST_SECRET: &[Node] = &[
         fixed("revoke", "End what you let your agent use without asking: one secret's grants, or all (no password)", In::Op).whole(approval).then(ALLOW_REVOKE),
         value(Value::Secret, "The secret's name").then(SECRET_ALLOW),
     ]),
-    fixed("approve", "When a person is asked before the agent uses it (a tainted session is always asked); or, with a waiting use's number, your yes to it", In::Op).then(&[value(Value::Secret, "The secret's name; or the number of a use that waits for you (show system secrets waiting)").whole(approval).then(&[
+    fixed("approve", "When a person is asked before the agent uses it (a session that read untrusted text is always asked); or, with a waiting use's number, your yes to it", In::Op).then(&[value(Value::Secret, "The secret's name; or the number of a use that waits for you (show system secrets waiting)").whole(approval).then(&[
         fixed("each-use", "Every time", In::Op).whole(secret).then(SECRET_OWNER),
         fixed("first-use", "The first time in each of the agent's sessions", In::Op).whole(secret).then(SECRET_OWNER),
-        fixed("never", "Never: only a tainted session asks", In::Op).whole(secret).then(SECRET_OWNER),
+        fixed("never", "Never: only a session that read untrusted text asks", In::Op).whole(secret).then(SECRET_OWNER),
         fixed("never-even-tainted", "Never, even from a session that read untrusted text: your own secret only, and it asks your password", In::Op).whole(secret).then(SECRET_OWNER),
     ])]),
     fixed("delete", "Delete its value and its rule (no undoing the value)", In::Op).then(&[value(Value::Secret, "The secret's name").whole(secret).then(SECRET_OWNER)]),
-    fixed("deny", "Your no to a use of your agent's that waits for you", In::Op).then(&[value(Value::Change, "The waiting use's number, from show system secrets waiting").whole(approval).then(&[
+    fixed("deny", "Your no to a use of your agent's that waits for you", In::Op).then(&[value(Value::Use, "The waiting use's number, from show system secrets waiting").whole(approval).then(&[
         fixed("session", "And do not ask again about that secret in this session of the agent's: refused at once until the session is over, whatever you allow later (a new session asks again)", In::Op).whole(approval),
     ])]),
     fixed("disallow", "Take back a use: a host, or the agent's (one change, undoable)", In::Op).then(&[value(Value::Secret, "The secret's name").then(SECRET_GRANT)]),
@@ -519,7 +523,7 @@ fn approval(r: &Read) -> Result<Op> {
     use crate::secrets::Approval;
     let number = |w: &str| w.trim_start_matches('#').parse::<u64>().ok().filter(|n| *n > 0);
     let a = if r.has("deny") {
-        Approval::Answer { n: r.value(Value::Change).and_then(number).unwrap_or_default(), approved: false, rest: r.has("session") }
+        Approval::Answer { n: r.value(Value::Use).and_then(number).unwrap_or_default(), approved: false, rest: r.has("session") }
     } else if r.has("approve") {
         let Some(n) = r.value(Value::Secret).and_then(number) else {
             bail!("`approve <n>` answers a use that waits, by its number (show system secrets waiting); when a secret asks is `approve <name> each-use|first-use|never|never-even-tainted`");

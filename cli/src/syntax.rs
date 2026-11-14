@@ -563,6 +563,11 @@ mod tests {
         assert_eq!(read("show system secrets allowed").unwrap(), Op::ShowSecretsAllowed);
         assert_eq!(read("show system secrets waiting").unwrap(), Op::ShowSecretsWaiting);
         assert_eq!(read("show system secrets").unwrap(), Op::ShowSecrets);
+        // A word that is no number of a waiting use is said to be that, not a change's number; the number may be
+        // written as the list writes numbers.
+        assert_eq!(format!("{:#}", read("request system secret deny gh").unwrap_err()), "'gh' is not a number (the numbers of uses that wait: 1, 2, …)");
+        assert_eq!(format!("{:#}", read("request system secret deny").unwrap_err()), "needs <use> (the waiting use's number, from show system secrets waiting)");
+        assert_eq!(request("deny #7"), Request::SecretApproval(Approval::Answer { n: 7, approved: false, rest: false }));
     }
 
     /// Every operation, rendered as it is typed, parses back to itself.
