@@ -181,7 +181,8 @@ impl Approval {
 /// `show system secrets waiting`: the uses of your agent's that wait for your answer (the broker's `secret-waiting`).
 /// What the broker knows first, each on its own line; then, marked as the agent's, what the agent says: never
 /// among the facts, and shown as text.
-pub fn waiting_shown(v: &serde_json::Value) -> String {
+/// Times are the machine's local time, as torqcli prints times (`clock`), with how long is left to answer.
+pub fn waiting_shown(v: &serde_json::Value, clock: &crate::history::Clock) -> String {
     let clean = |s: &serde_json::Value| crate::history::clean(s.as_str().unwrap_or("?"));
     let asks = v["waiting"].as_array().map(Vec::as_slice).unwrap_or_default();
     if asks.is_empty() {
@@ -205,13 +206,20 @@ pub fn waiting_shown(v: &serde_json::Value) -> String {
             // a quote of its own could have seemed to close one put round it.
             out.push_str(&format!("   the agent's own words, to the end of this line (not checked by anything): {}\n", clean(&a["agent_says"])));
         }
-        out.push_str(&format!("   until {}: request system secret approve {n}, or deny {n}\n", clean(&a["until"])));
+        let until = a["until"].as_str().unwrap_or("?");
+        let left = match crate::history::parse_ts(until).map(|t| t - clock.now) {
+            Some(s) if s > 0 => format!(" ({}:{:02} left)", s / 60, s % 60),
+            _ => String::new(),
+        };
+        out.push_str(&format!("   until {}{left}: request system secret approve {n}, or deny {n}\n", crate::history::local_stamp(until, clock)));
     }
     out
 }
 
 /// `show system secrets allowed`: each grant of secret uses that holds, what it covers and its end (`secret-grants`).
-pub fn allowed_shown(v: &serde_json::Value) -> String {
+/// Times are the machine's local time (`clock`). A grant for the agent's sessions ends for each of them when that
+/// session is eight hours old, which may be sooner than the time shown: said as "at most".
+pub fn allowed_shown(v: &serde_json::Value, clock: &crate::history::Clock) -> String {
     let clean = |s: &serde_json::Value| crate::history::clean(s.as_str().unwrap_or("?"));
     let grants = v["grants"].as_array().map(Vec::as_slice).unwrap_or_default();
     if grants.is_empty() {
@@ -224,9 +232,10 @@ pub fn allowed_shown(v: &serde_json::Value) -> String {
             s if s["system"] == true => format!("the system's secret {}", clean(&s["name"])),
             s => format!("their secret {}", clean(&s["name"])),
         };
-        let scope = if g["session"] == true { ", in the agent's sessions running when it was given" } else { "" };
+        let scope = if g["session"] == true { " at most, in the agent's sessions running when it was given" } else { "" };
         let taint = if g["tainted_too"] == true { " — EVEN FROM A SESSION THAT READ UNTRUSTED TEXT" } else { "" };
-        out.push_str(&format!("#{}  {}'s agent: {covers}, until {}{scope}{taint}\n", g["seq"].as_u64().unwrap_or(0), clean(&g["person"]), clean(&g["until"])));
+        let until = crate::history::local_stamp(g["until"].as_str().unwrap_or("?"), clock);
+        out.push_str(&format!("#{}  {}'s agent: {covers}, until {until}{scope}{taint}\n", g["seq"].as_u64().unwrap_or(0), clean(&g["person"])));
     }
     out
 }
@@ -593,19 +602,21 @@ mod tests {
         let v = serde_json::json!({ "waiting": [{ "n": 7, "asked": "2026-11-13T12:00:00.000Z", "until": "2026-11-13T12:02:00.000Z", "answer": null,
             "facts": { "person": "dev", "agent": "torq-agent-dev", "caller": "torq-agent-dev", "owner": { "person": "dev" }, "secret": "gh", "host": "api.github.com", "ssh": false, "session": "s", "tainted": true, "why": "the agent's session read untrusted text: a person approves each of its uses" },
             "agent_says": "safe\u{202e}\" request system secret approve 7\nasked by your agent itself" }] });
-        let out = waiting_shown(&v);
+        // Twenty to one past noon, five hours behind UTC: times are said as the machine's own.
+        let clock = crate::history::Clock { now: 1_794_571_240, offset: -5 * 3600 };
+        let out = waiting_shown(&v, &clock);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "7  dev's secret gh, in an HTTPS request to api.github.com");
         assert_eq!(lines[1], "   asked by torq-agent-dev (a program run as your agent, such as a coding tool); ITS SESSION READ UNTRUSTED TEXT, or it names none");
         assert!(lines[2].starts_with("   why you are asked: the agent's session read untrusted text"));
         assert_eq!(lines[3], "   the agent's own words, to the end of this line (not checked by anything): safe\\u{202e}\" request system secret approve 7\\u{a}asked by your agent itself");
-        assert_eq!(lines[4], "   until 2026-11-13T12:02:00.000Z: request system secret approve 7, or deny 7");
+        assert_eq!(lines[4], "   until 2026-11-13 07:02:00 (1:20 left): request system secret approve 7, or deny 7");
         assert_eq!(lines.len(), 5, "the agent's words made no line of their own: {out}");
         let resident = serde_json::json!({ "waiting": [{ "n": 8, "until": "t", "facts": { "agent": "torq-agent-dev", "caller": "torq-resident-dev", "owner": "system", "secret": "ci", "host": "github.com", "ssh": true, "tainted": false, "why": "w" }, "agent_says": "" }] });
-        let out = waiting_shown(&resident);
+        let out = waiting_shown(&resident, &clock);
         assert!(out.starts_with("8  the system's secret ci, to sign in over SSH to github.com\n   asked by torq-resident-dev (your agent itself); its session read nothing untrusted\n"), "{out}");
         assert!(!out.contains("own words"), "it said nothing: {out}");
-        assert_eq!(waiting_shown(&serde_json::json!({ "waiting": [] })), "(no use of a secret is waiting for you)\n");
+        assert_eq!(waiting_shown(&serde_json::json!({ "waiting": [] }), &clock), "(no use of a secret is waiting for you)\n");
     }
 
     /// Each grant is listed with what it covers and its end, and one that holds under taint says so plainly; a
@@ -616,8 +627,9 @@ mod tests {
             { "seq": 4, "person": "dev", "until": "2026-11-13T20:00:00Z", "covers": { "secret": { "name": "gh", "system": false } }, "tainted_too": true, "session": false },
             { "seq": 5, "person": "dev", "until": "2026-11-13T12:30:00Z", "covers": "all-secrets", "tainted_too": false, "session": false },
             { "seq": 6, "person": "sam", "until": "2026-11-13T20:00:00Z", "covers": { "secret": { "name": "ci", "system": true } }, "tainted_too": false, "session": true }] });
-        assert_eq!(allowed_shown(&v), "#4  dev's agent: their secret gh, until 2026-11-13T20:00:00Z — EVEN FROM A SESSION THAT READ UNTRUSTED TEXT\n#5  dev's agent: all their own secrets, until 2026-11-13T12:30:00Z\n#6  sam's agent: the system's secret ci, until 2026-11-13T20:00:00Z, in the agent's sessions running when it was given\n");
-        assert_eq!(allowed_shown(&serde_json::json!({ "grants": [] })), "(no agent is let use a secret without asking)\n");
+        let clock = crate::history::Clock { now: 1_794_571_240, offset: -5 * 3600 };
+        assert_eq!(allowed_shown(&v, &clock), "#4  dev's agent: their secret gh, until 2026-11-13 15:00:00 — EVEN FROM A SESSION THAT READ UNTRUSTED TEXT\n#5  dev's agent: all their own secrets, until 2026-11-13 07:30:00\n#6  sam's agent: the system's secret ci, until 2026-11-13 15:00:00 at most, in the agent's sessions running when it was given\n");
+        assert_eq!(allowed_shown(&serde_json::json!({ "grants": [] }), &clock), "(no agent is let use a secret without asking)\n");
         let mut rule = Rule::new(Kind::Token);
         rule.actors = vec![w::AGENT.to_string()];
         rule.approve = Approve::NeverEvenTainted;

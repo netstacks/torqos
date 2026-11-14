@@ -2993,7 +2993,8 @@ mod tests {
             Ok(format!("asked the broker: {}\n", a.args(crate::secrets::Place::Terminal).join(" ")))
         }
         fn secret_approvals(&self, waiting: bool) -> Result<String> {
-            Ok(if waiting { crate::secrets::waiting_shown(&serde_json::json!({})) } else { crate::secrets::allowed_shown(&serde_json::json!({})) })
+            let clock = crate::history::Clock { now: 0, offset: 0 };
+            Ok(if waiting { crate::secrets::waiting_shown(&serde_json::json!({}), &clock) } else { crate::secrets::allowed_shown(&serde_json::json!({}), &clock) })
         }
         fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
             Ok(self.kept.clone())

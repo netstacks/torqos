@@ -482,9 +482,9 @@ impl Machine for Real<'_> {
     fn secret_approvals(&self, waiting: bool) -> Result<String> {
         let log = run::start_log()?;
         if !waiting {
-            return Ok(crate::secrets::allowed_shown(&self.grants(&log)?));
+            return Ok(crate::secrets::allowed_shown(&self.grants(&log)?, &history::Clock::system()));
         }
-        Ok(crate::secrets::waiting_shown(&self.waiting_uses(&me()?, &log)?))
+        Ok(crate::secrets::waiting_shown(&self.waiting_uses(&me()?, &log)?, &history::Clock::system()))
     }
 
     fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
