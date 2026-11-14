@@ -171,13 +171,13 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    torqcli does not check the rest of it (outputs, `configDir`, no extra modules or inputs): a
    flake.nix changed by hand beyond that line is still shown as TorqOS's own. It is changed only
    through the broker, as a system-tier change a person reads.
-6q. **`| display set` loads back, with one exception:** a setting that is not a list and whose value is
-   exactly `|` is refused when read back (a quoted word is not told apart from the syntax). A list
-   value that is exactly `[`, `]` or `|` is written inside brackets (`set … [ "|" ]`), where it is a
-   value, and loads back (`cli/src/tree.rs` `display_set_entries`; `session::pipe_at` reads, in a `set` or `delete` line, a `|`
-   inside a list's brackets as a value, and a `|` there that is not quoted is refused). A single
-   value `|` would need words that say whether they were quoted, through the grammar, the filters
-   and completion.
+6q. **`| display set` loads back.** A value that is exactly `|` (a list's, or a single setting's) is
+   written inside brackets, where it is a value: `set … [ "|" ]` (`cli/src/tree.rs`
+   `display_set_entries`; a non-list setting reads `[ "|" ]` as its one value, in `tree.rs` and
+   `nixos.rs` `value`). A list value that is exactly `[` or `]` is written the same way.
+   `session::pipe_at` reads, in a `set` or `delete` line, a `|` inside a list's brackets as a value, and a `|` there that
+   is not quoted is refused. A bare `|` after a value is a pipe. Tested: session (both cases) and
+   shell (the completer, driven as the editor drives it).
    `save` / `load override` keep them all. `load set` saves the candidate as it goes:
    all or nothing for errors, not for a crash or a full disk midway.
 6r. **The config repo is readable by every user** (0755/0644; second audit, L4), and so is the Nix
@@ -231,6 +231,15 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    included. Reading one when it is asked for would mean evaluating the configuration (seconds).
    Possible: defaults written by NixOS's manual build, or an evaluation per setting in its own
    process.
+   Plan (not built): (1) modules/nixos-schema.nix gains an optional `default` per entry (and cli/src/nixos.rs
+   `Entry` a `default: Option<Value>`), filled from NixOS's own options document
+   (`config.system.build.manual.optionsJSON`, where each default is already rendered, `literalExpression`
+   ones as text, errors caught by its build) and kept only for plain values (bool, number, text, a list of
+   those) so nothing is guessed; (2) `set` on a path with a default that is not yet set says "replaces
+   the default <value>" (cli/src/session.rs, where `set` answers); (3) `show <path> | display defaults`
+   (a new view word, grammar.rs `Display`) lists the known defaults below the path.
+   The first step is the large one: the manual build is a separate derivation (seconds to minutes), and
+   its JSON must be checked against the real options before any default is printed.
 6y. **Reading the history** was the owner's alone, with a password, out of dev mode; since the socket
    broker (ADR-040) it is anyone's on the machine to read, and only the broker writes it. Formerly: the history is
    privileged (ADR-026).

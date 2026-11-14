@@ -490,6 +490,8 @@ pub fn value(ty: &Type, words: &[String]) -> Result<Value> {
     let one = |what: &str| -> Result<&String> {
         match words {
             [w] => Ok(w),
+            // `[ "|" ]`: how `| display set` writes a value that is a bar alone.
+            [open, bar, close] if open == "[" && bar == "|" && close == "]" => Ok(bar),
             [] => bail!("needs {what}"),
             _ => bail!("takes one value ({what}); in \"quotes\" if it has spaces"),
         }

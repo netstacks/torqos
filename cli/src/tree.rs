@@ -244,7 +244,8 @@ impl Schema {
         let file = self.file_of(&t.node, t.name.as_deref());
         match (n.kind, file) {
             (Kind::Leaf, Some(file)) => {
-                let [value] = t.values.as_slice() else {
+                // (`[ "|" ]` is how `| display set` writes a value that is a bar alone.)
+                let [value] = (if matches!(t.values.as_slice(), [o, b, c] if o == "[" && b == "|" && c == "]") { &t.values[1..2] } else { t.values.as_slice() }) else {
                     bail!("{}: takes exactly one value", t.words.join(" "));
                 };
                 self.check_value(&t.node, value)?;
@@ -551,6 +552,8 @@ pub fn display_set_entries(entries: &[(Vec<String>, Val)]) -> String {
     for (words, val) in entries {
         let path = words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
         match val {
+            // A value that is exactly a bar is written in brackets, where it is a value (a word does not say it was quoted).
+            Val::One(v) if v == "|" => out.push_str(&format!("set {path} [ {} ]\n", quote(v))),
             Val::One(v) => out.push_str(&format!("set {path} {}\n", quote(v))),
             // An empty list too, so `load set` gives it back.
             Val::Many(vs) if vs.is_empty() => out.push_str(&format!("set {path} [ ]\n")),
