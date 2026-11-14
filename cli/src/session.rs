@@ -4171,6 +4171,32 @@ mod tests {
         assert_eq!(words(r#"show | grep "[" | wc"#).unwrap(), ["show", "|", "grep", "[", "|", "wc"]);
     }
 
+    /// A single value that is exactly `|` comes back from `| display set` too (KNOWN-GAPS 6q): written
+    /// `[ "|" ]`, it is the value; after any other value a pipe is still a pipe.
+    #[test]
+    fn a_bar_as_a_single_value_comes_back_from_display_set() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", r#"set fileSystems /data fsType [ "|" ]"#]);
+        let shown = s.exec("show | display set").unwrap();
+        assert!(shown.contains(r#"fsType [ "|" ]"#), "{shown}");
+        let (d2, m2) = (repo(), Fake::default());
+        let mut again = session(d2.path(), None, &m2);
+        again.exec("configure").unwrap();
+        for line in shown.lines() {
+            again.exec(line).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
+        assert_eq!(again.exec("show | display set").unwrap(), shown);
+        // Another value is written plain, and a pipe after it is a pipe.
+        run(&mut again, &["set fileSystems /data fsType ext4"]);
+        let plain = again.exec("show | display set").unwrap();
+        assert!(plain.contains("fsType ext4") && !plain.contains('['), "{plain}");
+        assert!(again.exec("show | display set | wc -l").is_ok());
+        // Bare, a bar is not a value.
+        assert!(words("set fileSystems /data fsType |").is_ok());
+        assert!(s.exec("set fileSystems /data fsType |").is_err());
+    }
+
     /// A NixOS setting commits as its nixos/ file, system tier, asked; a person's own packages,
     /// by their NixOS path, stay user tier.
     #[test]
