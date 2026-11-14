@@ -12,20 +12,10 @@ use super::{blocking, failed, waiting, Loaded, Message, Settings};
 use cosmic::iced::Length;
 use cosmic::prelude::*;
 use cosmic::widget::{self, settings};
-use torq::app::{self, Allowed, Approve, At, Kind, Secret};
-
-/// What a masked field holds, on its way from the field to the page: never printed, as a `Message` may be.
-#[derive(Clone)]
-pub struct Masked(String);
-
-impl std::fmt::Debug for Masked {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Masked")
-    }
-}
+use torq::app::{self, Allowed, Approve, At, Masked, Secret};
 
 /// A secret on the list: whose it is (None: the system's), and its name.
-type Which = (Option<String>, String);
+type Which = app::Which;
 
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -131,12 +121,10 @@ impl Settings {
         match m {
             Msg::Listed(r) => {
                 if let Ok((list, _)) = &r {
-                    let on_it = |w: &Which| list.iter().any(|x| x.user == w.0 && x.name == w.1);
                     // The chosen one deleted: nothing is chosen. A new one just made: it is the one chosen.
-                    if s.chosen.as_ref().is_some_and(|w| !on_it(w)) {
-                        s.chosen = None;
-                    } else if s.chosen.is_none() && on_it(&s.which()) {
-                        s.chosen = Some(s.which());
+                    let (chosen, made) = app::chosen_after_listing(s.chosen.as_ref(), list, &s.which());
+                    s.chosen = chosen;
+                    if made {
                         s.name.clear();
                     }
                 }
@@ -146,7 +134,7 @@ impl Settings {
             Msg::Choose(w) => {
                 // Another secret: what was typed was for the one before. Left in the masked fields, where it
                 // cannot be seen, a value meant for one secret could be kept on another; a host likewise.
-                if s.chosen != w {
+                if app::choosing_empties(s.chosen.as_ref(), w.as_ref()) {
                     drop((std::mem::take(&mut s.value), std::mem::take(&mut s.again)));
                     s.host.clear();
                     s.chosen = w;
@@ -155,8 +143,8 @@ impl Settings {
             Msg::Name(n) => s.name = n,
             Msg::Mine(on) => s.mine = on,
             Msg::Host(h) => s.host = h,
-            Msg::Value(v) => s.value = v.0,
-            Msg::Again(v) => s.again = v.0,
+            Msg::Value(v) => s.value = v.into_inner(),
+            Msg::Again(v) => s.again = v.into_inner(),
             Msg::Keep => {
                 // Out of the page, and so out of both fields, before anything is sent: whatever the broker
                 // answers, they are empty. The two are dropped when the call returns.
@@ -220,8 +208,7 @@ impl Settings {
         // Everything the person allowed, here, where it is seen on opening the page whatever secret is chosen:
         // the grant of all their own secrets first, then each named one, each with what it holds under (in the
         // destructive style where that is even untrusted text) and the line that ends it (`Allowed::ending`).
-        let mut mine: Vec<&Allowed> = allowed.iter().filter(|g| me == Some(g.person.as_str())).collect();
-        mine.sort_by_key(|g| g.secret.is_some());
+        let mine = app::own_allowed(allowed, me);
         if !mine.is_empty() {
             let mut section = settings::section().title("What you allowed without asking, for now");
             for g in mine {
@@ -241,12 +228,7 @@ impl Settings {
                 }
                 for x in secrets {
                     let which = (x.user.clone(), x.name.clone());
-                    let whose = match &x.user {
-                        None => "the system's".to_string(),
-                        Some(u) if Some(u) == s.me.as_ref() => "yours".to_string(),
-                        Some(u) => format!("{u}'s"),
-                    };
-                    list = list.add(settings::item::builder(format!("{} ({whose})", x.name)).description(x.said.clone()).control(choose(s.chosen.as_ref() == Some(&which), Some(which))));
+                    list = list.add(settings::item::builder(app::secret_row(x.user.as_deref(), &x.name, s.me.as_deref())).description(x.said.clone()).control(choose(s.chosen.as_ref() == Some(&which), Some(which))));
                     // Marked wherever the secret is listed: this one is used with no one asked, whatever was read.
                     if x.approve == Approve::NeverEvenTainted {
                         list = list.add(widget::text::caption(format!("{}: the agent uses it without ever asking. {}", x.name, app::EVEN_TAINTED)).class(red));
@@ -275,10 +257,8 @@ impl Settings {
         let listed = s.listed();
         let user = which.0.as_deref();
         // As the lines below show them; with either still to be typed, nothing that needs it can be run.
-        let name = if which.1.is_empty() { "<name>" } else { which.1.as_str() };
-        let host = if s.host.trim().is_empty() { "<host>" } else { s.host.trim() };
-        let named = self.busy.is_none() && !which.1.is_empty();
-        let hosted = named && !s.host.trim().is_empty();
+        let (name, host) = app::secret_placeholders(&which.1, &s.host);
+        let (named, hosted) = app::secret_ready(self.busy.is_some(), &which.1, &s.host);
         let whose = if which.1.is_empty() { "the new secret".to_string() } else { s.whose(&which) };
         // One of torqcli's commands for this secret: what it does, the line itself, and the button that runs it.
         let run = |label: String, words: &[&str], ready: bool| {
@@ -286,7 +266,7 @@ impl Settings {
             settings::item::builder(label).description(line.clone()).control(widget::button::standard("Run").on_press_maybe(ready.then(|| Message::Act(At::Read, line))))
         };
 
-        let keep = if listed.is_some_and(|x| x.has_value) { "Keep it in place of the value it has" } else { "Keep it" };
+        let keep = app::keep_label(listed.is_some_and(|x| x.has_value));
         page = page
             .push(
                 settings::section()
@@ -314,10 +294,11 @@ impl Settings {
         uses = uses.add(settings::item::builder("Another host").description("A DNS name").control(widget::text_input("api.github.com", &s.host).on_input(|h| Message::Secrets(Msg::Host(h))).width(Length::Fixed(280.0))));
         // A token is sent, an SSH key signs: one that is already the one is not offered the other.
         let kind = listed.and_then(|x| x.kind);
-        if kind != Some(Kind::SshKey) {
+        let (https_offered, ssh_offered) = app::host_uses_offered(kind);
+        if https_offered {
             uses = uses.add(run("Send it to this host, in an HTTPS header (a token)".into(), &["allow", name, "https", host], hosted));
         }
-        if kind != Some(Kind::Token) {
+        if ssh_offered {
             uses = uses.add(run("Sign for SSH to this host (an SSH key)".into(), &["allow", name, "ssh", host], hosted));
         }
         page = page.push(uses);
@@ -353,7 +334,7 @@ impl Settings {
                 }
                 // Never, even after untrusted text: a person's own secret only, theirs to say, with their password.
                 // In the destructive style, set or offered.
-                if user.is_some() && user == me {
+                if app::never_tainted_offered(user, me) {
                     if x.approve == Approve::NeverEvenTainted {
                         approve = approve.add(settings::item::builder("Never, even from a session that read untrusted text").description("As it is now").control(widget::text::caption("Now").class(red)));
                         approve = approve.add(widget::text::caption(format!("Your agent uses {whose} without ever asking you, whatever it has read: text it reads can make it use the secret. It still goes only to the hosts above. Any other line here ends that.")).class(red));
@@ -367,12 +348,11 @@ impl Settings {
                 ));
                 // What lets its uses through without asking, for now: each allowance that covers this secret, and
                 // for the person's own the line that ends it.
-                let covering: Vec<&Allowed> = allowed.iter().filter(|g| g.covers(user, name)).collect();
+                let covering = app::allowed_under(allowed, user, name, me);
                 if !covering.is_empty() {
                     let mut section = settings::section().title(format!("Allowed without asking, for now: {whose}"));
-                    for g in covering {
+                    for (g, at_top) in covering {
                         // The person's own has its button once, at the top of the page.
-                        let at_top = me == Some(g.person.as_str());
                         section = section.add(self.allowance(g, !at_top));
                     }
                     page = page.push(section);
@@ -402,12 +382,7 @@ impl Settings {
 
 /// `request system secret <words> [user <person>]`, as a line of torqcli's.
 fn command(words: &[&str], user: Option<&str>) -> String {
-    let mut line = vec!["request", "system", "secret"];
-    line.extend(words);
-    if let Some(u) = user {
-        line.extend(["user", u]);
-    }
-    app::line(&line)
+    app::secret_command(words, user)
 }
 
 /// A row's way of being the one the page is about: said, if it is; a button, if it is not.
@@ -422,5 +397,5 @@ fn choose(chosen: bool, which: Option<Which>) -> Element<'static, Message> {
 /// A field that shows dots for what is typed in it, with no way to show it (no eye to press), and nothing to
 /// copy or cut from (the toolkit's own rule for such a field).
 fn masked(value: &str, to: fn(Masked) -> Msg) -> Element<'_, Message> {
-    widget::secure_input("", value, None, true).on_input(move |v| Message::Secrets(to(Masked(v)))).width(Length::Fixed(280.0)).into()
+    widget::secure_input("", value, None, true).on_input(move |v| Message::Secrets(to(Masked::new(v)))).width(Length::Fixed(280.0)).into()
 }

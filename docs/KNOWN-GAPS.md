@@ -1435,10 +1435,11 @@ Its §5 lists claims without a test.
    - **"Allow for…" on a use from a session that read untrusted text offers only grants that say so**
      (`tainted-too`, this one secret, 60 or 480 minutes), which is every coding tool's use (the owner,
      2026-11-13: kept). The plain ones, given there, would not stop that session asking;
-   - **"Allow for…" ends a grant of that secret the person already gave.** The broker gives no second grant of a
-     secret while one holds, so the dialog says that one holds and, on the press, ends it (no password) before
-     it asks for the new one (the password). If the new one is refused or the password cancelled, the old one
-     is gone and the note says so: the person is left with less than before the press. Which grant holds is
+   - **"Allow for…" replaces a grant of that secret the person already gave.** The broker gives no second grant of a
+     secret while one holds, so the dialog says that one holds and, on the press, asks the password and sends the grant
+     with `--replace`, which ends the old one in the same step that makes the new one (changed 2026-11-14: it first
+     ended the old one, and a cancelled password left the person with neither). If the new one is refused or the
+     password cancelled, the old one stands and the note says so. Which grant holds is
      as the applet last asked (every 2 seconds while a use is shown); one given or ended since at a terminal
      is found at the broker, and the note says what was and was not done;
    - **the password for "Allow for…" is asked while the use's two minutes run.** If they are over when the
