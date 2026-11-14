@@ -1071,10 +1071,11 @@ Its §5 lists claims without a test.
      network at its first build. Setup says so before a new machine's build starts, naming the driver
      (`cli/src/setup.rs` `own_drivers`, 2026-11-12; the sentence's reading of the hardware file is
      unit-tested, its printing is not, and no such hardware has been tried). Still open of ADR-048
-     5's message: it does not offer Wi-Fi again there (offline, the build then fails and setup starts
-     over), it is not said when adopting, and only a driver is recognised, not everything not carried.
+     5's message: it is not said when adopting, and only a driver is recognised, not everything not carried.
      The VM test builds change #1 for a machine none of the samples is (a VM, no firmware): 23
      derivations, from the disk alone. Real hardware (firmware, iwd) is proved on the Zenbook.
+     A build that fails with no network starts setup over and offers Wi-Fi again (2026-11-13,
+     `setup::network_again`, unit-tested; the console step itself is not).
    - **Setup's own path is not what the test runs:** the test loads the registration as setup does
      (`register_carried`) and builds as the broker would; tests/image.nix's setup still switches to a
      prebuilt specialisation.

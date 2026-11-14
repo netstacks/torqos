@@ -35,7 +35,8 @@ The build needs no network, with one exception: hardware that needs a driver whi
 kernel. The installer does not carry such a driver, so the build fetches it. Setup says so, naming
 the driver, before the build starts.
 
-If the configuration does not build, nothing changes and setup starts over from its questions. If
+If the configuration does not build, nothing changes and setup starts over from its questions. A machine with no network is offered Wi-Fi again then, since
+the build may have failed for want of it. If
 setup is interrupted before the switch (by a power cut, say), it starts again from the beginning at
 the next boot, with its partial work removed. If it is interrupted after the switch, the machine
 starts its new system and finishes recording change #1 by itself.

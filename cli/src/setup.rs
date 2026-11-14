@@ -176,7 +176,7 @@ pub fn run() -> Result<()> {
     let repo = Path::new(REPO);
     // The network first (ADR-048, amended): what follows offers what needs it only when it is there.
     println!("\n{}\n", welcome());
-    let online = crate::network::step(&welcome)?;
+    let mut online = crate::network::step(&welcome)?;
     let mut first = true;
     loop {
         // Anything a setup cut short left: gone, to start clean. That includes Nix's caches of the
@@ -187,6 +187,7 @@ pub fn run() -> Result<()> {
         let _ = std::fs::remove_dir_all(BUILD_CACHE);
         if !std::mem::take(&mut first) {
             println!("\n{}\n", welcome());
+            online = network_again(online, || crate::network::step(&welcome))?;
         }
         const HOW: &str = "How should this machine start?\n  1  as a new machine\n  2  from a repository: become the machine it holds";
         if online {
@@ -242,6 +243,12 @@ pub fn run() -> Result<()> {
             }
         }
     }
+}
+
+/// Starting over after a build that failed: a machine that had no network is offered one again (`step`),
+/// since the build may have failed for want of it; one that had one is left as it is.
+fn network_again(online: bool, step: impl FnOnce() -> Result<bool>) -> Result<bool> {
+    if online { Ok(true) } else { step() }
 }
 
 /// What adopting a repository asked (ADR-036).
@@ -722,6 +729,17 @@ mod tests {
         assert_eq!(own_drivers(&file(" config.boot.kernelPackages.broadcom_sta ")).as_deref(), Some("config.boot.kernelPackages.broadcom_sta"));
         assert_eq!(own_drivers(&file(" ")), None);
         assert_eq!(own_drivers("{ ... }: { }\n"), None);
+    }
+
+    /// A setup started over offers the network again to a machine that had none, and leaves one that had.
+    #[test]
+    fn a_new_start_offers_wifi_again_only_when_offline() {
+        let mut asked = 0;
+        assert!(!network_again(false, || { asked += 1; Ok(false) }).unwrap());
+        assert!(network_again(false, || { asked += 1; Ok(true) }).unwrap(), "joined this time");
+        assert_eq!(asked, 2);
+        assert!(network_again(true, || panic!("already online")).unwrap());
+        assert!(network_again(false, || bail!("no console")).is_err());
     }
 }
 
