@@ -16,7 +16,7 @@ released: no version has been bumped for it.
   `~/.claude.json`, whether it follows a symlinked skill directory, and how its sign-in behaves as the agent account.
 - Any agent UI on a real machine (the applet, the window, the approval dialog, the Agent page, Super+Shift+A, the
   launcher, crash notifications). The VM screenshots don't show the applet or window drawn.
-- `coredumpctl info` with the crash watcher's matches was run by hand against a real entry on 2026-11-13, and
+- `coredumpctl info` with the crash watcher's matches was run by hand against a real entry on 2026-11-14, and
   `cli/src/agent/crash.rs` has a test from that real entry's format. The watcher's loop and the notification
   are still unseen on a desktop.
 
