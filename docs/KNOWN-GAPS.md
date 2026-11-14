@@ -593,8 +593,12 @@ Its §5 lists claims without a test.
    RAM, a read error) is offered, since only its label says it is the installer's; a cciss disk's
    `cciss!c0d0` name is not mapped to its `/dev/cciss/c0d0`. (Two more of that review are fixed,
    2026-11-12: the hardware is detected before the write, so a detection that fails writes nothing
-   — `tests/installer.nix`, a subtest written and not run yet; leaving the file on the new disk can
-   still fail after the write, which clears the disk as before. And a disk's model is shown without
+   — `tests/installer.nix`, a subtest written and not run yet; what the first build is carried (its store
+   paths, each checked to be in the installer's store, and the registration) is read before the write
+   too, 2026-11-13, `install.rs` `what_is_carried_is_checked_before_the_write`. What can still fail
+   after the write is what needs the new disk: reading its partitions, mounting it, writing the files,
+   copying the store paths (a full disk). The disk is then cleared again, and the message says whether
+   it was or may hold part of TorqOS. And a disk's model is shown without
    control characters or direction overrides, so an escape sequence in a USB disk's INQUIRY string
    cannot redraw the list: `install.rs` `a_model_cannot_redraw_the_console`.) And the installer does not ignore SIGINT, SIGQUIT
    or SIGTERM itself (Rust has no safe way without a new crate): with the console's signal keys
