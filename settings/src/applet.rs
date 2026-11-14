@@ -86,8 +86,6 @@ struct Applet {
     allowing: Option<u64>,
     /// The use whose answer is on its way to the broker: no other button acts until it is back.
     replying: Option<u64>,
-    /// What became of an answer, or of a use that ended without one given here, and whether that is a failure.
-    use_note: Option<(String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -311,30 +309,28 @@ impl Applet {
         }
     }
 
-    /// What became of the last answer given here, or of a use that ended without one: a failure in the
-    /// destructive style.
-    fn use_note_line(&self) -> Option<Element<'_, Message>> {
-        let (text, failed) = self.use_note.as_ref()?;
-        let said = widget::text::caption(text.clone()).width(Length::Fill);
+    /// What became of an answer given here, or of a use that ended without one: a failure in the destructive style.
+    fn note_line(note: &app::Note) -> Element<'static, Message> {
+        let said = widget::text::caption(note.text.clone()).width(Length::Fill);
         let theme = cosmic::theme::active();
-        Some(if *failed { said.class(cosmic::theme::Text::Color(theme.cosmic().destructive_color().into())).into() } else { said.into() })
+        if note.failed { said.class(cosmic::theme::Text::Color(theme.cosmic().destructive_color().into())).into() } else { said.into() }
     }
 
     /// The dialog for the agent's use of a secret that waits (ADR-051, ADR-052 4): the broker's facts first, then,
     /// apart and marked as the agent's, the agent's own words; then the buttons. Laid out from `d`, which
-    /// `torq::app` made: nothing is decided here.
-    fn use_view(&self, d: app::UseDialog) -> Element<'_, Message> {
+    /// `torq::app` made: nothing is decided here. `note`: why an answer to this very use was not taken.
+    /// No button here is the highlighted one: nothing in a prompt like this is the default.
+    fn use_view(&self, d: app::UseDialog, note: Option<&app::Note>) -> Element<'_, Message> {
         let spacing = cosmic::theme::spacing();
         let theme = cosmic::theme::active();
         let red = cosmic::theme::Text::Color(theme.cosmic().destructive_color().into());
         let n = d.n;
-        // No button acts in a dialog's first moment on the screen, nor while an answer is on its way.
+        // No button acts in the first moment after what is drawn changed, nor while an answer is on its way.
         let live = self.replying.is_none() && self.asking.takes(n, Instant::now());
         let mut col = widget::column::with_capacity(12).spacing(spacing.space_xs).padding(spacing.space_s).width(Length::Fixed(340.0));
         col = col.push(widget::text::heading("Your agent asks to use a secret"));
-        if let Some(more) = d.more {
-            col = col.push(widget::text::caption(more));
-        }
+        // Always a line, whether or not another use waits: one coming or going moves nothing below it.
+        col = col.push(widget::text::caption(d.more));
         for (label, value, marked) in d.facts {
             let value = widget::text::body(value).width(Length::Fill);
             let value = if marked { value.class(red) } else { value };
@@ -353,8 +349,8 @@ impl Applet {
             col = col.push(widget::container(words).padding(spacing.space_xs).width(Length::Fill).class(cosmic::theme::Container::Secondary));
         }
         col = col.push(widget::divider::horizontal::default());
-        if let Some(note) = self.use_note_line() {
-            col = col.push(note);
+        if let Some(note) = note {
+            col = col.push(Self::note_line(note));
         }
         if self.replying == Some(n) {
             col = col.push(widget::text::caption("Sending your answer…"));
@@ -377,7 +373,7 @@ impl Applet {
             col = col.push(
                 widget::row::with_capacity(2)
                     .spacing(spacing.space_xs)
-                    .push(widget::button::suggested("Allow once").on_press_maybe(live.then_some(Message::UseReply(n, app::Reply::Once))))
+                    .push(widget::button::standard("Allow once").on_press_maybe(live.then_some(Message::UseReply(n, app::Reply::Once))))
                     .push(widget::button::standard("Allow for…").on_press_maybe(live.then_some(Message::AllowFor(n, true)))),
             );
             col = col.push(widget::button::destructive("Deny").on_press_maybe(live.then_some(Message::UseReply(n, app::Reply::Deny))));
@@ -389,23 +385,27 @@ impl Applet {
     }
 
     fn popup_view(&self) -> Element<'_, Message> {
-        // One dialog at a time, and before anything else the popup has to say.
-        if let Some((u, more)) = self.asking.shown() {
-            return self.use_view(u.dialog(self.me.as_deref().unwrap_or_default(), more, self.now));
-        }
         let spacing = cosmic::theme::spacing();
-        // What became of the use the dialog was for, alone until it is read: a press meant for the dialog's
-        // buttons, as it goes, lands on none of the popup's own (Confirm, Restart).
-        if let Some(note) = self.use_note_line() {
-            let col = widget::column::with_capacity(3)
-                .spacing(spacing.space_s)
-                .padding(spacing.space_s)
-                .width(Length::Fixed(340.0))
-                .push(widget::text::heading("Your agent's use of a secret"))
-                .push(note)
-                .push(widget::button::standard("OK").on_press(Message::UseNoteRead));
-            return self.core.applet.popup_container(col).into();
+        match self.asking.showing() {
+            // One dialog at a time, and before anything else the popup has to say.
+            app::Showing::Use(u, more, note) => return self.use_view(u.dialog(self.me.as_deref().unwrap_or_default(), more, self.now), note),
+            // What became of a use, alone until it is read (or, with another use waiting behind it and no
+            // failure to read, for a few seconds): a press meant for the dialog's buttons, as it goes, lands
+            // on none of the next dialog's, and on none of the popup's own.
+            app::Showing::Note(note) => {
+                let col = widget::column::with_capacity(3)
+                    .spacing(spacing.space_s)
+                    .padding(spacing.space_s)
+                    .width(Length::Fixed(340.0))
+                    .push(widget::text::heading("Your agent's use of a secret"))
+                    .push(Self::note_line(note))
+                    .push(widget::button::standard("OK").on_press(Message::UseNoteRead));
+                return self.core.applet.popup_container(col).into();
+            }
+            app::Showing::Nothing => {}
         }
+        // The popup's own buttons take no press in the first moment after a note or a dialog stood here.
+        let settled = self.asking.settled(Instant::now());
         let mut col = widget::column::with_capacity(6).spacing(spacing.space_s).padding(spacing.space_s).width(Length::Fixed(340.0));
         let version = match &self.glance {
             Some(Ok(g)) => format!("TorqOS {}", g.version),
@@ -419,19 +419,19 @@ impl Applet {
                 let left = c.at.map(|at| (at - self.now).max(0)).map(|s| format!("{}:{:02} left. ", s / 60, s % 60)).unwrap_or_default();
                 col = col.push(line(format!("{left}Change #{} rolls back at {} unless you confirm it.", c.seq, c.deadline)));
                 let both = matches!(&self.glance, Some(Ok(g)) if matches!(g.needs, Needs::Restart(_)));
-                col = col.push(widget::button::suggested(if both { "Confirm, then restart" } else { "Confirm" }).on_press(Message::Confirm));
+                col = col.push(widget::button::suggested(if both { "Confirm, then restart" } else { "Confirm" }).on_press_maybe(settled.then_some(Message::Confirm)));
             }
             State::Needs(n) => {
                 col = col.push(line(n.line().unwrap_or_default()));
                 col = col.push(match n {
-                    Needs::Restart(_) => widget::button::suggested("Restart…").on_press(Message::Restart),
-                    _ => widget::button::suggested("Log out…").on_press(Message::LogOut),
+                    Needs::Restart(_) => widget::button::suggested("Restart…").on_press_maybe(settled.then_some(Message::Restart)),
+                    _ => widget::button::suggested("Log out…").on_press_maybe(settled.then_some(Message::LogOut)),
                 });
             }
             State::Alarm(a) => {
                 col = col.push(line(a.to_string()));
                 // The agent can look at it with the person: the alarm attached (ADR-051 4).
-                col = col.push(widget::button::text("Ask the agent").on_press(Message::AskAgent(a.to_string())));
+                col = col.push(widget::button::text("Ask the agent").on_press_maybe(settled.then(|| Message::AskAgent(a.to_string()))));
             }
             State::Waiting(n, tainted) => {
                 open = "proposals";
@@ -466,7 +466,7 @@ impl Applet {
             }
         }
         col = col.push(widget::divider::horizontal::default());
-        col = col.push(widget::button::text("Open TorqOS Settings").on_press(Message::Open(open)));
+        col = col.push(widget::button::text("Open TorqOS Settings").on_press_maybe(settled.then_some(Message::Open(open))));
         self.core.applet.popup_container(col).into()
     }
 }
@@ -504,10 +504,11 @@ impl cosmic::Application for Applet {
         if matches!(self.state(), State::Confirm(_)) {
             all.push(cosmic::iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
-        // The agent's uses of secrets that wait: sooner, and its dialog drawn again, while one is shown.
+        // The agent's uses of secrets that wait: sooner, and its dialog drawn again, while one is shown; drawn
+        // again too while a change of what is drawn settles, so that buttons come alive.
         let shown = self.asking.shown().is_some();
         all.push(cosmic::iced::time::every(if shown { USES_SHOWN } else { USES }).map(|_| Message::Uses));
-        if shown {
+        if shown || self.asking.settling() {
             all.push(cosmic::iced::time::every(USE_DRAWN).map(|_| Message::Tick));
         }
         Subscription::batch(all)
@@ -576,6 +577,7 @@ impl cosmic::Application for Applet {
                 }
             }
             Message::Tick => {
+                self.asking.tick(Instant::now());
                 self.now = app::now();
                 if let State::Confirm(c) = self.state() {
                     let (seq, deadline, left) = (c.seq, c.deadline.clone(), c.at.map(|at| at - self.now));
@@ -612,6 +614,9 @@ impl cosmic::Application for Applet {
                 }
                 return then;
             }
+            // The popup's own buttons, in the first moment after a note or a dialog stood where they are: a press
+            // meant for that is not one for them. (They are drawn dead for that moment too.)
+            Message::Confirm | Message::LogOut | Message::Restart | Message::Open(_) | Message::AskAgent(_) if !self.asking.settled(Instant::now()) => {}
             Message::Confirm => {
                 let restart = matches!(&self.glance, Some(Ok(g)) if matches!(g.needs, Needs::Restart(_)));
                 return cosmic::task::future(async move {
@@ -657,14 +662,13 @@ impl cosmic::Application for Applet {
                 // (Nothing to tell: a look that worked only forgets why the last one failed.)
                 let _ = self.uses_unread.heard(Ok(()));
                 self.now = app::now();
-                let heard = self.asking.heard(waiting, self.now, Instant::now());
-                // The use shown ended without an answer given here: its dialog goes, and this is said in its place.
-                if let Some(over) = heard.over {
-                    self.use_note = Some((over, false));
+                // A use that ended without an answer given here leaves a note in the dialog's place (`Asking`).
+                let tell = self.asking.heard(waiting, self.now, Instant::now());
+                // The choices of "Allow for…" are of the use they were opened for, and of no other.
+                if self.allowing != self.asking.shown().map(|(u, _)| u.n) {
                     self.allowing = None;
                 }
-                if let Some(u) = heard.tell {
-                    self.allowing = None;
+                if let Some(u) = tell {
                     // Its number alone: the journal is not where a secret's name or an agent's words belong.
                     eprintln!("torq-applet: use {} of a secret waits for an answer", u.n);
                     let (summary, body) = u.notice(self.me.as_deref().unwrap_or_default());
@@ -678,11 +682,15 @@ impl cosmic::Application for Applet {
                     return cosmic::task::message(cosmic::Action::Surface(open_popup(None)));
                 }
             }
-            // Only for the use that is shown, and not in its first moment on the screen (`Asking::takes`): a press
-            // that was meant for what the popup showed before does nothing.
+            // Only for the use whose dialog is drawn, and not in the first moment after what is drawn changed
+            // (`Asking::takes`): a press that was meant for what the popup showed before does nothing. Opening or
+            // closing the choices changes what is drawn, so the buttons wait again: a second click of a
+            // double-click lands on none of them.
             Message::AllowFor(n, open) => {
-                if self.replying.is_none() && self.asking.takes(n, Instant::now()) {
+                let now = Instant::now();
+                if self.replying.is_none() && self.asking.takes(n, now) {
                     self.allowing = open.then_some(n);
+                    self.asking.drawn(now);
                 }
             }
             Message::UseReply(n, reply) => {
@@ -692,28 +700,20 @@ impl cosmic::Application for Applet {
                 }
                 let u = u.clone();
                 self.replying = Some(n);
-                self.use_note = None;
                 return cosmic::task::future(async move { Message::UseReplied(n, blocking(move || app::answer_use(&u, reply)).await) });
             }
+            // What was done, or why not, is `Asking`'s to keep and to show: a failure until it is read.
             Message::UseReplied(n, outcome) => {
                 self.replying = None;
                 self.allowing = None;
-                self.use_note = Some(match outcome {
-                    Ok(said) => {
-                        self.asking.answered(n);
-                        (said.trim().to_string(), false)
-                    }
-                    // Not answered: it stays shown for as long as it waits, with why.
-                    Err(why) => (why, true),
-                });
+                self.asking.replied(n, outcome, Instant::now());
                 return self.update(Message::Uses);
             }
-            Message::UseNoteRead => self.use_note = None,
+            Message::UseNoteRead => self.asking.read(Instant::now()),
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
-                    // Shown, at least: not kept for the next time the popup opens.
-                    self.use_note = None;
+                    self.asking.closed();
                 }
             }
             Message::Surface(a) => return cosmic::task::message(cosmic::Action::Surface(a)),

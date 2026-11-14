@@ -858,6 +858,8 @@ pub const ONLY_EVEN_TAINTED: &str = "This use comes from a session that read unt
 /// How long after a use is first drawn its buttons take no press: a click meant for what was there before lands
 /// on nothing.
 pub const USE_ARMS_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long what became of one use stands alone in front of the next use that waits, unless it is read sooner.
+pub const NOTE_ALONE: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// The agent's words as lines the dialog draws as they are, each beginning with `AGENT_SAYS_MARK`. The lines are
 /// broken here, at `columns` of a fixed-width font (a character outside ASCII counted as two), and not by the
@@ -937,12 +939,13 @@ pub struct UseDialog {
     /// The broker's facts, first: a label and its value each, in the order drawn, and whether the row is drawn in
     /// the destructive style (the session's, where it read untrusted text or none is named).
     pub facts: Vec<(&'static str, String, bool)>,
-    /// How long is left to answer.
+    /// How long is left to answer: one short line whatever the time, so the countdown moves nothing of the dialog.
     pub left: String,
     /// The agent's own words, under `AGENT_SAYS`: lines drawn as they are (none: it said nothing).
     pub agent_says: Vec<String>,
-    /// How many others wait: "2 more waiting".
-    pub more: Option<String>,
+    /// How many others wait: "2 more waiting", or that none does. Always a line, so that another use coming or
+    /// going moves nothing of the dialog.
+    pub more: String,
     /// What "Allow for…" offers.
     pub offers: Vec<Offer>,
     /// Said with the offers, where they are only the kind that holds under untrusted text.
@@ -1022,11 +1025,11 @@ impl WaitingUse {
                 ("Its session", session.into(), self.tainted),
             ],
             left: match self.until.map(|u| u - now) {
-                Some(s) if s > 0 => format!("{}:{:02} left to answer. With no answer it is refused.", s / 60, s % 60),
+                Some(s) if s > 0 => format!("{}:{:02} left to answer, then it is refused.", s / 60, s % 60),
                 _ => "Its time is about over.".into(),
             },
             agent_says: marked_lines(&self.agent_says, AGENT_SAYS_COLUMNS),
-            more: (more > 0).then(|| format!("{more} more waiting")),
+            more: if more > 0 { format!("{more} more waiting") } else { "No other use waits".into() },
             offers: self.offers(),
             offers_note: self.tainted.then_some(ONLY_EVEN_TAINTED),
             deny_session: self.session,
@@ -1083,81 +1086,167 @@ fn answer_with(cli: &Cli, me: &str, log: &std::path::Path, u: &WaitingUse, reply
     Ok(said)
 }
 
+/// What became of a use, said to the person: the answer they gave in the dialog, or how a use ended without one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Note {
+    pub text: String,
+    /// Something was not done, or not all of it: drawn in the destructive style, and kept until it is read.
+    pub failed: bool,
+    /// The use it is about.
+    about: u64,
+    since: std::time::Instant,
+}
+
+/// What the popup shows of the agent's uses.
+#[derive(Debug, PartialEq)]
+pub enum Showing<'a> {
+    /// Nothing: the popup is the panel's own.
+    Nothing,
+    /// What became of a use, alone, with nothing else to press but its OK.
+    Note(&'a Note),
+    /// The dialog of the use shown, how many others wait, and why an answer to this very use was not taken.
+    Use(&'a WaitingUse, usize, Option<&'a Note>),
+}
+
 /// Which waiting use the panel's dialog shows: one at a time, lowest number first, and the next only when the one
-/// shown is answered or its time is over.
+/// shown is answered or its time is over. And when a press is taken: never in the first moment after what is drawn
+/// changed otherwise than by the person's own press, so a click meant for what was there lands on nothing.
 #[derive(Debug, Default)]
 pub struct Asking {
     shown: Option<WaitingUse>,
     more: usize,
-    /// When the use shown was last put in front of the person: its buttons take a press `USE_ARMS_AFTER` later.
+    /// When what is drawn last changed under the person: a press is taken `USE_ARMS_AFTER` later.
     since: Option<std::time::Instant>,
     /// The uses answered here, lately: a list asked before the answer landed may still have one, and it is not shown again.
     answered: Vec<u64>,
-}
-
-/// What a look at the broker's list changed.
-#[derive(Debug, Default, PartialEq)]
-pub struct Heard {
-    /// A use is shown that was not before: the person is told of it, once.
-    pub tell: Option<WaitingUse>,
-    /// The use that was shown is over, and not by an answer given here: said as a note.
-    pub over: Option<String>,
+    note: Option<Note>,
 }
 
 impl Asking {
-    /// The broker's list of what waits (`waiting`), at `now` (seconds since the epoch) and `at`.
-    pub fn heard(&mut self, mut waiting: Vec<WaitingUse>, now: i64, at: std::time::Instant) -> Heard {
+    /// The broker's list of what waits (`waiting`), at `now` (seconds since the epoch) and `at`. A use that is
+    /// shown now and was not before: the person is told of it, once.
+    pub fn heard(&mut self, mut waiting: Vec<WaitingUse>, now: i64, at: std::time::Instant) -> Option<WaitingUse> {
         waiting.retain(|u| !self.answered.contains(&u.n));
         waiting.sort_by_key(|u| u.n);
-        let mut heard = Heard::default();
+        let before = self.shown.as_ref().map(|u| u.n);
         if let Some(was) = self.shown.take() {
             match waiting.iter().position(|u| u.n == was.n) {
-                // Still waiting: it stays the one shown, whatever else has come.
+                // Still waiting: it stays the one shown, whatever else has come. How many others wait is a line of
+                // the dialog: where it changes, the buttons wait again.
                 Some(i) => {
+                    if self.more != waiting.len() - 1 {
+                        self.since = Some(at);
+                    }
                     self.more = waiting.len() - 1;
                     self.shown = Some(waiting.swap_remove(i));
-                    return heard;
+                    return None;
                 }
-                None if was.until.is_none_or(|u| now >= u) => heard.over = Some(format!("The time to answer use {} ({} for {}) is over.", was.n, was.secret, was.host)),
-                None => heard.over = Some(format!("Use {} ({} for {}) was answered somewhere else.", was.n, was.secret, was.host)),
+                None if was.until.is_none_or(|u| now >= u) => self.say(format!("The time to answer use {} ({} for {}) is over.", was.n, was.secret, was.host), false, was.n, at),
+                None => self.say(format!("Use {} ({} for {}) was answered somewhere else.", was.n, was.secret, was.host), false, was.n, at),
             }
         }
         self.more = waiting.len().saturating_sub(1);
         self.shown = waiting.into_iter().next();
-        self.since = self.shown.as_ref().map(|_| at);
-        heard.tell = self.shown.clone();
-        heard
+        if self.shown.as_ref().map(|u| u.n) != before {
+            self.since = Some(at);
+        }
+        self.shown.clone()
     }
 
-    /// The use shown, and how many others wait.
+    /// A note takes the place of the one before it. Except a failure not yet read: what was not done is not
+    /// written over by what happened next, which is said after it.
+    fn say(&mut self, text: String, failed: bool, about: u64, at: std::time::Instant) {
+        self.note = Some(match self.note.take() {
+            Some(unread) if unread.failed => Note { text: format!("{} {text}", unread.text), failed: true, about, since: at },
+            _ => Note { text, failed, about, since: at },
+        });
+        self.since = Some(at);
+    }
+
+    /// The answer given here to use `n` came back. Taken (`Ok`), the use is no longer shown, and is not said to have
+    /// been answered elsewhere. Not taken, or not all of it, it stays shown for as long as it waits, with why.
+    pub fn replied(&mut self, n: u64, outcome: Result<String, String>, at: std::time::Instant) {
+        match outcome {
+            Ok(said) => {
+                if self.shown.as_ref().is_some_and(|u| u.n == n) {
+                    self.shown = None;
+                }
+                self.answered.push(n);
+                // Numbers only grow, and a list asked before an answer is seconds old at most: the last few are enough.
+                if self.answered.len() > 16 {
+                    self.answered.remove(0);
+                }
+                self.say(said.trim().to_string(), false, n, at);
+            }
+            Err(why) => self.say(why, true, n, at),
+        }
+    }
+
+    /// What the popup shows. A note about a use that is no longer the one shown stands alone first, whatever
+    /// waits: it is never drawn inside another use's dialog, above that use's buttons.
+    pub fn showing(&self) -> Showing<'_> {
+        match (&self.shown, &self.note) {
+            (Some(u), Some(note)) if note.about == u.n => Showing::Use(u, self.more, Some(note)),
+            (_, Some(note)) => Showing::Note(note),
+            (Some(u), None) => Showing::Use(u, self.more, None),
+            (None, None) => Showing::Nothing,
+        }
+    }
+
+    /// The use that waits in front, with how many others wait: shown, or behind a note for the moment.
     pub fn shown(&self) -> Option<(&WaitingUse, usize)> {
         self.shown.as_ref().map(|u| (u, self.more))
     }
 
-    /// The dialog was put in front of the person at `at` (its popup opened): its buttons wait again.
-    pub fn drawn(&mut self, at: std::time::Instant) {
-        if self.shown.is_some() {
+    /// Time passing, at `at`. A note that holds a waiting use back gives way after `NOTE_ALONE`, and that use's
+    /// dialog is drawn, its buttons waiting. Not a failure: that stays until it is read.
+    pub fn tick(&mut self, at: std::time::Instant) {
+        let blocks = matches!((&self.shown, &self.note), (Some(u), Some(n)) if n.about != u.n && !n.failed && at.saturating_duration_since(n.since) >= NOTE_ALONE);
+        // Settled: nothing is waited for any more (and nothing need be drawn again for it).
+        if self.settled(at) {
+            self.since = None;
+        }
+        if blocks {
+            self.note = None;
             self.since = Some(at);
         }
     }
 
-    /// Whether a press of a button drawn for use `n` is taken at `at`: only for the use shown, and not in its first
-    /// moment on the screen.
-    pub fn takes(&self, n: u64, at: std::time::Instant) -> bool {
-        self.shown.as_ref().is_some_and(|u| u.n == n) && self.since.is_some_and(|s| at.saturating_duration_since(s) >= USE_ARMS_AFTER)
+    /// The note was read (its OK pressed) at `at`. What is drawn in its place takes no press at once.
+    pub fn read(&mut self, at: std::time::Instant) {
+        self.note = None;
+        self.since = Some(at);
     }
 
-    /// Use `n` was answered here: it is no longer shown, and is not said to have been answered elsewhere.
-    pub fn answered(&mut self, n: u64) {
-        if self.shown.as_ref().is_some_and(|u| u.n == n) {
-            self.shown = None;
-            self.since = None;
+    /// The popup closed. A note that was no failure has been shown, and is not kept for the next time it opens.
+    pub fn closed(&mut self) {
+        if self.note.as_ref().is_some_and(|n| !n.failed) {
+            self.note = None;
         }
-        self.answered.push(n);
-        // Numbers only grow, and a list asked before an answer is seconds old at most: the last few are enough.
-        if self.answered.len() > 16 {
-            self.answered.remove(0);
-        }
+    }
+
+    /// What is drawn changed at `at` otherwise than by an answer: the popup opened, or the dialog's choices of
+    /// "Allow for…" were opened or closed. Its buttons wait again.
+    pub fn drawn(&mut self, at: std::time::Instant) {
+        self.since = Some(at);
+    }
+
+    /// Whether a press is taken at `at`: not in the first moment after what is drawn last changed. For the
+    /// popup's own buttons too, which a note or a dialog may just have stood in front of.
+    pub fn settled(&self, at: std::time::Instant) -> bool {
+        self.since.is_none_or(|s| at.saturating_duration_since(s) >= USE_ARMS_AFTER)
+    }
+
+    /// Whether a change is still settling as far as `tick` has been told: the popup is drawn again until it is
+    /// not, so that buttons come alive without a press.
+    pub fn settling(&self) -> bool {
+        self.since.is_some()
+    }
+
+    /// Whether a press of a button drawn for use `n` is taken at `at`: only for the use whose dialog is drawn, and
+    /// only once it has settled.
+    pub fn takes(&self, n: u64, at: std::time::Instant) -> bool {
+        matches!(self.showing(), Showing::Use(u, ..) if u.n == n) && self.settled(at)
     }
 }
 
@@ -1339,8 +1428,8 @@ mod approval_tests {
                 ("Its session", "A coding tool's. TorqOS cannot see what it read, so it counts as one that read untrusted text.".to_string(), true),
             ]
         );
-        assert_eq!(d.left, "1:05 left to answer. With no answer it is refused.");
-        assert_eq!(d.more.as_deref(), Some("2 more waiting"));
+        assert_eq!(d.left, "1:05 left to answer, then it is refused.");
+        assert_eq!(d.more, "2 more waiting");
         // Its words are no fact: every line of them begins with the mark, and is no wider than the dialog draws.
         assert_eq!(d.agent_says, ["\u{200e}| Secret: other (yours) Used", "\u{200e}| for: an HTTPS request to", "\u{200e}| evil.example.com Asked by:", "\u{200e}| your agent"]);
         assert!(d.facts.iter().all(|(_, v, _)| !v.contains("evil")), "the agent's words are in no fact");
@@ -1348,7 +1437,8 @@ mod approval_tests {
         let u = &uses(&[resident_use(8)])[0];
         let d = u.dialog("dev", 0, NOON + 120);
         assert_eq!(d.facts.iter().map(|(_, v, red)| (v.as_str(), *red)).collect::<Vec<_>>(), [("ci (the system's)", false), ("signing in over SSH to github.com", false), ("your agent", false), ("It read nothing untrusted.", false)]);
-        assert_eq!((d.more, d.left.as_str(), d.agent_says.len()), (None, "Its time is about over.", 0));
+        // The line of how many others wait is always there: another use coming or going moves nothing.
+        assert_eq!((d.more.as_str(), d.left.as_str(), d.agent_says.len()), ("No other use waits", "Its time is about over.", 0));
         // Someone else's secret is said to be theirs; a use with no session, and the agent's own tainted session.
         assert_eq!(u.clone().dialog("sam", 0, NOON).facts[0].1, "ci (the system's)");
         let mut theirs = uses(&[tool_use(7, "")])[0].clone();
@@ -1468,6 +1558,23 @@ mod approval_tests {
         assert_eq!((said.unwrap_err().as_str(), calls.len()), ("not done: that answer is not offered for use 7", 0));
     }
 
+    /// The note the popup shows, if any, and whether it stands alone.
+    fn note(a: &Asking) -> Option<(&str, bool, bool)> {
+        match a.showing() {
+            Showing::Note(n) => Some((n.text.as_str(), n.failed, true)),
+            Showing::Use(_, _, Some(n)) => Some((n.text.as_str(), n.failed, false)),
+            _ => None,
+        }
+    }
+
+    /// The use whose dialog is drawn, and how many others wait.
+    fn drawn(a: &Asking) -> Option<(u64, usize)> {
+        match a.showing() {
+            Showing::Use(u, more, _) => Some((u.n, more)),
+            _ => None,
+        }
+    }
+
     /// One dialog at a time: the lowest number is shown and stays shown while it waits, whatever else comes; the
     /// next is shown, and the person told of it, only when that one is over; a use over without an answer given
     /// here says how.
@@ -1475,33 +1582,43 @@ mod approval_tests {
     fn one_use_is_shown_at_a_time() {
         let t0 = Instant::now();
         let mut a = Asking::default();
-        assert_eq!(a.heard(vec![], NOON, t0), Heard::default());
-        assert!(a.shown().is_none());
-        let h = a.heard(uses(&[tool_use(8, ""), tool_use(7, "")]), NOON, t0);
-        assert_eq!((h.tell.map(|u| u.n), h.over), (Some(7), None));
-        assert_eq!(a.shown().map(|(u, more)| (u.n, more)), Some((7, 1)));
+        assert_eq!(a.heard(vec![], NOON, t0), None);
+        assert_eq!(a.showing(), Showing::Nothing);
+        let told = a.heard(uses(&[tool_use(8, ""), tool_use(7, "")]), NOON, t0);
+        assert_eq!((told.map(|u| u.n), drawn(&a), note(&a)), (Some(7), Some((7, 1)), None));
         // Another comes, and one of the others goes: 7 is still the one shown, and no one is told again.
-        let h = a.heard(uses(&[tool_use(7, ""), tool_use(8, ""), tool_use(9, "")]), NOON + 2, t0);
-        assert_eq!((h, a.shown().map(|(u, more)| (u.n, more))), (Heard::default(), Some((7, 2))));
-        // Answered at a terminal before its time: said so, and the next is shown and told.
-        let h = a.heard(uses(&[tool_use(8, ""), tool_use(9, "")]), NOON + 4, t0);
-        assert_eq!((h.tell.map(|u| u.n), h.over.as_deref()), (Some(8), Some("Use 7 (gh for api.github.com) was answered somewhere else.")));
+        assert_eq!(a.heard(uses(&[tool_use(7, ""), tool_use(8, ""), tool_use(9, "")]), NOON + 2, t0), None);
+        assert_eq!(drawn(&a), Some((7, 2)));
+        // Answered at a terminal before its time: said so, and the person is told of the next.
+        let told = a.heard(uses(&[tool_use(8, ""), tool_use(9, "")]), NOON + 4, t0);
+        assert_eq!((told.map(|u| u.n), note(&a)), (Some(8), Some(("Use 7 (gh for api.github.com) was answered somewhere else.", false, true))));
         assert_eq!(a.shown().map(|(u, more)| (u.n, more)), Some((8, 1)));
-        // Its time over: said so.
-        let h = a.heard(uses(&[tool_use(9, "")]), NOON + 120, t0);
-        assert_eq!((h.tell.map(|u| u.n), h.over.as_deref()), (Some(9), Some("The time to answer use 8 (gh for api.github.com) is over.")));
-        // Answered here: nothing is said of it being answered elsewhere, and a list from before the answer landed
-        // does not bring it back.
-        a.answered(9);
-        assert!(a.shown().is_none());
-        let h = a.heard(uses(&[tool_use(9, ""), tool_use(10, "")]), NOON + 121, t0);
-        assert_eq!((h.tell.map(|u| u.n), h.over, a.shown().map(|(u, more)| (u.n, more))), (Some(10), None, Some((10, 0))));
-        let h = a.heard(vec![], NOON + 122, t0);
-        assert_eq!((h.tell, h.over.as_deref(), a.shown().is_none()), (None, Some("The time to answer use 10 (gh for api.github.com) is over."), true));
+        // Its time over: said so, in the place of the note before it, which was no failure.
+        let told = a.heard(uses(&[tool_use(9, "")]), NOON + 120, t0);
+        assert_eq!((told.map(|u| u.n), note(&a)), (Some(9), Some(("The time to answer use 8 (gh for api.github.com) is over.", false, true))));
+        // Answered here: what was done is said, nothing of it being answered elsewhere, and a list from before the
+        // answer landed does not bring it back.
+        a.replied(9, Ok("dev approved it (ledger #3)\n".into()), t0);
+        assert_eq!((a.shown().is_none(), note(&a)), (true, Some(("dev approved it (ledger #3)", false, true))));
+        let told = a.heard(uses(&[tool_use(9, ""), tool_use(10, "")]), NOON + 121, t0);
+        assert_eq!((told.map(|u| u.n), a.shown().map(|(u, more)| (u.n, more)), note(&a).map(|n| n.0)), (Some(10), Some((10, 0)), Some("dev approved it (ledger #3)")));
+        a.read(t0);
+        assert_eq!(a.heard(vec![], NOON + 122, t0), None);
+        assert_eq!((a.shown().is_none(), note(&a)), (true, Some(("The time to answer use 10 (gh for api.github.com) is over.", false, true))));
+        // Read, it is gone; and so is one that was only shown when the popup closes.
+        a.read(t0);
+        assert_eq!(a.showing(), Showing::Nothing);
+        a.heard(uses(&[tool_use(11, "")]), NOON, t0);
+        a.heard(vec![], NOON + 1, t0);
+        assert!(note(&a).is_some());
+        a.closed();
+        assert_eq!(a.showing(), Showing::Nothing);
     }
 
-    /// A press is taken only for the use shown, and not in the first moment it is on the screen: when a use
-    /// takes another's place, or the dialog opens, a click meant for what was there before lands on nothing.
+    /// A press is taken only for the use whose dialog is drawn, and not in the first moment after what is drawn
+    /// changed under the person: a use taking another's place, the popup opening, the choices of "Allow for…"
+    /// opening or closing, an answer coming back, and another use coming or going, which changes a line of the
+    /// dialog. A click meant for what was there before lands on nothing.
     #[test]
     fn a_press_is_for_the_use_shown_and_not_at_once() {
         let t0 = Instant::now();
@@ -1511,18 +1628,103 @@ mod approval_tests {
         a.heard(uses(&[tool_use(7, ""), tool_use(8, "")]), NOON, t0);
         assert!(!a.takes(7, t0) && !a.takes(7, just_before) && a.takes(7, after));
         assert!(!a.takes(8, after), "a button of a use that is not the one shown");
-        // Still shown at the next look: its buttons do not wait again.
+        // Still shown at the next look, the same others waiting: nothing moved, and its buttons do not wait again.
         a.heard(uses(&[tool_use(7, ""), tool_use(8, "")]), NOON, after);
         assert!(a.takes(7, after));
-        // The dialog opened: they wait again.
+        // The popup opened, or "Allow for…" was opened or closed: they wait again.
         a.drawn(after);
         assert!(!a.takes(7, after) && a.takes(7, after + USE_ARMS_AFTER));
+        // Another use comes while this one is shown: the line that says how many wait changes. They wait again.
+        let t1 = after + Duration::from_secs(10);
+        a.heard(uses(&[tool_use(7, ""), tool_use(8, ""), tool_use(9, "")]), NOON, t1);
+        assert!(!a.takes(7, t1) && !a.takes(7, t1 + USE_ARMS_AFTER - Duration::from_millis(1)) && a.takes(7, t1 + USE_ARMS_AFTER));
+        // And when one of the others goes.
+        let t2 = t1 + Duration::from_secs(10);
+        a.heard(uses(&[tool_use(7, ""), tool_use(9, "")]), NOON, t2);
+        assert!(!a.takes(7, t2) && a.takes(7, t2 + USE_ARMS_AFTER));
+        // An answer that was not taken comes back with why, drawn above the buttons: they wait again.
+        let t3 = t2 + Duration::from_secs(10);
+        a.replied(7, Err("refused".into()), t3);
+        assert_eq!((drawn(&a), note(&a)), (Some((7, 1)), Some(("refused", true, false))));
+        assert!(!a.takes(7, t3) && a.takes(7, t3 + USE_ARMS_AFTER));
         // The next use takes its place: its buttons wait from then, and the old use's are dead.
-        let later = after + Duration::from_secs(10);
-        a.heard(uses(&[tool_use(8, "")]), NOON, later);
-        assert!(!a.takes(7, later + USE_ARMS_AFTER) && !a.takes(8, later) && a.takes(8, later + USE_ARMS_AFTER));
-        a.answered(8);
-        assert!(!a.takes(8, later + USE_ARMS_AFTER));
+        let later = t3 + Duration::from_secs(10);
+        a.read(later);
+        a.heard(uses(&[tool_use(9, "")]), NOON, later);
+        a.read(later);
+        assert!(!a.takes(7, later + USE_ARMS_AFTER) && !a.takes(9, later) && a.takes(9, later + USE_ARMS_AFTER));
+        a.replied(9, Ok("done".into()), later + USE_ARMS_AFTER);
+        assert!(!a.takes(9, later + USE_ARMS_AFTER * 3));
+    }
+
+    /// What was not done is not written over. An allowance given whose yes then failed is a failure; when the
+    /// use is found over at the next look, that is said after it, and the whole stays, as a failure, until it is
+    /// read: not when the popup closes, and not for time passing.
+    #[test]
+    fn a_failure_is_kept_until_it_is_read() {
+        let t0 = Instant::now();
+        let mut a = Asking::default();
+        a.heard(uses(&[tool_use(7, ""), tool_use(8, "")]), NOON, t0);
+        a.replied(7, Err("Allowed for 60 minutes. But use 7 was not approved by this. The allowance holds.".into()), t0);
+        assert_eq!(note(&a), Some(("Allowed for 60 minutes. But use 7 was not approved by this. The allowance holds.", true, false)), "with the use, while it waits");
+        a.heard(uses(&[tool_use(8, "")]), NOON + 120, t0);
+        let both = "Allowed for 60 minutes. But use 7 was not approved by this. The allowance holds. The time to answer use 7 (gh for api.github.com) is over.";
+        assert_eq!(note(&a), Some((both, true, true)), "alone, in front of the next use");
+        a.closed();
+        a.tick(t0 + NOTE_ALONE * 10);
+        assert_eq!((note(&a), drawn(&a)), (Some((both, true, true)), None));
+        assert!(!a.takes(8, t0 + NOTE_ALONE * 10), "the use behind it takes no press");
+        // And what happens after is said after it again, never in its place.
+        a.heard(vec![], NOON + 240, t0);
+        assert_eq!(note(&a).map(|n| (n.0.starts_with(both), n.0.ends_with("The time to answer use 8 (gh for api.github.com) is over."), n.1)), Some((true, true, true)));
+        a.read(t0);
+        assert_eq!(a.showing(), Showing::Nothing);
+    }
+
+    /// What became of one use stands alone first, also when another waits: it is not drawn in the next use's
+    /// dialog. It gives way when it is read, or after a few seconds, and the dialog then drawn takes no press at
+    /// once. After a note is read, the popup's own buttons take none at once either.
+    #[test]
+    fn a_note_stands_alone_before_the_next_use() {
+        let t0 = Instant::now();
+        let mut a = Asking::default();
+        a.heard(uses(&[tool_use(7, ""), tool_use(8, "")]), NOON, t0);
+        a.replied(7, Ok("dev approved it".into()), t0);
+        a.heard(uses(&[tool_use(8, "")]), NOON + 1, t0);
+        assert_eq!((note(&a), drawn(&a)), (Some(("dev approved it", false, true)), None));
+        assert!(!a.takes(8, t0 + USE_ARMS_AFTER), "no button of a dialog that is not drawn");
+        a.tick(t0 + NOTE_ALONE - Duration::from_millis(1));
+        assert!(note(&a).is_some());
+        let t1 = t0 + NOTE_ALONE;
+        a.tick(t1);
+        assert_eq!((note(&a), drawn(&a)), (None, Some((8, 0))));
+        assert!(!a.takes(8, t1) && a.takes(8, t1 + USE_ARMS_AFTER));
+        // Read sooner: the same.
+        a.replied(8, Ok("dev denied it".into()), t1);
+        a.heard(uses(&[tool_use(9, "")]), NOON + 2, t1);
+        a.read(t1 + Duration::from_millis(100));
+        assert_eq!(drawn(&a), Some((9, 0)));
+        assert!(!a.takes(9, t1 + Duration::from_millis(200)) && a.takes(9, t1 + Duration::from_millis(100) + USE_ARMS_AFTER));
+        // With nothing waiting it stays for as long as the popup is open, whatever the time; read, the popup's
+        // own buttons (Confirm, Restart) are under the pointer, and wait.
+        a.replied(9, Ok("dev approved it".into()), t1);
+        a.heard(vec![], NOON + 3, t1);
+        a.tick(t1 + NOTE_ALONE * 10);
+        assert_eq!(note(&a), Some(("dev approved it", false, true)));
+        let t2 = t1 + NOTE_ALONE * 10;
+        assert!(a.settled(t2));
+        a.read(t2);
+        assert!(!a.settled(t2) && !a.settled(t2 + USE_ARMS_AFTER - Duration::from_millis(1)) && a.settled(t2 + USE_ARMS_AFTER));
+        assert!(Asking::default().settled(t0), "nothing has ever stood in front of them");
+        // The popup is drawn again only while something settles: not for a look that changed nothing.
+        let mut quiet = Asking::default();
+        quiet.heard(vec![], NOON, t0);
+        assert!(!quiet.settling());
+        quiet.heard(uses(&[tool_use(7, "")]), NOON, t0);
+        quiet.tick(t0 + USE_ARMS_AFTER - Duration::from_millis(1));
+        assert!(quiet.settling() && !quiet.takes(7, t0 + USE_ARMS_AFTER - Duration::from_millis(1)));
+        quiet.tick(t0 + USE_ARMS_AFTER);
+        assert!(!quiet.settling() && quiet.takes(7, t0 + USE_ARMS_AFTER));
     }
 
     /// The notification says the broker's facts in fixed words, escaped, and nothing the agent said.
