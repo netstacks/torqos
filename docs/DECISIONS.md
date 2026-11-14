@@ -2742,35 +2742,53 @@ vouches for, that only proposes, every change ledgered and undone in one command
       still be needed to watch and to notify.
     - The applet asks the broker what waits for the person (`secret-waiting`) every 10 seconds, and every 2
       while a use is shown; only for a person who has an agent account. Each asking is one request, so one
-      short-lived broker process, which takes the secrets' lock. Its cost has not been measured.
+      short-lived broker process, which takes the secrets' lock; while a use waits it is two, the second for
+      the grants in force (below). Its cost has not been measured.
     - A use that begins to wait gives a notification: fixed words and the broker's facts, never the agent's
-      words. Clicked, it opens the popup. The panel's mark has the warning badge while a use waits, and a press
-      on it opens the same dialog.
+      words. Clicked, it opens the popup. It is taken down when that use is no longer the one in front. The
+      panel's mark has the warning badge while a use waits, and a press on it opens the same dialog.
     - The dialog shows the broker's facts first, as rows: the secret and whose it is; HTTPS or SSH and the host;
       who asked ("your agent" for the resident account, "a coding tool run as your agent" for the agent
       account); what is known of its session; then the time left. Under a line that says they are the agent's
       own words and that nothing has checked them, it shows those words: plain text, in a fixed-width font,
-      broken into lines of 30 columns by `torq::app` and not by the widget, each line beginning with a mark.
-      So no line of the agent's can pass for a row.
+      broken into lines of 30 columns by `torq::app` and not by the widget. Each line begins with a
+      left-to-right mark (U+200E) and then a visible mark, so the visible mark leads the line even where the
+      agent's words begin with right-to-left letters. So no line of the agent's can pass for a row.
     - The buttons: **Allow once** (`secret-approve <n> --where dialog`); **Allow for…**, which sends the grant
       and, only if it was given, the approval of this use (refused or its password not given, the use still
       waits and the person is told); **Deny** (`secret-deny <n>`); and **Deny, and don't ask again this
-      session** (`--rest-of-session`), only where the use names a session.
-    - One dialog at a time: the lowest number is shown, with how many others wait, and the next only when that
-      one is over. A use that ends without an answer given there (answered at a terminal, or its time over)
-      gives way to a note that stands alone until it is read.
+      session** (`--rest-of-session`), only where the use names a session. None of them is the highlighted
+      button, and the popup has no Enter or default action: nothing allows by default.
+    - Where the person already allows the very secret asked about (their own grant of that secret holds, and
+      this use asked all the same), the broker would refuse a second grant, and the use has two minutes. The dialog says
+      so with the offers of "Allow for…", and choosing one ends that grant first (no password), then asks for
+      the new one, then approves the use, each only if the one before was done. If the new grant is refused
+      or its password cancelled, the old one is gone, and the note says exactly that. This was chosen over
+      telling the person which line to type.
+    - One dialog at a time: the lowest number is shown, with how many others wait (a line that is always
+      there), and the next only when that one is over. What became of a use (the answer given, or that it was
+      answered at a terminal, or that its time is over) is a note that stands alone, with an OK, before
+      anything else is drawn: never inside the next use's dialog. With another use waiting behind it, it
+      gives way after four seconds if it is not read sooner. A failure does not: what was not done, or not all
+      of it (a grant given whose approval then failed), stays until it is read, is never written over by what
+      happened next, which is said after it, and is not dropped when the popup closes.
     - Every button's message carries the number of the use it was drawn for. A press is taken only for the use
-      shown, not in its first second on the screen (when a use takes another's place, or the popup opens), and
-      not while an answer is on its way. So a click meant for what was there before lands on nothing.
-    - What the dialog says, which buttons it has and what each sends are decided in `torq::app` and tested
-      there (`cli/src/app.rs`, `approval_tests`); the settings crate lays them out.
-  - **Differs from the design note.** "Allow for…" on a use from a session that read untrusted text (every coding
-    tool's) offers only grants that hold there: this one secret for 60 or 480 minutes, in the destructive style
-    with a warning sentence. A use from a clean session is offered: the agent's sessions running now, 60
-    minutes, 480 minutes. The note offered all of them on every use; but a grant that does not say tainted-too
-    would be given, with a password, and the same session's next use would ask all the same. Whether to offer
-    them anyway is the owner's to say (KNOWN-GAPS 6zzs). "This session" is every session of the person's agent
-    running when the grant was given, for 8 hours at most: the broker knows no end of a session.
+      whose dialog is drawn, not while an answer is on its way, and not in the first second after what is drawn
+      changed otherwise than by an answer being sent: a use taking another's place, the popup opening, the
+      count of others changing, "Allow for…" opening or closing, an answer coming back, a note giving way. The
+      popup's own buttons (Confirm, Restart) wait the same second after a note is read. So a click meant for
+      what was there before lands on nothing. Nothing in the dialog changes its height while a use is shown but
+      those changes: the countdown is one short line at any value.
+    - What the dialog says, which buttons it has, what each sends, which note is shown and when a press is
+      taken are decided in `torq::app` and tested there (`cli/src/app.rs`, `approval_tests`); the settings
+      crate lays them out.
+  - **Differs from the design as first written, and kept (confirmed 2026-11-13).** "Allow for…" on a use from a
+    session that read untrusted text (every coding tool's) offers only grants that hold there: this one secret
+    for 60 or 480 minutes, in the destructive style with a warning sentence. A use from a clean session is
+    offered: the agent's sessions running now, 60 minutes, 480 minutes. The design offered all of them on every
+    use; but a grant that does not say tainted-too would be given, with a password, and the same session's
+    next use would ask all the same. "This session" is every session of the person's agent running when the
+    grant was given, for 8 hours at most: the broker knows no end of a session.
   - **Tested, and not.** Broker and torqcli units (`broker/tests/secrets.rs`, `broker/tests/sessions.rs`,
     `cli/src/app.rs`, `cli/src/secrets.rs`, the grammar's and the completion's tests), each new guard in torqcli
     seen to fail with it broken. `tests/secrets.nix` (the asks, the answers, the time-out, the limits, a grant
@@ -3096,9 +3114,11 @@ vouches for, that only proposes, every change ledgered and undone in one command
 
     `user <you>` after the first two names a secret of the person's own; without it, a system secret whose rule
     names their agent. Seen with `show system secrets allowed` and on the Secrets page; ended with
-    `request system secret allow revoke [<name>|all]`, there or at a terminal, or at its time. By name, that
-    line ends what the person allowed for every secret of the name, their own and the system's. With no name or
-    `all`, it ends every grant of secret uses they gave. No line ends the grant of all their own secrets alone.
+    `request system secret allow revoke <name> [user <you>]` (that one secret's: the system's, or with `user`
+    their own, as the grant read the same words), `allow all revoke` (the grant of all their own secrets, and
+    no other), or `allow revoke` and `allow revoke all` (every grant of secret uses they gave); there or at a
+    terminal, or at its time. As first built, ending by name ended the person's own and the system's of that
+    name together, and nothing ended the grant of all alone (the broker's `secret-revoke`, changed 2026-11-13).
   - **What a grant never covers:** anything that changes the system, which stays a proposal applied by a person;
     a secret whose rule does not name this agent (a grant widens no rule, and is refused, saying so); another
     person's secrets or another person's agent; a host or an operation the rule does not name; reading a value
@@ -3136,12 +3156,14 @@ vouches for, that only proposes, every change ledgered and undone in one command
     that goes under a grant names it: the agent's first use of a secret in each session under each grant is
     `secret_first_use` with the grant's number. A use no one is asked about is on the ledger as before, the
     first in each session. The daemon's own log has every use. Never the value, and never the agent's words.
-  - **The Secrets page** (step 5), as it is now: for the chosen secret, each grant that covers it (whose agent,
-    its end, and in the destructive style that it holds even from a session that read untrusted text), a
-    person's own with the torqcli line that ends it and a button that runs it; a grant of all their own
-    secrets once, at the top, with the line that ends everything they allowed; a secret whose rule is
-    `never-even-tainted` marked in the same style, and for a person's own secret that rule offered as torqcli's
-    line. Its caption no longer says the asking is not built. The applet's dialog is ADR-051's.
+  - **The Secrets page** (step 5), as it is now: at its top, everything the person allowed, the grant of all
+    their own secrets first and then each named one, each with its end ("at most" for a grant of the agent's
+    sessions, which ends for each session when that session is eight hours old), in the destructive style that
+    it holds even from a session that read untrusted text, and a button that runs the torqcli line that ends
+    that grant and no other. Under the chosen secret, every grant that covers it, another person's included
+    (theirs to end). A secret whose rule is `never-even-tainted` is marked in the same style, and for a
+    person's own secret that rule is offered as torqcli's line. Its caption no longer says the asking is not
+    built. The applet's dialog is ADR-051's.
   - **Limits, said plainly:** KNOWN-GAPS 6zzs. Among them: the resident agent, whose sessions can start clean,
     has no tool that sends HTTPS or signs, so today every agent use that reaches the daemon is a coding tool's
     or `torq agent run`'s; the agent's own words reach the person for HTTPS (`X-Torq-Reason`) and not for SSH.

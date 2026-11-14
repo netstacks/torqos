@@ -224,7 +224,7 @@ may use, and when it must ask you first.
 
 When a use asks, it waits two minutes for you, and only for you. On the desktop a notification says
 "Your agent asks to use a secret"; click it, or click TorqOS in the panel, and answer there: **Allow
-once**, **Allow for…**, **Deny**, or **Deny, and don't ask again this session**. The panel shows what
+once**, **Allow for…**, **Deny**, or (for a use that belongs to a session) **Deny, and don't ask again this session**. The panel shows what
 TorqOS knows first (which secret, which host, whether your agent or a coding tool asked), and the
 agent's own words below, marked as the agent's. At a terminal, `show system secrets waiting` lists
 what waits, and `request system secret approve <n>` or `deny <n>` answers it. With no answer the use

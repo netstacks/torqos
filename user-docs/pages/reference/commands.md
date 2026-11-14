@@ -57,7 +57,9 @@ command can be abbreviated to a unique beginning, and `?` or `help` works anywhe
 | `request system secret allow <name> session` or `for <minutes> [tainted-too]` | for a while, your agent uses that secret without asking you (asks your password): in its sessions running now, or for 1 to 480 minutes. `tainted-too`: even from a session that read untrusted text. `user <you>` for a secret of your own |
 | `request system secret allow all for <minutes>` | the same for all your own secrets, 1 to 480 minutes; never from a session that read untrusted text |
 | `show system secrets allowed` | what agents may use without asking for now, and until when |
-| `request system secret allow revoke [<name> or all]` | end what you allowed: for every secret of that name, or everything (no password) |
+| `request system secret allow revoke <name> [user <you>]` | end what you allowed for that one secret: the system's, or with `user <you>` your own (no password) |
+| `request system secret allow all revoke` | end what you allowed for all your own secrets at once; what you allowed for one secret stays |
+| `request system secret allow revoke` or `allow revoke all` | end everything you allowed |
 | `request system secret show <name>` | print its value here (asks your password) |
 | `request system secret delete <name>` | delete its value and its rule |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |

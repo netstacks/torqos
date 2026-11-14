@@ -144,13 +144,23 @@ The buttons:
 - **Allow once**: this one use goes ahead.
 - **Allow for…**: this use goes ahead, and so do later uses of this one secret, for a time you pick.
   It asks your password first. If you cancel the password, nothing is allowed and the use still waits.
+  If you already let your agent use this secret for a while, the panel says so: choosing a time then
+  ends what you allowed before and asks for the new one. If you cancel the password at that point,
+  the old one stays ended.
 - **Deny**: this use is refused.
 - **Deny, and don't ask again this session**: this use is refused, and so is every later use of that
-  secret in that session of the agent's, at once. A new session can ask again.
+  secret in that session of the agent's, at once. A new session can ask again. This button is there
+  only when the use belongs to a session; a use that names none has only **Deny**.
 
-One use is shown at a time, and the panel says how many more are waiting. A button takes no press in
-the first second a use is shown, so a click meant for something else does not answer it. If a use is
-answered at a terminal, or its two minutes run out, the panel says so.
+No button is highlighted, and no key answers for you: you choose one.
+
+One use is shown at a time, and the panel says how many more are waiting. When what the panel shows
+changes (another use arrives, or the next one takes its place), its buttons take no press for one
+second, so a click meant for what was there before does nothing. After you answer, the panel says
+what was done, with an **OK**; if a use is answered at a terminal, or its two minutes run out, it
+says that instead. If something was not done, it says so in red and keeps saying it until you press
+**OK**: read it, because part of what you asked for may have happened. For example, if a use ran
+out of time while you typed your password, what you allowed still holds, though that use was refused.
 
 The panel's dialog is new and has not been tried on a real machine yet. If it does not appear, answer
 at a terminal.
@@ -165,7 +175,7 @@ alice@torq> request system secret deny 7 session
 ```
 
 `show system secrets waiting` lists each use with the same facts, then the agent's own words, marked
-as the agent's, and the time it waits until (in UTC). `deny 7 session` is the "don't ask again this
+as the agent's, and until when it waits, in local time, with the time left. `deny 7 session` is the "don't ask again this
 session" answer.
 
 Each answer is recorded in the ledger: who answered, yes or no, and whether in the panel or at a
@@ -205,15 +215,22 @@ To see what is allowed now, and to end it:
 
 ```text
 alice@torq> show system secrets allowed
-alice@torq> request system secret allow revoke gh
+alice@torq> request system secret allow revoke gh user alice
+alice@torq> request system secret allow revoke ci
+alice@torq> request system secret allow all revoke
 alice@torq> request system secret allow revoke all
 ```
 
-Ending needs no password. `allow revoke <name>` ends what you allowed for every secret of that name,
-your own and the system's. `allow revoke all` ends everything you allowed; there is no command that
-ends only "all your own secrets" and keeps the rest. The Secrets page of TorqOS Settings shows the
-same list for the secret you chose, with a button for each of these two commands, and shows in red
-what holds even from a session that read untrusted text.
+Ending needs no password. `allow revoke <name> user <you>` ends what you allowed for your own secret
+of that name; without `user <you>` it means the system's secret of that name, as when you allowed
+it. `allow all revoke` ends "all your own secrets" and leaves what you allowed for one secret.
+`allow revoke all` (or just `allow revoke`) ends everything you allowed. Times in these lists are
+your machine's local time. A line that says "at most" is one you allowed for your agent's sessions:
+it ends for each session when that session is 8 hours old, which may be sooner.
+
+The Secrets page of TorqOS Settings shows everything you allowed at the top, with a button that ends
+each one, and shows in red what holds even from a session that read untrusted text. Under a secret
+you choose it also lists anyone else's agent that is allowed it for now; that is theirs to end.
 
 ## Checking a release yourself
 

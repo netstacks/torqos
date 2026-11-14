@@ -1331,39 +1331,61 @@ Its §5 lists claims without a test.
   <minutes>`; their password) or the rule's `never-even-tainted` lets uses through unasked (`broker/src/ask.rs`,
   `broker/src/session.rs`; `broker/tests/secrets.rs`). What is not there, and what a person should know:
    - **the dialog has been type-checked and nothing more.** It has not been drawn or pressed on any machine, and
-     no test clicks in the panel. What decides its content and what its buttons send is tested in torqcli
-     (`app::approval_tests`); the applet's own wiring is not: that the rows are laid out as given, that a
-     button is dead in a use's first second, that the popup shows the dialog before anything else.
-     `tests/desktop.nix` (written, not run) goes as far as the applet seeing a waiting use and raising its
-     notification, and then sends the dialog's own request itself;
+     no test clicks in the panel. What decides its content, what its buttons send, which note is shown and when
+     a press is taken is tested in torqcli (`app::approval_tests`); the applet's own wiring is not: that the
+     rows are laid out as given and do not move, that a button is drawn dead while `torq::app` says no press
+     is taken, that the popup shows the dialog or the note before anything else, that the notification is
+     taken down. `tests/desktop.nix` (written, not run) goes as far as the applet seeing a waiting use and
+     raising its notification, and then sends the dialog's own request itself;
    - **a popup the applet opens by itself is untried.** A clicked notification opens the popup with no press on
      the panel, so it is opened without taking the pointer, and is closed with the panel's button. Whether
      COSMIC shows it, and where, has not been seen. If it does not, the panel's mark has the warning badge
      while a use waits, and a press on it opens the same dialog;
    - **"Allow for…" on a use from a session that read untrusted text offers only grants that say so**
-     (`tainted-too`, this one secret, 60 or 480 minutes), which is every coding tool's use. The design offered
-     the plain ones too; given there, they would not stop that session asking. Open, for the owner: offer them
-     anyway, with that said? A grant refused because one of the same secret holds already ("revoke it first")
-     is said in the dialog, and the use still waits: the dialog does not end the older grant for the person;
+     (`tainted-too`, this one secret, 60 or 480 minutes), which is every coding tool's use (the owner,
+     2026-11-13: kept). The plain ones, given there, would not stop that session asking;
+   - **"Allow for…" ends a grant of that secret the person already gave.** The broker gives no second grant of a
+     secret while one holds, so the dialog says that one holds and, on the press, ends it (no password) before
+     it asks for the new one (the password). If the new one is refused or the password cancelled, the old one
+     is gone and the note says so: the person is left with less than before the press. Which grant holds is
+     as the applet last asked (every 2 seconds while a use is shown); one given or ended since at a terminal
+     is found at the broker, and the note says what was and was not done;
    - **the password for "Allow for…" is asked while the use's two minutes run.** If they are over when the
-     grant is given, the grant holds, the dialog says the use was not approved by it, and the agent's next use
-     goes through unasked;
+     grant is given, the grant holds and the agent's next use goes through unasked. The dialog says so as a
+     failure (the grant given, this use not approved by it), which stays until its OK is pressed;
    - **a waiting use is seen up to 10 seconds late**, the applet's beat, and its end up to 2 seconds late. Each
      beat is one request to the broker, so one broker process, for every logged-in person who has an agent:
-     six a minute while nothing waits. What that costs (the processor, and the lines systemd writes for each
+     six a minute while nothing waits, and two requests every 2 seconds while a use is shown (what waits, and
+     the grants in force). What that costs (the processor, and the lines systemd writes for each
      request's unit) has not been measured. A look that fails is said once, in a notification and in the popup;
    - **no notification says that a use ran out of time.** The note of how a use ended is shown the next time
-     the popup is open, and is gone once the popup closes. A notification the daemon never reports closed
-     keeps one idle thread of the applet's, as its other notifications do;
+     the popup is open. One that is no failure is gone once the popup closes, and gives way after four seconds
+     to another use that waits behind it; a failure stays until its OK. The notification of a use is taken
+     down when the applet next finds that use is no longer the one in front, so up to about 3 seconds after.
+     A notification the daemon never reports closed keeps one idle thread of the applet's, as its other
+     notifications do;
+   - **no button takes a press for one second after what the popup draws changed** (another use coming or
+     going, the choices of "Allow for…" opening, a note read). A person who is quick waits that second, and
+     with uses coming and going one after another, each change makes them wait it again. The second is
+     counted from when the applet learned of the change, not from when the screen drew it;
    - **the agent's words are drawn in lines of 30 columns**, a character outside ASCII counted as two. A font
-     wider than that reckoning would have a line cut at the box's edge (it is never wrapped). Not seen drawn;
+     wider than that reckoning would have a line cut at the box's edge (it is never wrapped). Each line begins
+     with a left-to-right mark so that its visible mark leads even before Hebrew or Arabic letters: that
+     cosmic-text lays such a line out from the left is read from its source (it takes a line's direction from
+     its first strong character), not seen drawn;
    - **the Secrets page lists the grants as they stood when it last read them**: after each thing done on it,
-     not by the clock. A grant that has since ended stays listed until then. The line it runs to end one
-     secret's grant ends what the person allowed for every secret of that name, their own and the system's,
-     and the line for all ends every grant they gave: the command line has no narrower ones. Another person's
-     grant is shown with no button. The page has not been opened on a desktop (6zzr);
-   - `show system secrets waiting` and `allowed` print their times as the broker writes them, in UTC; the dialog
-     shows the time left, and the Secrets page local time;
+     not by the clock. A grant that has since ended stays listed until then. Another person's grant is shown
+     under the secret it covers, with no button. A grant of a secret whose name is a word of the command
+     (`all`, `agent`, `https`, `ssh`) cannot be ended by name: its button ends everything the person allowed,
+     and says so. The page has not been opened on a desktop (6zzr);
+   - **`request system secret allow revoke <name>` with no `user` is the system's secret**, as every command of
+     a secret reads a name (changed 2026-11-13: it used to end the person's own of that name too). Where the
+     system has no secret of that name and the person has one, torqcli refuses and says the line with
+     `user <you>`; where both exist, it ends the system's grant and says nothing of the other;
+   - **that the applet's lines reach the journal is seen only in part.** `tests/desktop.nix` looks in the
+     journal for a line the applet writes to its standard error. On the laptop, cosmic-panel writes what
+     another applet prints to the journal under that applet's name, and its source does the same for every
+     applet; no line of `torq-applet`'s own has been seen there (it had printed none);
    - every program run as `torq-agent-<person>` (a coding tool, `torq agent run`) starts its session tainted
      (`not-the-resident-agent`, 6zzo), so each of its uses asks unless a `tainted-too` grant of that one secret
      or `never-even-tainted` covers it. It cannot borrow the resident agent's clean session, though its id is in
@@ -1391,7 +1413,8 @@ Its §5 lists claims without a test.
      terminal names no one session, and neither does the dialog's offer); the broker knows no end of a session
      but the eight hours a grant may last.
   `tests/secrets.nix` states the waiting, the answers, the time-out, four uses waiting at once beside a
-  person's own, and a grant given at a terminal, used under and ended; `tests/desktop.nix` the applet seeing a
-  use. Their edits of 2026-11-13 have not run. Not in either: a clean session's use let through by a grant that
-  does not say `tainted-too` (those machines have no resident agent; the broker's own tests have it), and
-  `allow <name> session`.
+  person's own, and a grant given at a terminal, used under, and ended by whose secret it is and all one's own
+  alone; `tests/desktop.nix` the applet seeing a use. Their edits of 2026-11-13 have not run. Not in either: a
+  clean session's use let through by a grant that does not say `tainted-too` (those machines have no resident
+  agent; the broker's own tests have it), `allow <name> session`, and "Allow for…" replacing a grant (torqcli's
+  units have what it sends, against a stand-in broker).
