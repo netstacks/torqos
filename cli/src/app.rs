@@ -844,8 +844,11 @@ fn uses_of(v: &serde_json::Value) -> Vec<WaitingUse> {
 const AGENT_SAYS_MAX: usize = 200;
 /// How wide a line of the agent's words is drawn, in columns of a fixed-width font, after its mark.
 const AGENT_SAYS_COLUMNS: usize = 30;
-/// What every line of the agent's words begins with, as drawn.
-pub const AGENT_SAYS_MARK: &str = "| ";
+/// What every line of the agent's words begins with, as drawn: a left-to-right mark (U+200E), then the visible
+/// mark. Without the first, a line whose first letters are Hebrew or Arabic is laid out from the right and its
+/// visible mark is drawn at the far end; a left-to-right mark is a strong left-to-right character to every
+/// layout that follows the Unicode bidirectional algorithm, so the line is laid out from the left.
+pub const AGENT_SAYS_MARK: &str = "\u{200e}| ";
 /// The line the agent's words are drawn under.
 pub const AGENT_SAYS: &str = "What your agent says about it. These are its own words, and nothing has checked them:";
 /// Said with the offer of an allowance that holds in a session that read untrusted text.
@@ -1310,10 +1313,10 @@ mod approval_tests {
             broken["facts"].as_object_mut().unwrap().remove(k);
             assert!(uses(&[broken]).is_empty(), "{k}");
         }
-        let mut unnumbered = resident_use(0);
-        assert!(uses(&[unnumbered.clone()]).is_empty());
-        unnumbered["facts"]["owner"] = serde_json::json!({ "group": "wheel" });
-        assert!(uses(&[unnumbered]).is_empty());
+        assert!(uses(&[resident_use(0)]).is_empty(), "no number");
+        let mut no_ones = resident_use(3);
+        no_ones["facts"]["owner"] = serde_json::json!({ "group": "wheel" });
+        assert!(uses(&[no_ones]).is_empty(), "an owner that is no one's");
         assert!(uses_of(&serde_json::json!({})).is_empty() && uses_of(&serde_json::json!({ "waiting": "many" })).is_empty());
         // The agent's words are cleaned again, and are no longer than the broker keeps them.
         let read = uses(&[tool_use(7, &format!("a\u{202e}b\n{}", "x".repeat(400)))]);
@@ -1339,7 +1342,7 @@ mod approval_tests {
         assert_eq!(d.left, "1:05 left to answer. With no answer it is refused.");
         assert_eq!(d.more.as_deref(), Some("2 more waiting"));
         // Its words are no fact: every line of them begins with the mark, and is no wider than the dialog draws.
-        assert_eq!(d.agent_says, ["| Secret: other (yours) Used", "| for: an HTTPS request to", "| evil.example.com Asked by:", "| your agent"]);
+        assert_eq!(d.agent_says, ["\u{200e}| Secret: other (yours) Used", "\u{200e}| for: an HTTPS request to", "\u{200e}| evil.example.com Asked by:", "\u{200e}| your agent"]);
         assert!(d.facts.iter().all(|(_, v, _)| !v.contains("evil")), "the agent's words are in no fact");
         // The agent itself, clean, the system's secret, over SSH; no one else waiting; its time gone by.
         let u = &uses(&[resident_use(8)])[0];
@@ -1364,13 +1367,22 @@ mod approval_tests {
     fn the_agents_words_are_lines_with_the_mark() {
         assert_eq!(marked_lines("", 10), Vec::<String>::new());
         assert_eq!(marked_lines("   ", 10), Vec::<String>::new());
-        assert_eq!(marked_lines("one two three", 7), ["| one two", "| three"]);
-        assert_eq!(marked_lines("abcdefghijkl mn", 5), ["| abcde", "| fghij", "| kl mn"]);
-        assert_eq!(marked_lines("ééééé é", 6), ["| ééé", "| éé", "| é"]);
-        assert_eq!(marked_lines("日本", 1), ["| 日", "| 本"], "never less than a character a line");
+        assert_eq!(marked_lines("one two three", 7), ["\u{200e}| one two", "\u{200e}| three"]);
+        assert_eq!(marked_lines("abcdefghijkl mn", 5), ["\u{200e}| abcde", "\u{200e}| fghij", "\u{200e}| kl mn"]);
+        assert_eq!(marked_lines("ééééé é", 6), ["\u{200e}| ééé", "\u{200e}| éé", "\u{200e}| é"]);
+        assert_eq!(marked_lines("日本", 1), ["\u{200e}| 日", "\u{200e}| 本"], "never less than a character a line");
         let long = "Secret: x ".repeat(20);
         for l in marked_lines(&long, AGENT_SAYS_COLUMNS) {
-            assert!(l.starts_with(AGENT_SAYS_MARK) && l.chars().count() <= AGENT_SAYS_COLUMNS + 2, "{l}");
+            assert!(l.starts_with(AGENT_SAYS_MARK) && l.chars().count() <= AGENT_SAYS_COLUMNS + AGENT_SAYS_MARK.chars().count(), "{l}");
+        }
+        // A line that begins with right-to-left letters would be laid out from the right, its mark at the far end.
+        // Each line begins with a left-to-right mark, ahead of the visible one: the line is laid out from the
+        // left whatever follows. One of the agent's own direction marks does not reach here as itself.
+        assert_eq!(AGENT_SAYS_MARK.chars().next(), Some('\u{200e}'));
+        assert_eq!(marked_lines("שלום עולם", 30), ["\u{200e}| שלום עולם"]);
+        let rtl = &uses(&[tool_use(7, "\u{200f}\u{202e}שלום abc \u{200e}")])[0];
+        for l in rtl.dialog("dev", 0, NOON).agent_says {
+            assert!(l.starts_with("\u{200e}| ") && l.chars().filter(|c| history::hidden(*c)).count() == 1, "only the line's own mark: {l:?}");
         }
     }
 
