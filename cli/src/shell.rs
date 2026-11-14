@@ -2041,6 +2041,32 @@ mod editor {
         }
     }
 
+    /// The completer, driven as the editor drives it (`Help::choices`, what Tab and `?` ask), for the
+    /// pipe rule: a `|` inside a list's brackets is a value, so the line goes on and is whole (Enter);
+    /// a `|` outside them is a pipe, and `set` has none to offer after it.
+    #[cfg(test)]
+    #[test]
+    fn the_completer_reads_a_bar_in_a_list_as_a_value() {
+        let help = Help {
+            know: Arc::new(Mutex::new(Arc::new((crate::tree::Schema::parse(include_str!("schema-fixture.json")).unwrap(), crate::nixos::Tree::parse(include_str!("nixos-fixture.json")).unwrap())))),
+            at: Arc::new(Mutex::new(complete::At { mode: Mode::Configuration, edit: vec![], data: Default::default(), configurations: complete::Later::new(Vec::new), files: vec![], interfaces: vec![] })),
+        };
+        let offered = |line: &str| help.choices(line).map(|(c, _)| c.into_iter().map(|c| c.word).collect::<Vec<_>>()).unwrap_or_else(|| panic!("{line}: no answer"));
+        let list = r#"set services httpd virtualHosts example.com serverAliases [ "|" "#;
+        // Inside open brackets, and after them: the bar was a value, so the line is whole.
+        assert_eq!(offered(list), ["<[Enter]>"]);
+        assert_eq!(offered(&format!("{list}] ")), ["<[Enter]>"]);
+        // A bar after the closing bracket is a pipe: set has no filters, so nothing is offered.
+        assert!(offered(&format!("{list}] | ")).is_empty());
+        assert!(offered(r#"set services httpd virtualHosts example.com serverAliases [ a b ] | "#).is_empty());
+        // A single value that is a bar, written in brackets, is a value too; bare it is a pipe.
+        assert_eq!(offered(r#"set fileSystems /data fsType [ "|" ] "#), ["<[Enter]>"]);
+        assert!(offered("set fileSystems /data fsType | ").is_empty());
+        // Where a pipe is allowed, a list's brackets do not hide it: `show | grep [ ` still takes filters.
+        assert!(offered("show | ").contains(&"grep".to_string()));
+        assert!(offered(r#"show | grep "[" | "#).contains(&"wc".to_string()));
+    }
+
 
     #[cfg(test)]
     #[test]
