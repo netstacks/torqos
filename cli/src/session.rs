@@ -437,6 +437,9 @@ pub fn words(line: &str) -> Result<Vec<String>> {
                     word(&mut out, std::mem::take(&mut cur))?;
                     any = false;
                 }
+                if in_list(&out) {
+                    bail!("a | inside [ ] is a value: quote it (\"|\")");
+                }
                 out.push("|".into());
             }
             c => {
@@ -456,9 +459,33 @@ pub fn words(line: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// A word from the text (not a pipe): a quoted `"|"` alone would read as one, so it is refused.
+/// Where the line's first pipe is: a `|` word outside a list's brackets. A list value that is exactly
+/// `|` is written inside them (`set … [ "|" ]`), because a word does not say whether it was quoted.
+/// Only a `set` or `delete` line (after `top`, if it has one) has lists: elsewhere a `[` is text
+/// (`help "[" | grep x`) and a pipe after it is a pipe.
+pub fn pipe_at(w: &[String]) -> Option<usize> {
+    let lists = matches!(w.iter().find(|x| *x != "top").map(String::as_str), Some("set" | "delete"));
+    let mut open = false;
+    for (i, x) in w.iter().enumerate() {
+        match x.as_str() {
+            "[" if lists && !open => open = true,
+            "]" => open = false,
+            "|" if !open => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether the words so far end inside a list's brackets (and no pipe came before them).
+fn in_list(w: &[String]) -> bool {
+    pipe_at(&[w, &["|".to_string()]].concat()).is_none()
+}
+
+/// A word from the text (not a pipe): a quoted `"|"` alone would read as one, so it is refused
+/// except inside a list's brackets, where `pipe_at` does not read it as one.
 fn word(out: &mut Vec<String>, w: String) -> Result<()> {
-    if w == "|" {
+    if w == "|" && !in_list(out) {
         bail!("\"|\" alone cannot be a word: it would read as a pipe");
     }
     out.push(w);
@@ -2224,7 +2251,7 @@ impl<'a> Session<'a> {
     /// `load set`: each line a `set` or `delete` command, from the top (what `| display set` writes).
     fn load_set(&mut self, text: &str) -> Result<String> {
         self.edit.clear();
-        let mut n = 0;
+        let (mut n, mut told) = (0, String::new());
         for (i, line) in text.lines().enumerate() {
             let w = words(line).with_context(|| format!("line {}", i + 1))?;
             match w.first().map(String::as_str) {
@@ -2233,11 +2260,15 @@ impl<'a> Session<'a> {
                 Some("set" | "delete") => {}
                 Some(_) => bail!("line {}: only `set` and `delete` lines load (`| display set` writes them)", i + 1),
             }
-            self.exec_words(&w).with_context(|| format!("line {}: {}", i + 1, crate::history::one_line(line, 80)))?;
+            let said = self.exec_words(&w).with_context(|| format!("line {}: {}", i + 1, crate::history::one_line(line, 80)))?;
+            // A line's warning is shown under its number: in a long file it would not say where it came from.
+            if !said.is_empty() {
+                told.push_str(&format!("line {}:\n{said}", i + 1));
+            }
             n += 1;
         }
         let d = self.candidate_data()?;
-        Ok(format!("{}{}", self.said(&format!("load complete ({n} line{})", if n == 1 { "" } else { "s" })), self.rules_note(&d)))
+        Ok(format!("{told}{}{}", self.said(&format!("load complete ({n} line{})", if n == 1 { "" } else { "s" })), self.rules_note(&d)))
     }
 
     /// `load override` (the file is the candidate) or `load merge` (the file's settings set onto it).
@@ -3365,6 +3396,26 @@ mod tests {
         assert!(words(r#"set "open"#).is_err());
     }
 
+    /// A `[` only opens a list in a `set` or `delete` line: elsewhere it is text, and a pipe after it is
+    /// still a pipe (a word does not say whether it was quoted).
+    #[test]
+    fn a_bracket_outside_set_does_not_swallow_a_pipe() {
+        for line in [r#"help "[" | grep x"#, r#"commit comment "[" | no-more"#, "show | grep [ | wc"] {
+            let w = words(line).unwrap();
+            let bar = w.iter().position(|x| x == "|");
+            assert_eq!(pipe_at(&w), bar, "{line}");
+        }
+        let line = crate::grammar::read_line(Mode::Operational, &words(r#"help "[" | grep x"#).unwrap()).unwrap();
+        assert_eq!(line.filters.len(), 1);
+        // Completion after it offers the filters, as after any pipe.
+        assert!(!crate::grammar::pipe_next(Mode::Operational, &words(r#"help "[" |"#).unwrap()).is_empty());
+        // In a `set` (also from `top`) a list's bar is still a value, and a list holding "[" is one.
+        for line in [r#"set a [ "|" ]"#, r#"top set a [ "|" ]"#, r#"delete a [ "|" ]"#, r#"set a [ "[" "|" ]"#] {
+            let w = words(line).unwrap();
+            assert_eq!(pipe_at(&w), None, "{line}");
+        }
+    }
+
     #[test]
     fn a_quoted_bar_alone_is_never_a_pipe() {
         let e = format!("{:#}", words(r#"show "|" compare"#).unwrap_err());
@@ -4093,6 +4144,31 @@ mod tests {
         for line in saved.lines() {
             s.exec(line).unwrap_or_else(|e| panic!("{line}: {e:#}"));
         }
+    }
+
+    /// A list value that is exactly `|` comes back from `| display set` (KNOWN-GAPS 6q): written inside
+    /// brackets, it is a value, not a pipe, and a pipe outside brackets is still a pipe.
+    #[test]
+    fn a_bar_as_a_lists_value_comes_back_from_display_set() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        run(&mut s, &["configure", r#"set services httpd virtualHosts example.com serverAliases [ "|" a ]"#]);
+        let shown = s.exec("show | display set").unwrap();
+        assert!(shown.contains(r#"serverAliases [ "|" ]"#), "{shown}");
+        let (d2, m2) = (repo(), Fake::default());
+        let mut again = session(d2.path(), None, &m2);
+        again.exec("configure").unwrap();
+        for line in shown.lines() {
+            again.exec(line).unwrap_or_else(|e| panic!("{line}: {e:#}"));
+        }
+        assert_eq!(again.exec("show").unwrap(), s.exec("show").unwrap());
+        // `delete` names it the same way, and the pipe after a command is still a pipe.
+        again.exec(r#"delete services httpd virtualHosts example.com serverAliases [ "|" ]"#).unwrap();
+        assert!(!again.exec("show").unwrap().contains('|'));
+        assert!(again.exec("show | wc -l").is_ok());
+        // Unquoted inside a list it is not guessed at; the line is refused.
+        assert!(words("set a [ b | c ]").is_err());
+        assert_eq!(words(r#"show | grep "[" | wc"#).unwrap(), ["show", "|", "grep", "[", "|", "wc"]);
     }
 
     /// A NixOS setting commits as its nixos/ file, system tier, asked; a person's own packages,
@@ -5192,6 +5268,23 @@ mod tests {
         let mut s = session(d.path(), None, &yes);
         run(&mut s, &["configure", "set virtualisation docker enable true", "set system time-zone UTC", "delete"]);
         assert_eq!(s.exec("show").unwrap(), "", "nothing left");
+    }
+
+    /// `load set` shows what its lines print (a warning, what a delete renumbered), each under its
+    /// line's number in the file, before "load complete".
+    #[test]
+    fn load_set_shows_what_its_lines_say() {
+        let (d, m) = (repo(), Fake::default());
+        let mut s = session(d.path(), None, &m);
+        let at = "networking interfaces eth0 ipv4 addresses";
+        let lines = d.path().join("l.set");
+        std::fs::write(&lines, format!("set {at} 1 address 10.0.0.1\nset {at} 2 address 10.0.0.2\n\n# a note\ndelete {at} 1\ndelete time timeZone\n")).unwrap();
+        let out = run(&mut s, &["configure", &format!("load set {}", lines.display())]);
+        assert_eq!(
+            out.lines().skip_while(|l| !l.starts_with("line ")).collect::<Vec<_>>(),
+            ["line 5:", &format!("! {at}: entry 2 is now 1"), "line 6:", "! nothing deleted: time timeZone is not set", "load complete (4 lines)"],
+            "{out}"
+        );
     }
 
     /// `load … terminal`: what is pasted, up to Ctrl-D — brace format for override and merge, `set`

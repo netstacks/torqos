@@ -24,6 +24,12 @@ in
         assertion = cfg.user == null || builtins.match "[a-z_][a-z0-9_-]*" cfg.user != null;
         message = "torq.user '${cfg.user}' must be a lowercase login name ([a-z_][a-z0-9_-]*).";
       }
+      {
+        # The boot menu is the one way back from a configuration that does not start (KNOWN-GAPS 6n):
+        # `torqcli` refuses 0 at `set`, this covers a .nix config file and a hand-made proposal too.
+        assertion = config.boot.loader.timeout != 0;
+        message = "boot.loader.timeout is 0: that hides the boot menu, where an earlier configuration is chosen when the machine does not start. Use 1 or more (or null, to wait there for a key).";
+      }
     ];
 
     nix.settings = {

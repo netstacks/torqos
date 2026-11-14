@@ -285,7 +285,7 @@ static SHOW_SYSTEM: &[Node] = &[
     fixed("remote", "The configuration's remote: where it and its ledger are pushed, and how the last push went", In::Op).whole(|_| Ok(Op::ShowRemote)).pipes(Pipes::Filters),
     fixed("rollback", "An earlier configuration, or how two differ", In::Op).then(&[value(Value::Rollback, "0 is the configuration in effect, 1 the one before, …").whole(show_rollback).pipes(Pipes::Views(CONFIGURATION_VIEWS)).then(&[fixed("compare", "How it differs from another one", In::Op).then(&[value(Value::Rollback, "The configuration to compare with").whole(show_rollback).pipes(Pipes::Views(COMPARISON))])])]),
     fixed("secrets", "The secrets: whose, whether each has a value, and what each may be used for (never a value)", In::Op).whole(|_| Ok(Op::ShowSecrets)).pipes(Pipes::Filters).then(&[
-        fixed("allowed", "What agents are let use without asking, for now: each grant, what it covers, its end", In::Op).whole(|_| Ok(Op::ShowSecretsAllowed)).pipes(Pipes::Filters),
+        fixed("allowed", "What agents may use without asking, for now: each grant, what it covers, its end", In::Op).whole(|_| Ok(Op::ShowSecretsAllowed)).pipes(Pipes::Filters),
         fixed("waiting", "Your agent's uses of secrets that wait for your answer (request system secret approve <n>, deny <n>)", In::Op).whole(|_| Ok(Op::ShowSecretsWaiting)).pipes(Pipes::Filters),
     ]),
     fixed("snapshots", "The snapshots of the data this machine still has, each from before a change", In::Op).whole(|_| Ok(Op::ShowSnapshots)).pipes(Pipes::Filters),
@@ -393,7 +393,7 @@ static REQUEST_SYSTEM: &[Node] = &[
     fixed("pull", "Load the configuration waiting on the remote (its incoming branch) into the candidate: nothing changes until you commit it", In::Op).whole(|_| Ok(Op::Request(Request::Pull))),
     fixed("remote", "The configuration's remote", In::Op).then(&[fixed("clear", "Clear its alarm, having looked into it (ledgered; raised again if still true)", In::Op).whole(|_| Ok(Op::Request(Request::RemoteClear))), fixed("key", "This machine's key for it, to add to the repository as a deploy key (made the first time)", In::Op).whole(|_| Ok(Op::Request(Request::RemoteKey)))]),
     fixed("repair", "Return a machine changed outside TorqOS to its last configuration (it asks first)", In::Op).whole(|_| Ok(Op::Request(Request::Repair))),
-    fixed("restore", "Put a path back from a backup, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").then(&[value(Value::Snapshot, "A snapshot's id, from show system backups — or, for the newest, the path").whole(restore).then(&[value(Value::File, "The path, under /home or /var/lib").whole(restore)])])]),
+    fixed("restore", "Put a path back from a backup, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Backup, "The backup's name, from show system backups").then(&[value(Value::Snapshot, "A snapshot's id, from show system backups, or latest — or, for the newest, the path").whole(restore).then(&[value(Value::File, "The path, under /home or /var/lib").whole(restore)])])]),
     fixed("revert", "Undo one change: a new change that reverses it (it asks first, unless it only touches your own settings)", In::Op).then(&[value(Value::Change, "The change's number, from show system ledger").whole(|r| Ok(Op::Request(Request::Revert { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]),
     fixed("secret", "A secret: a token or an SSH key, kept encrypted, that the agent may use and never read", In::Op).then(REQUEST_SECRET),
     fixed("snapshot", "The data as it was before a change", In::Op).then(&[fixed("delete", "Delete one, for the room or for what is in it: on the record first, and there is no undoing it (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").whole(|r| Ok(Op::Request(Request::SnapshotDelete { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()? })))]), fixed("restore", "Put a path back, as its owner: what is there now is set aside, not lost (it asks your password)", In::Op).then(&[value(Value::Change, "The change's number, from show system snapshots").then(&[value(Value::File, "The path, under /home or /var/lib").whole(|r| Ok(Op::Request(Request::RestoreData { change: r.value(Value::Change).map(|c| c.trim_start_matches('#')).unwrap_or_default().parse()?, path: r.value(Value::File).map(String::from).unwrap_or_default() })))])]), fixed("take", "Take one now, before work you may think better of (it asks your password)", In::Op).whole(|_| Ok(Op::Request(Request::SnapshotTake)))]),
@@ -425,13 +425,13 @@ static COMMIT_FIRST: &[Node] = &[
     fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("check", "Check the candidate evaluates, without committing", In::Cf).once().whole(commit).pipes(Pipes::Steps),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
-    fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&CONFIRMED),
+    fixed("confirmed", "Commit, rolled back unless confirmed within <minutes> (default 10)", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&CONFIRMED),
 ];
 static COMMIT_MORE: [Node; 4] = [
     fixed("and-quit", "Commit, then leave configuration mode", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&COMMIT_MORE),
     fixed("at", "Commit at a time: approved now, applied then (clear system commit cancels it)", In::Cf).once().then(&AT),
     fixed("comment", "Commit, with a comment for the log", In::Cf).once().then(&COMMENT),
-    fixed("confirmed", "Commit, rolled back unless confirmed within minutes (default 10)", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&CONFIRMED),
+    fixed("confirmed", "Commit, rolled back unless confirmed within <minutes> (default 10)", In::Cf).once().whole(commit).pipes(Pipes::Steps).then(&CONFIRMED),
 ];
 static COMMENT: [Node; 1] = [value(Value::Text, "What the change is for").whole(commit).pipes(Pipes::Steps).then(&COMMIT_MORE)];
 static AT: [Node; 1] = [value(Value::Time, "HH:MM (today, or tomorrow if it has passed), \"YYYY-MM-DD HH:MM\" (local), or RFC 3339; within 30 days").whole(commit).pipes(Pipes::Steps).then(&COMMIT_MORE)];
@@ -948,7 +948,7 @@ pub struct Line {
 
 /// Read a whole line.
 pub fn read_line(mode: Mode, w: &[String]) -> Result<Line> {
-    let bar = w.iter().position(|x| x == "|").unwrap_or(w.len());
+    let bar = crate::session::pipe_at(w).unwrap_or(w.len());
     let mut walked = walk(mode, &w[..bar])?;
     let Some(node) = walked.node().filter(|n| n.whole.is_some()) else { return Err(short(&walked).into()) };
     let mut segments: Vec<Vec<String>> = if bar < w.len() { w[bar + 1..].split(|x| x == "|").map(<[String]>::to_vec).collect() } else { vec![] };
@@ -1007,7 +1007,7 @@ pub fn pipe_help(mode: Mode, words: &[String]) -> Option<String> {
 /// command's own pipes, then the filters; after `| display`, the views; after `| compare rollback`,
 /// a configuration; after a filter's name, what it needs (its own options: not offered).
 pub fn pipe_next(mode: Mode, words: &[String]) -> Vec<(String, String, Option<Value>)> {
-    let Some(bar) = words.iter().position(|x| x == "|") else { return vec![] };
+    let Some(bar) = crate::session::pipe_at(words) else { return vec![] };
     let Ok(mut walked) = walk(mode, &words[..bar]) else { return vec![] };
     let Some(node) = walked.node().filter(|n| n.whole.is_some() && n.pipes != Pipes::None) else { return vec![] };
     let mut segments: Vec<Vec<String>> = words[bar + 1..].split(|x| x == "|").map(<[String]>::to_vec).collect();

@@ -100,4 +100,4 @@ settings.
 
 Every committed configuration is also a bootable system version, listed in the boot menu. If a
 machine ever fails to start, choose an earlier entry there. `set boot loader timeout 0` would hide
-the menu, so it is refused: 1 is the shortest.
+the menu, so it is refused, in a config file too: 1 is the shortest.

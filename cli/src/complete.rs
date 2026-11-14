@@ -105,7 +105,7 @@ fn values(at: &At, kind: Option<crate::grammar::Value>) -> Vec<Choice> {
 /// What may follow `words` at `at`: the grammar's words and values, configuration paths from the
 /// tree, and after a `|`, the pipes.
 fn next(k: &Know, at: &At, words: &[String], _partial: &str) -> Vec<Choice> {
-    if words.iter().any(|w| w == "|") {
+    if crate::session::pipe_at(words).is_some() {
         let mut out = Vec::new();
         for (w, h, kind) in crate::grammar::pipe_next(at.mode, words) {
             out.push(Choice::new(&w, &h));

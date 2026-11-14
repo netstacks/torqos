@@ -1469,6 +1469,21 @@ fn a_script_on_the_persons_candidate_is_asked_for_by_name() {
     assert!(!asks(&Invocation::Draft("commit".into()), true, true), "a script is never asked to go on");
 }
 
+/// A command as an error names it: the pipes (from the first on) as pipes, every other word quoted as it
+/// is typed, so a list's value `|` is not mistaken for one.
+fn typed(w: &[String]) -> String {
+    let first = crate::session::pipe_at(w).unwrap_or(w.len());
+    w.iter().enumerate().map(|(i, x)| if x == "|" && i >= first { x.clone() } else { crate::syntax::quote(x) }).collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+#[test]
+fn a_list_values_bar_is_quoted_where_a_command_is_named() {
+    let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert_eq!(typed(&w(&["set", "a", "[", "|", "]"])), r#"set a [ "|" ]"#);
+    assert_eq!(typed(&w(&["show", "a b", "|", "grep", "x", "|", "wc"])), r#"show "a b" | grep x | wc"#);
+}
+
 /// The command line (`name`: as torqcli was run). A refusal says why, then how torqcli is run.
 fn parse_args(name: &str, args: &[String]) -> Result<Invocation> {
     // (One line, as every message: the usage after the reason.)
@@ -1672,8 +1687,7 @@ fn run_shell(args: &[String]) -> Result<i32> {
             Ok(0)
         }
         Invocation::Command(w) => {
-            // A `|` word is the pipe: shown as one, not quoted.
-            let shown = w.iter().map(|x| if x == "|" { x.clone() } else { crate::syntax::quote(x) }).collect::<Vec<_>>().join(" ");
+            let shown = typed(&w);
             match s.exec_words(&w) {
                 Ok(out) => {
                     print_clean(&out);

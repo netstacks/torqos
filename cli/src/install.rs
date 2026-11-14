@@ -710,8 +710,6 @@ fn leave(d: &Disk, file: &str) -> Result<()> {
     settle();
     // The record's file system, by its label, among this disk's partitions only: each checked to be one
     // of the disk written, and from then on used as what was opened, not by its name.
-    // A file system by its label, among this disk's partitions only: each checked to be one of the disk
-    // written, and from then on used as what was opened, not by its name.
     let own = |want: &str, what: &str| {
         (1..=16)
             .map(|n| format!("/dev/{}", partition(&d.name, n)))
