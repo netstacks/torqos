@@ -407,7 +407,7 @@ Its §5 lists claims without a test.
    drawing) is caught by that library, which carries on, as it means to: ending the whole applet on any panic was
    tried and dropped for that reason. A death by a signal (seen only when the panel itself died, which starts its
    applets anew) still leaves the machine without TorqOS in the panel, and without its restarting of the approval
-   dialog after polkit is replaced, until the panel restarts or the person logs in again. A supervisor process
+   dialog after polkit is replaced, until the panel restarts or the person logs in again. Why, from the source read 2026-11-13 (cosmic-panel 1.11.0 `space/wrapper_space.rs`, launch-pad `5b516ee`): launch-pad calls the panel's `on_exit` with the exit code, None for a death by signal, and the panel restarts only `is_restarting && err_code.is_some()`, else stops the process; no panel setting changes it (the restart mode is fixed in `main.rs`). A supervisor process
    between the panel and the applet would cover it; not built. torqcli's own retry (cli/src/run.rs,
    `NO_APPROVAL_AGENT`) still starts the dialog again for a terminal's command.
 10. **Desktop VM tests on .52 (nested ESXi, software rendering).** COSMIC's launcher, app library and portal panic
