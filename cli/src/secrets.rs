@@ -75,6 +75,23 @@ pub enum Approval {
     Answer { n: u64, approved: bool, rest: bool },
 }
 
+/// Where a person answers a use that waits: a terminal's command, or the panel's dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    Terminal,
+    Dialog,
+}
+
+impl Place {
+    /// As the broker takes it (`--where`), and as the use's entry then says it.
+    fn word(self) -> &'static str {
+        match self {
+            Place::Terminal => "terminal",
+            Place::Dialog => "dialog",
+        }
+    }
+}
+
 impl Approval {
     /// The command, after `request system secret `.
     pub fn line(&self) -> String {
@@ -91,8 +108,9 @@ impl Approval {
         }
     }
 
-    /// What the broker is asked (who asks is the kernel's word, added at its socket).
-    pub fn args(&self) -> Vec<String> {
+    /// What the broker is asked (who asks is the kernel's word, added at its socket). `place`: where the person
+    /// gives an answer to a waiting use, which its entry records.
+    pub fn args(&self, place: Place) -> Vec<String> {
         match self {
             Approval::Grant { name, user, minutes, tainted_too } => {
                 let mut a = vec!["secret-grant".to_string()];
@@ -120,7 +138,7 @@ impl Approval {
                 a
             }
             Approval::Answer { n, approved, rest } => {
-                let mut a = vec![if *approved { "secret-approve" } else { "secret-deny" }.to_string(), n.to_string(), "--where".into(), "terminal".into()];
+                let mut a = vec![if *approved { "secret-approve" } else { "secret-deny" }.to_string(), n.to_string(), "--where".into(), place.word().into()];
                 if *rest && !*approved {
                     a.push("--rest-of-session".into());
                 }
@@ -599,12 +617,15 @@ mod tests {
         rule.approve = Approve::Never;
         assert!(!listed(&rule).contains("!!"), "{}", listed(&rule));
         // What the broker is asked, word for word: all is never tainted-too or someone's from here either.
-        assert_eq!(Approval::Grant { name: None, user: None, minutes: Some(30), tainted_too: false }.args(), ["secret-grant", "--all", "--minutes", "30"]);
-        assert_eq!(Approval::Grant { name: Some("gh".into()), user: Some("dev".into()), minutes: Some(5), tainted_too: true }.args(), ["secret-grant", "--name", "gh", "--user", "dev", "--minutes", "5", "--tainted-too"]);
-        assert_eq!(Approval::Grant { name: Some("ci".into()), user: None, minutes: None, tainted_too: false }.args(), ["secret-grant", "--name", "ci", "--session"]);
-        assert_eq!(Approval::Revoke { name: None }.args(), ["secret-revoke"]);
-        assert_eq!(Approval::Answer { n: 7, approved: false, rest: false }.args(), ["secret-deny", "7", "--where", "terminal"]);
-        assert_eq!(Approval::Answer { n: 7, approved: false, rest: true }.args(), ["secret-deny", "7", "--where", "terminal", "--rest-of-session"]);
+        assert_eq!(Approval::Grant { name: None, user: None, minutes: Some(30), tainted_too: false }.args(Place::Terminal), ["secret-grant", "--all", "--minutes", "30"]);
+        assert_eq!(Approval::Grant { name: Some("gh".into()), user: Some("dev".into()), minutes: Some(5), tainted_too: true }.args(Place::Terminal), ["secret-grant", "--name", "gh", "--user", "dev", "--minutes", "5", "--tainted-too"]);
+        assert_eq!(Approval::Grant { name: Some("ci".into()), user: None, minutes: None, tainted_too: false }.args(Place::Terminal), ["secret-grant", "--name", "ci", "--session"]);
+        assert_eq!(Approval::Revoke { name: None }.args(Place::Terminal), ["secret-revoke"]);
+        assert_eq!(Approval::Answer { n: 7, approved: false, rest: false }.args(Place::Terminal), ["secret-deny", "7", "--where", "terminal"]);
+        assert_eq!(Approval::Answer { n: 7, approved: false, rest: true }.args(Place::Terminal), ["secret-deny", "7", "--where", "terminal", "--rest-of-session"]);
+        // An answer says where it was given; nothing else of a request does.
+        assert_eq!(Approval::Answer { n: 7, approved: true, rest: false }.args(Place::Dialog), ["secret-approve", "7", "--where", "dialog"]);
+        assert_eq!(Approval::Revoke { name: Some("gh".into()) }.args(Place::Dialog), ["secret-revoke", "--name", "gh"]);
         // Ending one secret's grants says when a grant of all still covers it.
         let ended = serde_json::json!({ "revoked": [{ "seq": 9, "reason": "dev revoked their leave" }], "all_until": "2026-11-13T20:00:00Z" });
         assert!(Approval::Revoke { name: Some("gh".into()) }.said(&ended).ends_with("still covers a secret of your own by that name, until 2026-11-13T20:00:00Z: `request system secret allow revoke all` ends it too.\n"));

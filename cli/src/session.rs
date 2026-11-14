@@ -2989,7 +2989,7 @@ mod tests {
             Ok(format!("{} {name}\n", act.verb()))
         }
         fn secret_approval(&self, a: &crate::secrets::Approval) -> Result<String> {
-            Ok(format!("asked the broker: {}\n", a.args().join(" ")))
+            Ok(format!("asked the broker: {}\n", a.args(crate::secrets::Place::Terminal).join(" ")))
         }
         fn secret_approvals(&self, waiting: bool) -> Result<String> {
             Ok(if waiting { crate::secrets::waiting_shown(&serde_json::json!({})) } else { crate::secrets::allowed_shown(&serde_json::json!({})) })

@@ -174,6 +174,25 @@ impl Real<'_> {
             })
             .collect())
     }
+
+    /// One request of an approval's to the broker, and its answer: `me` asks (over the socket, the kernel's word
+    /// for it stands instead), and an answer to a waiting use says it was given at `place`.
+    pub(crate) fn approval(&self, a: &crate::secrets::Approval, place: crate::secrets::Place, me: &str, log: &Path) -> Result<serde_json::Value> {
+        let mut args = a.args(place);
+        args.extend(["--approved-by".into(), me.to_string()]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        done(run::broker_json(broker(self.cli, &args)?, log)?, &format!("request system secret {}", a.line()))
+    }
+
+    /// The grants of secret uses that hold (`secret-grants`: everyone's), as the broker lists them.
+    pub(crate) fn grants(&self, log: &Path) -> Result<serde_json::Value> {
+        done(run::broker_json(broker(self.cli, &["secret-grants"])?, log)?, "show system secrets allowed")
+    }
+
+    /// The uses of `me`'s agent that wait for their answer (`secret-waiting`), as the broker lists them.
+    pub(crate) fn waiting_uses(&self, me: &str, log: &Path) -> Result<serde_json::Value> {
+        done(run::broker_json(broker(self.cli, &["secret-waiting", "--approved-by", me])?, log)?, "show system secrets waiting")
+    }
 }
 
 impl Machine for Real<'_> {
@@ -457,21 +476,15 @@ impl Machine for Real<'_> {
     }
 
     fn secret_approval(&self, a: &crate::secrets::Approval) -> Result<String> {
-        let log = run::start_log()?;
-        let me = me()?;
-        let mut args = a.args();
-        args.extend(["--approved-by".into(), me]);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        Ok(a.said(&done(run::broker_json(broker(self.cli, &args)?, &log)?, &format!("request system secret {}", a.line()))?))
+        Ok(a.said(&self.approval(a, crate::secrets::Place::Terminal, &me()?, &run::start_log()?)?))
     }
 
     fn secret_approvals(&self, waiting: bool) -> Result<String> {
         let log = run::start_log()?;
         if !waiting {
-            return Ok(crate::secrets::allowed_shown(&done(run::broker_json(broker(self.cli, &["secret-grants"])?, &log)?, "show system secrets allowed")?));
+            return Ok(crate::secrets::allowed_shown(&self.grants(&log)?));
         }
-        let me = me()?;
-        Ok(crate::secrets::waiting_shown(&done(run::broker_json(broker(self.cli, &["secret-waiting", "--approved-by", &me])?, &log)?, "show system secrets waiting")?))
+        Ok(crate::secrets::waiting_shown(&self.waiting_uses(&me()?, &log)?))
     }
 
     fn secrets_kept(&self) -> Result<Vec<crate::secrets::Kept>> {
