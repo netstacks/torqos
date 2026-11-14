@@ -3,12 +3,15 @@
 //! the broker asks what it asks of torqcli. One thing here is not a line: a value, typed twice in masked fields,
 //! goes to the broker as torqcli's own does (`app::secret_set`), and is no part of any command, log or message.
 //! A value is never shown here: `request system secret show` stays a terminal's.
+//!
+//! It also shows what agents are let use without asking for now (the broker's grants, `app::allowed`), each
+//! with the torqcli line that ends it, and marks a secret whose rule never asks, whatever its session read.
 
 use super::{blocking, failed, waiting, Loaded, Message, Settings};
 use cosmic::iced::Length;
 use cosmic::prelude::*;
 use cosmic::widget::{self, settings};
-use torq::app::{self, Approve, At, Kind, Secret};
+use torq::app::{self, Allowed, Approve, At, Kind, Secret};
 
 /// What a masked field holds, on its way from the field to the page: never printed, as a `Message` may be.
 #[derive(Clone)]
@@ -27,6 +30,8 @@ type Which = (Option<String>, String);
 pub enum Msg {
     /// What `show system secrets` lists, and each rules file that could not be read.
     Listed(Result<(Vec<Secret>, Vec<String>), String>),
+    /// What `show system secrets allowed` lists: what agents are let use without asking, for now.
+    Allowed(Result<Vec<Allowed>, String>),
     /// A secret of the list chosen (None: a new one, named on the page).
     Choose(Option<Which>),
     Name(String),
@@ -47,6 +52,8 @@ pub(super) struct State {
     /// The window's memory is closed to other programs (`app::secret_guard`): before that, nothing typed is taken.
     guarded: bool,
     list: Loaded<(Vec<Secret>, Vec<String>)>,
+    /// What agents are let use without asking, as it stood when the page last read it.
+    allowed: Loaded<Vec<Allowed>>,
     /// The secret the sections below act on (None: a new one, named by `name` and `mine`).
     chosen: Option<Which>,
     name: String,
@@ -68,6 +75,7 @@ impl Default for State {
             me: app::who().ok(),
             guarded: false,
             list: Loaded::Waiting,
+            allowed: Loaded::Waiting,
             chosen: None,
             name: String::new(),
             mine: false,
@@ -104,16 +112,19 @@ impl State {
     }
 }
 
-/// Ask for the list again.
+/// Ask for the list again, and for what is allowed without asking.
 pub(super) fn load() -> Task<cosmic::Action<Message>> {
-    cosmic::task::future(async { Message::Secrets(Msg::Listed(blocking(app::secrets_status).await)) })
+    Task::batch([
+        cosmic::task::future(async { Message::Secrets(Msg::Listed(blocking(app::secrets_status).await)) }),
+        cosmic::task::future(async { Message::Secrets(Msg::Allowed(blocking(app::allowed).await)) }),
+    ])
 }
 
 impl Settings {
     pub(super) fn secrets_update(&mut self, m: Msg) -> Task<cosmic::Action<Message>> {
         // Before the page takes anything a person does on it: a value is not kept in a memory another program
-        // can read. (The list arriving is not that, and holds no value.)
-        if !self.secrets.guarded && !matches!(m, Msg::Listed(_)) {
+        // can read. (The lists arriving are not that, and hold no value.)
+        if !self.secrets.guarded && !matches!(m, Msg::Listed(_) | Msg::Allowed(_)) {
             if let Err(e) = app::secret_guard() {
                 self.note = Some((app::said(&e), true));
                 return Task::none();
@@ -137,6 +148,7 @@ impl Settings {
                 }
                 s.list = r.into();
             }
+            Msg::Allowed(r) => s.allowed = r.into(),
             Msg::Choose(w) => {
                 // Another secret: what was typed was for the one before. Left in the masked fields, where it
                 // cannot be seen, a value meant for one secret could be kept on another; a host likewise.
@@ -174,12 +186,47 @@ impl Settings {
         Task::none()
     }
 
+    /// One allowance: whose agent, what it covers and until when; in the destructive style, that it holds even
+    /// after untrusted text; and (`with_button`) for the person's own, the line that ends it and its button.
+    fn allowance(&self, g: &Allowed, with_button: bool) -> Element<'_, Message> {
+        let me = self.secrets.me.as_deref();
+        let mut said = widget::column::with_capacity(3).width(Length::Fill).push(widget::text::body(g.said(me)));
+        if g.even_tainted {
+            let theme = cosmic::theme::active();
+            said = said.push(widget::text::caption(app::EVEN_TAINTED).class(cosmic::theme::Text::Color(theme.cosmic().destructive_color().into())));
+        }
+        let (how, ends) = if with_button { g.ending(me) } else { ("Ended at the top of this page.".to_string(), None) };
+        let mut row = vec![said.push(widget::text::caption(how)).into()];
+        if let Some((label, line)) = ends {
+            row.push(widget::button::standard(label).on_press_maybe(self.busy.is_none().then(|| Message::Act(At::Read, line))).into());
+        }
+        settings::item_row(row).into()
+    }
+
     pub(super) fn secrets_page(&self) -> Element<'_, Message> {
         let s = &self.secrets;
         let spacing = cosmic::theme::spacing();
         let mut page = widget::column::with_capacity(10).spacing(spacing.space_m).push(widget::text::body(
             "Tokens and SSH keys that a program, or the agent, uses through TorqOS and never reads. Not a password manager: everyday passwords belong in an app made for them.",
         ));
+
+        // What agents are let use without asking, for now. A list that could not be read is said: no allowance
+        // is then shown, and that is not the same as there being none.
+        let allowed: &[Allowed] = match &s.allowed {
+            Loaded::Got(allowed) => allowed,
+            Loaded::Waiting => &[],
+            Loaded::Failed(why) => {
+                page = page.push(widget::text::caption(format!("What your agent may use without asking could not be read: {why}")));
+                &[]
+            }
+        };
+        let theme = cosmic::theme::active();
+        let red = cosmic::theme::Text::Color(theme.cosmic().destructive_color().into());
+        let me = s.me.as_deref();
+        // All of the person's own secrets at once: shown here, once, with the line that ends it (`Allowed::ending`).
+        if let Some(g) = allowed.iter().find(|g| g.secret.is_none() && me == Some(g.person.as_str())) {
+            page = page.push(settings::section().title("Allowed without asking, for now").add(self.allowance(g, true)));
+        }
 
         // The list: what `show system secrets` says of each, and the one the rest of the page is about.
         let mut list = settings::section().title("The secrets");
@@ -198,6 +245,10 @@ impl Settings {
                         Some(u) => format!("{u}'s"),
                     };
                     list = list.add(settings::item::builder(format!("{} ({whose})", x.name)).description(x.said.clone()).control(choose(s.chosen.as_ref() == Some(&which), Some(which))));
+                    // Marked wherever the secret is listed: this one is used with no one asked, whatever was read.
+                    if x.approve == Approve::NeverEvenTainted {
+                        list = list.add(widget::text::caption(format!("{}: the agent uses it without ever asking. {}", x.name, app::EVEN_TAINTED)).class(red));
+                    }
                 }
             }
         }
@@ -298,9 +349,32 @@ impl Settings {
                         approve.add(run(label.into(), &["approve", name, rule.word()], named))
                     };
                 }
+                // Never, even after untrusted text: a person's own secret only, theirs to say, with their password.
+                // In the destructive style, set or offered.
+                if user.is_some() && user == me {
+                    if x.approve == Approve::NeverEvenTainted {
+                        approve = approve.add(settings::item::builder("Never, even from a session that read untrusted text").description("As it is now").control(widget::text::caption("Now").class(red)));
+                        approve = approve.add(widget::text::caption(format!("Your agent uses {whose} without ever asking you, whatever it has read: text it reads can make it use the secret. It still goes only to the hosts above. Any other line here ends that.")).class(red));
+                    } else {
+                        approve = approve.add(run("Never, even from a session that read untrusted text. Your password is asked".into(), &["approve", name, Approve::NeverEvenTainted.word()], named));
+                        approve = approve.add(widget::text::caption("With that, text your agent reads can make it use the secret without you being asked.").class(red));
+                    }
+                }
                 page = page.push(agent).push(approve).push(widget::text::caption(
-                    "The asking itself is not built yet. Until it is, the agent may use only a secret set to never, and only from a session that has read nothing from outside (a web page, an email, a downloaded file).",
+                    "A use that asks waits two minutes for the person whose agent it is: they answer in TorqOS's item in the panel, or in a terminal (show system secrets waiting). With no answer it is refused. A session that read untrusted text (a web page, an email, a downloaded file) is asked every time, whatever is chosen above, and so is a coding tool run as the agent, which TorqOS cannot see into.",
                 ));
+                // What lets its uses through without asking, for now: each allowance that covers this secret, and
+                // for the person's own the line that ends it.
+                let covering: Vec<&Allowed> = allowed.iter().filter(|g| g.covers(user, name)).collect();
+                if !covering.is_empty() {
+                    let mut section = settings::section().title(format!("Allowed without asking, for now: {whose}"));
+                    for g in covering {
+                        // The person's own of all their secrets has its button once, at the top of the page.
+                        let at_top = g.secret.is_none() && me == Some(g.person.as_str());
+                        section = section.add(self.allowance(g, !at_top));
+                    }
+                    page = page.push(section);
+                }
             }
             None => page = page.push(widget::text::caption("Whether the agent may use it, and when a person is asked first, can be said once it has a use (a host, above).")),
         }
