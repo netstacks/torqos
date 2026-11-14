@@ -78,7 +78,8 @@ At [first-boot setup](../start/first-boot.md), if the machine is online, you may
 a repository instead of answering the questions: the machine then becomes the machine that
 repository describes, with its history, but with this machine's own hardware, software and
 password. Setup shows what is in the repository (its users, the Nix files it attaches, its SSH
-setting, and whether it turns development mode on) and asks you to confirm, because that
+setting, and whether it turns development mode on; Nix files it attaches are not read for that, and
+setup says so) and asks you to confirm, because that
 configuration will run as root on this machine.
 If this machine's hardware needs a driver the installer does not carry, setup says so before the build,
 as it does for a new machine.

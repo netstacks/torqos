@@ -780,8 +780,10 @@ Its §5 lists claims without a test.
      system running with no ledger (setup's own record of a cut-short setup does not cover adopt).
    - **`torq.dev.enable` and every other setting travel** with the configuration: adopting a dev
      machine makes a dev machine. The summary calls out `torq.dev.enable` set in the tree
-     (`nixos/torq.json`; 2026-11-12, `tests/adopt.nix`, extended but not run yet); set in an attached
-     Nix file it is not seen, and no other setting is called out.
+     (`nixos/torq.json`; 2026-11-12, `tests/adopt.nix`, extended but not run yet). A Nix file is code, so
+     what an attached one sets cannot be read reliably without evaluating it: when the configuration
+     attaches any, the summary says they were not read for development mode (2026-11-13,
+     `setup::dev_notes`, unit-tested). No other setting is called out.
 
 6zj. **Strict mode and break-glass (ADR-035).** Open:
    - **No ledger, no shell, by the owner's decision (2026-11-05: "I prefer secure over back doors").**

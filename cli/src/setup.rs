@@ -264,6 +264,20 @@ fn network_again(online: bool, step: impl FnOnce() -> Result<bool>) -> Result<bo
     if online { Ok(true) } else { step() }
 }
 
+/// What the summary says of development mode (`torq.dev.enable`, which makes sudo ask no password): that the
+/// tree's settings turn it on; and, when the configuration attaches Nix files, that those were not read for it.
+/// A Nix file is code: only evaluating it could say, so it is not guessed at.
+fn dev_notes(found: &serde_json::Value) -> Vec<&'static str> {
+    let mut notes = vec![];
+    if found["dev"].as_bool().unwrap_or(false) {
+        notes.push("It turns development mode on (torq dev enable): sudo asks no password here either. For developing TorqOS only.");
+    }
+    if found["files"].as_array().is_some_and(|f| !f.is_empty()) {
+        notes.push("Its attached Nix files were not read for development mode: if one turns it on, this machine becomes a development machine.");
+    }
+    notes
+}
+
 /// What adopting a repository asked (ADR-036).
 struct Adopting {
     url: String,
@@ -346,8 +360,8 @@ fn adopt_questions() -> Result<Option<Adopting>> {
         Some(r) => println!("  ! It names another remote: {}", crate::history::one_line(r, 100)),
         None => println!("  ! It names no remote: this machine will not push there until `torq remote url` is set."),
     }
-    if found["dev"].as_bool().unwrap_or(false) {
-        println!("  ! It turns development mode on (torq dev enable): sudo asks no password here either. For developing TorqOS only.");
+    for note in dev_notes(&found) {
+        println!("  ! {note}");
     }
     println!("  This machine's own hardware file and software take the place of the repository's.");
     let hash = loop {
@@ -761,6 +775,21 @@ mod tests {
         assert!(!broadcom.contains("needs the network"), "{broadcom}");
         assert_eq!(driver_notice(&hw(" ")), None);
         assert_eq!(driver_notice(&[("flake.nix".to_string(), b"boot.extraModulePackages = [ x ];".to_vec())]), None, "only the hardware file is read");
+    }
+
+    /// The summary of an adopted configuration on development mode: set in the tree, said; attached Nix files,
+    /// said to be unread; neither, nothing.
+    #[test]
+    fn development_mode_in_the_summary() {
+        use serde_json::json;
+        assert!(dev_notes(&json!({"dev": false, "files": []})).is_empty());
+        let tree = dev_notes(&json!({"dev": true, "files": []}));
+        assert_eq!(tree.len(), 1);
+        assert!(tree[0].contains("turns development mode on"));
+        let attached = dev_notes(&json!({"dev": false, "files": ["extra.nix"]}));
+        assert_eq!(attached.len(), 1);
+        assert!(attached[0].contains("not read for development mode"));
+        assert_eq!(dev_notes(&json!({"dev": true, "files": ["extra.nix"]})).len(), 2);
     }
 
     /// A setup started over offers the network again to a machine that had none, and leaves one that had.
