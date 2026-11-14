@@ -100,7 +100,8 @@ enum Message {
     SyncDesktop,
     /// The settings that could not be put on the desktop, or why the sync failed.
     Synced(Result<Vec<String>, String>),
-    Reconciled(Result<(), String>),
+    /// The ids of the apps that could not be installed, or why the reconcile could not run.
+    Reconciled(Result<Vec<String>, String>),
     Answer(Result<Glance, String>),
     Confirm,
     Closed,
@@ -612,7 +613,7 @@ impl cosmic::Application for Applet {
                 }
             }
             Message::Reconciled(outcome) => {
-                if let Some(why) = self.apps.heard(outcome) {
+                if let Some(why) = self.apps.heard(app::apps_outcome(outcome)) {
                     notify(APPS.to_string(), why, "apps");
                 }
             }
@@ -826,7 +827,7 @@ fn sync() -> Task<cosmic::Action<Message>> {
 }
 
 /// Bring the person's apps in line with the configuration, and answer why that failed. An app that could not be
-/// installed is not an error here: it is tried again at the next reconcile (`reconcile_apps`).
+/// installed is told once for each set of them (`app::apps_outcome`), and tried again at the next reconcile.
 fn reconcile() -> Task<cosmic::Action<Message>> {
     cosmic::task::future(async { Message::Reconciled(blocking(app::reconcile_apps).await) })
 }

@@ -488,7 +488,7 @@ Its §5 lists claims without a test.
    Since `c6342be` (0.4.0-rc1), a switch that changes `torq-applet` or `torq-tunnels` ends the panel, and COSMIC's
    session starts it again with its applets, new from the system's path (`app::LIVE_PARTS`); an applet of 0.3.2
    does not, and keeps its old torqcli until the person logs in again. A save that fails or is refused is no longer
-   silent (2026-11-12), nor are settings it could not put on the desktop or apps it could not bring back: the
+   silent (2026-11-12), nor are settings it could not put on the desktop or apps it could not bring back (an install that failed, told once for each set of apps, 2026-11-13; before that, only a reconcile that could not run was told): the
    applet says why in a notification, once for each reason (again after a try worked),
    and in its popup until a try works.
 6zzp. **A value typed on the Secrets page is not wiped from the window's memory** (ADR-052 step 5, 2026-11-12;

@@ -2830,20 +2830,47 @@ pub fn sync_apps() -> Result<bool> {
 }
 
 /// Bring what is installed in line with the configuration: a rebuilt machine's apps come back, an undone install
-/// goes. Applications the person installed and has yet to be remembered are left for `sync_apps`.
-pub fn reconcile_apps() -> Result<()> {
+/// goes. Applications the person installed and has yet to be remembered are left for `sync_apps`. The ids that could
+/// not be installed: they are tried again at the next reconcile, and the person is told (`apps_outcome`).
+pub fn reconcile_apps() -> Result<Vec<String>> {
     let cli = cli();
     let real = crate::shell::Real::new(&cli);
     let mut s = open_session(&cli, &real, None, At::Read)?;
     let (declared, managed) = (my_list(&mut s, "flatpaks")?, managed_apps());
     let installed: BTreeSet<String> = installed_apps()?.into_iter().map(|a| a.id).collect();
     let plan = plan_apps(&declared, &managed, &installed);
-    // A person's removal stays known, for `sync_apps` to take out of the configuration: dropped here, it would be
-    // taken for a machine that has yet to install, and come back.
+    let (also, failed) = bring_back(&plan, install_app, removing);
+    set_managed(&managed_after(&declared, &installed, also))?;
+    Ok(failed)
+}
+
+/// What a plan leaves known to TorqOS, and the installs that failed. A person's removal stays known, for
+/// `sync_apps` to take out of the configuration: dropped here, it would be taken for a machine that has yet to
+/// install, and come back. An install that failed is not known, so the next reconcile tries it again.
+fn bring_back(plan: &AppPlan, install: impl Fn(&str) -> Result<()>, remove: impl Fn(&[String]) -> Vec<String>) -> (Vec<String>, Vec<String>) {
     let mut also = plan.forget.clone();
-    also.extend(plan.install.iter().filter(|id| install_app(id).is_ok()).cloned());
-    also.extend(removing(&plan.remove));
-    set_managed(&managed_after(&declared, &installed, also))
+    let mut failed = Vec::new();
+    for id in &plan.install {
+        if install(id).is_ok() {
+            also.push(id.clone());
+        } else {
+            failed.push(id.clone());
+        }
+    }
+    also.extend(remove(&plan.remove));
+    (also, failed)
+}
+
+/// What a reconcile came to, as `Told` takes it: Ok when every app is back, else the sentence for the ones that are
+/// not. The same ids are one reason, however many times a try fails for them.
+pub fn apps_outcome(outcome: Result<Vec<String>, String>) -> Result<(), String> {
+    let mut failed = outcome?;
+    if failed.is_empty() {
+        return Ok(());
+    }
+    failed.sort();
+    let again = if failed.len() == 1 { "It will" } else { "They will" };
+    Err(format!("{} could not be installed. {again} be tried again later.", failed.join(", ")))
 }
 
 // ── Tools: command-line software, a person's own ─────────────────────────────────────────────────
@@ -2893,6 +2920,29 @@ mod app_tests {
     }
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn an_app_that_fails_to_install_is_returned_and_not_remembered() {
+        let plan = AppPlan { install: v(&["org.a", "org.bad", "org.c"]), forget: v(&["org.gone"]), remove: v(&["org.old"]), ..Default::default() };
+        let (also, failed) = bring_back(&plan, |id| if id == "org.bad" { anyhow::bail!("no network") } else { Ok(()) }, |ids| ids.to_vec());
+        assert_eq!(failed, v(&["org.bad"]));
+        // The failed one is not known, so the next reconcile tries it again; a person's removal stays known.
+        assert_eq!(also, v(&["org.gone", "org.a", "org.c", "org.old"]));
+    }
+
+    #[test]
+    fn failed_installs_are_told_once_for_each_set_and_again_after_a_success() {
+        let mut u = Told::default();
+        let say = |u: &mut Told, ids: &[&str]| u.heard(apps_outcome(Ok(v(ids))));
+        assert_eq!(say(&mut u, &[]), None);
+        assert_eq!(say(&mut u, &["org.b", "org.a"]).as_deref(), Some("org.a, org.b could not be installed. They will be tried again later."));
+        assert_eq!(say(&mut u, &["org.a", "org.b"]), None);
+        assert_eq!(say(&mut u, &["org.a"]).as_deref(), Some("org.a could not be installed. It will be tried again later."));
+        assert_eq!(say(&mut u, &[]), None);
+        assert!(say(&mut u, &["org.a"]).is_some());
+        // A reconcile that could not run says why, as it did.
+        assert_eq!(apps_outcome(Err("no session".into())), Err("no session".into()));
     }
 
     #[test]
