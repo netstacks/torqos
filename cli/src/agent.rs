@@ -128,7 +128,7 @@ pub(crate) fn owned(dir: &Path, uid: u32) -> Result<(Vec<PathBuf>, Vec<PathBuf>)
 
 /// Whether this machine has agent account `agent`, from /etc/passwd: refused, plainly, if not (the
 /// person is not in `torq.agent.people`). The launcher checks it again, as root, against the broker's map.
-fn has_agent(agent: &str) -> Result<()> {
+pub(crate) fn has_agent(agent: &str) -> Result<()> {
     let passwd = std::fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
     if !passwd.lines().any(|l| l.split(':').next() == Some(agent)) {
         bail!("you have no agent account on this machine ({agent}): `torq agent people` names who has one (the owner, by default) — adding you is a system change, an administrator's");

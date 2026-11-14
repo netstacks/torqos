@@ -781,6 +781,650 @@ mod secret_tests {
     }
 }
 
+// ── A use of a secret that waits for its person, and what they let their agent use without asking ─
+
+use crate::secrets::{Approval, Place};
+
+/// A use of a secret by the person's agent that waits for their answer, as the broker keeps it
+/// (`secret-waiting`). All of it is the broker's own knowledge but `agent_says`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaitingUse {
+    /// Its number: what an answer names.
+    pub n: u64,
+    pub secret: String,
+    /// Whose secret it is (None: the system's).
+    pub user: Option<String>,
+    pub host: String,
+    /// A signature for SSH to the host, not an HTTPS request to it.
+    pub ssh: bool,
+    /// A program run as the agent asked (a coding tool), not the agent itself.
+    pub tool: bool,
+    /// Its session read untrusted text, or it names no session.
+    pub tainted: bool,
+    /// It names a session: a no can be for the rest of it.
+    pub session: bool,
+    /// When its time is over, in seconds since the epoch (None: the broker's time could not be read).
+    pub until: Option<i64>,
+    /// The agent's own words for it: one line, cleaned again here. Never a fact.
+    pub agent_says: String,
+}
+
+/// The uses in the broker's answer. One that does not say what it is (no number, secret, host or owner) is left
+/// out: nothing is shown of it, and nothing can be answered. Where the answer does not say a use is the agent's own
+/// from a session that read nothing untrusted, it is taken as the more doubtful: a coding tool's, tainted.
+fn uses_of(v: &serde_json::Value) -> Vec<WaitingUse> {
+    let one = |a: &serde_json::Value| -> Option<WaitingUse> {
+        let f = &a["facts"];
+        let user = match &f["owner"] {
+            serde_json::Value::String(s) if s == "system" => None,
+            o => Some(history::one_line(o["person"].as_str()?, 40)),
+        };
+        Some(WaitingUse {
+            n: a["n"].as_u64().filter(|n| *n > 0)?,
+            secret: history::one_line(f["secret"].as_str()?, 80),
+            user,
+            host: history::one_line(f["host"].as_str()?, 255),
+            ssh: f["ssh"] == true,
+            tool: match (f["caller"].as_str(), f["agent"].as_str()) {
+                (Some(caller), Some(agent)) => caller == agent,
+                _ => true,
+            },
+            tainted: f["tainted"] != false,
+            session: f["session"].is_string(),
+            until: a["until"].as_str().and_then(history::parse_ts),
+            agent_says: history::one_line(a["agent_says"].as_str().unwrap_or_default(), AGENT_SAYS_MAX),
+        })
+    };
+    let mut uses: Vec<WaitingUse> = v["waiting"].as_array().into_iter().flatten().filter_map(one).collect();
+    uses.sort_by_key(|u| u.n);
+    uses
+}
+
+/// The most of the agent's own words the dialog shows (the broker keeps no more).
+const AGENT_SAYS_MAX: usize = 200;
+/// How wide a line of the agent's words is drawn, in columns of a fixed-width font, after its mark.
+const AGENT_SAYS_COLUMNS: usize = 30;
+/// What every line of the agent's words begins with, as drawn.
+pub const AGENT_SAYS_MARK: &str = "| ";
+/// The line the agent's words are drawn under.
+pub const AGENT_SAYS: &str = "What your agent says about it. These are its own words, and nothing has checked them:";
+/// Said with the offer of an allowance that holds in a session that read untrusted text.
+pub const EVEN_TAINTED_WARNING: &str = "Text your agent has read can then make it use this secret without you being asked. The secret still goes only to the hosts its rule names.";
+/// Said where "Allow for…" offers only such allowances.
+pub const ONLY_EVEN_TAINTED: &str = "This use comes from a session that read untrusted text, or that TorqOS cannot see into. Only an allowance that says so lets its later uses through.";
+/// How long after a use is first drawn its buttons take no press: a click meant for what was there before lands
+/// on nothing.
+pub const USE_ARMS_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The agent's words as lines the dialog draws as they are, each beginning with `AGENT_SAYS_MARK`. The lines are
+/// broken here, at `columns` of a fixed-width font (a character outside ASCII counted as two), and not by the
+/// widget: so every line of them drawn has the mark, and none can pass for a row of the broker's facts.
+fn marked_lines(words: &str, columns: usize) -> Vec<String> {
+    let wide = |c: char| if c.is_ascii() { 1 } else { 2 };
+    let cols = |s: &str| s.chars().map(wide).sum::<usize>();
+    let (mut lines, mut line) = (Vec::new(), String::new());
+    for word in words.split_whitespace() {
+        let mut rest = word;
+        while !rest.is_empty() {
+            let gap = usize::from(!line.is_empty());
+            if cols(&line) + gap + cols(rest) <= columns {
+                if gap == 1 {
+                    line.push(' ');
+                }
+                line.push_str(rest);
+                rest = "";
+            } else if line.is_empty() {
+                // Longer than a line by itself: cut where the line is full, and never before its first character.
+                let mut used = 0;
+                let full = rest.char_indices().find(|(_, c)| {
+                    used += wide(*c);
+                    used > columns
+                });
+                let first = rest.chars().next().map_or(rest.len(), char::len_utf8);
+                let cut = full.map_or(rest.len(), |(i, _)| i).max(first);
+                lines.push(rest[..cut].to_string());
+                rest = &rest[cut..];
+            } else {
+                lines.push(std::mem::take(&mut line));
+            }
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines.into_iter().map(|l| format!("{AGENT_SAYS_MARK}{l}")).collect()
+}
+
+/// What "Allow for…" can give: leave for the agent to use this one secret without asking, for a while.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Allowance {
+    /// In the agent's sessions running now.
+    Session,
+    Minutes(u32),
+    /// For minutes, and even from a session that read untrusted text.
+    MinutesEvenTainted(u32),
+}
+
+/// One thing "Allow for…" offers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Offer {
+    pub allowance: Allowance,
+    pub label: String,
+    /// Drawn in the destructive style, with `EVEN_TAINTED_WARNING`.
+    pub red: bool,
+}
+
+/// A person's answer, in the panel's dialog, to a use that waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply {
+    /// Allow once.
+    Once,
+    /// Allow for…: the allowance first (the broker asks the person's password), and a yes to this use only if it
+    /// was given.
+    For(Allowance),
+    Deny,
+    /// Deny, and don't ask again this session.
+    DenySession,
+}
+
+/// What the dialog shows of one waiting use. The panel lays this out and decides nothing of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseDialog {
+    pub n: u64,
+    /// The broker's facts, first: a label and its value each, in the order drawn, and whether the row is drawn in
+    /// the destructive style (the session's, where it read untrusted text or none is named).
+    pub facts: Vec<(&'static str, String, bool)>,
+    /// How long is left to answer.
+    pub left: String,
+    /// The agent's own words, under `AGENT_SAYS`: lines drawn as they are (none: it said nothing).
+    pub agent_says: Vec<String>,
+    /// How many others wait: "2 more waiting".
+    pub more: Option<String>,
+    /// What "Allow for…" offers.
+    pub offers: Vec<Offer>,
+    /// Said with the offers, where they are only the kind that holds under untrusted text.
+    pub offers_note: Option<&'static str>,
+    /// Whether "Deny, and don't ask again this session" is offered: only a use that names a session.
+    pub deny_session: bool,
+}
+
+impl WaitingUse {
+    /// "your secret gh", "the system's secret ci".
+    fn whose(&self, me: &str) -> String {
+        match &self.user {
+            None => format!("the system's secret {}", self.secret),
+            Some(u) if u == me => format!("your secret {}", self.secret),
+            Some(u) => format!("{u}'s secret {}", self.secret),
+        }
+    }
+
+    /// What "Allow for…" offers for this use. A use from a session that read untrusted text is covered only by an
+    /// allowance that says so: the others would be given, and its next use would ask all the same, so they are
+    /// not offered for it.
+    fn offers(&self) -> Vec<Offer> {
+        let minutes = |m: u32| if m == 480 { "480 minutes (8 hours)".to_string() } else { format!("{m} minutes") };
+        if self.tainted {
+            return [60, 480].into_iter().map(|m| Offer { allowance: Allowance::MinutesEvenTainted(m), label: format!("For {}, even from a session that read untrusted text", minutes(m)), red: true }).collect();
+        }
+        let mut offers = Vec::new();
+        if self.session {
+            offers.push(Offer { allowance: Allowance::Session, label: "In your agent's sessions that are running now".into(), red: false });
+        }
+        offers.extend([60, 480].into_iter().map(|m| Offer { allowance: Allowance::Minutes(m), label: format!("For {}", minutes(m)), red: false }));
+        offers
+    }
+
+    /// Whether the dialog offers `reply` for this use.
+    fn offered(&self, reply: Reply) -> bool {
+        match reply {
+            Reply::Once | Reply::Deny => true,
+            Reply::DenySession => self.session,
+            Reply::For(a) => self.offers().iter().any(|o| o.allowance == a),
+        }
+    }
+
+    /// What the broker is asked for `reply`, in order: each only if the one before it was done.
+    fn requests(&self, reply: Reply) -> Vec<Approval> {
+        let answer = |approved, rest| Approval::Answer { n: self.n, approved, rest };
+        let grant = |minutes, tainted_too| Approval::Grant { name: Some(self.secret.clone()), user: self.user.clone(), minutes, tainted_too };
+        match reply {
+            Reply::Once => vec![answer(true, false)],
+            Reply::Deny => vec![answer(false, false)],
+            Reply::DenySession => vec![answer(false, true)],
+            Reply::For(Allowance::Session) => vec![grant(None, false), answer(true, false)],
+            Reply::For(Allowance::Minutes(m)) => vec![grant(Some(m), false), answer(true, false)],
+            Reply::For(Allowance::MinutesEvenTainted(m)) => vec![grant(Some(m), true), answer(true, false)],
+        }
+    }
+
+    /// The dialog for this use, with `more` others waiting, at `now` (seconds since the epoch).
+    pub fn dialog(&self, me: &str, more: usize, now: i64) -> UseDialog {
+        let secret = match &self.user {
+            None => format!("{} (the system's)", self.secret),
+            Some(u) if u == me => format!("{} (yours)", self.secret),
+            Some(u) => format!("{} ({u}'s)", self.secret),
+        };
+        let session = match (self.tainted, self.session, self.tool) {
+            (false, ..) => "It read nothing untrusted.",
+            (true, false, _) => "The use names no session, so it counts as one that read untrusted text.",
+            (true, true, true) => "A coding tool's. TorqOS cannot see what it read, so it counts as one that read untrusted text.",
+            (true, true, false) => "It read untrusted text.",
+        };
+        UseDialog {
+            n: self.n,
+            facts: vec![
+                ("Secret", secret, false),
+                ("Used for", if self.ssh { format!("signing in over SSH to {}", self.host) } else { format!("an HTTPS request to {}", self.host) }, false),
+                ("Asked by", if self.tool { "a coding tool run as your agent".into() } else { "your agent".into() }, false),
+                ("Its session", session.into(), self.tainted),
+            ],
+            left: match self.until.map(|u| u - now) {
+                Some(s) if s > 0 => format!("{}:{:02} left to answer. With no answer it is refused.", s / 60, s % 60),
+                _ => "Its time is about over.".into(),
+            },
+            agent_says: marked_lines(&self.agent_says, AGENT_SAYS_COLUMNS),
+            more: (more > 0).then(|| format!("{more} more waiting")),
+            offers: self.offers(),
+            offers_note: self.tainted.then_some(ONLY_EVEN_TAINTED),
+            deny_session: self.session,
+        }
+    }
+
+    /// The notification that a use waits: fixed words and the broker's facts (its body escaped, as a notification's
+    /// may be read as markup). Never the agent's words.
+    pub fn notice(&self, me: &str) -> (String, String) {
+        let what = if self.ssh { "to sign in over SSH to" } else { "in an HTTPS request to" };
+        ("Your agent asks to use a secret".into(), crate::agent::crash::markup(&format!("It asks for {}, {what} {}. Open this to answer. With no answer it is refused.", self.whose(me), self.host)))
+    }
+}
+
+/// Whether the person has an agent here (the account `torq-agent-<them>`). Without one no use waits for them, and
+/// the panel asks the broker nothing about it.
+pub fn has_agent() -> bool {
+    crate::me().is_ok_and(|me| crate::agent::has_agent(&crate::agent::agent_of(&me)).is_ok())
+}
+
+/// The uses of the person's agent that wait for their answer now, lowest number first.
+pub fn uses_waiting() -> Result<Vec<WaitingUse>> {
+    let cli = cli();
+    let waiting = crate::shell::Real::new(&cli).waiting_uses(&crate::me()?, &crate::run::watch_log()?)?;
+    Ok(uses_of(&waiting))
+}
+
+/// Give the person's `reply` to the use `u`, from the panel's dialog. What was done, said as the command line
+/// says it.
+pub fn answer_use(u: &WaitingUse, reply: Reply) -> Result<String> {
+    answer_with(&cli(), &crate::me()?, &crate::run::start_log()?, u, reply)
+}
+
+fn answer_with(cli: &Cli, me: &str, log: &std::path::Path, u: &WaitingUse, reply: Reply) -> Result<String> {
+    if !u.offered(reply) {
+        anyhow::bail!("not done: that answer is not offered for use {}", u.n);
+    }
+    let real = crate::shell::Real::new(cli);
+    let mut said = String::new();
+    for request in u.requests(reply) {
+        let granting = matches!(request, Approval::Grant { .. });
+        match real.approval(&request, Place::Dialog, me, log) {
+            Ok(v) => said.push_str(&request.said(&v)),
+            // The allowance was not given (refused, or its password not): nothing was, and the use is not answered.
+            Err(e) if granting => anyhow::bail!("{e:#}. Nothing was allowed, and use {} still waits for your answer.", u.n),
+            // Nothing was done before this: the answer itself was refused.
+            Err(e) if said.is_empty() => return Err(e),
+            // The allowance stands, though the yes did not reach this use (over or answered meanwhile, or the
+            // broker busy): said as a failure, so the use stays shown for as long as it still waits.
+            // (One line: an error is shown cleaned, its line breaks as escapes.)
+            Err(e) => anyhow::bail!("{} But use {} was not approved by this ({e:#}). The allowance holds for the agent's later uses.", said.trim().replace('\n', " "), u.n),
+        }
+    }
+    Ok(said)
+}
+
+/// Which waiting use the panel's dialog shows: one at a time, lowest number first, and the next only when the one
+/// shown is answered or its time is over.
+#[derive(Debug, Default)]
+pub struct Asking {
+    shown: Option<WaitingUse>,
+    more: usize,
+    /// When the use shown was last put in front of the person: its buttons take a press `USE_ARMS_AFTER` later.
+    since: Option<std::time::Instant>,
+    /// The uses answered here, lately: a list asked before the answer landed may still have one, and it is not shown again.
+    answered: Vec<u64>,
+}
+
+/// What a look at the broker's list changed.
+#[derive(Debug, Default, PartialEq)]
+pub struct Heard {
+    /// A use is shown that was not before: the person is told of it, once.
+    pub tell: Option<WaitingUse>,
+    /// The use that was shown is over, and not by an answer given here: said as a note.
+    pub over: Option<String>,
+}
+
+impl Asking {
+    /// The broker's list of what waits (`waiting`), at `now` (seconds since the epoch) and `at`.
+    pub fn heard(&mut self, mut waiting: Vec<WaitingUse>, now: i64, at: std::time::Instant) -> Heard {
+        waiting.retain(|u| !self.answered.contains(&u.n));
+        waiting.sort_by_key(|u| u.n);
+        let mut heard = Heard::default();
+        if let Some(was) = self.shown.take() {
+            match waiting.iter().position(|u| u.n == was.n) {
+                // Still waiting: it stays the one shown, whatever else has come.
+                Some(i) => {
+                    self.more = waiting.len() - 1;
+                    self.shown = Some(waiting.swap_remove(i));
+                    return heard;
+                }
+                None if was.until.is_none_or(|u| now >= u) => heard.over = Some(format!("The time to answer use {} ({} for {}) is over.", was.n, was.secret, was.host)),
+                None => heard.over = Some(format!("Use {} ({} for {}) was answered somewhere else.", was.n, was.secret, was.host)),
+            }
+        }
+        self.more = waiting.len().saturating_sub(1);
+        self.shown = waiting.into_iter().next();
+        self.since = self.shown.as_ref().map(|_| at);
+        heard.tell = self.shown.clone();
+        heard
+    }
+
+    /// The use shown, and how many others wait.
+    pub fn shown(&self) -> Option<(&WaitingUse, usize)> {
+        self.shown.as_ref().map(|u| (u, self.more))
+    }
+
+    /// The dialog was put in front of the person at `at` (its popup opened): its buttons wait again.
+    pub fn drawn(&mut self, at: std::time::Instant) {
+        if self.shown.is_some() {
+            self.since = Some(at);
+        }
+    }
+
+    /// Whether a press of a button drawn for use `n` is taken at `at`: only for the use shown, and not in its first
+    /// moment on the screen.
+    pub fn takes(&self, n: u64, at: std::time::Instant) -> bool {
+        self.shown.as_ref().is_some_and(|u| u.n == n) && self.since.is_some_and(|s| at.saturating_duration_since(s) >= USE_ARMS_AFTER)
+    }
+
+    /// Use `n` was answered here: it is no longer shown, and is not said to have been answered elsewhere.
+    pub fn answered(&mut self, n: u64) {
+        if self.shown.as_ref().is_some_and(|u| u.n == n) {
+            self.shown = None;
+            self.since = None;
+        }
+        self.answered.push(n);
+        // Numbers only grow, and a list asked before an answer is seconds old at most: the last few are enough.
+        if self.answered.len() > 16 {
+            self.answered.remove(0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The broker's answer to `secret-waiting`, with these uses.
+    fn waiting(uses: &[serde_json::Value]) -> serde_json::Value {
+        serde_json::json!({ "waiting": uses })
+    }
+
+    /// A coding tool's use of dev's own secret gh, tainted, in a session, with the agent's words.
+    fn tool_use(n: u64, says: &str) -> serde_json::Value {
+        serde_json::json!({ "n": n, "asked": "2026-11-13T12:00:00.000Z", "until": "2026-11-13T12:02:00.000Z", "answer": null, "agent_says": says,
+            "facts": { "person": "dev", "agent": "torq-agent-dev", "caller": "torq-agent-dev", "owner": { "person": "dev" }, "secret": "gh", "host": "api.github.com", "ssh": false, "session": "s1", "tainted": true, "why": "w" } })
+    }
+
+    /// The resident agent's use of the system's secret ci over SSH, from a session that read nothing untrusted.
+    fn resident_use(n: u64) -> serde_json::Value {
+        serde_json::json!({ "n": n, "asked": "2026-11-13T12:00:00.000Z", "until": "2026-11-13T12:02:00.000Z", "agent_says": "",
+            "facts": { "person": "dev", "agent": "torq-agent-dev", "caller": "torq-resident-dev", "owner": "system", "secret": "ci", "host": "github.com", "ssh": true, "session": "s2", "tainted": false, "why": "w" } })
+    }
+
+    fn uses(v: &[serde_json::Value]) -> Vec<WaitingUse> {
+        uses_of(&waiting(v))
+    }
+
+    const NOON: i64 = 1_794_571_200; // 2026-11-13T12:00:00Z
+
+    /// What waits is read as the broker's facts, lowest number first; where the broker's answer does not say a use
+    /// is clean, it is not taken as clean; one that does not say what it is, is not shown at all.
+    #[test]
+    fn what_waits_is_read_as_the_brokers_facts() {
+        assert_eq!(history::parse_ts("2026-11-13T12:00:00.000Z"), Some(NOON));
+        let read = uses(&[resident_use(9), tool_use(7, "listing  the\trepositories")]);
+        assert_eq!(read.iter().map(|u| u.n).collect::<Vec<_>>(), [7, 9]);
+        assert_eq!(read[0], WaitingUse { n: 7, secret: "gh".into(), user: Some("dev".into()), host: "api.github.com".into(), ssh: false, tool: true, tainted: true, session: true, until: Some(NOON + 120), agent_says: "listing the repositories".into() });
+        assert_eq!((read[1].user.as_deref(), read[1].ssh, read[1].tool, read[1].tainted, read[1].session, read[1].agent_says.as_str()), (None, true, false, false, true, ""));
+        // Nothing said of taint, the caller or the session: tainted, a coding tool's, no session.
+        let mut bare = resident_use(3);
+        for k in ["tainted", "caller", "session"] {
+            bare["facts"].as_object_mut().unwrap().remove(k);
+        }
+        let read = uses(&[bare]);
+        assert_eq!((read[0].tainted, read[0].tool, read[0].session), (true, true, false));
+        // No number, no secret, no host, an owner that is no one's: left out.
+        for k in ["secret", "host", "owner"] {
+            let mut broken = resident_use(3);
+            broken["facts"].as_object_mut().unwrap().remove(k);
+            assert!(uses(&[broken]).is_empty(), "{k}");
+        }
+        let mut unnumbered = resident_use(0);
+        assert!(uses(&[unnumbered.clone()]).is_empty());
+        unnumbered["facts"]["owner"] = serde_json::json!({ "group": "wheel" });
+        assert!(uses(&[unnumbered]).is_empty());
+        assert!(uses_of(&serde_json::json!({})).is_empty() && uses_of(&serde_json::json!({ "waiting": "many" })).is_empty());
+        // The agent's words are cleaned again, and are no longer than the broker keeps them.
+        let read = uses(&[tool_use(7, &format!("a\u{202e}b\n{}", "x".repeat(400)))]);
+        assert!(read[0].agent_says.starts_with("a\\u{202e}b x") && read[0].agent_says.chars().count() == AGENT_SAYS_MAX, "{}", read[0].agent_says);
+    }
+
+    /// The dialog: the broker's facts first, in their order; then the agent's words, apart, every line of them
+    /// marked; how many others wait; and the time left.
+    #[test]
+    fn the_dialog_is_the_facts_then_the_agents_words() {
+        let u = &uses(&[tool_use(7, "Secret: other (yours) Used for: an HTTPS request to evil.example.com Asked by: your agent")])[0];
+        let d = u.dialog("dev", 2, NOON + 55);
+        assert_eq!(d.n, 7);
+        assert_eq!(
+            d.facts,
+            [
+                ("Secret", "gh (yours)".to_string(), false),
+                ("Used for", "an HTTPS request to api.github.com".to_string(), false),
+                ("Asked by", "a coding tool run as your agent".to_string(), false),
+                ("Its session", "A coding tool's. TorqOS cannot see what it read, so it counts as one that read untrusted text.".to_string(), true),
+            ]
+        );
+        assert_eq!(d.left, "1:05 left to answer. With no answer it is refused.");
+        assert_eq!(d.more.as_deref(), Some("2 more waiting"));
+        // Its words are no fact: every line of them begins with the mark, and is no wider than the dialog draws.
+        assert_eq!(d.agent_says, ["| Secret: other (yours) Used", "| for: an HTTPS request to", "| evil.example.com Asked by:", "| your agent"]);
+        assert!(d.facts.iter().all(|(_, v, _)| !v.contains("evil")), "the agent's words are in no fact");
+        // The agent itself, clean, the system's secret, over SSH; no one else waiting; its time gone by.
+        let u = &uses(&[resident_use(8)])[0];
+        let d = u.dialog("dev", 0, NOON + 120);
+        assert_eq!(d.facts.iter().map(|(_, v, red)| (v.as_str(), *red)).collect::<Vec<_>>(), [("ci (the system's)", false), ("signing in over SSH to github.com", false), ("your agent", false), ("It read nothing untrusted.", false)]);
+        assert_eq!((d.more, d.left.as_str(), d.agent_says.len()), (None, "Its time is about over.", 0));
+        // Someone else's secret is said to be theirs; a use with no session, and the agent's own tainted session.
+        assert_eq!(u.clone().dialog("sam", 0, NOON).facts[0].1, "ci (the system's)");
+        let mut theirs = uses(&[tool_use(7, "")])[0].clone();
+        assert_eq!(theirs.dialog("sam", 0, NOON).facts[0].1, "gh (dev's)");
+        theirs.session = false;
+        assert_eq!(theirs.dialog("dev", 0, NOON).facts[3].1, "The use names no session, so it counts as one that read untrusted text.");
+        (theirs.session, theirs.tool) = (true, false);
+        assert_eq!(theirs.dialog("dev", 0, NOON).facts[2..], [("Asked by", "your agent".to_string(), false), ("Its session", "It read untrusted text.".to_string(), true)]);
+        theirs.until = None;
+        assert_eq!(theirs.dialog("dev", 0, NOON).left, "Its time is about over.");
+    }
+
+    /// The agent's words are broken into lines here: none wider than asked, a long word cut, wide characters
+    /// counted as two, and each line marked.
+    #[test]
+    fn the_agents_words_are_lines_with_the_mark() {
+        assert_eq!(marked_lines("", 10), Vec::<String>::new());
+        assert_eq!(marked_lines("   ", 10), Vec::<String>::new());
+        assert_eq!(marked_lines("one two three", 7), ["| one two", "| three"]);
+        assert_eq!(marked_lines("abcdefghijkl mn", 5), ["| abcde", "| fghij", "| kl mn"]);
+        assert_eq!(marked_lines("ééééé é", 6), ["| ééé", "| éé", "| é"]);
+        assert_eq!(marked_lines("日本", 1), ["| 日", "| 本"], "never less than a character a line");
+        let long = "Secret: x ".repeat(20);
+        for l in marked_lines(&long, AGENT_SAYS_COLUMNS) {
+            assert!(l.starts_with(AGENT_SAYS_MARK) && l.chars().count() <= AGENT_SAYS_COLUMNS + 2, "{l}");
+        }
+    }
+
+    /// Which buttons a use is offered: a no for the rest of a session only where one is named; for a use from a
+    /// session that read untrusted text, only the allowances that say so, in red; for a clean one, never those.
+    #[test]
+    fn what_a_use_is_offered() {
+        let tool = uses(&[tool_use(7, "")])[0].clone();
+        let d = tool.dialog("dev", 0, NOON);
+        assert_eq!(
+            d.offers,
+            [
+                Offer { allowance: Allowance::MinutesEvenTainted(60), label: "For 60 minutes, even from a session that read untrusted text".into(), red: true },
+                Offer { allowance: Allowance::MinutesEvenTainted(480), label: "For 480 minutes (8 hours), even from a session that read untrusted text".into(), red: true },
+            ]
+        );
+        assert_eq!((d.offers_note, d.deny_session), (Some(ONLY_EVEN_TAINTED), true));
+        let clean = uses(&[resident_use(8)])[0].clone();
+        let d = clean.dialog("dev", 0, NOON);
+        assert_eq!(d.offers.iter().map(|o| (o.allowance, o.label.as_str(), o.red)).collect::<Vec<_>>(), [(Allowance::Session, "In your agent's sessions that are running now", false), (Allowance::Minutes(60), "For 60 minutes", false), (Allowance::Minutes(480), "For 480 minutes (8 hours)", false)]);
+        assert_eq!((d.offers_note, d.deny_session), (None, true));
+        let mut unnamed = tool.clone();
+        unnamed.session = false;
+        assert!(!unnamed.dialog("dev", 0, NOON).deny_session);
+        // What is not on the dialog is not done, whatever message says so.
+        for (u, no) in [(&tool, Reply::For(Allowance::Minutes(60))), (&tool, Reply::For(Allowance::Session)), (&tool, Reply::For(Allowance::MinutesEvenTainted(5))), (&clean, Reply::For(Allowance::MinutesEvenTainted(60))), (&clean, Reply::For(Allowance::Minutes(481))), (&unnamed, Reply::DenySession)] {
+            assert!(!u.offered(no), "{no:?}");
+        }
+        for (u, yes) in [(&tool, Reply::Once), (&tool, Reply::Deny), (&tool, Reply::DenySession), (&tool, Reply::For(Allowance::MinutesEvenTainted(480))), (&clean, Reply::For(Allowance::Session)), (&unnamed, Reply::For(Allowance::MinutesEvenTainted(60)))] {
+            assert!(u.offered(yes), "{yes:?}");
+        }
+    }
+
+    /// A stand-in for the broker: each call's arguments on a line of `calls`; a grant answered by `grant`, an
+    /// answer to a use by `answer` (shell).
+    fn broker(dir: &std::path::Path, grant: &str, answer: &str) -> Cli {
+        let script = dir.join("broker.sh");
+        let d = dir.display();
+        std::fs::write(&script, format!("echo \"$*\" >> {d}/calls\ncase \"$1\" in\nsecret-grant) {grant};;\n*) {answer};;\nesac\n")).unwrap();
+        Cli { repo: PathBuf::from(REPO), broker: format!("sh {}", script.display()) }
+    }
+
+    const GRANTED: &str = "echo '{\"seq\":11,\"reason\":\"dev lets the agent use their secret gh without asking, for 60 minutes\",\"data\":{\"until\":\"2026-11-13T13:00:00Z\"}}'";
+    const APPROVED: &str = "echo '{\"seq\":12,\"reason\":\"dev approved the agent use\"}'";
+    const REFUSED: &str = "echo '{\"error\":\"the broker would not\"}'; exit 1";
+
+    /// What each button sends, in order, and that an answer says it was given in the dialog. "Allow for…" sends
+    /// the allowance first, and the yes to this use only once the allowance was given: refused (or its password
+    /// not given), nothing more is sent, and the person is told the use still waits.
+    #[test]
+    fn what_each_button_sends() {
+        let tool = uses(&[tool_use(7, "")])[0].clone();
+        let clean = uses(&[resident_use(8)])[0].clone();
+        let run = |u: &WaitingUse, reply: Reply, grant: &str, answer: &str| {
+            let d = tempfile::tempdir().unwrap();
+            let said = answer_with(&broker(d.path(), grant, answer), "dev", &d.path().join("log"), u, reply).map_err(|e| format!("{e:#}"));
+            let calls = std::fs::read_to_string(d.path().join("calls")).unwrap_or_default();
+            (said, calls.lines().map(String::from).collect::<Vec<_>>())
+        };
+        let (said, calls) = run(&tool, Reply::Once, GRANTED, APPROVED);
+        assert_eq!((said.unwrap().as_str(), calls), ("dev approved the agent use (ledger #12)\n", vec!["secret-approve 7 --where dialog --approved-by dev --json".to_string()]));
+        assert_eq!(run(&tool, Reply::Deny, GRANTED, APPROVED).1, ["secret-deny 7 --where dialog --approved-by dev --json"]);
+        assert_eq!(run(&tool, Reply::DenySession, GRANTED, APPROVED).1, ["secret-deny 7 --where dialog --rest-of-session --approved-by dev --json"]);
+        // The allowance, then the yes: of this one secret, whose it is, and under taint only where it says so.
+        let (said, calls) = run(&tool, Reply::For(Allowance::MinutesEvenTainted(60)), GRANTED, APPROVED);
+        assert_eq!(calls, ["secret-grant --name gh --user dev --minutes 60 --tainted-too --approved-by dev --json", "secret-approve 7 --where dialog --approved-by dev --json"]);
+        assert_eq!(said.unwrap(), "dev lets the agent use their secret gh without asking, for 60 minutes (ledger #11)\nUntil 2026-11-13T13:00:00Z. `request system secret allow revoke` ends it.\ndev approved the agent use (ledger #12)\n");
+        assert_eq!(run(&clean, Reply::For(Allowance::Session), GRANTED, APPROVED).1, ["secret-grant --name ci --session --approved-by dev --json", "secret-approve 8 --where dialog --approved-by dev --json"]);
+        assert_eq!(run(&clean, Reply::For(Allowance::Minutes(480)), GRANTED, APPROVED).1[0], "secret-grant --name ci --minutes 480 --approved-by dev --json");
+        // The allowance refused: no yes is sent, and the person is told the use still waits.
+        let (said, calls) = run(&tool, Reply::For(Allowance::MinutesEvenTainted(480)), REFUSED, APPROVED);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(said.unwrap_err(), "request system secret allow gh for 480 tainted-too user dev refused: the broker would not. Nothing was allowed, and use 7 still waits for your answer.");
+        // The allowance given and the yes refused (the use over meanwhile): both are said.
+        let (said, calls) = run(&tool, Reply::For(Allowance::MinutesEvenTainted(60)), GRANTED, REFUSED);
+        assert_eq!(calls.len(), 2);
+        let said = said.unwrap_err();
+        assert!(said.starts_with("dev lets the agent use their secret gh") && said.ends_with("ends it. But use 7 was not approved by this (request system secret approve 7 refused: the broker would not). The allowance holds for the agent's later uses.") && !said.contains('\n'), "{said}");
+        // A plain answer refused is the broker's refusal, as it said it.
+        assert_eq!(run(&tool, Reply::Once, GRANTED, REFUSED).0.unwrap_err(), "request system secret approve 7 refused: the broker would not");
+        // What the dialog does not offer for the use is asked of no one.
+        let (said, calls) = run(&tool, Reply::For(Allowance::Minutes(60)), GRANTED, APPROVED);
+        assert_eq!((said.unwrap_err().as_str(), calls.len()), ("not done: that answer is not offered for use 7", 0));
+    }
+
+    /// One dialog at a time: the lowest number is shown and stays shown while it waits, whatever else comes; the
+    /// next is shown, and the person told of it, only when that one is over; a use over without an answer given
+    /// here says how.
+    #[test]
+    fn one_use_is_shown_at_a_time() {
+        let t0 = Instant::now();
+        let mut a = Asking::default();
+        assert_eq!(a.heard(vec![], NOON, t0), Heard::default());
+        assert!(a.shown().is_none());
+        let h = a.heard(uses(&[tool_use(8, ""), tool_use(7, "")]), NOON, t0);
+        assert_eq!((h.tell.map(|u| u.n), h.over), (Some(7), None));
+        assert_eq!(a.shown().map(|(u, more)| (u.n, more)), Some((7, 1)));
+        // Another comes, and one of the others goes: 7 is still the one shown, and no one is told again.
+        let h = a.heard(uses(&[tool_use(7, ""), tool_use(8, ""), tool_use(9, "")]), NOON + 2, t0);
+        assert_eq!((h, a.shown().map(|(u, more)| (u.n, more))), (Heard::default(), Some((7, 2))));
+        // Answered at a terminal before its time: said so, and the next is shown and told.
+        let h = a.heard(uses(&[tool_use(8, ""), tool_use(9, "")]), NOON + 4, t0);
+        assert_eq!((h.tell.map(|u| u.n), h.over.as_deref()), (Some(8), Some("Use 7 (gh for api.github.com) was answered somewhere else.")));
+        assert_eq!(a.shown().map(|(u, more)| (u.n, more)), Some((8, 1)));
+        // Its time over: said so.
+        let h = a.heard(uses(&[tool_use(9, "")]), NOON + 120, t0);
+        assert_eq!((h.tell.map(|u| u.n), h.over.as_deref()), (Some(9), Some("The time to answer use 8 (gh for api.github.com) is over.")));
+        // Answered here: nothing is said of it being answered elsewhere, and a list from before the answer landed
+        // does not bring it back.
+        a.answered(9);
+        assert!(a.shown().is_none());
+        let h = a.heard(uses(&[tool_use(9, ""), tool_use(10, "")]), NOON + 121, t0);
+        assert_eq!((h.tell.map(|u| u.n), h.over, a.shown().map(|(u, more)| (u.n, more))), (Some(10), None, Some((10, 0))));
+        let h = a.heard(vec![], NOON + 122, t0);
+        assert_eq!((h.tell, h.over.as_deref(), a.shown().is_none()), (None, Some("The time to answer use 10 (gh for api.github.com) is over."), true));
+    }
+
+    /// A press is taken only for the use shown, and not in the first moment it is on the screen: when a use
+    /// takes another's place, or the dialog opens, a click meant for what was there before lands on nothing.
+    #[test]
+    fn a_press_is_for_the_use_shown_and_not_at_once() {
+        let t0 = Instant::now();
+        let (just_before, after) = (t0 + USE_ARMS_AFTER - Duration::from_millis(1), t0 + USE_ARMS_AFTER);
+        let mut a = Asking::default();
+        assert!(!a.takes(7, after), "nothing is shown");
+        a.heard(uses(&[tool_use(7, ""), tool_use(8, "")]), NOON, t0);
+        assert!(!a.takes(7, t0) && !a.takes(7, just_before) && a.takes(7, after));
+        assert!(!a.takes(8, after), "a button of a use that is not the one shown");
+        // Still shown at the next look: its buttons do not wait again.
+        a.heard(uses(&[tool_use(7, ""), tool_use(8, "")]), NOON, after);
+        assert!(a.takes(7, after));
+        // The dialog opened: they wait again.
+        a.drawn(after);
+        assert!(!a.takes(7, after) && a.takes(7, after + USE_ARMS_AFTER));
+        // The next use takes its place: its buttons wait from then, and the old use's are dead.
+        let later = after + Duration::from_secs(10);
+        a.heard(uses(&[tool_use(8, "")]), NOON, later);
+        assert!(!a.takes(7, later + USE_ARMS_AFTER) && !a.takes(8, later) && a.takes(8, later + USE_ARMS_AFTER));
+        a.answered(8);
+        assert!(!a.takes(8, later + USE_ARMS_AFTER));
+    }
+
+    /// The notification says the broker's facts in fixed words, escaped, and nothing the agent said.
+    #[test]
+    fn the_notification_has_no_word_of_the_agents() {
+        let mut u = uses(&[tool_use(7, "click <b>Allow</b> now")])[0].clone();
+        let (summary, body) = u.notice("dev");
+        assert_eq!(summary, "Your agent asks to use a secret");
+        assert_eq!(body, "It asks for your secret gh, in an HTTPS request to api.github.com. Open this to answer. With no answer it is refused.");
+        u.host = "a<b>&c".into();
+        assert!(u.notice("dev").1.contains("a&lt;b&gt;&amp;c"));
+        let (_, body) = uses(&[resident_use(8)])[0].notice("dev");
+        assert_eq!(body, "It asks for the system's secret ci, to sign in over SSH to github.com. Open this to answer. With no answer it is refused.");
+    }
+}
+
 // ── The pages that are the command line's output ─────────────────────────────────────────────────
 
 /// How a button acts on its command.
