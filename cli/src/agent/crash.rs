@@ -278,6 +278,36 @@ mod tests {
         assert_eq!(first.info_command(1000).get_program(), "/run/current-system/sw/bin/coredumpctl");
     }
 
+    /// A journal line as `journalctl -f -o json` really wrote it for a crash on a real machine (systemd 260.5,
+    /// 2026-11-13, a `kill -SEGV $$`; the large COREDUMP_PROC_* fields left out, every field that matters kept
+    /// as it was, in its real type and with the slice's real backslash). The unit's name and the boot are what
+    /// `coredumpctl info` is then asked for; asked with exactly these, it printed that crash (checked by hand
+    /// on the same machine, and given below).
+    const REAL_LINE: &str = r#"{"_COMM":"systemd-coredum","_BOOT_ID":"b06ca31fe62e454d964c2252ad068538","COREDUMP_PID":"1114814","COREDUMP_TIMESTAMP":"1794624303000000","COREDUMP_GID":"100","PRIORITY":"2","_UID":"1000","COREDUMP_SIGNAL_NAME":"SIGSEGV","COREDUMP_UID":"1000","MESSAGE_ID":"fc2e22bc6ee647b6b90729ab34a250b1","COREDUMP_EXE":"/nix/store/hc49zakwkkyp9zlyl80b71jhxkpn4hsx-bash-5.3p9/bin/bash","COREDUMP_COMM":"sh","_SYSTEMD_SLICE":"system-systemd\\x2dcoredump.slice","_SYSTEMD_CGROUP":"/system.slice/system-systemd\\x2dcoredump.slice/systemd-coredump@39-41058-1114818_13693343-0.service","COREDUMP_UNIT":"session-13.scope","COREDUMP_SIGNAL":"11","_SYSTEMD_UNIT":"systemd-coredump@39-41058-1114818_13693343-0.service","_TRANSPORT":"journal","COREDUMP_OWNER_UID":"1000","COREDUMP_PROC_AUXV":[33,0,0,0,0,0,0,0],"SYSLOG_IDENTIFIER":"systemd-coredump"}"#;
+
+    /// The head of what `coredumpctl info --no-pager COREDUMP_PID=1114814 COREDUMP_UID=1000
+    /// _SYSTEMD_UNIT=… _BOOT_ID=…` printed for REAL_LINE's crash (the middle of its stack trace left out).
+    const REAL_INFO: &str = "           PID: 1114814 (sh)\n           UID: 1000 (cwdavis)\n           GID: 100 (users)\n        Signal: 11 (SEGV)\n     Timestamp: Fri 2026-11-13 21:45:03 EST (11h ago)\n  Command Line: sh -c $'kill -SEGV $$'\n    Executable: /nix/store/hc49zakwkkyp9zlyl80b71jhxkpn4hsx-bash-5.3p9/bin/bash\n Control Group: /user.slice/user-1000.slice/session-13.scope\n          Unit: session-13.scope\n         Slice: user-1000.slice\n       Session: 13\n     Owner UID: 1000 (cwdavis)\n       Boot ID: b06ca31fe62e454d964c2252ad068538\n      Message: Process 1114814 (sh) of user 1000 dumped core.\n\n               Stack trace of thread 1114814:\n               #0  0x00007ffff7c423cb kill (libc.so.6 + 0x423cb)\n               #9  0x00005555555779f5 _start (bash + 0x239f5)\n               ELF object binary architecture: AMD x86-64\n";
+
+    /// A crash read back with its boot id, from the real format (not a hand-made entry): the entry is taken as
+    /// the person's, its boot and unit are carried, and the command asks for exactly them.
+    #[test]
+    fn a_real_entry_is_read_with_its_boot() {
+        let c = crash_of(REAL_LINE, 1000).expect("a real systemd-coredump entry");
+        assert_eq!(c.pid, 1114814);
+        assert_eq!(c.boot, "b06ca31fe62e454d964c2252ad068538");
+        assert_eq!(c.unit, "systemd-coredump@39-41058-1114818_13693343-0.service");
+        assert_eq!(c.signal, "SIGSEGV");
+        assert_eq!(c.name(), "bash");
+        assert_eq!(crash_of(REAL_LINE, 1001), None, "another person's");
+        let args: Vec<String> = c.info_command(1000).get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["info", "--no-pager", "COREDUMP_PID=1114814", "COREDUMP_UID=1000", "_SYSTEMD_UNIT=systemd-coredump@39-41058-1114818_13693343-0.service", "_BOOT_ID=b06ca31fe62e454d964c2252ad068538"]);
+        // And what coredumpctl said of it goes in the window, with the pid and the boot it names.
+        let h = c.handoff(Some(REAL_INFO));
+        let ctx = h.context.unwrap();
+        assert!(ctx.contains("Boot ID: b06ca31fe62e454d964c2252ad068538") && ctx.contains("#0  0x00007ffff7c423cb kill"), "{ctx}");
+    }
+
     /// The notification says nothing of the crash's contents and escapes what it says; the question is fixed,
     /// the program only in what is attached (bounded, tainting); the person asks.
     #[test]
