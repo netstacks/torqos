@@ -333,7 +333,8 @@ pkgs.testers.runNixOSTest {
         # What says it is given no credential, and may only look: one capability, the system read-only.
         def says_prop(name):
             return machine.succeed(f"systemctl show -P {name} {says}").strip()
-        assert says_prop("LoadCredential") == "" and says_prop("CapabilityBoundingSet") == "cap_dac_read_search", (says_prop("LoadCredential"), says_prop("CapabilityBoundingSet"))
+        machine.fail(f"systemctl cat {says} | grep -F Credential")
+        assert says_prop("CapabilityBoundingSet") == "cap_dac_read_search", says_prop("CapabilityBoundingSet")
         assert says_prop("NoNewPrivileges") == "yes" and says_prop("ProtectSystem") == "strict"
         # The key there, a failure is not called a missing key: the check at the start says its own words, alone.
         machine.succeed(f"chmod 644 {key}; systemctl reset-failed {unit}; true")
