@@ -2952,8 +2952,8 @@ vouches for, that only proposes, every change ledgered and undone in one command
   daemon asks of the broker (`secret-use`, open to that account alone, which may ask nothing else). The broker reads
   who is connected from the kernel's own table itself, both ends of the connection (the client's is the actor, the
   other must be the daemon's), judges the use by the rule at HEAD, records the agent's first use in each session,
-  and gives the value, header and prefix for this request. Until approving is built (step 4) the agent's use is
-  only from an untainted session (`X-Torq-Session`) of a rule that asks no approval; anything else is refused. The
+  and gives the value, header and prefix for this request. Before step 4 (built 2026-11-13: the last amendment below) the agent's use was
+  only from an untainted session (`X-Torq-Session`) of a rule that asks no approval; anything else was refused. The
   daemon sends with curl (its configuration, and the value, on its input; `--disable`, HTTPS, the certificate
   checked, no redirect followed, no proxy, no URL globbing), asks for no compression and refuses an answer it cannot
   check, drops a program's own header of the secret's name, and replaces the value in what comes back: as it is,
@@ -3018,11 +3018,11 @@ vouches for, that only proposes, every change ledgered and undone in one command
   A person's everyday passwords are left to a password-manager app such as 1Password, and TorqOS does not try
   to be one. Secrets are command line only for now. So step 5, the Secrets page in TorqOS Settings, is
   deferred, and every part of TorqOS Settings this ADR names above (Decision 4's values entered there,
-  what it says when a secret is added, the commands it shares, the Secrets page) waits with it. Step 4 (approvals and taint) is unchanged: still to build, after rc1. Nothing
+  what it says when a secret is added, the commands it shares, the Secrets page) waits with it. Step 4 (approvals and taint) is unchanged: still to build, after rc1 (built 2026-11-13: see the last amendment below). Nothing
   is renamed: the commands, the `secrets` tree and `torq-secrets` stay as built.
   - **2026-11-12: the owner reversed the deferral of step 5.** The Secrets page is built (below). The scope
     stands as this amendment says: the narrow store for the tokens and keys that programs use, not a password
-    manager, and the page says so. Step 4 is still not built.
+    manager, and the page says so. Step 4 was still not built then (built 2026-11-13: see the last amendment below).
 - **Step 5 built (2026-11-12): the Secrets page in TorqOS Settings** (`settings/src/window/secrets.rs`), what the
   command line does and nothing more.
   - **The list** is what `show system secrets` reads, each secret a row (`torq::app::secrets_status`, over
@@ -3034,8 +3034,8 @@ vouches for, that only proposes, every change ledgered and undone in one command
     `first-use`, `each-use`) and `delete`, each ending `user <person>` for a person's own. What the chosen
     secret is allowed now is shown, each use with the line that takes it back. The broker asks what it asks of
     torqcli: nothing for a person's own, an administrator's approval in COSMIC's dialog for the system's. The
-    approve rule is offered as the command line offers it, and the page says that the asking itself (step 4)
-    is not built. **Delete takes two presses:** the first only asks ("Really delete …?"), and anything else
+    approve rule is offered as the command line offers it, and the page said that the asking itself (step 4, then)
+    was not built. **Delete takes two presses:** the first only asks ("Really delete …?"), and anything else
     done on the page takes the question back; the window has no other confirmation of its own to reuse (a
     command's own question is asked in its dialog, and `delete` asks none).
   - **A value is the one thing that is not a line.** It is typed twice in masked fields (dots, no way to show
@@ -3081,8 +3081,8 @@ vouches for, that only proposes, every change ledgered and undone in one command
   program's (a session's id is in the ledger for every account to read). For a use, "resident" rests on the
   resident account's uid alone: the daemon vouches for the uid of its loopback peer, and the broker has no
   pidfd or control group of the caller there, as it has on its own socket. Approval
-  (Decision 4) is still not built, and only the resident agent starts a session untainted, so until it is no
-  agent's use is let through: a coding tool's session is tainted from its start, and the resident agent has no
+  (Decision 4) was not yet built when this was written (it is now: the next amendment), and only the resident agent starts a session untainted, so until it was, no
+  agent's use was let through: a coding tool's session is tainted from its start, and the resident agent has no
   tool that sends HTTPS or signs (KNOWN-GAPS 6zzs).
   The Secrets page (step 5) follows it: a person's own secret offers their own agent, as before; a system
   secret shows each person's agent it names, each with the line that takes it back, offers the person's own,

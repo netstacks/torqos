@@ -1,6 +1,6 @@
 # AI layer
 
-**Status (2026-11-11): experimental. M5 (ADR-034) is built in part: the account (ADR-035, ADR-041), doctor mode, proposals and session trust (ADR-042) exist and are in v0.3.x. Doctor is off by default, no model ships, and no real model has ever been tried (the tests use a scripted endpoint). The resident agent, torq-mcp and ADR-051 are not on main: they are parked on branch `work/agents` until after 0.4.0-rc1.**
+**Status (2026-11-14): experimental. M5 (ADR-034) is built in part: the account (ADR-035, ADR-041), doctor mode, proposals and session trust (ADR-042) exist and are in v0.3.x. Doctor is off by default, no model ships, and no real model has ever been tried (the tests use a scripted endpoint). The resident agent, torq-mcp and ADR-051 are on main (steps 1 to 5, and approval of an agent's use of a secret, ADR-052 step 4) and not yet released.**
 Everything built so far (the broker as the only writer, actors, tiers, the ledger) was built so
 this could be added without a bypass. Each person's agent is an *account* of its own,
 `torq-agent-<person>` (ADR-051 3, amending ADR-041 1: `torq.agent.people`, the owner by default),
