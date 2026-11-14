@@ -4,7 +4,8 @@
 //! goes to the broker as torqcli's own does (`app::secret_set`), and is no part of any command, log or message.
 //! A value is never shown here: `request system secret show` stays a terminal's.
 //!
-//! It also shows what agents are let use without asking for now (the broker's grants, `app::allowed`), each
+//! It also shows what agents are let use without asking for now (the broker's grants, `app::allowed`): all of the
+//! person's own at the top, and under the chosen secret every grant that covers it, each
 //! with the torqcli line that ends it, and marks a secret whose rule never asks, whatever its session read.
 
 use super::{blocking, failed, waiting, Loaded, Message, Settings};
@@ -223,9 +224,17 @@ impl Settings {
         let theme = cosmic::theme::active();
         let red = cosmic::theme::Text::Color(theme.cosmic().destructive_color().into());
         let me = s.me.as_deref();
-        // All of the person's own secrets at once: shown here, once, with the line that ends it (`Allowed::ending`).
-        if let Some(g) = allowed.iter().find(|g| g.secret.is_none() && me == Some(g.person.as_str())) {
-            page = page.push(settings::section().title("Allowed without asking, for now").add(self.allowance(g, true)));
+        // Everything the person allowed, here, where it is seen on opening the page whatever secret is chosen:
+        // the grant of all their own secrets first, then each named one, each with what it holds under (in the
+        // destructive style where that is even untrusted text) and the line that ends it (`Allowed::ending`).
+        let mut mine: Vec<&Allowed> = allowed.iter().filter(|g| me == Some(g.person.as_str())).collect();
+        mine.sort_by_key(|g| g.secret.is_some());
+        if !mine.is_empty() {
+            let mut section = settings::section().title("What you allowed without asking, for now");
+            for g in mine {
+                section = section.add(self.allowance(g, true));
+            }
+            page = page.push(section);
         }
 
         // The list: what `show system secrets` says of each, and the one the rest of the page is about.
@@ -369,8 +378,8 @@ impl Settings {
                 if !covering.is_empty() {
                     let mut section = settings::section().title(format!("Allowed without asking, for now: {whose}"));
                     for g in covering {
-                        // The person's own of all their secrets has its button once, at the top of the page.
-                        let at_top = g.secret.is_none() && me == Some(g.person.as_str());
+                        // The person's own has its button once, at the top of the page.
+                        let at_top = me == Some(g.person.as_str());
                         section = section.add(self.allowance(g, !at_top));
                     }
                     page = page.push(section);
