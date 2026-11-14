@@ -325,7 +325,7 @@ fn an_ssh_keys_public_half_is_kept_beside_it() {
 
 use torq_broker::ask::Ask;
 use torq_broker::secrets::Use;
-use torq_broker::session::{self, Covers, Scope};
+use torq_broker::session::{self, Covers, Ending, Scope};
 
 /// Long enough that a test's own answer always comes first.
 const LONG: std::time::Duration = std::time::Duration::from_secs(30);
@@ -356,7 +356,7 @@ impl Asked {
         fs::create_dir_all(repo.join("secrets")).unwrap();
         fs::write(repo.join("users/alice/secrets.json"), format!(r#"{{"gh":{},"each":{},"first":{},"std":{},"own":{}}}"#, agents("never"), agents("each-use"), agents("first-use"), agents("never-even-tainted"), token(""))).unwrap();
         fs::write(repo.join("users/bob/secrets.json"), format!(r#"{{"gh":{}}}"#, agents("each-use"))).unwrap();
-        fs::write(repo.join("secrets/system.json"), format!(r#"{{"sys":{},"bobs":{}}}"#, token(r#","actors":["torq-agent-alice","torq-agent-bob"],"approve":"each-use""#), token(r#","actors":["torq-agent-bob"],"approve":"each-use""#))).unwrap();
+        fs::write(repo.join("secrets/system.json"), format!(r#"{{"sys":{},"bobs":{},"each":{}}}"#, token(r#","actors":["torq-agent-alice","torq-agent-bob"],"approve":"each-use""#), token(r#","actors":["torq-agent-bob"],"approve":"each-use""#), token(r#","actors":["torq-agent-alice"],"approve":"each-use""#))).unwrap();
         let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success());
         git(&["add", "-A"]);
         git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "rules"]);
@@ -366,6 +366,8 @@ impl Asked {
         m.b.set_secret(&Owner::Person("bob".into()), "gh", VALUE, "bob").unwrap();
         m.b.set_secret(&Owner::System, "sys", VALUE, "casey").unwrap();
         m.b.set_secret(&Owner::System, "bobs", VALUE, "casey").unwrap();
+        // A system secret of the same name as one of alice's own: the two are never taken for each other.
+        m.b.set_secret(&Owner::System, "each", VALUE, "casey").unwrap();
         let clean = session::start(&m.as_agent("torq-agent-alice", true)).unwrap().id;
         let tool = session::start(&m.as_agent("torq-agent-alice", false)).unwrap().id;
         Asked { m, clean, tool }
@@ -669,15 +671,51 @@ fn a_grant_lets_its_secrets_uses_through_until_it_ends() {
     assert_eq!((first.len(), first[0]["data"]["grant"].as_u64()), (1, Some(g.body.seq)), "its use names the grant it went under");
     assert_eq!(a.count("secret_use_approved") + a.count("secret_use_timed_out"), 0, "no one was asked");
     assert!(a.unanswered(&a.clean("first")).contains("no one answered"), "another secret is not covered");
-    let ended = session::revoke_secrets(&a.m.b, "alice", Some("each")).unwrap();
+    let ended = session::revoke_secrets(&a.m.b, "alice", &Ending::Secret { name: "each".into(), system: false }).unwrap();
     assert_eq!((ended.len(), ended[0].body.kind.as_str(), ended[0].body.data["grant"].as_u64(), ended[0].body.data["covers"].as_str()), (1, "trust_revoked", Some(g.body.seq), Some("secret each")));
     assert!(a.unanswered(&a.clean("each")).contains("no one answered"), "taken back: it asks again");
-    assert!(session::revoke_secrets(&a.m.b, "alice", None).unwrap().is_empty(), "nothing left to end");
+    assert!(session::revoke_secrets(&a.m.b, "alice", &Ending::Everything).unwrap().is_empty(), "nothing left to end");
     // All of a person's own, for a time; ended with every other of theirs, and no one else's.
     session::grant_secret(&a.m.b, "alice", Covers::AllSecrets, Scope::Minutes(30), false).unwrap();
     session::grant_secret(&a.m.b, "bob", Covers::AllSecrets, Scope::Minutes(30), false).unwrap();
     assert_eq!(used(&a.m.b, &a.clean("first")).unwrap().value, VALUE);
-    assert_eq!(session::revoke_secrets(&a.m.b, "alice", None).unwrap().len(), 1);
+    assert_eq!(session::revoke_secrets(&a.m.b, "alice", &Ending::Everything).unwrap().len(), 1);
+    assert_eq!(session::active(&a.m.b.ledger.read_all().unwrap()).iter().map(|g| g.person.as_str()).collect::<Vec<_>>(), ["bob"]);
+}
+
+/// Ending a grant ends that one: a person's own secret and a system secret of the same name are told apart, as
+/// the grant told them apart; the grant of all their own is ended alone; and everything is everything.
+#[test]
+fn ending_a_grant_ends_that_one_and_no_other() {
+    let a = Asked::new();
+    let named = |system: bool| Covers::Secret { name: "each".into(), system };
+    let covers = |a: &Asked| session::active(&a.m.b.ledger.read_all().unwrap()).into_iter().filter(|g| g.person == "alice").map(|g| g.covers).collect::<Vec<_>>();
+    let give = |a: &Asked| {
+        for c in [named(false), named(true), Covers::AllSecrets] {
+            if !covers(a).contains(&c) {
+                session::grant_secret(&a.m.b, "alice", c, Scope::Minutes(30), false).unwrap();
+            }
+        }
+    };
+    session::grant_secret(&a.m.b, "bob", Covers::AllSecrets, Scope::Minutes(30), false).unwrap();
+    give(&a);
+    assert_eq!(covers(&a), [named(false), named(true), Covers::AllSecrets]);
+    // Her own secret of that name: the system's grant and the grant of all stay.
+    let ended = session::revoke_secrets(&a.m.b, "alice", &Ending::Secret { name: "each".into(), system: false }).unwrap();
+    assert_eq!((ended.len(), covers(&a)), (1, vec![named(true), Covers::AllSecrets]));
+    // The system's of that name: her own stays.
+    give(&a);
+    let ended = session::revoke_secrets(&a.m.b, "alice", &Ending::Secret { name: "each".into(), system: true }).unwrap();
+    assert_eq!((ended.len(), covers(&a)), (1, vec![Covers::AllSecrets, named(false)]));
+    // The grant of all her own, alone: each named one stays.
+    give(&a);
+    let ended = session::revoke_secrets(&a.m.b, "alice", &Ending::AllOwn).unwrap();
+    assert_eq!((ended.len(), ended[0].body.data["covers"].as_str()), (1, Some("all-secrets")));
+    assert_eq!(covers(&a), [named(false), named(true)]);
+    assert!(session::revoke_secrets(&a.m.b, "alice", &Ending::AllOwn).unwrap().is_empty(), "none left to end");
+    // Everything: all of hers, and nothing of anyone else's.
+    give(&a);
+    assert_eq!(session::revoke_secrets(&a.m.b, "alice", &Ending::Everything).unwrap().len(), 3);
     assert_eq!(session::active(&a.m.b.ledger.read_all().unwrap()).iter().map(|g| g.person.as_str()).collect::<Vec<_>>(), ["bob"]);
 }
 

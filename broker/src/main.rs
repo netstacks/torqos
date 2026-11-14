@@ -91,7 +91,7 @@ enum Cmd {
     Secrets,
     SecretUse { name: String, user: Option<String>, host: String, client_port: Option<u16>, server_port: Option<u16>, session: Option<String>, grant: Option<String>, ssh: bool, reason: Option<String>, waiting: Option<u64> },
     SecretGrant { name: Option<String>, user: Option<String>, minutes: Option<u32>, tainted_too: bool, approved_by: String },
-    SecretRevoke { name: Option<String>, approved_by: String },
+    SecretRevoke { name: Option<String>, user: Option<String>, all: bool, approved_by: String },
     SecretGrants,
     SecretWaiting { approved_by: String },
     SecretAnswer { n: u64, approved: bool, rest: bool, place: String, approved_by: String },
@@ -264,7 +264,14 @@ fn command_line() -> clap::Command {
                 .arg(Arg::new("tainted-too").long("tainted-too").action(ArgAction::SetTrue).help("It holds in a session that read untrusted text too: one named secret, for minutes"))
                 .arg(by()),
         )
-        .subcommand(Command::new("secret-revoke").about("End the approver's grants of secret uses now: of one secret (--name), or all of them (ledgered).").arg(Arg::new("name").long("name")).arg(by()))
+        .subcommand(
+            Command::new("secret-revoke")
+                .about("End the approver's grants of secret uses now (ledgered): of one secret (--name; --user: their own, else the system's, as secret-grant reads it), of all their own secrets at once and no other (--all), or with neither, every one they gave.")
+                .arg(Arg::new("name").long("name"))
+                .arg(Arg::new("user").long("user").requires("name"))
+                .arg(Arg::new("all").long("all").action(ArgAction::SetTrue).conflicts_with_all(["name", "user"]))
+                .arg(by()),
+        )
         .subcommand(Command::new("secret-grants").about("The grants of secret uses that hold now: whose, what each covers, and until when."))
         .subcommand(Command::new("secret-waiting").about("The agent's uses of secrets that wait for the approver's answer.").arg(by()))
         .subcommand(Command::new("secret-approve").about("Approve the waiting use SEQ, once (only the person whose agent asks; ledgered).").arg(Arg::new("seq").required(true).value_parser(value_parser!(u64))).arg(Arg::new("where").long("where").default_value("terminal")).arg(by()))
@@ -340,7 +347,7 @@ fn parse_cli() -> Cli {
         "secrets" => Cmd::Secrets,
         "secret-use" => Cmd::SecretUse { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), host: s(sub, "host").unwrap_or_default(), client_port: sub.get_one::<u16>("client-port").copied(), server_port: sub.get_one::<u16>("server-port").copied(), session: s(sub, "session"), grant: s(sub, "grant"), ssh: sub.get_flag("ssh"), reason: s(sub, "reason"), waiting: sub.get_one::<u64>("waiting").copied() },
         "secret-grant" => Cmd::SecretGrant { name: s(sub, "name"), user: s(sub, "user"), minutes: sub.get_one::<u32>("minutes").copied(), tainted_too: sub.get_flag("tainted-too"), approved_by: by(sub) },
-        "secret-revoke" => Cmd::SecretRevoke { name: s(sub, "name"), approved_by: by(sub) },
+        "secret-revoke" => Cmd::SecretRevoke { name: s(sub, "name"), user: s(sub, "user"), all: sub.get_flag("all"), approved_by: by(sub) },
         "secret-grants" => Cmd::SecretGrants,
         "secret-waiting" => Cmd::SecretWaiting { approved_by: by(sub) },
         "secret-approve" => Cmd::SecretAnswer { n: seq(sub).unwrap_or_default(), approved: true, rest: false, place: s(sub, "where").unwrap_or_default(), approved_by: by(sub) },
@@ -740,12 +747,19 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             }
             println!("{} (ledger #{}): until {}", printable(&e.body.reason), e.body.seq, e.body.data["until"].as_str().unwrap_or("?"));
         }
-        Cmd::SecretRevoke { name, approved_by } => {
-            let ended = torq_broker::session::revoke_secrets(&b, &approved_by, name.as_deref())?;
-            // One secret's grants ended, a grant of all their own still lets that secret be used: said, with its end.
-            let all_until = match &name {
-                Some(_) => torq_broker::session::active(&b.ledger.read_all()?).into_iter().find(|g| g.person == approved_by && g.covers == torq_broker::session::Covers::AllSecrets).map(|g| g.until),
-                None => None,
+        Cmd::SecretRevoke { name, user, all, approved_by } => {
+            use torq_broker::session::Ending;
+            // A person's own secret is the approver's own, as a grant of one is: whose, the socket says from the kernel.
+            if user.as_deref().is_some_and(|u| u != approved_by) {
+                anyhow::bail!("refused: a grant is ended by the person who gave it: not another person's");
+            }
+            let which = which_grants(name, user.is_some(), all);
+            let ended = torq_broker::session::revoke_secrets(&b, &approved_by, &which)?;
+            // One of their own secrets' grant ended, a grant of all their own still lets that secret be used: said,
+            // with its end. (A grant of all covers no system secret.)
+            let all_until = match which {
+                Ending::Secret { system: false, .. } => torq_broker::session::active(&b.ledger.read_all()?).into_iter().find(|g| g.person == approved_by && g.covers == torq_broker::session::Covers::AllSecrets).map(|g| g.until),
+                _ => None,
             };
             if json {
                 println!("{}", json!({ "revoked": ended, "all_until": all_until }));
@@ -1049,4 +1063,39 @@ fn connected(client: u16, server: u16) -> Result<(String, u32)> {
     }
     let uid = uid_of_connection(&tables, client, server).context("refused: the connection has gone")?;
     Ok((account(uid)?, uid))
+}
+
+/// Which grants `secret-revoke` ends: one secret's (`own`: the approver's own of that name, else the system's, as
+/// `secret-grant` reads the same words), the grant of all their own alone (`all`), or with neither, every one.
+fn which_grants(name: Option<String>, own: bool, all: bool) -> torq_broker::session::Ending {
+    use torq_broker::session::Ending;
+    match (name, all) {
+        (Some(name), _) => Ending::Secret { name, system: !own },
+        (None, true) => Ending::AllOwn,
+        (None, false) => Ending::Everything,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use torq_broker::session::Ending;
+
+    /// `secret-revoke` reads whose secret as `secret-grant` does, ends the grant of all alone only when told so,
+    /// and takes no line that could mean two things.
+    #[test]
+    fn secret_revoke_names_one_thing() {
+        let read = |args: &[&str]| {
+            let m = command_line().try_get_matches_from(["torq-broker", "secret-revoke"].iter().chain(args).chain(&["--approved-by", "dev"])).map_err(|e| e.kind())?;
+            let (_, sub) = m.subcommand().expect("a command");
+            Ok::<_, clap::error::ErrorKind>(which_grants(sub.get_one::<String>("name").cloned(), sub.get_one::<String>("user").is_some(), sub.get_flag("all")))
+        };
+        assert_eq!(read(&[]), Ok(Ending::Everything));
+        assert_eq!(read(&["--all"]), Ok(Ending::AllOwn));
+        assert_eq!(read(&["--name", "gh"]), Ok(Ending::Secret { name: "gh".into(), system: true }));
+        assert_eq!(read(&["--name", "gh", "--user", "dev"]), Ok(Ending::Secret { name: "gh".into(), system: false }));
+        for no in [&["--all", "--name", "gh"][..], &["--all", "--user", "dev"], &["--user", "dev"]] {
+            assert!(read(no).is_err(), "{no:?}");
+        }
+    }
 }

@@ -599,16 +599,29 @@ pub fn revoke(b: &Broker, person: &str) -> Result<Option<Entry>> {
     Ok(Some(revoke_locked(b, &g)?))
 }
 
-/// End `person`'s grants of secret uses now: those of the secret `name` (their own or the system's), or with none
-/// named, every one. No use starts under them after.
-pub fn revoke_secrets(b: &Broker, person: &str, name: Option<&str>) -> Result<Vec<Entry>> {
+/// Which of a person's grants of secret uses to end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ending {
+    /// Every one they gave.
+    Everything,
+    /// The grant of one secret: their own of that name, or (`system`) the system's. Never both: a person's own
+    /// secret and a system secret may share a name, and are told apart here as a grant tells them apart.
+    Secret { name: String, system: bool },
+    /// The grant of all their own secrets, and no other.
+    AllOwn,
+}
+
+/// End `person`'s grants of secret uses now, those `which` names. No use starts under them after.
+pub fn revoke_secrets(b: &Broker, person: &str, which: &Ending) -> Result<Vec<Entry>> {
     let _l = lock(b)?;
     settle_locked(b)?;
-    let theirs = |g: &Grant| match (&g.covers, name) {
+    let theirs = |g: &Grant| match (&g.covers, which) {
         (Covers::Proposals, _) => false,
-        (_, None) => true,
-        (Covers::Secret { name: n, .. }, Some(name)) => n == name,
-        (Covers::AllSecrets, Some(_)) => false,
+        (_, Ending::Everything) => true,
+        (Covers::Secret { name: n, system: s }, Ending::Secret { name, system }) => n == name && s == system,
+        (Covers::AllSecrets, Ending::AllOwn) => true,
+        (Covers::Secret { .. }, Ending::AllOwn) => false,
+        (Covers::AllSecrets, Ending::Secret { .. }) => false,
     };
     active(&b.ledger.read_all()?).iter().filter(|g| g.person == person && theirs(g)).map(|g| revoke_locked(b, g)).collect()
 }
