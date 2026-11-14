@@ -91,6 +91,26 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("pgrep -u alice -fx torq-applet", timeout=60)
         machine.succeed("pgrep -u alice -fx cosmic-comp")
 
+    with subtest("an applet a signal ends is not started again by COSMIC: the known gap (KNOWN-GAPS, 'An applet a signal ends')"):
+        # Read in cosmic-panel 1.11's source (launch-pad 1.0.1), now also driven: the panel starts an applet again
+        # only when it exits with an error code. The applet has no signal handler, so SIGTERM ends it as SIGKILL
+        # does, by the signal, with no code to read. If either comes back, COSMIC changed: this assertion is then
+        # what to correct, and the gap and its supervisor plan (KNOWN-GAPS) are no longer needed.
+        # What this does not drive: an exit with a code (a panic ends the applet with 101), which no signal from
+        # outside can make.
+        for sig in ["TERM", "KILL"]:
+            applet = machine.succeed("pgrep -u alice -fx torq-applet").strip()
+            machine.succeed(f"kill -{sig} {applet}")
+            machine.wait_until_fails(f"kill -0 {applet}", timeout=30)
+            # Longer than launch-pad's first wait before it starts a program again.
+            machine.sleep(30)
+            machine.fail("pgrep -u alice -fx torq-applet")
+            # The panel starting again brings it back, as a log-in does (the subtest above).
+            panel = machine.succeed("pgrep -u alice -fx cosmic-panel").strip()
+            machine.succeed("pkill -u alice -fx cosmic-panel")
+            machine.wait_until_succeeds(f"pgrep -u alice -fx cosmic-panel | grep -vx {panel}", timeout=60)
+            machine.wait_until_succeeds("pgrep -u alice -fx torq-applet", timeout=60)
+
     with subtest("memory run short ends a program, it does not freeze the desktop"):
         machine.succeed("swapon --show=NAME --noheadings | grep -q zram")
 

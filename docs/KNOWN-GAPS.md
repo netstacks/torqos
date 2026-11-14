@@ -400,7 +400,7 @@ Its §5 lists claims without a test.
 9. **An applet a signal ends stays gone until the panel starts again** (2026-11-10; corrected 2026-11-12). COSMIC
    1.11's panel starts again an applet that exits with an error code (launch-pad, with a wait that doubles and is not
    reset within a login), but not one a signal ended (an abort, a segfault, a kill): read in its source
-   (cosmic-panel 1.11, launch-pad 1.0.1), not tested. A panic on the applet's main thread exits it with code 101, so
+   (cosmic-panel 1.11, launch-pad 1.0.1); `tests/desktop.nix` now asserts it for SIGTERM and SIGKILL (written, not run). The restart after an exit with a code is not driven: no signal from outside makes one. A panic on the applet's main thread exits it with code 101, so
    it comes back. A panic in one of its own calls (each on a thread of its own, `off`) is answered as that call's
    error ("the call stopped before it answered"; a notification's own thread: a failure or panic is said in the journal and the notification tried once more after 5 s, `app::twice`; a second failure is only in the journal, and the popup still says what it was about);
    one in a library task (tokio's, zbus's executor, iced's SVG
