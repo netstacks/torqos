@@ -118,6 +118,19 @@ fn own_drivers(hardware: &str) -> Option<String> {
     (!named.is_empty()).then(|| named.to_string())
 }
 
+/// What to say before a build when the hardware file among `files` names a driver from outside the
+/// kernel (`own_drivers`). Broadcom's `broadcom_sta` is unfree, which TorqOS refuses unless told
+/// otherwise (modules/unfree.nix): no network helps it, so that case does not say one would.
+fn driver_notice(files: &[(String, Vec<u8>)]) -> Option<String> {
+    let (_, hardware) = files.iter().find(|(rel, _)| rel == "hardware-configuration.nix")?;
+    let drivers = own_drivers(&String::from_utf8_lossy(hardware))?;
+    Some(if drivers.contains("broadcom_sta") {
+        format!("This machine's hardware needs Broadcom's Wi-Fi driver ({drivers}). It is not free software, and TorqOS allows none unless told to: the first build will fail, with a network or without one. A different network adapter (a USB one, say) avoids it.")
+    } else {
+        format!("This machine's hardware needs a driver that is not in the kernel ({drivers}). The installer does not carry it: the first build fetches it, and needs the network for that.")
+    })
+}
+
 /// The config repo's files for `a`: TorqOS's template (`template`: its templates/config) with the
 /// answers, the image's lock (`image`), this machine's hardware file (`hardware`: `hardware_file`),
 /// TorqOS from `source` (a store path), for
@@ -466,8 +479,8 @@ fn apply(a: &Answers) -> Result<()> {
     }
     register_carried(&Path::new("/").join(crate::install::REGISTRATION))?;
     // Said before the build, which would otherwise fetch it, or fail offline, without a word (ADR-048 5).
-    if let Some(drivers) = files.iter().find(|(rel, _)| rel == "hardware-configuration.nix").and_then(|(_, b)| own_drivers(&String::from_utf8_lossy(b))) {
-        println!("\nThis machine's hardware needs a driver that is not in the kernel ({drivers}). The installer does not carry it: the first build fetches it, and needs the network for that.");
+    if let Some(notice) = driver_notice(&files) {
+        println!("\n{notice}");
     }
     // The broker as a service of its own, not a child of this console program: the switch starts the
     // console's login prompt, which takes the console from setup (and stops this unit) — the broker
@@ -729,6 +742,21 @@ mod tests {
         assert_eq!(own_drivers(&file(" config.boot.kernelPackages.broadcom_sta ")).as_deref(), Some("config.boot.kernelPackages.broadcom_sta"));
         assert_eq!(own_drivers(&file(" ")), None);
         assert_eq!(own_drivers("{ ... }: { }\n"), None);
+    }
+
+    /// What setup and adopt say before a build, from the hardware file among the files they write: a
+    /// driver the installer does not carry needs the network; Broadcom's unfree one fails with or without
+    /// one, and does not say a network would help. No driver, no hardware file: nothing said.
+    #[test]
+    fn the_driver_sentence() {
+        let hw = |named: &str| vec![("hardware-configuration.nix".to_string(), format!("{{ ... }}:\n{{\n  boot.extraModulePackages = [{named}];\n}}\n").into_bytes())];
+        let other = driver_notice(&hw(" config.boot.kernelPackages.v4l2loopback ")).unwrap();
+        assert!(other.contains("v4l2loopback") && other.contains("needs the network"), "{other}");
+        let broadcom = driver_notice(&hw(" config.boot.kernelPackages.broadcom_sta ")).unwrap();
+        assert!(broadcom.contains("broadcom_sta") && broadcom.contains("not free software") && broadcom.contains("with a network or without one"), "{broadcom}");
+        assert!(!broadcom.contains("needs the network"), "{broadcom}");
+        assert_eq!(driver_notice(&hw(" ")), None);
+        assert_eq!(driver_notice(&[("flake.nix".to_string(), b"boot.extraModulePackages = [ x ];".to_vec())]), None, "only the hardware file is read");
     }
 
     /// A setup started over offers the network again to a machine that had none, and leaves one that had.

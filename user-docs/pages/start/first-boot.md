@@ -33,7 +33,10 @@ it and records it as **change #1**, "TorqOS set up".
 
 The build needs no network, with one exception: hardware that needs a driver which is not in the
 kernel. The installer does not carry such a driver, so the build fetches it. Setup says so, naming
-the driver, before the build starts.
+the driver, before the build starts. A Broadcom Wi-Fi card's driver (`broadcom_sta`) is the
+exception to the exception: it is not free software, which TorqOS does not allow unless told to, so
+the build fails with a network or without one. Setup says so; a different network adapter (a USB one,
+say) avoids it.
 
 If the configuration does not build, nothing changes and setup starts over from its questions. A machine with no network is offered Wi-Fi again then, since
 the build may have failed for want of it. If
