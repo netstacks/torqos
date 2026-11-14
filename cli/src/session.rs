@@ -3458,7 +3458,7 @@ mod tests {
         let (diff, _, tier, _, _) = m.commits.borrow().last().unwrap().clone();
         assert_eq!(tier, "system");
         assert!(diff.contains("+++ b/secrets/system.json"), "{diff}");
-        // A system secret names whose agent may use it, by its account (the approval design, part 1; what it writes:
+        // A system secret names whose agent may use it, by its account (ADR-052, amended 2026-11-12; what it writes:
         // secrets::tests::a_grant_to_an_agent_says_whose).
         assert!(s.exec("request system secret allow ci agent").is_err(), "whose agent");
         // Deleting: its value, and for someone else's, only that.

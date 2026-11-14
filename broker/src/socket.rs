@@ -252,7 +252,7 @@ pub fn gate(who: &Caller, cmd: &str, change: Option<&Change>, user: Option<&str>
         // Trust in the agent with their own folder: theirs alone to give, with their password; ending it, at any time.
         "trust-grant" => Gate::Password,
         "trust-revoke" => Gate::Open,
-        // Leave for their agent to use a secret without asking (the approval design, part 3): as trust is, theirs
+        // Leave for their agent to use a secret without asking (ADR-051 and ADR-052 4, amended 2026-11-13): as trust is, theirs
         // alone to give, with their password, so that no program running as them gives it quietly; ended at any time.
         "secret-grant" => Gate::Password,
         "secret-revoke" => Gate::Open,
@@ -986,7 +986,7 @@ mod tests {
         assert_eq!(r.last().map(String::as_str), Some("viper"));
     }
 
-    /// The approval design, part 2: a waiting use of a secret is answered by the person its agent serves (`user`:
+    /// ADR-051 and ADR-052 4, amended 2026-11-13: a waiting use of a secret is answered by the person its agent serves (`user`:
     /// the broker's own record of the use), and by no one else: not the agent's two accounts, not another person,
     /// not an administrator, not a service. An answer needs no password; who gave it is the kernel's word.
     #[test]
@@ -1009,7 +1009,7 @@ mod tests {
         assert!(check_args(&["secret-approve".into(), "7".into(), "--approved-by=viper".into()]).is_err());
     }
 
-    /// The approval design, part 3: leave for their agent to use a secret unasked is a person's own to give, with
+    /// ADR-051 and ADR-052 4, amended 2026-11-13: leave for their agent to use a secret unasked is a person's own to give, with
     /// their password, as trust is; taken back without one. Never the agent's, either account, nor a service's.
     #[test]
     fn a_grant_of_secret_uses_is_a_persons_with_their_password() {

@@ -116,7 +116,7 @@ See KNOWN-GAPS 6zq, 6zzk and 6zzo.
    - Only the tip was compiled. Commits from "one agent account per person" to the rebase fix (fa9e6da) do not build
      the broker binary: `connected()` (secrets, main) calls `socket::caller` with the old three arguments. Left there,
      not moved into each commit: a bisect in that range needs the same one-line change, with that commit's arguments.
-   - **Settled (the approval design's part 1, 2026-11-12):** `torq-agent` in a person's rules is their own agent,
+   - **Settled (ADR-052, amended 2026-11-12):** `torq-agent` in a person's rules is their own agent,
      both accounts; system rules name each agent's account. The two broker tests pass again. What it leaves:
      no agent can use a secret until approval is built (KNOWN-GAPS 6zzs). (Built 2026-11-13: ADR-051 and ADR-052,
      amended that day.)

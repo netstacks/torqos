@@ -353,7 +353,7 @@ pub struct AgentOf {
 }
 
 /// Whether `actor` (the person's agent when `agent` says so) may use `owner`'s secret under rule `r`
-/// (the approval design, part 1): a person's own secret by them, or by their own agent where the rule says
+/// (ADR-052, amended 2026-11-12): a person's own secret by them, or by their own agent where the rule says
 /// `torq-agent`, never another's agent; a system secret by each person and each agent account the rule names.
 fn may(owner: &Owner, r: &torq_wire::secrets::Rule, actor: &str, agent: Option<&AgentOf>) -> bool {
     use torq_wire::secrets::AGENT;
@@ -386,8 +386,8 @@ pub fn may_use<'a>(rules: &'a torq_wire::secrets::Rules, u: &Use, agent: Option<
     Ok(r)
 }
 
-/// Why a person is asked before the agent's use of `whose` under rule `r`, unless a grant covers it (the approval
-/// design, part 2), or None: it goes without asking. `tainted`: whether the agent's session read untrusted text
+/// Why a person is asked before the agent's use of `whose` under rule `r`, unless a grant covers it (ADR-052 4,
+/// amended 2026-11-13), or None: it goes without asking. `tainted`: whether the agent's session read untrusted text
 /// (None: the use names no session, which is asked as a tainted one is). `first`: no use of the secret in this
 /// session has gone through yet. Only the person's own standing word, `never-even-tainted`, lets a tainted use
 /// through unasked.
@@ -756,7 +756,7 @@ mod tests {
         assert!(may_use(&r, &ssh("gh", "api.github.com"), Some(&sams)).is_err());
     }
 
-    /// When a person is asked (the approval design, part 2): the rule says each use; or the first, and it is; or
+    /// When a person is asked (ADR-051 and ADR-052 4, amended 2026-11-13): the rule says each use; or the first, and it is; or
     /// the use names no session; or its session is tainted, whatever the rule says, but for the person's own
     /// standing word. What was refused while approving was not built is asked now.
     #[test]

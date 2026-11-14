@@ -2687,11 +2687,8 @@ vouches for, that only proposes, every change ledgered and undone in one command
   owner's fixed points: "one agent per user"; "whatever user is running the agent is the one that should be
   approving the tool calls for the agent, especially for secrets"; they "need to be able to auto-approve or blanket
   approve, bypass permissions … for a regular user to an agent"; "the agent should still be fenced off from making
-  any changes to the system itself". This amendment and ADR-052's replace the design note
-  `docs/DESIGN-agent-approval.md`, which is deleted with them. Where the code's comments say "the approval design":
-  its part 1 is ADR-052's amendment of 2026-11-12 (whose agent a rule names), part 2 is the waiting ask here and
-  "when a use asks" in ADR-052, part 3 is the grant here and "what a grant of secret uses covers" in ADR-052, and
-  part 4 is the next paragraph.
+  any changes to the system itself". This amendment and ADR-052's replace the note the design was written in
+  (`docs/DESIGN-agent-approval.md`), which is deleted with them.
   - **One mechanism, in two ADRs.** This ADR owns the mechanism: the grant, the waiting ask, and the rule that an
     agent's accounts never answer. What uses it: session trust (ADR-042 7), which is a grant that covers
     proposals; grants of secret uses and the asking before a use (ADR-052); later the screen grant (decision 6),
@@ -3056,8 +3053,8 @@ vouches for, that only proposes, every change ledgered and undone in one command
     for the tests alone), uses it, and looks for it in every file of the machine; `tests/desktop.nix` has the
     non-dumpable client's approval. Both written, not yet run. The page itself has no test: nothing drives
     the window (KNOWN-GAPS 6zzr).
-- **Amended 2026-11-12 — whose agent, with one agent per person (ADR-051 3; the approval design's part 1, a note
-  since replaced by ADR-051's amendment of 2026-11-13; built on `work/agents`):** `torq-agent` in a person's own rules means that person's
+- **Amended 2026-11-12 — whose agent, with one agent per person (ADR-051 3; the first part of the design that
+  ADR-051's amendment of 2026-11-13 records; built on `work/agents`):** `torq-agent` in a person's own rules means that person's
   own agent, both of its accounts (`torq-agent-<person>` and `torq-resident-<person>`, by the broker's map), and no
   other person's. The system's rules name each agent that may use a secret by its account (`actors [
   torq-agent-alice ]`, `request system secret allow <name> agent alice`); the bare word is refused there, as

@@ -214,7 +214,7 @@ fn a_use_is_judged_by_its_rule_and_the_agents_first_is_recorded() {
     let resident = m.as_agent("torq-agent-alice", true);
     let session = torq_broker::session::start(&resident).unwrap().id;
     // Alice's agent is her resident agent's account and her agent account, judged as one (ADR-051 3): `torq-agent`
-    // in her own rules (the approval design, part 1).
+    // in her own rules (ADR-052, amended 2026-11-12).
     let as_ = |actor: &str, name: &str, host: &str, session: Option<&str>| Use { owner: alice(), name: name.into(), host: host.into(), actor: actor.into(), session: session.map(String::from), ssh: false };
     let agent = |name: &str, host: &str, session: Option<&str>| as_("torq-resident-alice", name, host, session);
     let count = |kind: &str| m.ledger().matches(&format!("\"kind\":\"{kind}\"")).count();
@@ -321,7 +321,7 @@ fn an_ssh_keys_public_half_is_kept_beside_it() {
     assert!(!m.store().join("users/alice/deploy.pub").exists(), "not a key now: no public half");
 }
 
-// ── Grants, and uses that wait for a person (the approval design, parts 2 and 3) ─────────────────────────────────
+// ── Grants, and uses that wait for a person (ADR-051 and ADR-052, amended 2026-11-13) ─────────────────────────────────
 
 use torq_broker::ask::Ask;
 use torq_broker::secrets::Use;
@@ -719,7 +719,7 @@ fn ending_a_grant_ends_that_one_and_no_other() {
     assert_eq!(session::active(&a.m.b.ledger.read_all().unwrap()).iter().map(|g| g.person.as_str()).collect::<Vec<_>>(), ["bob"]);
 }
 
-/// What a grant never covers (the approval design, part 3), each line of it.
+/// What a grant never covers (ADR-051 and ADR-052 4, amended 2026-11-13), each line of it.
 #[test]
 fn what_a_grant_never_covers() {
     let a = Asked::new();

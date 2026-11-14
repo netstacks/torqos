@@ -12,7 +12,7 @@ use torq_wire::secrets::{self as w, Approve, Https, Kind, Rule, Rules, Ssh};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Grant {
     /// An agent may use it. A person's own secret: their own agent (None, `torq-agent` in their rules). A system
-    /// secret: the named person's agent, by its account (`torq-agent-<person>`): the approval design, part 1.
+    /// secret: the named person's agent, by its account (`torq-agent-<person>`): ADR-052, amended 2026-11-12.
     Agent(Option<String>),
     /// Sent in an HTTPS header to this host.
     Https(String),
@@ -63,7 +63,7 @@ impl Act {
 }
 
 /// What a person lets their own agent do with secrets beyond their rules, and their answers to its uses that wait
-/// (the approval design, parts 2 and 3). The broker's to keep and to judge, on its ledger: not a change of the rules.
+/// (ADR-051 and ADR-052, amended 2026-11-13). The broker's to keep and to judge, on its ledger: not a change of the rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Approval {
     /// `allow <name> session`, `allow <name> for <minutes> [tainted-too]` (`user <you>`: your own secret, else the
@@ -282,7 +282,7 @@ fn agent_said(of: &Option<String>) -> String {
 }
 
 /// A grant to an agent fits whose secret it is: a person's own, their own agent alone; a system secret, the
-/// agent of a person it names (the approval design, part 1).
+/// agent of a person it names (ADR-052, amended 2026-11-12).
 fn agent_fits(name: &str, user: Option<&str>, act: &Act) -> Result<()> {
     match (act, user) {
         (Act::Allow(Grant::Agent(None)) | Act::Disallow(Grant::Agent(None)), None) => {
@@ -673,7 +673,7 @@ mod tests {
         assert!(edit(&mut r, "gh", &Act::Allow(Grant::Https("api.github.com".into()))).is_err(), "already");
     }
 
-    /// Whose agent (the approval design, part 1): a person's own secret, their own agent (`torq-agent`); a system
+    /// Whose agent (ADR-052, amended 2026-11-12): a person's own secret, their own agent (`torq-agent`); a system
     /// secret, a named person's agent by its account. Either way round is refused before anything changes.
     #[test]
     fn a_grant_to_an_agent_says_whose() {

@@ -303,7 +303,7 @@ static SECRET_SET: &[Node] = &[
 static SECRET_OWNER: &[Node] = &[fixed("user", "A person's own secret, not the system's: yours (no one else's, an administrator included, but to delete)", In::Op).then(&[value(Value::User, "Whose: yours").whole(secret)])];
 
 /// After `agent`: a person's own secret's (`user <you>`: their own agent), or for a system secret, whose agent
-/// (the approval design, part 1: a system rule names each agent by its account).
+/// (ADR-052, amended 2026-11-12: a system rule names each agent by its account).
 static SECRET_AGENT: &[Node] = &[
     fixed("user", "A person's own secret, not the system's: yours (no one else's, an administrator included, but to delete)", In::Op).then(&[value(Value::User, "Whose: yours").whole(secret)]),
     value(Value::User, "A system secret: the person whose agent may use it (theirs, torq-agent-<person>)").whole(secret),
@@ -326,7 +326,7 @@ static GRANT_FOR: &[Node] = &[
 ];
 
 /// After `allow <name>`: a use its rule lets (as `disallow` takes back), or leave for your own agent to use it
-/// without asking you, for a while (the approval design, part 3: a grant, the broker's, not a change of the rule).
+/// without asking you, for a while (ADR-051 and ADR-052 4, amended 2026-11-13: a grant, the broker's, not a change of the rule).
 static SECRET_ALLOW: &[Node] = &[
     fixed("agent", "An agent: it uses the secret through TorqOS, never reading it (yours, for your own secret; a person's, named, for a system secret)", In::Op).then(SECRET_AGENT),
     fixed("for", "For <minutes>, your agent uses it without asking you (it asks your password; ledgered; request system secret allow revoke ends it)", In::Op).then(&[value(Value::Minutes, "How many minutes: 1 to 480").whole(approval).then(GRANT_FOR)]),

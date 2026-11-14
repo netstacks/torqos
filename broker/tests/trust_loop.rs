@@ -3726,7 +3726,7 @@ fn a_persons_secrets_rules_are_theirs_alone_at_the_broker() {
     assert!(b.propose_on(Some(&b.repo.head().unwrap()), &d, "twice", Actor::User, false).is_err());
 }
 
-/// `never-even-tainted` (the approval design, part 3): a change that newly says it of a person's own secret is known
+/// `never-even-tainted` (ADR-051 and ADR-052 4, amended 2026-11-13): a change that newly says it of a person's own secret is known
 /// for it when it is proposed (`standing`, which the socket asks their password by); one that takes it back, or
 /// leaves it as it was, is not; and an undo, which asks no password, never brings it back.
 #[test]

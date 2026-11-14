@@ -633,7 +633,7 @@ fn a_slow_resolver_holds_up_no_other_session() {
     assert_eq!(waiting.join().unwrap().unwrap(), false, "the slow one starts too, untainted");
 }
 
-/// The approval design, part 3: a grant covers secret uses, and nothing else. Under one, however wide, no proposal
+/// ADR-051 and ADR-052 4, amended 2026-11-13: a grant covers secret uses, and nothing else. Under one, however wide, no proposal
 /// applies: a change stays a proposal a person applies. Trust in proposals is a grant of its own, beside it.
 #[test]
 fn a_grant_of_secret_uses_applies_no_proposal() {

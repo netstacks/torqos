@@ -183,8 +183,8 @@ pkgs.testers.runNixOSTest {
     with subtest("dev's agent account (a coding tool's, not the resident agent) starts tainted: each use waits for dev, and only dev answers"):
         # One agent per person (ADR-051 3): `torq-agent` in dev's rules is dev's agent, torq-agent-dev. Only the
         # resident agent starts a session untainted; every other program of the agent account is tainted from its
-        # first request (`not-the-resident-agent`), so its use waits at the broker for dev (the approval design,
-        # part 2), under a number, and sends nothing until dev says yes.
+        # first request (`not-the-resident-agent`), so its use waits at the broker for dev (ADR-052 4,
+        # amended 2026-11-13), under a number, and sends nothing until dev says yes.
         code, s = ask("torq-agent-dev", {"args": ["--json", "session-start"]})
         assert code == 0, (code, s)
         session = s["session"]

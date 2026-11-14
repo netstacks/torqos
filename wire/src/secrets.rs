@@ -13,14 +13,14 @@ pub const SYSTEM_RULES: &str = "secrets/system.json";
 pub const PERSON_RULES: &str = "secrets.json";
 /// The word for the agent in a person's own rules: that person's own agent, both of its accounts (`torq-agent-<person>`
 /// and `torq-resident-<person>`, ADR-051 3), and no one else's. A system rule names each agent by its account
-/// instead (`torq-agent-<person>`): this word there would say no one's agent (the approval design, part 1).
+/// instead (`torq-agent-<person>`): this word there would say no one's agent (ADR-052, amended 2026-11-12).
 pub const AGENT: &str = "torq-agent";
 /// The daemon that uses secrets (`torq-secrets`, its own account): the only caller of the broker's `secret-use`.
 pub const DAEMON: &str = "torq-secrets";
 /// Where the daemon listens: one loopback port, a path for each use (`/system/<secret>/<host>/…`,
 /// `/user/<person>/<secret>/<host>/…`).
 pub const PORT: u16 = 7800;
-/// How long a use of a secret waits at the broker for its person's answer (the approval design, part 2): the
+/// How long a use of a secret waits at the broker for its person's answer (ADR-051 and ADR-052 4, amended 2026-11-13): the
 /// broker refuses it then, and whoever asked for the use waits a little longer than this.
 pub const ASK_WAIT_SECONDS: u64 = 120;
 /// The header an agent's request says what the use is for in, in its own words: shown to the person asked as
@@ -500,7 +500,7 @@ mod tests {
         assert!(parse_person(br#"{"t":{"kind":"token","actors":["torq-agent"]}}"#).is_ok());
         assert!(parse_person(br#"{"t":{"kind":"token","actors":["sam"]}}"#).is_err());
         assert!(parse(br#"{"t":{"kind":"token","actors":["sam"]}}"#).is_ok(), "a system secret may be a person's to use");
-        // Whose agent: a person's own rules say theirs; the system's name each agent's account (the approval design, part 1).
+        // Whose agent: a person's own rules say theirs; the system's name each agent's account (ADR-052, amended 2026-11-12).
         assert!(parse(br#"{"t":{"kind":"token","actors":["torq-agent-sam"]}}"#).is_ok(), "a system secret may be sam's agent's");
         let e = parse(br#"{"t":{"kind":"token","actors":["sam","torq-agent"]}}"#).unwrap_err();
         assert!(e.contains("no one's agent") && e.contains("torq-agent-<person>"), "{e}");

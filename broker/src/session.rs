@@ -362,7 +362,7 @@ impl Covers {
 }
 
 /// A person's grant to their own agent, not yet revoked or expired on the record: trust in its proposals, or leave
-/// to use a secret without asking (the approval design, parts 3 and 4).
+/// to use a secret without asking (ADR-051, amended 2026-11-13).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Grant {
     /// Its `trust_granted` entry.

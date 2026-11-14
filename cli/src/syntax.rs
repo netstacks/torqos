@@ -511,7 +511,7 @@ mod tests {
         ]
     }
 
-    /// The approval design's commands beside the ones `allow` and `approve` had: each line means one thing. A
+    /// The commands of grants and answers (ADR-051, amended 2026-11-13) beside the ones `allow` and `approve` had: each line means one thing. A
     /// secret named as one of the new words keeps every command it had; where the two would meet, the line is
     /// refused or reads as the new word, never as either.
     #[test]

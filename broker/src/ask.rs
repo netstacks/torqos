@@ -1,4 +1,4 @@
-//! A use of a secret that waits for a person (the approval design, part 2; ADR-051, ADR-052 4).
+//! A use of a secret that waits for a person (ADR-051 and ADR-052 4, both amended 2026-11-13).
 //!
 //! The broker is one process for each request, and none of them waits: a use that must ask is given a number and
 //! its caller told so at once; the answer to it is another request, and the caller asking again about its number
@@ -267,7 +267,7 @@ impl Broker {
         Ok(())
     }
 
-    /// A use begins to wait, under the secrets' lock (held): its number. Refused, in the design's words, when
+    /// A use begins to wait, under the secrets' lock (held): its number. Refused, in ADR-051's words (amended 2026-11-13), when
     /// `WAITING_EACH` of this agent's wait already, when a person was asked `ASKS_AN_HOUR` times about this agent
     /// this hour, or `ASKS_A_SESSION` times about its session.
     pub(crate) fn open_ask(&self, held: &Lock, facts: Facts, agent_says: &str) -> Result<u64> {
