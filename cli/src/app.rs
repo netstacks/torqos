@@ -2489,6 +2489,118 @@ pub fn secret_whose(user: Option<&str>, name: &str, me: Option<&str>) -> String 
     }
 }
 
+/// A secret on the Secrets page's list: whose it is (None: the system's), and its name.
+pub type Which = (Option<String>, String);
+
+/// What a masked field holds, on its way from the field to the page and to `secret_set`: a secret's value. It is
+/// never printed: its `Debug` says only that it is there, it has no `Display`, and the page's messages, which are
+/// printed when something goes wrong, may carry it for that reason.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Masked(String);
+
+impl Masked {
+    pub fn new(typed: String) -> Self {
+        Masked(typed)
+    }
+
+    /// What was typed, for the page to keep until Keep is pressed (and no longer).
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for Masked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Masked")
+    }
+}
+
+/// `request system secret <words> [user <person>]`, as a line of torqcli's. (`user`: the person's own secret.)
+pub fn secret_command(words: &[&str], user: Option<&str>) -> String {
+    let mut all = vec!["request", "system", "secret"];
+    all.extend(words);
+    if let Some(u) = user {
+        all.extend(["user", u]);
+    }
+    line(&all)
+}
+
+/// A row of the Secrets page's list: "gh (yours)", "ci (the system's)", "gh (sam's)".
+pub fn secret_row(user: Option<&str>, name: &str, me: Option<&str>) -> String {
+    let whose = match user {
+        None => "the system's".to_string(),
+        Some(u) if Some(u) == me => "yours".to_string(),
+        Some(u) => format!("{u}'s"),
+    };
+    format!("{name} ({whose})")
+}
+
+/// What the page holds as chosen after the list was read again: `(chosen, name is now on the list)`. The chosen
+/// one deleted (no longer listed): nothing is chosen. A new one just made, `target` being the secret the page was
+/// about to act on, now listed: it is the one chosen, and the name typed for it is cleared (`true`).
+pub fn chosen_after_listing(chosen: Option<&Which>, listed: &[Secret], target: &Which) -> (Option<Which>, bool) {
+    let on_it = |w: &Which| listed.iter().any(|x| x.user == w.0 && x.name == w.1);
+    match chosen {
+        Some(w) if !on_it(w) => (None, false),
+        Some(w) => (Some(w.clone()), false),
+        None if on_it(target) => (Some(target.clone()), true),
+        None => (None, false),
+    }
+}
+
+/// Whether choosing `next` while `current` is chosen empties the value, the host and the other typed fields:
+/// another secret's page keeps nothing of what was typed for the one before, where it could be kept on the wrong one.
+pub fn choosing_empties(current: Option<&Which>, next: Option<&Which>) -> bool {
+    current != next
+}
+
+/// What the Secrets page needs to enable its buttons: `(named, hosted)`. A command that names the secret needs a
+/// name typed (or chosen) and no command running; one that names a host needs a host typed as well.
+pub fn secret_ready(busy: bool, name: &str, host: &str) -> (bool, bool) {
+    let named = !busy && !name.is_empty();
+    (named, named && !host.trim().is_empty())
+}
+
+/// The words the page's command lines show where the name or the host is still to be typed: `(name, host)`.
+pub fn secret_placeholders<'a>(name: &'a str, host: &'a str) -> (&'a str, &'a str) {
+    (if name.is_empty() { "<name>" } else { name }, if host.trim().is_empty() { "<host>" } else { host.trim() })
+}
+
+/// The label of the button that keeps the typed value.
+pub fn keep_label(has_value: bool) -> &'static str {
+    if has_value {
+        "Keep it in place of the value it has"
+    } else {
+        "Keep it"
+    }
+}
+
+/// Which of "send it to this host in an HTTPS header" (a token) and "sign for SSH to this host" (an SSH key) the page
+/// offers for a secret of this kind: a token is sent, an SSH key signs, and one that is already the one is not
+/// offered the other. `(https, ssh)`.
+pub fn host_uses_offered(kind: Option<Kind>) -> (bool, bool) {
+    (kind != Some(Kind::SshKey), kind != Some(Kind::Token))
+}
+
+/// What the person allowed of their own, for the top of the Secrets page: the grant of all their own secrets first,
+/// then each named one.
+pub fn own_allowed<'a>(allowed: &'a [Allowed], me: Option<&str>) -> Vec<&'a Allowed> {
+    let mut mine: Vec<&Allowed> = allowed.iter().filter(|g| me.is_some() && me == Some(g.person.as_str())).collect();
+    mine.sort_by_key(|g| g.secret.is_some());
+    mine
+}
+
+/// The allowances under a chosen secret: every one that covers it, and `true` where its end button is the one at the
+/// top of the page rather than here (the person's own).
+pub fn allowed_under<'a>(allowed: &'a [Allowed], user: Option<&str>, name: &str, me: Option<&str>) -> Vec<(&'a Allowed, bool)> {
+    allowed.iter().filter(|g| g.covers(user, name)).map(|g| (g, me == Some(g.person.as_str()))).collect()
+}
+
+/// Whether "Never, even from a session that read untrusted text" is the person's to offer: for a secret of their own.
+pub fn never_tainted_offered(user: Option<&str>, me: Option<&str>) -> bool {
+    user.is_some() && user == me
+}
+
 // ── The wrapper the panel starts an applet through (`torq-applet-run`) ──
 //
 // COSMIC's panel starts an applet again only when it exits with a code, never when a signal ended it (KNOWN-GAPS,
@@ -3857,6 +3969,84 @@ mod moved_decisions {
         assert_eq!(secret_whose(Some("me"), "gh", Some("me")), "your secret gh");
         assert_eq!(secret_whose(Some("sam"), "gh", Some("me")), "sam's secret gh");
         assert_eq!(secret_whose(Some("me"), "gh", None), "me's secret gh");
+    }
+
+    fn listed(user: Option<&str>, name: &str) -> Secret {
+        Secret { name: name.into(), user: user.map(String::from), said: String::new(), has_value: false, kind: None, https: vec![], ssh: vec![], agents: vec![], approve: Approve::default() }
+    }
+
+    /// A value typed in a masked field is never printed, whatever carries it: not by `Debug` (the page's messages
+    /// are printed by the toolkit when something goes wrong), not inside a type that derives it, not by `{:#?}`.
+    #[test]
+    fn a_masked_value_is_never_printed() {
+        const VALUE: &str = "ghp_do-not-print-7";
+        let m = Masked::new(VALUE.into());
+        assert_eq!(format!("{m:?}"), "Masked");
+        assert_eq!(format!("{m:#?}"), "Masked");
+        let carried = format!("{:?} {:#?} {:?}", (m.clone(), 1), Some(m.clone()), vec![m.clone()]);
+        assert!(!carried.contains(VALUE) && !carried.contains("ghp_"), "{carried}");
+        assert_eq!(m.clone().into_inner(), VALUE, "the page still gets it back whole");
+        assert_eq!(Masked::default().into_inner(), "");
+        // The other types the secrets code lists and shows hold a rule or a flag that there is a value, never one.
+        let s = listed(Some("dev"), "gh");
+        assert!(!format!("{s:?}").contains(VALUE) && !s.has_value);
+    }
+
+    #[test]
+    fn a_secrets_command_and_its_row() {
+        assert_eq!(secret_command(&["set", "gh"], Some("dev")), "request system secret set gh user dev");
+        assert_eq!(secret_command(&["delete", "ci"], None), "request system secret delete ci");
+        assert_eq!(secret_command(&["allow", "<name>", "https", "<host>"], None), "request system secret allow <name> https <host>");
+        assert_eq!(secret_row(None, "ci", Some("me")), "ci (the system's)");
+        assert_eq!(secret_row(Some("me"), "gh", Some("me")), "gh (yours)");
+        assert_eq!(secret_row(Some("sam"), "gh", Some("me")), "gh (sam's)");
+        assert_eq!(secret_row(Some("me"), "gh", None), "gh (me's)");
+    }
+
+    #[test]
+    fn the_list_read_again_moves_the_choice_only_as_it_must() {
+        let (gh, ci) = ((Some("dev".to_string()), "gh".to_string()), (None, "ci".to_string()));
+        let list = [listed(Some("dev"), "gh")];
+        // The chosen one is still listed: it stays, and a name being typed is not touched.
+        assert_eq!(chosen_after_listing(Some(&gh), &list, &gh), (Some(gh.clone()), false));
+        // Deleted: nothing is chosen.
+        assert_eq!(chosen_after_listing(Some(&ci), &list, &ci), (None, false));
+        // A new one just made (nothing chosen, the target listed now): chosen, its typed name cleared.
+        assert_eq!(chosen_after_listing(None, &list, &gh), (Some(gh.clone()), true));
+        // Nothing chosen and the target not listed (not made yet, or refused): left as it is.
+        assert_eq!(chosen_after_listing(None, &list, &ci), (None, false));
+        assert_eq!(chosen_after_listing(None, &[], &gh), (None, false));
+        // Choosing another secret empties what was typed; choosing the same one does not.
+        assert!(choosing_empties(Some(&gh), Some(&ci)) && choosing_empties(Some(&gh), None) && choosing_empties(None, Some(&gh)));
+        assert!(!choosing_empties(Some(&gh), Some(&gh)) && !choosing_empties(None, None));
+    }
+
+    #[test]
+    fn the_secrets_buttons_wait_for_what_they_need() {
+        assert_eq!(secret_ready(false, "gh", "api.github.com"), (true, true));
+        assert_eq!(secret_ready(false, "gh", "  "), (true, false), "no host typed");
+        assert_eq!(secret_ready(false, "", "api.github.com"), (false, false), "no name");
+        assert_eq!(secret_ready(true, "gh", "api.github.com"), (false, false), "a command is running");
+        assert_eq!(secret_placeholders("", " "), ("<name>", "<host>"));
+        assert_eq!(secret_placeholders("gh", " h.example "), ("gh", "h.example"));
+        assert_eq!((keep_label(true), keep_label(false)), ("Keep it in place of the value it has", "Keep it"));
+        assert_eq!((host_uses_offered(None), host_uses_offered(Some(Kind::Token)), host_uses_offered(Some(Kind::SshKey))), ((true, true), (true, false), (false, true)));
+        assert!(never_tainted_offered(Some("me"), Some("me")));
+        assert!(!never_tainted_offered(None, Some("me")) && !never_tainted_offered(Some("sam"), Some("me")) && !never_tainted_offered(Some("me"), None));
+    }
+
+    #[test]
+    fn the_secrets_page_lists_the_grants_of_the_person_and_those_under_a_secret() {
+        let g = |seq: u64, person: &str, secret: Option<(&str, bool)>| Allowed { seq, person: person.into(), secret: secret.map(|(n, s)| (n.to_string(), s)), until: "then".into(), session: false, even_tainted: false };
+        let all = [g(1, "dev", Some(("gh", false))), g(2, "sam", Some(("gh", false))), g(3, "dev", None), g(4, "dev", Some(("ci", true)))];
+        // Only the person's own, the grant of all of theirs first.
+        assert_eq!(own_allowed(&all, Some("dev")).iter().map(|g| g.seq).collect::<Vec<_>>(), [3, 1, 4]);
+        assert!(own_allowed(&all, None).is_empty(), "who they are not known: none is theirs to end");
+        // Under their own gh: their named grant and the grant of all; sam's does not cover it. Each end at the top.
+        assert_eq!(allowed_under(&all, Some("dev"), "gh", Some("dev")).iter().map(|(g, top)| (g.seq, *top)).collect::<Vec<_>>(), [(1, true), (3, true)]);
+        // Under the system's ci: the grant of the system's, ended here if it is not the person's own.
+        assert_eq!(allowed_under(&all, None, "ci", Some("sam")).iter().map(|(g, top)| (g.seq, *top)).collect::<Vec<_>>(), [(4, false)]);
+        assert!(allowed_under(&all, Some("sam"), "other", Some("sam")).is_empty());
     }
 }
 
