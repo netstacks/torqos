@@ -131,6 +131,12 @@ fn driver_notice(files: &[(String, Vec<u8>)]) -> Option<String> {
     })
 }
 
+/// What setup and adopt print before the build for the files they wrote: the driver sentence
+/// (`driver_notice`) on a line of its own after a blank one, or nothing.
+fn notice_before_build(files: &[(String, Vec<u8>)]) -> String {
+    driver_notice(files).map(|n| format!("\n{n}\n")).unwrap_or_default()
+}
+
 /// The config repo's files for `a`: TorqOS's template (`template`: its templates/config) with the
 /// answers, the image's lock (`image`), this machine's hardware file (`hardware`: `hardware_file`),
 /// TorqOS from `source` (a store path), for
@@ -198,10 +204,7 @@ pub fn run() -> Result<()> {
         // build would fail on them. Before change #1 nothing else on the image uses them.
         let _ = std::fs::remove_dir_all(repo);
         let _ = std::fs::remove_dir_all(BUILD_CACHE);
-        if !std::mem::take(&mut first) {
-            println!("\n{}\n", welcome());
-            online = network_again(online, || crate::network::step(&welcome))?;
-        }
+        online = offer_network(&mut first, online, || println!("\n{}\n", welcome()), || crate::network::step(&welcome))?;
         const HOW: &str = "How should this machine start?\n  1  as a new machine\n  2  from a repository: become the machine it holds";
         if online {
             println!("\n{HOW}");
@@ -262,6 +265,17 @@ pub fn run() -> Result<()> {
 /// since the build may have failed for want of it; one that had one is left as it is.
 fn network_again(online: bool, step: impl FnOnce() -> Result<bool>) -> Result<bool> {
     if online { Ok(true) } else { step() }
+}
+
+/// The network at the top of each pass of setup's loop: not on the first (`first`, which this
+/// clears: the network step has just run), and on every later one the welcome (`show`) and
+/// `network_again`.
+fn offer_network(first: &mut bool, online: bool, show: impl FnOnce(), step: impl FnOnce() -> Result<bool>) -> Result<bool> {
+    if std::mem::take(first) {
+        return Ok(online);
+    }
+    show();
+    network_again(online, step)
 }
 
 /// What the summary says of development mode (`torq.dev.enable`, which makes sudo ask no password): that the
@@ -408,9 +422,7 @@ fn adopt(a: &Adopting) -> Result<()> {
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?;
     writeln!(f, "{}", a.hash)?;
     // The hardware file is this machine's own, so a driver it names is needed whatever the repository holds.
-    if let Some(notice) = driver_notice(&mine) {
-        println!("\n{notice}");
-    }
+    print!("{}", notice_before_build(&mine));
     println!();
     let ok = {
         let _p = crate::run::Progress::start("Building this machine's system and switching to it");
@@ -497,9 +509,7 @@ fn apply(a: &Answers) -> Result<()> {
     }
     register_carried(&Path::new("/").join(crate::install::REGISTRATION))?;
     // Said before the build, which would otherwise fetch it, or fail offline, without a word (ADR-048 5).
-    if let Some(notice) = driver_notice(&files) {
-        println!("\n{notice}");
-    }
+    print!("{}", notice_before_build(&files));
     // The broker as a service of its own, not a child of this console program: the switch starts the
     // console's login prompt, which takes the console from setup (and stops this unit) — the broker
     // finishes regardless, and records change #1.
@@ -801,6 +811,42 @@ mod tests {
         assert_eq!(asked, 2);
         assert!(network_again(true, || panic!("already online")).unwrap());
         assert!(network_again(false, || bail!("no console")).is_err());
+    }
+
+    /// The loop's own use of it: the first pass asks nothing (the step has just run) whatever the
+    /// state, every later pass shows the welcome, and offers the network only if there is none.
+    #[test]
+    fn the_loop_offers_wifi_from_its_second_pass() {
+        let (mut shown, mut asked) = (0, 0);
+        let mut first = true;
+        assert!(!offer_network(&mut first, false, || shown += 1, || { asked += 1; Ok(true) }).unwrap());
+        assert!(!first);
+        assert_eq!((shown, asked), (0, 0), "not on the first pass");
+        assert!(offer_network(&mut first, false, || shown += 1, || { asked += 1; Ok(true) }).unwrap(), "offline: offered, joined");
+        assert_eq!((shown, asked), (1, 1));
+        assert!(offer_network(&mut first, true, || shown += 1, || { asked += 1; Ok(false) }).unwrap(), "online: kept");
+        assert_eq!((shown, asked), (2, 1), "the welcome again, no question");
+    }
+
+    /// What adopt prints from the files it really writes (`files`, with a hardware file that names a
+    /// driver), and the same for setup's; none for a plain hardware file.
+    #[test]
+    fn adopt_prints_the_driver_sentence_from_its_files() {
+        let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/config");
+        if !template.join("flake.nix").exists() {
+            return;
+        }
+        let image = tempfile::tempdir().unwrap();
+        std::fs::write(image.path().join("flake.lock"), "{\"lock\":1}\n").unwrap();
+        let hw = image.path().join("hardware-configuration.nix");
+        let answers = Answers { host: "box".into(), zone: "UTC".into(), user: "alice".into(), hash: String::new(), remote: Remote::No, key: None };
+        let mine = |text: &str| {
+            std::fs::write(&hw, text).unwrap();
+            files(&answers, &template, image.path(), &hw, "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-source", "x86_64-linux").unwrap()
+        };
+        assert_eq!(notice_before_build(&mine("{ ... }: { }\n")), "");
+        let said = notice_before_build(&mine("{ ... }:\n{\n  boot.extraModulePackages = [ config.boot.kernelPackages.broadcom_sta ];\n}\n"));
+        assert!(said.starts_with('\n') && said.ends_with(".\n") && said.contains("broadcom_sta") && said.contains("not free software"), "{said:?}");
     }
 }
 

@@ -204,9 +204,17 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    that message, and waited for 2 seconds after the command ends, no longer, so a process it left behind
    cannot hold the broker. The same message about any other file, the store's database included, is left
    alone and the change fails as before; no other command (activation, boot, snapshots, timers) is run
-   again. Not covered: a cache damaged so that Nix fails without one of those messages; a `rebuild` set by
-   hand that switches before it builds; damage in a person's own `~/.cache/nix` (their `nix`, not the
-   broker's). (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
+   again. Since 2026-11-14 a third message counts, "malformed database schema" (what SQLite says of a damaged
+   schema when the file is opened; all three strings are in the libsqlite3 Nix 2.34 links, and Nix's own
+   format `<what>: <message> (in '<file>')` is in libnixstore; test `the_messages_of_a_damaged_cache`), and
+   a `rebuild` set by hand that switches before it builds is not run a second time: the links to the running
+   system and the system profile are compared before and after, and if either moved the cache is removed
+   but the command is not run again, so the change fails as any failed rebuild does (`may_run_again`, tests
+   `a_command_that_switched_is_not_run_again`, `a_rebuild_that_already_switched_is_not_run_again_on_a_damaged_cache`;
+   a command that switches in a way neither link shows, or fails before its switch has finished, is not
+   told apart). Not covered: a cache damaged so that Nix fails with none of those messages (a message not
+   in Nix's or SQLite's text on hand is not guessed); damage in a person's own `~/.cache/nix` (their
+   `nix`, not the broker's). (The store itself is safe from this since ADR-024: `fsync-store-paths`.)
 6u. **Packages cannot be found by the command they install** (`rg` → ripgrep, `nvim` → neovim).
    `show packages <words>` searches names and descriptions (`nix search` on this machine's
    nixpkgs); which package holds a command needs an index that is not on the machine (nixpkgs'
@@ -512,9 +520,15 @@ Its §5 lists claims without a test.
    the name being no identity: the 200 kept are saved as COSMIC's. Components also take turns now
    (2026-11-13, `local`, test `components_take_turns_at_the_limits`): the settings are kept one from each
    component in turn, the smaller first within a turn, so ten such components, each with 200 settings or with
-   files as large as one may be, no longer fill `MAX_KEYS` or `MAX_TOTAL` ahead of COSMIC's own. Still open:
-   as many components as the limit (one setting each, or large ones) still fill it, which only a list of
-   the components COSMIC has would stop.
+   files as large as one may be, no longer fill `MAX_KEYS` or `MAX_TOTAL` ahead of COSMIC's own. As many
+   components as the limit also no longer do (2026-11-14, `cli/src/desktop.rs` `KNOWN_COMPONENTS`, test
+   `known_components_are_kept_before_planted_ones`): the components COSMIC is known to have (an exact list of
+   the names a COSMIC session writes) are kept first, each taking turns with the others, and any other
+   component only takes what is left; 2000 planted one-file components, 16 files of `MAX_VALUE` (exactly
+   `MAX_TOTAL`) and a flood under every known name all leave each known component's settings kept. Still
+   open: a program writing under a known name is saved as COSMIC's (up to an equal turn); a COSMIC component
+   missing from the list is kept only while room is left, so the list needs adding to as COSMIC grows
+   (`scripts/bump-cosmic` does not do it).
 6zzb. **COSMIC's own settings can be personal, and the saved desktop is readable by every account** (6r; the
    review of work/autosave). Kept on purpose, as the person's desktop, but not harmless: the wallpaper's path
    (`CosmicBackground/v1/all`, a folder in the home), custom shortcuts (`CosmicSettings.Shortcuts/v1/custom`,
@@ -634,8 +648,14 @@ Its §5 lists claims without a test.
    paths, each checked to be in the installer's store, and the registration) is read before the write
    too, 2026-11-13, `install.rs` `what_is_carried_is_checked_before_the_write`. What can still fail
    after the write is what needs the new disk: reading its partitions, mounting it, writing the files,
-   copying the store paths (a full disk). The disk is then cleared again, and the message says whether
-   it was or may hold part of TorqOS. And a disk's model is shown without
+   copying the store paths (a full disk). The tools those steps run and a place to mount are now checked
+   before the write too (2026-11-14, `install.rs` `ready_for_after`, tests
+   `the_tools_after_the_write_are_checked_before_it`). The disk is then cleared again, and the message
+   says plainly whether it was cleared (it holds no system) or may hold part of TorqOS (do not start
+   from it), and that the installer starts over and choosing the disk again is safe, as a new install
+   erases the whole disk (`after_failure`, test `a_failure_after_the_write_says_what_state_the_disk_is_in`).
+   Not checkable before: whether the new root file system has room for the carried paths, and whether
+   the kernel can mount ext4 and btrfs (a module not loaded yet shows in no list). And a disk's model is shown without
    control characters or direction overrides, so an escape sequence in a USB disk's INQUIRY string
    cannot redraw the list: `install.rs` `a_model_cannot_redraw_the_console`.) And the installer does not ignore SIGINT, SIGQUIT
    or SIGTERM itself (Rust has no safe way without a new crate): with the console's signal keys
@@ -1113,7 +1133,7 @@ Its §5 lists claims without a test.
      brings what none of them has (an out-of-tree driver, `boot.extraModulePackages`) needs the
      network at its first build. Setup says so before a new machine's build starts, naming the driver
      (`cli/src/setup.rs` `own_drivers`, 2026-11-12; the sentence's reading of the hardware file is
-     unit-tested, its printing is not, and no such hardware has been tried). For Broadcom's
+     unit-tested, and since 2026-11-14 the sentence adopt and setup print from the files they write (`notice_before_build`) too; no such hardware has been tried). For Broadcom's
      `broadcom_sta` the sentence says another thing: that driver is unfree, which TorqOS refuses unless
      told otherwise (`modules/unfree.nix`), so the first build fails with a network or without one
      (2026-11-13, `setup::driver_notice`, unit-tested). Still open of ADR-048

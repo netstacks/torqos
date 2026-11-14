@@ -455,18 +455,56 @@ fn install(image: &Path, bytes: u64, sha: &str) -> Result<String> {
     // Likewise what the first build is carried: unreadable or missing here, it costs the disk nothing.
     let carried = carried_for_first_build(Path::new(FIRST_BUILD), Path::new("/"))
         .with_context(|| format!("reading what the installer carries for the first build (nothing was written to {})", d.name))?;
+    // And what the steps after the write run (their tools, a place to mount): only what needs the
+    // new disk itself is left to fail after it.
+    ready_for_after(Path::new(BIN), &d.name)?;
     write(image, bytes, sha, d)?;
     if let Err(e) = leave(d, &hardware, carried.as_ref()) {
         // Without the detected hardware, setup would take the image's (a VM's): no half-installed
         // system left to start from.
         // The disk the name still means, checked as it was before writing (`by_name`).
-        let now = match by_name(d, true).and_then(|mut f| clear(&mut f, bytes, d.bytes)) {
-            Ok(()) => format!("{} was cleared again: it holds no system.", d.name),
-            Err(_) => format!("{} may hold part of TorqOS: install again before starting from it.", d.name),
-        };
-        bail!("{e:#}\n{now}");
+        let cleared = by_name(d, true).and_then(|mut f| clear(&mut f, bytes, d.bytes)).is_ok();
+        bail!("{}", after_failure(&format!("{e:#}"), &d.name, cleared));
     }
     Ok(d.name.clone())
+}
+
+/// The installer's tools that `write` and `leave` run once the image is on the disk: found before
+/// anything is written (`ready_for_after`), so a missing one costs the disk nothing.
+const AFTER_TOOLS: &[&str] = &["blockdev", "blkid", "cp", "rm"];
+
+/// Those of `names` that are not an executable file in `bin`.
+fn missing_tools(bin: &Path, names: &[&str]) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+    names
+        .iter()
+        .filter(|n| !std::fs::metadata(bin.join(n)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+        .map(|n| n.to_string())
+        .collect()
+}
+
+/// What the steps after the write need that can be known without the new disk: each of their tools
+/// is there (`bin`), and a folder to mount the disk at can be made. Fails before anything is written.
+fn ready_for_after(bin: &Path, name: &str) -> Result<()> {
+    let missing = missing_tools(bin, AFTER_TOOLS);
+    if !missing.is_empty() {
+        bail!("the installer lacks {} (needed once the image is written): nothing was written to {name}", missing.join(", "));
+    }
+    tempfile::tempdir().with_context(|| format!("making a place to mount the new disk (nothing was written to {name})"))?;
+    Ok(())
+}
+
+/// What to tell the person when something failed after the image began to go on `name`: the state of
+/// the disk (`cleared`: it was cleared again, or clearing it failed) and what to do. The installer
+/// starts over by itself and a new install erases the whole disk again, so choosing it again is safe.
+fn after_failure(error: &str, name: &str, cleared: bool) -> String {
+    if cleared {
+        format!("{error}\n{name} was cleared again: it holds no system, and TorqOS cannot start from it. Nothing else was changed. The installer starts over: choose {name} again to retry.")
+    } else {
+        format!(
+            "{error}\n{name} may hold part of TorqOS, with no hardware file for this machine: do not start from it. The installer starts over: choose {name} again, which erases it afresh, or another disk. If this keeps failing, turn the machine off and check the disk and its cable."
+        )
+    }
 }
 
 /// The installed system finds its file systems by their labels (`file-systems.nix`): another disk
@@ -608,8 +646,7 @@ fn write(image: &Path, bytes: u64, sha: &str, d: &Disk) -> Result<()> {
     let checked = wrote.and_then(|()| read_back(d, bytes, sha));
     if let Err(e) = checked {
         let cleared = clear(&mut out, bytes, d.bytes);
-        let now = if cleared.is_ok() { format!("{name} was cleared again: it holds no system.") } else { format!("{name} may hold part of TorqOS: install again before starting from it.") };
-        bail!("{e:#}\n{now}");
+        bail!("{}", after_failure(&format!("{e:#}"), name, cleared.is_ok()));
     }
     Ok(())
 }
@@ -1178,6 +1215,43 @@ mod tests {
             std::fs::write(first.path().join("store-paths"), bad).unwrap();
             assert!(carried_for_first_build(first.path(), from.path()).is_err(), "{why}");
         }
+    }
+
+    /// A tool the steps after the write run is looked for before it: a missing or non-executable one
+    /// is refused with nothing written, and every tool this file runs after the write is in the list.
+    #[test]
+    fn the_tools_after_the_write_are_checked_before_it() {
+        let bin = tempfile::tempdir().unwrap();
+        for n in AFTER_TOOLS {
+            assert_eq!(missing_tools(bin.path(), &[n]), [n.to_string()], "{n} absent");
+        }
+        let err = ready_for_after(bin.path(), "sda").unwrap_err().to_string();
+        assert!(err.contains("blockdev") && err.contains("nothing was written to sda"), "{err}");
+        for n in AFTER_TOOLS {
+            let p = bin.path().join(n);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            assert_eq!(missing_tools(bin.path(), &[n]), [n.to_string()], "{n} not executable");
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        ready_for_after(bin.path(), "sda").unwrap();
+        // Every `tool("x"` this file calls outside udevadm (whose failure is ignored) and the
+        // tools used before the write is in the list, so a tool added later cannot be forgotten.
+        let src = include_str!("install.rs").split("#[cfg(test)]").next().unwrap();
+        let before = ["zstd", "nixos-generate-config", "udevadm", "systemctl"];
+        for part in src.split("tool(\"").skip(1) {
+            let name = part.split('"').next().unwrap();
+            assert!(AFTER_TOOLS.contains(&name) || before.contains(&name), "{name} is run but not checked");
+        }
+    }
+
+    /// The failure after the write says plainly what the disk holds and what to do, either way.
+    #[test]
+    fn a_failure_after_the_write_says_what_state_the_disk_is_in() {
+        let ok = after_failure("mounting failed", "sda", true);
+        assert!(ok.starts_with("mounting failed\n") && ok.contains("sda was cleared again") && ok.contains("holds no system") && ok.contains("choose sda again to retry"), "{ok}");
+        let bad = after_failure("mounting failed", "sda", false);
+        assert!(bad.contains("may hold part of TorqOS") && bad.contains("do not start from it") && bad.contains("erases it afresh") && bad.contains("another disk"), "{bad}");
+        assert!(!bad.contains("was cleared again"));
     }
 
     /// Wi-Fi is found by a wireless interface, or by a PCI device of the wireless class before its driver

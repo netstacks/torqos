@@ -4094,3 +4094,28 @@ fn stale_agent_names_do_not_wedge_the_systems_rules() {
     let e = format!("{:#}", change("4.diff", &other, &ghost).unwrap_err());
     assert!(e.contains("torq-agent-ghost") && e.contains("no agent"), "{e}");
 }
+
+/// KNOWN-GAPS 6t: a rebuild set by hand that switches before it builds, and then fails on a damaged Nix cache, is not
+/// run again: it had already changed the system, and a second run would switch twice. The cache is removed all the
+/// same and the change fails. One that had not changed the system is run again, as before.
+#[test]
+fn a_rebuild_that_already_switched_is_not_run_again_on_a_damaged_cache() {
+    for (switches, runs_again) in [(false, true), (true, false)] {
+        let (dir, repo) = config_dir();
+        let cache = dir.path().join("home/.cache/nix");
+        fs::create_dir_all(&cache).unwrap();
+        let link = dir.path().join("current-system");
+        std::os::unix::fs::symlink("/nix/store/old-system", &link).unwrap();
+        let db = format!("{}/fetcher-cache-v4.sqlite", cache.display());
+        let said = format!("error: executing SQLite statement 'x': malformed database schema (t), malformed database schema (t) (in '{db}')");
+        let switch = if switches { format!("ln -sfn /nix/store/new-system '{}'; ", link.display()) } else { String::new() };
+        let count = dir.path().join("runs");
+        let rebuild = format!("echo run >> '{}'; {switch}if [ -d '{}' ]; then printf '%s\\n' \"{said}\" >&2; exit 1; fi", count.display(), cache.display());
+        let b = Broker::new(&repo, dir.path().join("state"), rebuild).with_nix_cache(&cache).with_current_system(&link);
+        b.init().unwrap();
+        let d = write_diff(dir.path(), "nl.diff", NIGHT_LIGHT);
+        let p = b.propose(&d, "night light", Actor::User, false).unwrap();
+        assert_eq!(b.apply(p.body.seq, "casey", false).is_ok(), runs_again, "switches: {switches}");
+        assert!(!cache.exists(), "the damaged cache is removed either way (switches: {switches})");
+    }
+}

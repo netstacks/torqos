@@ -262,7 +262,19 @@ const STDERR_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 /// taken for a cache, and a fault Nix reports as "error (ignored)" and carries on past is not the build's failure.
 fn cache_damage_ended_it(line: &[u8], within: &str) -> bool {
     let line = String::from_utf8_lossy(line);
-    line.contains(within) && !line.contains("(ignored)") && (line.contains("database disk image is malformed") || line.contains("file is not a database"))
+    line.contains(within) && !line.contains("(ignored)") && DAMAGE.iter().any(|m| line.contains(m))
+}
+
+/// What SQLite says (Nix puts its message in "<what>: <message> (in '<file>')": libnixstore's format string) of a
+/// database it cannot read: SQLITE_CORRUPT's, SQLITE_NOTADB's, and the one a damaged schema gives when the
+/// database is opened (all three strings are in the libsqlite3 Nix 2.34 links). Others it says (busy, full disk,
+/// I/O error) are not damage to the file, and are not here.
+const DAMAGE: &[&str] = &["database disk image is malformed", "file is not a database", "malformed database schema"];
+
+/// Whether a command that failed on a damaged cache may be run again: only if it did not change the system
+/// (the links to the running system and the system profile, `before` and `after` it, are the same).
+fn may_run_again(before: &(Option<PathBuf>, Option<PathBuf>), after: &(Option<PathBuf>, Option<PathBuf>)) -> bool {
+    before == after
 }
 
 /// Run `c`, its stderr passed on to the broker's own as it comes (bytes, so a progress line drawn with \r shows), and
@@ -2920,13 +2932,28 @@ impl Broker {
     /// more (KNOWN-GAPS 6t). Nix writes those caches (the broker's HOME's `.cache/nix`) without waiting for the
     /// disk, so a power cut mid-build can leave one damaged, and every build after would fail on it. They are
     /// only caches: Nix makes them again. The store's own database is never touched.
+    ///
+    /// Not run again if it already changed the system (the running system or the system profile is another
+    /// than before it ran): a command set by hand that switches before it builds would otherwise switch twice.
+    /// The damaged cache is removed all the same, so that the next attempt starts clean, and the failure stands.
     fn run_again_if_cache_damaged(&self, what: &str, command: impl Fn() -> Result<Command>) -> Result<std::process::Output> {
         let cache = self.nix_cache.as_deref();
+        let before = self.system_links();
         let (out, damaged) = watched(&mut command()?, cache).with_context(|| format!("running {what}"))?;
         let Some(cache) = cache.filter(|_| damaged && !out.status.success()) else { return Ok(out) };
-        eprintln!("torq-broker: Nix's cache {} is damaged (a power cut during a build can do that): removing it and running {what} again", cache.display());
+        let again = may_run_again(&before, &self.system_links());
+        let said = if again { "removing it and running" } else { "removing it, but not running" };
+        eprintln!("torq-broker: Nix's cache {} is damaged (a power cut during a build can do that): {said} {what} again{}", cache.display(), if again { "" } else { " (it had already changed the system)" });
         fs::remove_dir_all(cache).with_context(|| format!("removing Nix's damaged cache {}", cache.display()))?;
+        if !again {
+            return Ok(out);
+        }
         Ok(watched(&mut command()?, None).with_context(|| format!("running {what} again"))?.0)
+    }
+
+    /// Where the running system and the system profile point now: a command that switched has changed one.
+    fn system_links(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        (fs::read_link(&self.current_system).ok(), fs::read_link(&self.system_profile).ok())
     }
 
     /// `sh -c cmd` holding the broker lock through its stdin (see `Lock::for_child`).
@@ -3568,6 +3595,34 @@ impl Broker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which of Nix's lines say a cache is damaged: SQLite's three messages for a database it cannot read, in a file
+    /// under the cache; not other SQLite faults (busy, disk full), not another folder's file, not an ignored fault.
+    #[test]
+    fn the_messages_of_a_damaged_cache() {
+        let line = |msg: &str, file: &str| format!("error: executing SQLite statement 'pragma journal_mode': {msg}, {msg} (in '{file}')").into_bytes();
+        let within = "(in '/root/.cache/nix/";
+        let cache = "/root/.cache/nix/fetcher-cache-v4.sqlite";
+        for msg in ["database disk image is malformed", "file is not a database", "malformed database schema (t)"] {
+            assert!(cache_damage_ended_it(&line(msg, cache), within), "{msg}");
+            assert!(!cache_damage_ended_it(&line(msg, "/nix/var/nix/db/db.sqlite"), within), "the store's: {msg}");
+            assert!(!cache_damage_ended_it(&[b"error (ignored): ".to_vec(), line(msg, cache)].concat(), within), "ignored: {msg}");
+        }
+        for msg in ["database is locked", "database or disk is full", "disk I/O error", "unable to open database file"] {
+            assert!(!cache_damage_ended_it(&line(msg, cache), within), "{msg}");
+        }
+    }
+
+    /// A command that changed the running system or the system profile is not run again; one that changed neither is.
+    #[test]
+    fn a_command_that_switched_is_not_run_again() {
+        let p = |s: &str| Some(PathBuf::from(s));
+        let before = (p("/nix/store/a"), p("/nix/var/nix/profiles/system-3-link"));
+        assert!(may_run_again(&before, &before));
+        assert!(!may_run_again(&before, &(p("/nix/store/b"), before.1.clone())), "switched");
+        assert!(!may_run_again(&before, &(before.0.clone(), p("/nix/var/nix/profiles/system-4-link"))), "profile set");
+        assert!(!may_run_again(&(None, None), &(p("/x"), None)), "a link made");
+    }
 
     fn status(pending: Option<PendingConfirm>, overdue: bool, next_boot: &str) -> Status {
         Status {
