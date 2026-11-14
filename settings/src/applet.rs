@@ -20,6 +20,8 @@ use cosmic::prelude::*;
 use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget::{self, icon};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use torq::app::{self, Console, Glance, Needs};
 
@@ -84,6 +86,8 @@ struct Applet {
     uses_unread: app::Told,
     /// The use whose "Allow for…" choices are open.
     allowing: Option<u64>,
+    /// The use a notification is up for, and the flag that takes the notification down when the use is over.
+    noticed: Option<(u64, Arc<AtomicBool>)>,
     /// The use whose answer is on its way to the broker: no other button acts until it is back.
     replying: Option<u64>,
 }
@@ -108,7 +112,7 @@ enum Message {
     AskedAgent(Result<(), String>),
     /// Look at the agent's uses of secrets that wait for the person, and what the broker said.
     Uses,
-    UsesHeard(Result<Vec<app::WaitingUse>, String>),
+    UsesHeard(Result<(Vec<app::WaitingUse>, Vec<app::Allowed>), String>),
     /// The notification of a waiting use was clicked (true), or went unclicked.
     UseNoticed(bool),
     /// The dialog's buttons. Each carries the number of the use it was drawn for, and acts on no other.
@@ -167,7 +171,7 @@ fn notify(summary: String, body: String, page: &'static str) {
 }
 
 fn send(summary: &str, body: &str, page: &str) -> zbus::Result<()> {
-    if clicked(summary, body, -1)? {
+    if clicked(summary, body, -1, None)? {
         if let Err(e) = app::open_settings(page) {
             eprintln!("torq-applet: opening TorqOS Settings from a notification: {e:#}");
             notify(SETTINGS_UNOPENED.to_string(), app::said(&e), "overview");
@@ -177,38 +181,60 @@ fn send(summary: &str, body: &str, page: &str) -> zbus::Result<()> {
 }
 
 /// A notification, waited for until it is clicked or goes: whether it was clicked. `expires`: after how many
-/// milliseconds the notification daemon is asked to take it down (-1: when it sees fit).
-fn clicked(summary: &str, body: &str, expires: i32) -> zbus::Result<bool> {
+/// milliseconds the notification daemon is asked to take it down (-1: when it sees fit). `over`: set by the
+/// caller when what the notification is about is over, and the notification is then taken down, so that it does
+/// not go on offering what can no longer be done.
+fn clicked(summary: &str, body: &str, expires: i32, over: Option<Arc<AtomicBool>>) -> zbus::Result<bool> {
     let connection = zbus::blocking::Connection::session()?;
     let bus = zbus::blocking::Proxy::new(&connection, "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications")?;
     let signals = bus.receive_all_signals()?;
     let hints = std::collections::HashMap::<&str, zbus::zvariant::Value>::new();
     let id: u32 = bus.call("Notify", &("TorqOS", 0u32, "torqos", summary, body, vec!["default", "Open"], hints, expires))?;
-    for signal in signals {
-        let header = signal.header();
-        let member = header.member().map(|m| m.to_string()).unwrap_or_default();
-        if member == "ActionInvoked" {
-            let (of, _action): (u32, String) = signal.body().deserialize()?;
-            if of == id {
-                return Ok(true);
+    if let Some(over) = over.clone() {
+        // On a thread of its own, which looks twice a second: the wait below is for the daemon's signals, and the
+        // daemon's word that it closed the notification is what ends it. The flag is set on the way out of here
+        // too, so this thread ends with the notification however it went.
+        std::thread::spawn(move || {
+            while !over.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(500));
             }
-        } else if member == "NotificationClosed" {
-            let (of, _why): (u32, u32) = signal.body().deserialize()?;
-            if of == id {
-                break;
+            let closed: zbus::Result<()> = zbus::blocking::Proxy::new(&connection, "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications").and_then(|bus| bus.call("CloseNotification", &(id,)));
+            // Clicked or expired already, there is none to close, and the daemon may say so: as wanted.
+            drop(closed);
+        });
+    }
+    let was = (|| {
+        for signal in signals {
+            let header = signal.header();
+            let member = header.member().map(|m| m.to_string()).unwrap_or_default();
+            if member == "ActionInvoked" {
+                let (of, _action): (u32, String) = signal.body().deserialize()?;
+                if of == id {
+                    return Ok(true);
+                }
+            } else if member == "NotificationClosed" {
+                let (of, _why): (u32, u32) = signal.body().deserialize()?;
+                if of == id {
+                    break;
+                }
             }
         }
+        Ok(false)
+    })();
+    if let Some(over) = over {
+        over.store(true, Ordering::Relaxed);
     }
-    Ok(false)
+    was
 }
 
 /// Tell the person that a use of a secret waits for them (`summary`, `body`: `WaitingUse::notice`), for as long
-/// as it waits (`seconds`). Clicked, the dialog opens. A notification that could not be shown is in the journal:
-/// the panel's mark and its popup say that a use waits all the same.
-fn notify_use(summary: String, body: String, seconds: i64) -> Task<cosmic::Action<Message>> {
+/// as it waits (`seconds`, or until `over` is set: the use answered, or its time gone). Clicked, the dialog
+/// opens. A notification that could not be shown is in the journal: the panel's mark and its popup say that a
+/// use waits all the same.
+fn notify_use(summary: String, body: String, seconds: i64, over: Arc<AtomicBool>) -> Task<cosmic::Action<Message>> {
     let expires = i32::try_from(seconds.clamp(1, 600) * 1000).unwrap_or(i32::MAX);
     cosmic::task::future(async move {
-        Message::UseNoticed(match off(move || clicked(&summary, &body, expires)).await {
+        Message::UseNoticed(match off(move || clicked(&summary, &body, expires, Some(over))).await {
             Ok(Ok(was)) => was,
             Ok(Err(e)) => {
                 eprintln!("torq-applet: the notification that a use of a secret waits: {e}");
@@ -316,6 +342,17 @@ impl Applet {
         if note.failed { said.class(cosmic::theme::Text::Color(theme.cosmic().destructive_color().into())).into() } else { said.into() }
     }
 
+    /// The notification of a use that is no longer the one in front (answered, or its time over) is taken down:
+    /// it would go on saying "Open this to answer".
+    fn withdraw_notice(&mut self) {
+        if let Some((n, over)) = &self.noticed {
+            if self.asking.shown().map(|(u, _)| u.n) != Some(*n) {
+                over.store(true, Ordering::Relaxed);
+                self.noticed = None;
+            }
+        }
+    }
+
     /// The dialog for the agent's use of a secret that waits (ADR-051, ADR-052 4): the broker's facts first, then,
     /// apart and marked as the agent's, the agent's own words; then the buttons. Laid out from `d`, which
     /// `torq::app` made: nothing is decided here. `note`: why an answer to this very use was not taken.
@@ -360,6 +397,9 @@ impl Applet {
             if let Some(note) = d.offers_note {
                 col = col.push(widget::text::caption(note).width(Length::Fill));
             }
+            if let Some(replaces) = d.replaces {
+                col = col.push(widget::text::caption(replaces).width(Length::Fill));
+            }
             let warn = d.offers.iter().any(|o| o.red);
             for o in d.offers {
                 let reply = live.then_some(Message::UseReply(n, app::Reply::For(o.allowance)));
@@ -388,7 +428,7 @@ impl Applet {
         let spacing = cosmic::theme::spacing();
         match self.asking.showing() {
             // One dialog at a time, and before anything else the popup has to say.
-            app::Showing::Use(u, more, note) => return self.use_view(u.dialog(self.me.as_deref().unwrap_or_default(), more, self.now), note),
+            app::Showing::Use(u, more, note) => return self.use_view(u.dialog(self.me.as_deref().unwrap_or_default(), more, self.now, self.asking.held()), note),
             // What became of a use, alone until it is read (or, with another use waiting behind it and no
             // failure to read, for a few seconds): a press meant for the dialog's buttons, as it goes, lands
             // on none of the next dialog's, and on none of the popup's own.
@@ -648,7 +688,7 @@ impl cosmic::Application for Applet {
                 }
                 self.uses_looking = true;
                 // Asked only for a person who has an agent: no one else has a use waiting for them.
-                return cosmic::task::future(async { Message::UsesHeard(blocking(|| if app::has_agent() { app::uses_waiting() } else { Ok(vec![]) }).await) });
+                return cosmic::task::future(async { Message::UsesHeard(blocking(|| if app::has_agent() { app::uses_waiting() } else { Ok((vec![], vec![])) }).await) });
             }
             Message::UsesHeard(Err(why)) => {
                 self.uses_looking = false;
@@ -657,13 +697,17 @@ impl cosmic::Application for Applet {
                     notify(USES_UNREAD.to_string(), why, "secrets");
                 }
             }
-            Message::UsesHeard(Ok(waiting)) => {
+            Message::UsesHeard(Ok((waiting, allowed))) => {
                 self.uses_looking = false;
                 // (Nothing to tell: a look that worked only forgets why the last one failed.)
                 let _ = self.uses_unread.heard(Ok(()));
                 self.now = app::now();
                 // A use that ended without an answer given here leaves a note in the dialog's place (`Asking`).
                 let tell = self.asking.heard(waiting, self.now, Instant::now());
+                let me = self.me.clone().unwrap_or_default();
+                // Whether the person already allows the secret the use shown asks for: the dialog says so.
+                self.asking.allows(&allowed, &me, Instant::now());
+                self.withdraw_notice();
                 // The choices of "Allow for…" are of the use they were opened for, and of no other.
                 if self.allowing != self.asking.shown().map(|(u, _)| u.n) {
                     self.allowing = None;
@@ -671,8 +715,10 @@ impl cosmic::Application for Applet {
                 if let Some(u) = tell {
                     // Its number alone: the journal is not where a secret's name or an agent's words belong.
                     eprintln!("torq-applet: use {} of a secret waits for an answer", u.n);
-                    let (summary, body) = u.notice(self.me.as_deref().unwrap_or_default());
-                    return notify_use(summary, body, u.until.map_or(120, |t| t - self.now));
+                    let (summary, body) = u.notice(&me);
+                    let over = Arc::new(AtomicBool::new(false));
+                    self.noticed = Some((u.n, over.clone()));
+                    return notify_use(summary, body, u.until.map_or(120, |t| t - self.now), over);
                 }
             }
             Message::UseNoticed(false) => {}
@@ -698,15 +744,16 @@ impl cosmic::Application for Applet {
                 if self.replying.is_some() || !self.asking.takes(n, Instant::now()) {
                     return Task::none();
                 }
-                let u = u.clone();
+                let (u, held) = (u.clone(), self.asking.held().cloned());
                 self.replying = Some(n);
-                return cosmic::task::future(async move { Message::UseReplied(n, blocking(move || app::answer_use(&u, reply)).await) });
+                return cosmic::task::future(async move { Message::UseReplied(n, blocking(move || app::answer_use(&u, reply, held.as_ref())).await) });
             }
             // What was done, or why not, is `Asking`'s to keep and to show: a failure until it is read.
             Message::UseReplied(n, outcome) => {
                 self.replying = None;
                 self.allowing = None;
                 self.asking.replied(n, outcome, Instant::now());
+                self.withdraw_notice();
                 return self.update(Message::Uses);
             }
             Message::UseNoteRead => self.asking.read(Instant::now()),
