@@ -1201,23 +1201,25 @@ impl Allowed {
     }
 
     /// How the Secrets page lets `me` end it: what is said under it, and the button's label with the line it runs
-    /// (None: not theirs to end). One secret's is ended by name, which ends what they allowed for every secret of
-    /// that name; all their own at once, and one whose name the line would not read as a secret's, only with
-    /// everything they allowed: the command line has no narrower line.
+    /// (None: not theirs to end). One secret's by its own line, whose secret said as the grant said it; all their
+    /// own by its own line, which leaves each named one. A secret whose name the line would not read as a
+    /// secret's is ended only with everything they allowed.
     pub fn ending(&self, me: Option<&str>) -> (String, Option<(&'static str, String)>) {
         if me != Some(self.person.as_str()) {
             return (format!("{}'s to end.", self.person), None);
         }
-        match self.secret.as_ref().map(|(n, _)| revoke_line(n)) {
-            Some(Some(line)) => (format!("Ending it ends what you allowed for every secret of this name, and asks no password: {line}"), Some(("End it", line))),
+        match self.secret.as_ref().map(|(n, system)| revoke_line(n, (!system).then_some(self.person.as_str()))) {
+            Some(Some(line)) => (format!("Ending it asks no password: {line}"), Some(("End it", line))),
             Some(None) => (format!("A secret of this name is ended only with everything else you allowed, and no password is asked: {REVOKE_ALL}"), Some(("End all", REVOKE_ALL.into()))),
-            None => (format!("Not from a session that read untrusted text. Ending it ends everything you allowed, each secret's too, and asks no password: {REVOKE_ALL}"), Some(("End all", REVOKE_ALL.into()))),
+            None => (format!("Not from a session that read untrusted text. Ending it leaves what you allowed of one secret, and asks no password: {REVOKE_ALL_OWN}"), Some(("End it", REVOKE_ALL_OWN.into()))),
         }
     }
 }
 
 /// The line that ends every allowance a person gave.
 pub const REVOKE_ALL: &str = "request system secret allow revoke all";
+/// The line that ends their allowance of all their own secrets, and no other.
+pub const REVOKE_ALL_OWN: &str = "request system secret allow all revoke";
 
 /// The grants in the broker's answer. One that does not say what it is, is left out.
 fn allowed_of(v: &serde_json::Value, clock: &history::Clock) -> Vec<Allowed> {
@@ -1246,12 +1248,16 @@ pub fn allowed() -> Result<Vec<Allowed>> {
     Ok(allowed_of(&grants, &history::Clock::system()))
 }
 
-/// The line that ends the person's allowances of every secret named `name`. None: the name is a word of the
-/// command itself (`all`, `agent`, …), which that line would not read as a secret's name.
-fn revoke_line(name: &str) -> Option<String> {
-    let line = self::line(&["request", "system", "secret", "allow", "revoke", name]);
+/// The line that ends the person's allowance of the secret `name`: their own (`user`), or the system's. None: the
+/// name is a word of the command itself (`all`, `agent`, …), which that line would not read as a secret's name.
+fn revoke_line(name: &str, user: Option<&str>) -> Option<String> {
+    let mut words = vec!["request", "system", "secret", "allow", "revoke", name];
+    if let Some(u) = user {
+        words.extend(["user", u]);
+    }
+    let line = self::line(&words);
     let read = crate::session::words(&line).ok().and_then(|w| crate::grammar::read_line(Mode::Operational, &w).ok())?;
-    (read.op == crate::syntax::Op::Request(crate::syntax::Request::SecretApproval(Approval::Revoke { name: Some(name.to_string()) }))).then_some(line)
+    (read.op == crate::syntax::Op::Request(crate::syntax::Request::SecretApproval(Approval::Revoke { name: Some(name.to_string()), user: user.map(String::from) }))).then_some(line)
 }
 
 #[cfg(test)]
@@ -1552,25 +1558,30 @@ mod approval_tests {
     /// as a secret's.
     #[test]
     fn the_line_that_ends_an_allowance() {
-        assert_eq!(revoke_line("gh").as_deref(), Some("request system secret allow revoke gh"));
-        assert_eq!(revoke_line("for").as_deref(), Some("request system secret allow revoke for"));
+        assert_eq!(revoke_line("gh", None).as_deref(), Some("request system secret allow revoke gh"));
+        assert_eq!(revoke_line("gh", Some("dev")).as_deref(), Some("request system secret allow revoke gh user dev"));
+        assert_eq!(revoke_line("for", None).as_deref(), Some("request system secret allow revoke for"));
         for word in ["all", "agent", "https", "ssh", "a b", ""] {
-            assert_eq!(revoke_line(word), None, "{word}");
+            assert_eq!(revoke_line(word, None), None, "{word}");
+            assert_eq!(revoke_line(word, Some("dev")), None, "{word}, one's own");
         }
-        // The line for everything is read as that: every allowance, not those of a secret of some name.
-        let all = crate::grammar::read_line(Mode::Operational, &crate::session::words(REVOKE_ALL).unwrap()).unwrap().op;
-        assert_eq!(all, crate::syntax::Op::Request(crate::syntax::Request::SecretApproval(Approval::Revoke { name: None })));
-        // What the page offers for each: one's own by name, or with everything; someone else's, nothing.
+        // The two fixed lines are read as what they say: every allowance; and the one of all one's own, alone.
+        let read = |line: &str| crate::grammar::read_line(Mode::Operational, &crate::session::words(line).unwrap()).unwrap().op;
+        assert_eq!(read(REVOKE_ALL), crate::syntax::Op::Request(crate::syntax::Request::SecretApproval(Approval::Revoke { name: None, user: None })));
+        assert_eq!(read(REVOKE_ALL_OWN), crate::syntax::Op::Request(crate::syntax::Request::SecretApproval(Approval::RevokeAllOwn)));
+        // What the page offers for each: one's own by its own line, whose secret said as the grant said it;
+        // someone else's, nothing.
         let grant = |person: &str, secret: Option<(&str, bool)>| Allowed { seq: 1, person: person.into(), secret: secret.map(|(n, s)| (n.to_string(), s)), until: "then".into(), session: false, even_tainted: false };
         let (said, ends) = grant("dev", Some(("gh", false))).ending(Some("dev"));
-        assert_eq!(ends, Some(("End it", "request system secret allow revoke gh".to_string())));
-        assert_eq!(said, "Ending it ends what you allowed for every secret of this name, and asks no password: request system secret allow revoke gh");
+        assert_eq!(ends, Some(("End it", "request system secret allow revoke gh user dev".to_string())));
+        assert_eq!(said, "Ending it asks no password: request system secret allow revoke gh user dev");
+        assert_eq!(grant("dev", Some(("gh", true))).ending(Some("dev")).1, Some(("End it", "request system secret allow revoke gh".to_string())), "the system's secret: no user");
         let (said, ends) = grant("dev", Some(("agent", true))).ending(Some("dev"));
         assert_eq!(ends, Some(("End all", REVOKE_ALL.to_string())));
         assert!(said.starts_with("A secret of this name is ended only with everything else you allowed"), "{said}");
         let (said, ends) = grant("dev", None).ending(Some("dev"));
-        assert_eq!(ends, Some(("End all", REVOKE_ALL.to_string())));
-        assert!(said.starts_with("Not from a session that read untrusted text. Ending it ends everything you allowed"), "{said}");
+        assert_eq!(ends, Some(("End it", REVOKE_ALL_OWN.to_string())));
+        assert_eq!(said, "Not from a session that read untrusted text. Ending it leaves what you allowed of one secret, and asks no password: request system secret allow all revoke");
         for me in [Some("sam"), None] {
             assert_eq!(grant("dev", Some(("gh", false))).ending(me), ("dev's to end.".to_string(), None));
             assert_eq!(grant("dev", None).ending(me), ("dev's to end.".to_string(), None));
@@ -1753,7 +1764,8 @@ mod page_tests {
         whole(Mode::Operational, &decline_line(12));
         // The Secrets page's lines for what is allowed without asking, and for a secret that never asks.
         whole(Mode::Operational, REVOKE_ALL);
-        for c in ["request system secret allow revoke gh", "request system secret approve gh never-even-tainted user dev"] {
+        whole(Mode::Operational, REVOKE_ALL_OWN);
+        for c in ["request system secret allow revoke gh", "request system secret allow revoke gh user dev", "request system secret approve gh never-even-tainted user dev"] {
             whole(Mode::Operational, c);
         }
         // The Agent page's lines as the person finishes them, then commits them.
@@ -1785,7 +1797,7 @@ mod page_tests {
         for c in ["commit", "commit comment \"x\"", "commit confirmed 5", "commit at 12:00", "commit check", "set a b", "delete", "top delete", "rollback 1", "show | compare", "run request system repair"] {
             assert!(!t(Mode::Configuration, c), "{c}: asked in the window, approved in the dialog");
         }
-        for c in ["request system revert 5", "request system apply 5", "request system repair", "request system snapshot take", "clear system commit", "show system alarms", "request system update", "request system secret set gh file key", "request system secret delete gh", "request system secret allow gh agent", "show system secrets", "request system secret allow revoke gh", "request system secret allow revoke all", "request system secret approve gh never-even-tainted user dev", "show system secrets waiting", "show system secrets allowed"] {
+        for c in ["request system revert 5", "request system apply 5", "request system repair", "request system snapshot take", "clear system commit", "show system alarms", "request system update", "request system secret set gh file key", "request system secret delete gh", "request system secret allow gh agent", "show system secrets", "request system secret allow revoke gh", "request system secret allow revoke all", "request system secret allow all revoke", "request system secret approve gh never-even-tainted user dev", "show system secrets waiting", "show system secrets allowed"] {
             assert!(!t(Mode::Operational, c), "{c}");
         }
     }

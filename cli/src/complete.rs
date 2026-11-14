@@ -495,10 +495,11 @@ mod tests {
         assert_eq!(help("request system secret allow gh for", "<minutes>"), "How many minutes: 1 to 480");
         assert_eq!(offered("request system secret allow gh for 60"), ["<[Enter]>", "tainted-too", "user"]);
         assert_eq!(offered("request system secret allow gh for 60 tainted-too"), ["<[Enter]>", "user"]);
-        assert_eq!(offered("request system secret allow all"), ["agent", "for", "https", "ssh"]);
+        assert_eq!(offered("request system secret allow all"), ["agent", "for", "https", "revoke", "ssh"]);
+        assert_eq!(offered("request system secret allow all revoke"), ["<[Enter]>"]);
         assert_eq!(offered("request system secret allow all for 60"), ["<[Enter]>"], "all of them is never tainted-too, and never someone's");
         assert_eq!(offered("request system secret allow revoke"), ["<[Enter]>", "agent", "all", "https", "ssh", "<secret>"]);
-        assert_eq!(offered("request system secret allow revoke gh"), ["<[Enter]>"]);
+        assert_eq!(offered("request system secret allow revoke gh"), ["<[Enter]>", "user"]);
         assert_eq!(offered("request system secret allow revoke all"), ["<[Enter]>"]);
         // Tab.
         assert_eq!(tab(&op("show system secrets", "w")), [("waiting".to_string(), "waiting ".to_string())]);

@@ -69,8 +69,11 @@ pub enum Approval {
     /// `allow <name> session`, `allow <name> for <minutes> [tainted-too]` (`user <you>`: your own secret, else the
     /// system's), `allow all for <minutes>` (no name: all your own). No minutes: your agent's sessions running now.
     Grant { name: Option<String>, user: Option<String>, minutes: Option<u32>, tainted_too: bool },
-    /// `allow revoke [<name>|all]`: end those grants of yours (no name: every one).
-    Revoke { name: Option<String> },
+    /// `allow revoke [<name> [user <you>]|all]`: end the grant of that secret (`user`: your own, else the system's),
+    /// or with no name, every grant you gave.
+    Revoke { name: Option<String>, user: Option<String> },
+    /// `allow all revoke`: end your grant of all your own secrets, and no other.
+    RevokeAllOwn,
     /// `approve <n>`, `deny <n> [session]`: your answer to a waiting use (`rest`: a no for the rest of its session).
     Answer { n: u64, approved: bool, rest: bool },
 }
@@ -101,8 +104,9 @@ impl Approval {
                 let owner = user.as_ref().map(|u| format!(" user {}", crate::syntax::quote(u))).unwrap_or_default();
                 format!("allow {}{how_long}{}{owner}", name.as_deref().unwrap_or("all"), if *tainted_too { " tainted-too" } else { "" })
             }
-            Approval::Revoke { name: None } => "allow revoke".into(),
-            Approval::Revoke { name: Some(n) } => format!("allow revoke {n}"),
+            Approval::Revoke { name: None, .. } => "allow revoke".into(),
+            Approval::Revoke { name: Some(n), user } => format!("allow revoke {n}{}", user.as_ref().map(|u| format!(" user {}", crate::syntax::quote(u))).unwrap_or_default()),
+            Approval::RevokeAllOwn => "allow all revoke".into(),
             Approval::Answer { n, approved: true, .. } => format!("approve {n}"),
             Approval::Answer { n, approved: false, rest } => format!("deny {n}{}", if *rest { " session" } else { "" }),
         }
@@ -130,10 +134,15 @@ impl Approval {
                 }
                 a
             }
-            Approval::Revoke { name } => {
+            Approval::RevokeAllOwn => vec!["secret-revoke".to_string(), "--all".to_string()],
+            Approval::Revoke { name, user } => {
                 let mut a = vec!["secret-revoke".to_string()];
                 if let Some(n) = name {
                     a.extend(["--name".into(), n.clone()]);
+                    // Whose secret, as a grant says it: only of a named one.
+                    if let Some(u) = user {
+                        a.extend(["--user".into(), u.clone()]);
+                    }
                 }
                 a
             }
@@ -153,14 +162,14 @@ impl Approval {
         match self {
             Approval::Grant { .. } => format!("{}Until {}. `request system secret allow revoke` ends it.\n", entry(v), crate::history::clean(v["data"]["until"].as_str().unwrap_or("?"))),
             Approval::Answer { .. } => entry(v),
-            Approval::Revoke { .. } => {
+            Approval::Revoke { .. } | Approval::RevokeAllOwn => {
                 let ended: String = match v["revoked"].as_array().map(Vec::as_slice) {
                     None | Some([]) => "You had no such grant to end.\n".into(),
                     Some(ended) => ended.iter().map(entry).collect(),
                 };
                 // Said, so that no one thinks the secret asks again when it does not.
                 let still = match v["all_until"].as_str() {
-                    Some(until) => format!("Your grant of all your own secrets still covers a secret of your own by that name, until {}: `request system secret allow revoke all` ends it too.\n", crate::history::clean(until)),
+                    Some(until) => format!("Your grant of all your own secrets still covers that secret, until {}: `request system secret allow all revoke` ends it.\n", crate::history::clean(until)),
                     None => String::new(),
                 };
                 ended + &still
@@ -620,16 +629,21 @@ mod tests {
         assert_eq!(Approval::Grant { name: None, user: None, minutes: Some(30), tainted_too: false }.args(Place::Terminal), ["secret-grant", "--all", "--minutes", "30"]);
         assert_eq!(Approval::Grant { name: Some("gh".into()), user: Some("dev".into()), minutes: Some(5), tainted_too: true }.args(Place::Terminal), ["secret-grant", "--name", "gh", "--user", "dev", "--minutes", "5", "--tainted-too"]);
         assert_eq!(Approval::Grant { name: Some("ci".into()), user: None, minutes: None, tainted_too: false }.args(Place::Terminal), ["secret-grant", "--name", "ci", "--session"]);
-        assert_eq!(Approval::Revoke { name: None }.args(Place::Terminal), ["secret-revoke"]);
+        assert_eq!(Approval::Revoke { name: None, user: None }.args(Place::Terminal), ["secret-revoke"]);
         assert_eq!(Approval::Answer { n: 7, approved: false, rest: false }.args(Place::Terminal), ["secret-deny", "7", "--where", "terminal"]);
         assert_eq!(Approval::Answer { n: 7, approved: false, rest: true }.args(Place::Terminal), ["secret-deny", "7", "--where", "terminal", "--rest-of-session"]);
         // An answer says where it was given; nothing else of a request does.
         assert_eq!(Approval::Answer { n: 7, approved: true, rest: false }.args(Place::Dialog), ["secret-approve", "7", "--where", "dialog"]);
-        assert_eq!(Approval::Revoke { name: Some("gh".into()) }.args(Place::Dialog), ["secret-revoke", "--name", "gh"]);
+        assert_eq!(Approval::Revoke { name: Some("gh".into()), user: None }.args(Place::Dialog), ["secret-revoke", "--name", "gh"]);
+        // Whose secret a grant is of is said when it is ended, as when it is given; all one's own, alone.
+        assert_eq!(Approval::Revoke { name: Some("gh".into()), user: Some("dev".into()) }.args(Place::Terminal), ["secret-revoke", "--name", "gh", "--user", "dev"]);
+        assert_eq!(Approval::Revoke { name: None, user: Some("dev".into()) }.args(Place::Terminal), ["secret-revoke"]);
+        assert_eq!(Approval::RevokeAllOwn.args(Place::Terminal), ["secret-revoke", "--all"]);
+        assert_eq!((Approval::Revoke { name: Some("gh".into()), user: Some("dev".into()) }.line(), Approval::RevokeAllOwn.line()), ("allow revoke gh user dev".to_string(), "allow all revoke".to_string()));
         // Ending one secret's grants says when a grant of all still covers it.
         let ended = serde_json::json!({ "revoked": [{ "seq": 9, "reason": "dev revoked their leave" }], "all_until": "2026-11-13T20:00:00Z" });
-        assert!(Approval::Revoke { name: Some("gh".into()) }.said(&ended).ends_with("still covers a secret of your own by that name, until 2026-11-13T20:00:00Z: `request system secret allow revoke all` ends it too.\n"));
-        assert_eq!(Approval::Revoke { name: Some("gh".into()) }.said(&serde_json::json!({ "revoked": [{ "seq": 9, "reason": "r" }] })), "r (ledger #9)\n");
+        assert!(Approval::Revoke { name: Some("gh".into()), user: None }.said(&ended).ends_with("still covers that secret, until 2026-11-13T20:00:00Z: `request system secret allow all revoke` ends it.\n"));
+        assert_eq!(Approval::Revoke { name: Some("gh".into()), user: None }.said(&serde_json::json!({ "revoked": [{ "seq": 9, "reason": "r" }] })), "r (ledger #9)\n");
     }
 
     #[test]

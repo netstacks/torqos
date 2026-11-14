@@ -1396,13 +1396,14 @@ impl<'a> Session<'a> {
                 use crate::secrets::Approval;
                 match &a {
                     Approval::Grant { user: Some(u), .. } if *u != self.me => bail!("{u}'s secrets are theirs alone: you let your agent use your own, or a system secret it is named for"),
+                    Approval::Revoke { user: Some(u), .. } if *u != self.me => bail!("{u}'s grants are theirs to end: you end what you gave, of your own secret or of a system secret"),
                     // `all` reads as every secret: with a secret of that name it could be meant either way, so it is not guessed.
                     Approval::Grant { name: None, .. } if crate::secrets::read(&self.repo, &self.repo.head()?, Some(&self.me))?.contains_key("all") => {
                         bail!("you have a secret named all, and `allow all` means every secret of yours: not done, as it could be meant either way. Rename that secret to grant them all at once.")
                     }
                     // No `user`: the system's secret, as every command of a secret reads. Where there is none of that
                     // name and the person has one of their own, the line they meant is said.
-                    Approval::Grant { name: Some(n), user: None, .. } if !crate::secrets::read(&self.repo, &self.repo.head()?, None)?.contains_key(n) && crate::secrets::read(&self.repo, &self.repo.head()?, Some(&self.me))?.contains_key(n) => {
+                    Approval::Grant { name: Some(n), user: None, .. } | Approval::Revoke { name: Some(n), user: None } if !crate::secrets::read(&self.repo, &self.repo.head()?, None)?.contains_key(n) && crate::secrets::read(&self.repo, &self.repo.head()?, Some(&self.me))?.contains_key(n) => {
                         bail!("the system has no secret {n}; you have one of your own by that name: request system secret {} user {}", a.line(), self.me)
                     }
                     _ => {}
@@ -3404,6 +3405,10 @@ mod tests {
         assert_eq!(s.exec("request system secret allow gh for 30 tainted-too user dev").unwrap(), "asked the broker: secret-grant --name gh --user dev --minutes 30 --tainted-too\n");
         assert_eq!(s.exec("request system secret allow all for 30").unwrap(), "asked the broker: secret-grant --all --minutes 30\n");
         assert_eq!(s.exec("request system secret allow revoke gh").unwrap(), "asked the broker: secret-revoke --name gh\n");
+        assert_eq!(s.exec("request system secret allow revoke gh user dev").unwrap(), "asked the broker: secret-revoke --name gh --user dev\n");
+        assert_eq!(s.exec("request system secret allow all revoke").unwrap(), "asked the broker: secret-revoke --all\n");
+        let e = format!("{:#}", s.exec("request system secret allow revoke gh user sam").unwrap_err());
+        assert!(e.contains("theirs to end"), "{e}");
         assert_eq!(s.exec("request system secret approve 3").unwrap(), "asked the broker: secret-approve 3 --where terminal\n");
         assert_eq!(s.exec("request system secret deny 3").unwrap(), "asked the broker: secret-deny 3 --where terminal\n");
         assert_eq!(s.exec("request system secret deny 3 session").unwrap(), "asked the broker: secret-deny 3 --where terminal --rest-of-session\n");
@@ -3419,6 +3424,9 @@ mod tests {
         sh(d.path(), "printf '{\"mine\":{\"kind\":\"token\"}}\\n' > users/dev/secrets.json && git commit -qam mine");
         let e = format!("{:#}", s.exec("request system secret allow mine for 5 tainted-too").unwrap_err());
         assert!(e.ends_with("you have one of your own by that name: request system secret allow mine for 5 tainted-too user dev"), "{e}");
+        // Ending one is read the same way: no `user` is the system's, and theirs is said.
+        let e = format!("{:#}", s.exec("request system secret allow revoke mine").unwrap_err());
+        assert!(e.ends_with("you have one of your own by that name: request system secret allow revoke mine user dev"), "{e}");
         assert_eq!(s.exec("request system secret allow other for 5").unwrap(), "asked the broker: secret-grant --name other --minutes 5\n", "a name of no one's goes to the broker, which says so");
         assert_eq!(s.exec("show system secrets waiting").unwrap(), "(no use of a secret is waiting for you)\n");
         assert_eq!(s.exec("show system secrets allowed").unwrap(), "(no agent is let use a secret without asking)\n");

@@ -425,8 +425,10 @@ mod tests {
             (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Grant { name: Some("gh".into()), user: Some("dev".into()), minutes: Some(480), tainted_too: true }))),
             (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Grant { name: Some("ci".into()), user: None, minutes: Some(5), tainted_too: false }))),
             (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Grant { name: None, user: None, minutes: Some(30), tainted_too: false }))),
-            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Revoke { name: None }))),
-            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Revoke { name: Some("gh".into()) }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Revoke { name: None, user: None }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Revoke { name: Some("gh".into()), user: None }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Revoke { name: Some("gh".into()), user: Some("dev".into()) }))),
+            (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::RevokeAllOwn))),
             (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: true, rest: false }))),
             (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: false, rest: false }))),
             (Mode::Operational, Op::Request(Request::SecretApproval(crate::secrets::Approval::Answer { n: 7, approved: false, rest: true }))),
@@ -527,14 +529,17 @@ mod tests {
         assert_eq!(request("allow gh for 1"), grant(Some("gh"), None, Some(1), false));
         assert_eq!(request("allow gh for 480 tainted-too user dev"), grant(Some("gh"), Some("dev"), Some(480), true));
         assert_eq!(request("allow all for 30"), grant(None, None, Some(30), false));
-        assert_eq!(request("allow revoke"), Request::SecretApproval(Approval::Revoke { name: None }));
-        assert_eq!(request("allow revoke all"), Request::SecretApproval(Approval::Revoke { name: None }));
-        assert_eq!(request("allow revoke gh"), Request::SecretApproval(Approval::Revoke { name: Some("gh".into()) }));
+        assert_eq!(request("allow revoke"), Request::SecretApproval(Approval::Revoke { name: None, user: None }));
+        assert_eq!(request("allow revoke all"), Request::SecretApproval(Approval::Revoke { name: None, user: None }));
+        assert_eq!(request("allow revoke gh"), Request::SecretApproval(Approval::Revoke { name: Some("gh".into()), user: None }));
+        // Whose secret, as a grant says it; and the grant of all one's own, ended alone.
+        assert_eq!(request("allow revoke gh user dev"), Request::SecretApproval(Approval::Revoke { name: Some("gh".into()), user: Some("dev".into()) }));
+        assert_eq!(request("allow all revoke"), Request::SecretApproval(Approval::RevokeAllOwn));
         assert_eq!(request("approve 7"), Request::SecretApproval(Approval::Answer { n: 7, approved: true, rest: false }));
         assert_eq!(request("deny 7"), Request::SecretApproval(Approval::Answer { n: 7, approved: false, rest: false }));
         assert_eq!(request("deny 7 session"), Request::SecretApproval(Approval::Answer { n: 7, approved: false, rest: true }));
         // All is never tainted-too, never for a session, never someone's; a grant lasts 1 to 480 minutes.
-        for no in ["allow all for 30 tainted-too", "allow all session", "allow all for 30 user dev", "allow all", "allow gh for 0", "allow gh for 481", "allow gh for", "allow gh session tainted-too", "allow gh tainted-too", "approve gh", "approve 0", "deny gh", "deny", "deny 7 session user dev", "approve 7 session", "allow revoke gh all", "allow revoke all gh"] {
+        for no in ["allow all for 30 tainted-too", "allow all session", "allow all for 30 user dev", "allow all", "allow gh for 0", "allow gh for 481", "allow gh for", "allow gh session tainted-too", "allow gh tainted-too", "approve gh", "approve 0", "deny gh", "deny", "deny 7 session user dev", "approve 7 session", "allow revoke gh all", "allow revoke all gh", "allow revoke user dev", "allow revoke all user dev", "allow all revoke gh", "allow all revoke user dev", "allow all revoke all"] {
             assert!(read(&format!("request system secret {no}")).is_err(), "{no}");
         }
         // The commands there were, as they were: of any secret, one named as a new word too.
@@ -558,8 +563,9 @@ mod tests {
         // ...but `all` and `revoke` stand where the name does, and are read as themselves: `all` is every secret,
         // and never a grant of the one secret so named; `revoke for` ends the grants of a secret named for.
         assert_eq!(request("allow all for 5"), grant(None, None, Some(5), false));
-        assert_eq!(request("allow revoke for"), Request::SecretApproval(Approval::Revoke { name: Some("for".into()) }));
-        assert!(read("request system secret allow revoke for 5").is_err() && read("request system secret allow revoke session user dev").is_err());
+        assert_eq!(request("allow revoke for"), Request::SecretApproval(Approval::Revoke { name: Some("for".into()), user: None }));
+        assert!(read("request system secret allow revoke for 5").is_err());
+        assert_eq!(request("allow revoke session user dev"), Request::SecretApproval(Approval::Revoke { name: Some("session".into()), user: Some("dev".into()) }));
         assert_eq!(read("show system secrets allowed").unwrap(), Op::ShowSecretsAllowed);
         assert_eq!(read("show system secrets waiting").unwrap(), Op::ShowSecretsWaiting);
         assert_eq!(read("show system secrets").unwrap(), Op::ShowSecrets);

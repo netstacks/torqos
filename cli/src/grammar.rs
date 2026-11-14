@@ -341,6 +341,7 @@ static ALLOW_ALL: &[Node] = &[
     fixed("agent", "The secret named all: an agent may use it", In::Op).then(SECRET_AGENT),
     fixed("for", "For <minutes>, your agent uses every secret of your own without asking you — never from a session that read untrusted text (it asks your password; ledgered)", In::Op).then(&[value(Value::Minutes, "How many minutes: 1 to 480").whole(approval)]),
     fixed("https", "The secret named all: sent in an HTTPS header to this host", In::Op).then(&[value(Value::Host, "The host: a DNS name (api.github.com)").whole(secret).then(SECRET_OWNER)]),
+    fixed("revoke", "End your grant of all your own secrets, and no other: what you let it use of one secret stays (no password)", In::Op).whole(revoke_all_own),
     fixed("ssh", "The secret named all: signs for SSH to this host", In::Op).then(&[value(Value::Host, "The host: a DNS name (github.com)").whole(secret).then(SECRET_OWNER)]),
 ];
 
@@ -348,16 +349,16 @@ static ALLOW_ALL: &[Node] = &[
 /// had; so a grant of a secret named `agent`, `https` or `ssh` is ended with the rest (`allow revoke`), not by name.
 static ALLOW_REVOKE: &[Node] = &[
     fixed("agent", "The secret named revoke: an agent may use it", In::Op).then(SECRET_AGENT),
-    fixed("all", "Every grant of secret uses you gave", In::Op).whole(approval),
+    fixed("all", "Every grant of secret uses you gave: each secret's, and the one of all your own", In::Op).whole(approval),
     fixed("https", "The secret named revoke: sent in an HTTPS header to this host", In::Op).then(&[value(Value::Host, "The host: a DNS name (api.github.com)").whole(secret).then(SECRET_OWNER)]),
     fixed("ssh", "The secret named revoke: signs for SSH to this host", In::Op).then(&[value(Value::Host, "The host: a DNS name (github.com)").whole(secret).then(SECRET_OWNER)]),
-    value(Value::Secret, "The grants of this secret (yours, or the system's)").whole(approval),
+    value(Value::Secret, "The grant of this secret: the system's, or with user <you> after it, your own").whole(approval).then(GRANT_OWNER),
 ];
 
 static REQUEST_SECRET: &[Node] = &[
     fixed("allow", "Let it be used: for a host, or by the agent (one change, undoable); or, for a while, by your agent without asking you", In::Op).then(&[
         fixed("all", "All your own secrets, for <minutes>, without asking you", In::Op).then(ALLOW_ALL),
-        fixed("revoke", "End what you let your agent use without asking: one secret's grants, or all (no password)", In::Op).whole(approval).then(ALLOW_REVOKE),
+        fixed("revoke", "End what you let your agent use without asking: one secret's grant, or with nothing after it, every one (no password)", In::Op).whole(approval).then(ALLOW_REVOKE),
         value(Value::Secret, "The secret's name").then(SECRET_ALLOW),
     ]),
     fixed("approve", "When a person is asked before the agent uses it (a session that read untrusted text is always asked); or, with a waiting use's number, your yes to it", In::Op).then(&[value(Value::Secret, "The secret's name; or the number of a use that waits for you (show system secrets waiting)").whole(approval).then(&[
@@ -517,6 +518,11 @@ fn secret(r: &Read) -> Result<Op> {
     Ok(Op::Request(Request::Secret { name: name.into(), user, act }))
 }
 
+/// `request system secret allow all revoke`: the grant of all one's own secrets ended, and no other.
+fn revoke_all_own(_: &Read) -> Result<Op> {
+    Ok(Op::Request(Request::SecretApproval(crate::secrets::Approval::RevokeAllOwn)))
+}
+
 /// `request system secret allow <name> session`, `… for <minutes> [tainted-too]`, `allow all for <minutes>`,
 /// `allow revoke [<name>|all]`, `approve <n>` and `deny <n>`, from the words read.
 fn approval(r: &Read) -> Result<Op> {
@@ -530,7 +536,7 @@ fn approval(r: &Read) -> Result<Op> {
         };
         Approval::Answer { n, approved: true, rest: false }
     } else if r.has("revoke") {
-        Approval::Revoke { name: r.value(Value::Secret).map(String::from) }
+        Approval::Revoke { name: r.value(Value::Secret).map(String::from), user: r.value(Value::User).map(String::from) }
     } else {
         let minutes = r.number(Value::Minutes).map(|m| m as u32);
         if minutes.is_some_and(|m| m > 480) {
