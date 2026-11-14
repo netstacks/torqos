@@ -402,7 +402,7 @@ Its §5 lists claims without a test.
 8. ~~Template hard-codes user `casey`.~~ Fixed: `torq user` (nixos/torq.json) is the one place
    (asserted set and well-formed); per-user apps are `users/<name>/packages.json`.
 9. **An applet a signal ends is started again by the panel, through a wrapper; the wrapper itself is not** (2026-11-10;
-   rewritten 2026-11-13, built, not run in a VM). COSMIC 1.11's panel starts an applet again only after an exit with a
+   rewritten 2026-11-13, built; the VM subtest in `tests/desktop.nix` passed in the full check of 2026-11-14). COSMIC 1.11's panel starts an applet again only after an exit with a
    code, never one a signal ended (an abort, a segfault, a kill). Read in the source (cosmic-panel 1.11.0
    `space/wrapper_space.rs`, launch-pad `5b516ee`): launch-pad gives the panel's `on_exit` the exit code, None for a
    death by a signal, and the panel restarts only `is_restarting && err_code.is_some()`, else stops the process; no
@@ -430,9 +430,9 @@ Its §5 lists claims without a test.
      tried once more after 5 s, `app::twice`; a second failure is only in the journal, and the popup still says what it
      was about); one in a library task (tokio's, zbus's executor, iced's SVG drawing) is caught by that library, which
      carries on, as it means to: ending the whole applet on any panic was tried and dropped for that reason.
-   - **Not run:** the wrapper has been tested as functions and as a child of the test (`app::wrapper_tests`: the exit
-     mapping, a descriptor passing, the allow-list), not built as a binary or started by a panel. The parent-death
-     signal and the stop path are reasoned from the sources. torqcli's own retry (cli/src/run.rs, `NO_APPROVAL_AGENT`)
+   - **Not run on a real machine, or for the panel's stop path:** the wrapper has been tested as functions and as a child of the test (`app::wrapper_tests`: the exit
+     mapping, a descriptor passing, the allow-list), and, in `tests/desktop.nix` (passed in the full check of 2026-11-14), started by COSMIC's panel as the applet's Exec, restarted after KILL, SEGV and TERM of the applet, and not restarted after the wrapper's own death. The parent-death
+     signal is seen only as the applet going when the wrapper is killed; the stop path is reasoned from the sources. torqcli's own retry (cli/src/run.rs, `NO_APPROVAL_AGENT`)
      still starts the dialog again for a terminal's command.
 10. **Desktop VM tests on .52 (nested ESXi, software rendering).** COSMIC's launcher, app library and portal panic
    on wgpu validation errors there, and the desktop is slow enough that the first approval after login can come
@@ -556,7 +556,7 @@ Its §5 lists claims without a test.
    So nothing read on the way to the dialog is closed by non-dumpable. What was not done is the dialog itself
    for such a process: `tests/desktop.nix` now has that check (the page's own call, from a program of the
    session that is non-dumpable when the broker asks, setting a system secret, approved in the dialog),
-   **written and not yet run**, as is the `tests/secrets.nix` subtest for the same call. Not looked at: what
+   **ran and passed in the full check of 2026-11-14**, as did the `tests/secrets.nix` subtest for the same call. Not looked at: what
    else in a desktop session reads another program's `/proc` files that non-dumpable closes (`exe`, `root`,
    `environ`, `fd`), a portal identifying the window for one.
 
@@ -621,7 +621,7 @@ Its §5 lists claims without a test.
    RAM, a read error) is offered, since only its label says it is the installer's; a cciss disk's
    `cciss!c0d0` name is not mapped to its `/dev/cciss/c0d0`. (Two more of that review are fixed,
    2026-11-12: the hardware is detected before the write, so a detection that fails writes nothing
-   — `tests/installer.nix`, a subtest written and not run yet; what the first build is carried (its store
+   — `tests/installer.nix`, a subtest, passed in the full check of 2026-11-14; what the first build is carried (its store
    paths, each checked to be in the installer's store, and the registration) is read before the write
    too, 2026-11-13, `install.rs` `what_is_carried_is_checked_before_the_write`. What can still fail
    after the write is what needs the new disk: reading its partitions, mounting it, writing the files,
@@ -812,7 +812,7 @@ Its §5 lists claims without a test.
      system running with no ledger (setup's own record of a cut-short setup does not cover adopt).
    - **`torq.dev.enable` and every other setting travel** with the configuration: adopting a dev
      machine makes a dev machine. The summary calls out `torq.dev.enable` set in the tree
-     (`nixos/torq.json`; 2026-11-12, `tests/adopt.nix`, extended but not run yet). A Nix file is code, so
+     (`nixos/torq.json`; 2026-11-12, `tests/adopt.nix`, passed in the full check of 2026-11-14). A Nix file is code, so
      what an attached one sets cannot be read reliably without evaluating it: when the configuration
      attaches any, the summary says they were not read for development mode (2026-11-13,
      `setup::dev_notes`, unit-tested). No other setting is called out.
@@ -1009,7 +1009,7 @@ Its §5 lists claims without a test.
    Python completions. Open:
    - **Python stays for the boot writer** (systemd-boot's installer, ~135 MB): ADR-032's amendment says
      what replacing it would take. The size budget stays 1280 MB until then (1252 MB now).
-   - **Not yet run in a VM:** `tests/installer.nix` (repart's definitions compared instead of
+   - **Run in a VM (passed in the full check of 2026-11-14):** `tests/installer.nix` (repart's definitions compared instead of
      `boot.growPartition`, and the layout check; repart's "Growing existing partition 2." in the journal,
      its numbering from 0, and nothing of partitions 0 or 1; the ESP's and the record's entries as the
      image left them, the record's of TorqOS's type; no growpart unit) and `tests/image.nix` (which boots the
@@ -1367,7 +1367,7 @@ Its §5 lists claims without a test.
      open), Codex and opencode, removing the link when the tool is no longer chosen.
 
 6zzs. **An agent's use of a secret waits for its person, who answers at a terminal or in the panel's dialog; the
-  dialog has not run on a desktop (ADR-051 and ADR-052 4, both amended 2026-11-13; not yet run in a VM).**
+  dialog has not run on a desktop (ADR-051 and ADR-052 4, both amended 2026-11-13; the VM subtests passed in the full check of 2026-11-14).**
   `torq-agent` in a person's rules is their own agent, and a system rule names each agent's account. A use that
   asks (the rule says each use, or the first; no session; a tainted session) waits for up to two minutes for the
   person the agent serves. They answer with `request system secret approve <n>` or `deny <n> [session]`
@@ -1381,7 +1381,7 @@ Its §5 lists claims without a test.
      a press is taken is tested in torqcli (`app::approval_tests`); the applet's own wiring is not: that the
      rows are laid out as given and do not move, that a button is drawn dead while `torq::app` says no press
      is taken, that the popup shows the dialog or the note before anything else, that the notification is
-     taken down. `tests/desktop.nix` (written, not run) goes as far as the applet seeing a waiting use and
+     taken down. `tests/desktop.nix` (passed in the full check of 2026-11-14) goes as far as the applet seeing a waiting use and
      raising its notification, and then sends the dialog's own request itself;
    - **a popup the applet opens by itself is untried.** A clicked notification opens the popup with no press on
      the panel, so it is opened without taking the pointer, and is closed with the panel's button. Whether
@@ -1460,7 +1460,7 @@ Its §5 lists claims without a test.
      but the eight hours a grant may last.
   `tests/secrets.nix` states the waiting, the answers, the time-out, four uses waiting at once beside a
   person's own, and a grant given at a terminal, used under, and ended by whose secret it is and all one's own
-  alone; `tests/desktop.nix` the applet seeing a use. Their edits of 2026-11-13 have not run. Not in either: a
+  alone; `tests/desktop.nix` the applet seeing a use. Their edits of 2026-11-13 passed in the full check of 2026-11-14. Not in either: a
   clean session's use let through by a grant that does not say `tainted-too` (those machines have no resident
   agent; the broker's own tests have it), `allow <name> session`, and "Allow for…" replacing a grant (torqcli's
   units have what it sends, against a stand-in broker).

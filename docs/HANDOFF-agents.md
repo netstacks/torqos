@@ -6,12 +6,12 @@ branch, its commits and its rebase; all of that is done and is gone from here. W
 ADR-052's "As built" and "Amended" sections in docs/DECISIONS.md and KNOWN-GAPS 6zzk to 6zzo and 6zzs. Nothing is
 released: no version has been bumped for it.
 
+A full `nix flake check` (every check, all VM tests) passed on .52 for 880c7ff (2026-11-12), 5c9c84c
+(2026-11-13, the agents merge), 1121957 (2026-11-14, the approval flow: the new `tests/secrets.nix` and
+`tests/desktop.nix` subtests ran) and 4f077d9 (2026-11-14, main at that time).
+
 ## Never run
 
-- A full `nix flake check` of the agents work on one tree. Some of the agent VM tests (`agent-service`,
-  `agent-mcp`, `agent-proposals`, `agents-per-person`, `doctor`, `agent-run`, `agent`, `desktop-agent`) have
-  passed at earlier tips; the edits of 2026-11-13 to `tests/secrets.nix` and `tests/desktop.nix` have not run
-  (KNOWN-GAPS 6zzs).
 - The real Claude Code: only a stand-in MCP client. Untested is whether it takes a user-scope server from
   `~/.claude.json`, whether it follows a symlinked skill directory, and how its sign-in behaves as the agent account.
 - Any agent UI on a real machine (the applet, the window, the approval dialog, the Agent page, Super+Shift+A, the

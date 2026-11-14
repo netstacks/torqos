@@ -325,7 +325,7 @@ acceptance tests, each a VM test.
       secrets waiting`, `request system secret approve <n>`, `deny <n> [session]`) or in the panel applet's
       popup; a person lets their agent use a secret without asking for a while (`allow <name> session`, `for
       <minutes> [tainted-too]`, `allow all for <minutes>`, their password), and ends it (`allow revoke`, or the
-      Secrets page); `never-even-tainted` in their own rules. Not run: the VM tests' edits of that day
+      Secrets page); `never-even-tainted` in their own rules. The VM tests' edits of that day ran and passed in the full check of 2026-11-14
       (`tests/secrets.nix`, `tests/desktop.nix`). The dialog is type-checked only and has not been drawn on any
       machine (KNOWN-GAPS 6zzs).
 - [x] **Step 5**: the Secrets page in TorqOS Settings (built 2026-11-12, after v0.4.0-rc1; deferred on
@@ -339,7 +339,7 @@ acceptance tests, each a VM test.
       store for the agent and programs; everyday passwords are for apps such as 1Password. The page has no
       test of its own (KNOWN-GAPS 6zzp to 6zzr); the `tests/secrets.nix` subtest for its way of keeping a
       value, and the `tests/desktop.nix` check that a non-dumpable program still gets the approval dialog,
-      are written and not yet run.
+      ran and passed in the full check of 2026-11-14.
 
 ## After 0.3.0: in the next cycle
 

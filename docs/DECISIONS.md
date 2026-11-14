@@ -1443,7 +1443,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   a program is stopped at its byte cap and its timeout, a child of it with it; at most 8 calls a
   round; a model that keeps calling must answer; curl's `-q` first and its `--proto`; endpoints
   with a user, query, fragment or backslash, or another host for plain http, refused.
-  `tests/doctor.nix` (check `doctor`; written, not yet run): `torq doctor` as a person, against a
+  `tests/doctor.nix` (check `doctor`; passed in the full check of 2026-11-14): `torq doctor` as a person, against a
   fake endpoint, with a hostile journal line and the journal turned on — as the agent, in
   `systemd-journal` and no other group; the writing call refused; the answer clean and headed as
   tainted; the record of the agent's naming each tainting tool it called; the ledger unchanged (a
@@ -1462,7 +1462,7 @@ Short ADRs. Newest at the bottom. Format: context → decision → consequences.
   question; a failed report ends the session unseen; `propose_change` only in propose mode, words
   never a command; what a proposal became told from the broker's record, never torqcli's), torqcli (what `request system apply` says and when it confirms; the session id
   passed only if it is one; trust in the alarms). `tests/agent-proposals.nix` (check
-  `agent-proposals`; written, not yet run) checks each of them on a machine, the real doctor's report
+  `agent-proposals`; passed in the full check of 2026-11-14) checks each of them on a machine, the real doctor's report
   included.
 - **Not:** an agent service; MCP (the tools are in-process; serving them over MCP, for tools such as
   Claude Code run as the agent, is a later step); a default model; the desktop's dialog (M4). `torq.ai` (the stub) is gone: `torq.agent.doctor` and
@@ -2793,7 +2793,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
     `cli/src/app.rs`, `cli/src/secrets.rs`, the grammar's and the completion's tests), each new guard in torqcli
     seen to fail with it broken. `tests/secrets.nix` (the asks, the answers, the time-out, the limits, a grant
     at a terminal) and `tests/desktop.nix` (the applet sees a waiting use and raises its notification; the
-    answer the dialog sends is recorded as the dialog's) are written and have not run. The dialog has been
+    answer the dialog sends is recorded as the dialog's) ran and passed in the full check of 2026-11-14. The dialog has been
     type-checked only: it has not been drawn or pressed on any machine, and no test clicks in the panel.
     Whether COSMIC shows a popup the applet opens by itself, for a clicked notification, has not been tried.
 
@@ -3058,7 +3058,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
     `stat`); polkit reads `stat`, `status` and `cgroup`; COSMIC's agent reads nothing of it. For a
     non-dumpable process those files become root's and stay readable by all, and the folder stays the
     person's. polkit 127 answered the same for a non-dumpable process as for an ordinary one. The dialog
-    itself, end to end, is a check in `tests/desktop.nix`, written and not yet run.
+    itself, end to end, is a check in `tests/desktop.nix`, passed in the full check of 2026-11-14.
   - **Left to the terminal:** reading a value back (`request system secret show`), and a value from a file
     (`set <name> file <path>`, an SSH key of several lines): the window has no file chooser, and one was not
     added for this. On the window's Command Line page, `request system secret set <name>` and `show <name>`
@@ -3069,7 +3069,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
     that cannot be read among it; what goes to a terminal), each seen to fail with its guard broken.
     `tests/secrets.nix` has a subtest that keeps a value through `app::secret_set` (an example program built
     for the tests alone), uses it, and looks for it in every file of the machine; `tests/desktop.nix` has the
-    non-dumpable client's approval. Both written, not yet run. The page itself has no test: nothing drives
+    non-dumpable client's approval. Both passed in the full check of 2026-11-14. The page itself has no test: nothing drives
     the window (KNOWN-GAPS 6zzr).
 - **Amended 2026-11-12 — whose agent, with one agent per person (ADR-051 3; the first part of the design that
   ADR-051's amendment of 2026-11-13 records; built on `work/agents`):** `torq-agent` in a person's own rules means that person's
@@ -3170,7 +3170,7 @@ vouches for, that only proposes, every change ledgered and undone in one command
   - **Tested:** `broker/tests/secrets.rs` and the broker's units (each rule of asking, the answers, the first
     answer, the time-out, the limits at their numbers, the grants and what they never cover, both taint
     decisions); torqcli's units. `tests/secrets.nix` states the same at the socket and the terminal on a real
-    daemon and host, and `tests/desktop.nix` the applet; their edits of 2026-11-13 have not run.
+    daemon and host, and `tests/desktop.nix` the applet; their edits of 2026-11-13 passed in the full check of 2026-11-14.
 
 ## ADR-053 — A waiting change approved on a moved configuration: re-checked, applied only if it does exactly what was shown
 
