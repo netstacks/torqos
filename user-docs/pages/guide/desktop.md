@@ -44,7 +44,8 @@ things the command line can do, so anything you do there is the same change as t
 **The TorqOS panel applet** sits in COSMIC's panel by default. It shows the machine's state at a
 glance: a confirmed commit waiting for you, a log-out or restart that a switch needs, an alarm,
 proposals waiting, an uncommitted draft. It changes nothing by itself; it points you to TorqOS
-Settings, or confirms a commit when you ask.
+Settings, or confirms a commit when you ask. It is also where you answer when your agent asks to use a
+secret: see [When your agent asks to use a secret](../reference/security.md#when-your-agent-asks-to-use-a-secret).
 
 **The SSH tunnels applet** is in COSMIC's list of applets, not in the default panel (add it in
 COSMIC's panel settings). It starts, stops and adds your own SSH tunnels. See

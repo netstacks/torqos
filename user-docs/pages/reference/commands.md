@@ -49,7 +49,15 @@ command can be abbreviated to a unique beginning, and `?` or `help` works anywhe
 | `request system secret set <name>` | give a secret's value (typed, or `file <path>`): kept encrypted, outside the configuration, never in the ledger |
 | `request system secret allow <name> https <host>` or `ssh <host>`, or `agent user <you>` / `agent <person>` | let a secret be used for that host (a token in an HTTPS header, or an SSH key), or by an agent, which uses it without reading it: your own secret by your own agent (`agent user <you>`), a system secret by the agent of the person named (`agent alice`: alice's agent, `torq-agent-alice`) |
 | `request system secret disallow <name> …` | take a use back |
-| `request system secret approve <name> each-use`, `first-use` or `never` | when a person is asked before the agent uses it (a session that read untrusted text is always asked). The approval step itself is not built yet: until it is, an agent may use only a secret that asks for no approval, from an untainted session, which no agent's use has yet: only the resident agent starts one, and it has no tool that uses a secret (KNOWN-GAPS 6zzs in the repository) |
+| `request system secret approve <name> each-use`, `first-use` or `never` | when you are asked before your agent uses it. A session that read untrusted text is always asked, and so is a coding tool run as your agent. A use that asks waits two minutes for you, then is refused |
+| `request system secret approve <name> never-even-tainted user <you>` | your own secret is used with no one asked, even from a session that read untrusted text, until you choose another rule (asks your password) |
+| `show system secrets waiting` | your agent's uses of secrets that wait for your answer, each with its number |
+| `request system secret approve <n>` | your yes to the waiting use `<n>`, once |
+| `request system secret deny <n> [session]` | your no to it; with `session`, also to every later use of that secret in that session of the agent's |
+| `request system secret allow <name> session` or `for <minutes> [tainted-too]` | for a while, your agent uses that secret without asking you (asks your password): in its sessions running now, or for 1 to 480 minutes. `tainted-too`: even from a session that read untrusted text. `user <you>` for a secret of your own |
+| `request system secret allow all for <minutes>` | the same for all your own secrets, 1 to 480 minutes; never from a session that read untrusted text |
+| `show system secrets allowed` | what agents may use without asking for now, and until when |
+| `request system secret allow revoke [<name> or all]` | end what you allowed: for every secret of that name, or everything (no password) |
 | `request system secret show <name>` | print its value here (asks your password) |
 | `request system secret delete <name>` | delete its value and its rule |
 | `request system repair` | return a machine changed outside TorqOS to its last commit (asks first) |
@@ -61,7 +69,11 @@ Secrets are only for the tokens and keys that programs use and never read: see
 page of TorqOS Settings runs these same commands, except two that stay in a terminal:
 `request system secret show <name>` (the page never shows a value) and
 `request system secret set <name> file <path>`. On the page a value is typed twice in masked fields
-instead; a value pasted there stays in your clipboard.
+instead; a value pasted there stays in your clipboard. A use that waits for you is answered in the
+panel or with `approve <n>` and `deny <n>`, not on the page; and the page lists and ends what your
+agent may use without asking, but does not give it: that is **Allow for…** in the panel, or
+`allow … session` and `allow … for <minutes>` here. See
+[When your agent asks to use a secret](security.md#when-your-agent-asks-to-use-a-secret).
 
 ## Configuration mode
 

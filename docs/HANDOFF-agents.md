@@ -118,7 +118,8 @@ See KNOWN-GAPS 6zq, 6zzk and 6zzo.
      not moved into each commit: a bisect in that range needs the same one-line change, with that commit's arguments.
    - **Settled (the approval design's part 1, 2026-11-12):** `torq-agent` in a person's rules is their own agent,
      both accounts; system rules name each agent's account. The two broker tests pass again. What it leaves:
-     no agent can use a secret until approval is built (KNOWN-GAPS 6zzs).
+     no agent can use a secret until approval is built (KNOWN-GAPS 6zzs). (Built 2026-11-13: ADR-051 and ADR-052,
+     amended that day.)
 2. Finish the second review's batch, as above.
 3. Run the full check on .52, then land as a fast-forward with the owner (the lead session's plan).
 

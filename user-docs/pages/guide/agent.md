@@ -173,7 +173,8 @@ home, never in yours. Each time it starts, TorqOS links its own tools into Claud
 on how this machine is configured — and leaves your other Claude Code settings as they were. Everything it
 proposes, through those tools or with `torqcli` in its shell, is marked tainted and waits for you; your
 trust never applies it. Its own "skip permissions" mode is safe to use for that reason: there is nothing it
-can apply. The Agent page says whether it is installed for you, and how to start it.
+can apply. The Agent page says whether it is installed for you, and how to start it. When it uses one of
+your secrets you are asked each time, unless you allowed that ([When it uses a secret](#when-it-uses-a-secret)).
 
 ## Apply a proposal
 
@@ -214,3 +215,26 @@ apply as soon as it makes them, without asking you. Never a system change, never
 tainted session — so only your resident agent's, never Claude Code's or `torq agent propose`'s — never someone else's folder, and never another person's agent. Each one is its own change in the ledger, marked with
 your trust, and `request system revert <n>` undoes it. While it holds, `show system alarms` says so.
 Only you can give trust for your folder, and you can end it at any time.
+
+## When it uses a secret
+
+Your agent can use a token or an SSH key that it never reads: TorqOS sends the request or signs for it
+(see [Secrets](../reference/security.md#secrets-for-the-agent-and-programs)). You say which secrets it
+may use, and when it must ask you first.
+
+When a use asks, it waits two minutes for you, and only for you. On the desktop a notification says
+"Your agent asks to use a secret"; click it, or click TorqOS in the panel, and answer there: **Allow
+once**, **Allow for…**, **Deny**, or **Deny, and don't ask again this session**. The panel shows what
+TorqOS knows first (which secret, which host, whether your agent or a coding tool asked), and the
+agent's own words below, marked as the agent's. At a terminal, `show system secrets waiting` lists
+what waits, and `request system secret approve <n>` or `deny <n>` answers it. With no answer the use
+is refused.
+
+A coding tool such as Claude Code asks every time, because TorqOS cannot see what it read. To let it
+use one secret without asking for a while, see
+[Letting your agent use a secret without asking](../reference/security.md#letting-your-agent-use-a-secret-without-asking):
+it asks your password, and that page says what you are giving.
+
+The panel's dialog has not been tried on a real machine yet. Your resident agent (the one `torq ask`
+talks to) has no tool that uses a secret yet: today the uses come from coding tools and other programs
+you run as your agent.

@@ -316,19 +316,26 @@ acceptance tests, each a VM test.
       session and ledgered; remote input checked first. In the person's session; the agent's
       tooling, not the broker's.
 
-### Secrets the agent may use and never read (ADR-052; steps 1 to 3 in 0.4.0-rc1)
+### Secrets the agent may use and never read (ADR-052; steps 1 to 3 in 0.4.0-rc1, 4 and 5 after it)
 - [x] **Steps 1 to 3** (built 2026-11-10; `tests/secrets.nix`): the values and their rules (`request system
       secret …`, `show system secrets`, kept encrypted, root's alone, never in the ledger); the daemon
       `torq-secrets` that uses a secret in an HTTPS request for a program that never reads it; SSH.
-- [ ] **Step 4**: approvals and taint (a person asked before the agent uses a secret; until then the
-      agent may use only a secret that asks for no approval, from an untainted session).
+- [x] **Step 4** (built 2026-11-13; ADR-051 and ADR-052, amended that day): approvals and taint. An agent's use
+      that asks waits two minutes for the person whose agent it is, who answers at a terminal (`show system
+      secrets waiting`, `request system secret approve <n>`, `deny <n> [session]`) or in the panel applet's
+      popup; a person lets their agent use a secret without asking for a while (`allow <name> session`, `for
+      <minutes> [tainted-too]`, `allow all for <minutes>`, their password), and ends it (`allow revoke`, or the
+      Secrets page); `never-even-tainted` in their own rules. Not run: the VM tests' edits of that day
+      (`tests/secrets.nix`, `tests/desktop.nix`). The dialog is type-checked only and has not been drawn on any
+      machine (KNOWN-GAPS 6zzs).
 - [x] **Step 5**: the Secrets page in TorqOS Settings (built 2026-11-12, after v0.4.0-rc1; deferred on
       2026-11-11, reversed by the owner the next day). What the command line does and nothing more: the
       secrets `show system secrets` lists, one a row to choose; for the one chosen, what it is allowed now and
       each `request system secret` line as a button (allow, disallow, approve, and delete in two presses);
       and a value typed twice in masked fields, sent to the broker as torqcli sends it and part of no command
       or log. Not there: a value shown back, a value from a file (both stay a terminal's, and typed on the
-      window's Command Line page `set` and `show` open one), and the asking of step 4. Secrets stay the narrow
+      window's Command Line page `set` and `show` open one); the asking of step 4 is the panel's, and the page
+      lists and ends what is allowed without asking (2026-11-13). Secrets stay the narrow
       store for the agent and programs; everyday passwords are for apps such as 1Password. The page has no
       test of its own (KNOWN-GAPS 6zzp to 6zzr); the `tests/secrets.nix` subtest for its way of keeping a
       value, and the `tests/desktop.nix` check that a non-dumpable program still gets the approval dialog,
