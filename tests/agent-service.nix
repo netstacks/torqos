@@ -307,6 +307,47 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"systemctl reset-failed {unit}; systemctl start {unit}")
         machine.succeed(f"systemctl is-active {unit}")
 
+    with subtest("the model's key missing: no start without it, and TorqOS says why in the agent unit's own journal"):
+        # systemd refuses the unit before any of its commands (the credential cannot be loaded), so the check at
+        # the start never speaks: a unit of its own does, after the failure (modules/agent.nix, keyMissing), as
+        # an entry about the agent's unit — where `torq ask` sends an administrator (journalctl -u, systemctl status).
+        key, says = "/var/lib/torq/secrets/model.key", "torq-agent-key@alice.service"
+        for gone in [f"mv {key} /var/lib/torq/secrets/kept.key", f"mv {key} /var/lib/torq/secrets/kept.key && ln -s nothing-here {key}"]:
+            machine.succeed(gone)
+            # (Each start counted afresh: the starts before this, here and above, would reach systemd's limit.)
+            machine.succeed(f"systemctl reset-failed {unit}; true")
+            c = cursor()
+            machine.fail(f"systemctl restart {unit}")
+            journal_after(c, "is missing (torq.agent.doctor.apiKeyFile names it")
+            # Not started, by no other way: failed, no process, no credential left for it.
+            assert prop("ActiveState") == "failed" and prop("MainPID") == "0", (prop("ActiveState"), prop("MainPID"))
+            machine.fail(f"test -e /run/credentials/{unit}/model-key")
+            shown = machine.execute(f"systemctl status {unit} --no-pager --full -n 30 2>&1")[1]
+            assert "is missing (torq.agent.doctor.apiKeyFile names it" in shown, shown
+            # Root wrote it, about this unit; and the key's value is in neither unit's journal.
+            entry = json.loads(machine.succeed(f"journalctl -u {unit} --no-pager -o json --after-cursor={shlex.quote(c)} | grep -F 'is missing (torq.agent' | tail -n 1"))
+            assert entry["_UID"] == "0" and entry["OBJECT_SYSTEMD_UNIT"] == unit, entry
+            machine.fail(f"journalctl -u {unit} -u {says} --no-pager -o json | grep -F sk-test-key")
+            machine.succeed(f"rm -f {key} && mv /var/lib/torq/secrets/kept.key {key}")
+            assert machine.succeed(f"stat -c %a:%U {key}").strip() == "600:root"
+        # What says it is given no credential, and may only look: one capability, the system read-only.
+        def says_prop(name):
+            return machine.succeed(f"systemctl show -P {name} {says}").strip()
+        assert says_prop("LoadCredential") == "" and says_prop("CapabilityBoundingSet") == "cap_dac_read_search", (says_prop("LoadCredential"), says_prop("CapabilityBoundingSet"))
+        assert says_prop("NoNewPrivileges") == "yes" and says_prop("ProtectSystem") == "strict"
+        # The key there, a failure is not called a missing key: the check at the start says its own words, alone.
+        machine.succeed(f"chmod 644 {key}; systemctl reset-failed {unit}; true")
+        c = cursor()
+        machine.fail(f"systemctl restart {unit}")
+        journal_after(c, "must be root's and readable by no one else")
+        # (Once what says a missing key has run, and ended having said nothing.)
+        machine.wait_until_succeeds(f"journalctl -u {says} --no-pager --after-cursor={shlex.quote(c)} | grep -q Finished", timeout=30)
+        machine.fail(f"journalctl -u {unit} --no-pager --after-cursor={shlex.quote(c)} | grep -F 'is missing (torq.agent'")
+        machine.succeed(f"chmod 600 {key}")
+        # Put right, it starts, with its key.
+        machine.succeed(f"systemctl reset-failed {unit}; systemctl start {unit}")
+        machine.succeed(f"systemctl is-active {unit} && test -s /run/credentials/{unit}/model-key")
+
     with subtest("what the resident rule rests on, at run time: tracing only one's own descendants, no user manager for either account"):
         # agent-assertions checks the configuration; this, the running machine.
         assert machine.succeed("sysctl -n kernel.yama.ptrace_scope").strip() in ("1", "2", "3")

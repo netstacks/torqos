@@ -1336,6 +1336,22 @@ Its §5 lists claims without a test.
      the resident account alone reads it — not the agent account in or out of its sandbox (`tests/agent-service.nix`,
      su and sudo -u included); `torq agent run` hides `/run/credentials` besides. So `torq doctor` and `torq agent
      propose` cannot use a keyed model: they say so and send the person to `torq ask`.
+   - **A missing model key is said after the failure, not before the start** (2026-11-14; the VM subtest is
+     written and has not run). When nothing is at `apiKeyFile`, systemd refuses the agent's unit before any of
+     its commands runs: it loads the credential for every command of the unit, `ExecCondition` and
+     `ExecStartPre` included (tried on systemd 260.5 with a transient unit), so no check inside the unit can
+     speak first. The unit still does not start. A unit of its own, `torq-agent-key@<person>.service`, started
+     by the agent unit's failure (`OnFailure`), then looks only at whether anything is at the path and writes
+     TorqOS's line ("the model's key, <path>, is missing …") as a journal entry about the agent's unit, so
+     `journalctl -u torq-agent@<person>.service` and `systemctl status` show it. It is root's, as the check at
+     the start is, with one capability (`CAP_DAC_READ_SEARCH`), a read-only system and no credential; it never
+     opens the key. Left: systemd's own lines ("Failed to set up credentials") come first, and each failed
+     start says the line again. `torq ask` still says only that the agent did not answer and names the
+     journal (`cli/src/agent/client.rs`, the client the window shares), which is an administrator's to read: a person who is not an administrator is not
+     told the reason. A key file that is there and cannot be loaded for another reason (larger than systemd
+     takes) gets only systemd's words. After several failed starts the socket itself may have stopped
+     (systemd's start limit); whether asking again starts the agent once the key is back, without restarting
+     `torq-agent@<person>.socket`, has not been tried.
    - **A session is cited only by its own kind of caller** (fixed from step 5's review): a program of the agent's
      citing the resident agent's session id (the ledger shows it) is refused, so its proposal is never put in
      that session's record and told to the resident agent as its own; the resident agent cites only sessions

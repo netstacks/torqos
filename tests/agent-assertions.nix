@@ -70,6 +70,32 @@ let
     (refuses "the key named another way (/./)" { torq.agent.doctor = doctorOn // { apiKeyFile = "/./tmp/model.key"; }; } "named plainly")
     (refuses "the key named another way (..)" { torq.agent.doctor = doctorOn // { apiKeyFile = "/srv/../home/dev/k"; }; } "named plainly")
     (let ms = ours (failing { torq.agent.doctor = doctorOn // { apiKeyFile = "/var/lib/torq/secrets/model.key"; }; }); in if ms == [ ] then "the key root's" else throw "agent-assertions: a root-only key refused: ${builtins.toJSON ms}")
+    # A missing key is said by a unit of its own, started by the agent unit's failure (modules/agent.nix,
+    # keyMissing): there only where a key is named, given no credential and nothing of the key but its path
+    # (in its script), and the agent's own unit still takes the key the one way and checks it at each start.
+    (let
+      c = configOf { torq.agent.doctor = doctorOn // { apiKeyFile = "/var/lib/torq/secrets/model.key"; }; };
+      agent = c.systemd.services."torq-agent@dev";
+      says = c.systemd.services."torq-agent-key@dev";
+      sc = says.serviceConfig;
+      text = c.systemd.units."torq-agent-key@dev.service".text;
+    in
+      if agent.onFailure == [ "torq-agent-key@dev.service" ]
+        && agent.serviceConfig.LoadCredential == [ "model-key:/var/lib/torq/secrets/model.key" ]
+        && lib.length agent.serviceConfig.ExecStartPre == 1 && lib.hasPrefix "+" (lib.head agent.serviceConfig.ExecStartPre)
+        && !(agent.serviceConfig ? ExecCondition)
+        && sc.Type == "oneshot" && lib.hasSuffix " torq-agent@dev.service" sc.ExecStart
+        && sc.CapabilityBoundingSet == "CAP_DAC_READ_SEARCH" && sc.NoNewPrivileges && sc.ProtectSystem == "strict"
+        && !(sc ? LoadCredential) && !(sc ? User)
+        && !(lib.hasInfix "Credential" text) && !(lib.hasInfix "model.key" text)
+        && says.wantedBy == [ ] && says.requiredBy == [ ]
+      then "a missing key said by its own unit"
+      else throw "agent-assertions: the unit that says a missing key is not as it should be: ${builtins.toJSON { inherit (agent) onFailure; inherit sc; }}")
+    (let c = configOf { torq.agent.doctor = doctorOn; }; in
+      if !(c.systemd.services ? "torq-agent-key@dev") && c.systemd.services."torq-agent@dev".onFailure == [ ]
+        && c.systemd.services."torq-agent@dev".serviceConfig.LoadCredential == [ ]
+      then "no key named: nothing to say"
+      else throw "agent-assertions: a unit for a missing key where no key is named")
     (refuses "SETENV in sudoers text" ({ config, ... }: {
       security.sudo.extraConfig = "%wheel ALL=(root) NOPASSWD: SETENV: ${config.torq.agent.launcher}/bin/torq-agent-run";
     }) "a rule for torq-agent-run with SETENV")

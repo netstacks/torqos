@@ -148,6 +148,14 @@ Only your resident agent gets it (as its service's credential): no program run a
 included — can read it, and so `torq doctor` and `torq agent propose` cannot use a keyed model; they say so.
 Ask with `torq ask`.
 
+If the key file is missing, or is not root's alone, your resident agent does not start, and `torq ask` says
+it did not answer. The reason is in its service's journal, which an administrator reads:
+
+```text
+alice@torq> sudo journalctl -u torq-agent@alice.service
+… torq-agent: the model's key, /var/lib/torq/secrets/model.key, is missing …
+```
+
 ## Claude Code, as your agent
 
 Claude Code can run as your agent instead of as you: in your agent's account, seeing only the folder you

@@ -49,6 +49,20 @@ let
       exit 1
     fi
   '';
+  # A key that is not there at all. systemd refuses the unit before any of its commands runs: it loads a unit's
+  # credentials for every command it starts, ExecCondition and ExecStartPre included (tried on systemd 260), so
+  # the check above never gets to speak. This runs after that failure, as a unit of its own that the agent's unit
+  # names in OnFailure. It looks only at whether anything is at the path, never at what the file holds, and
+  # writes TorqOS's own line into the journal as an entry about the agent's unit (OBJECT_SYSTEMD_UNIT, which
+  # `journalctl -u` and `systemctl status` show when root wrote it). It changes nothing on the way to a start:
+  # no key, no start, as before.
+  keyMissing = pkgs.writeShellScript "torq-agent-key-missing" ''
+    f=${lib.escapeShellArg (toString modelKey)}
+    unit=$1
+    if [ -e "$f" ]; then exit 0; fi
+    msg="torq-agent: the model's key, $f, is missing (torq.agent.doctor.apiKeyFile names it; a link to nothing counts as missing): the resident agent is not started without it. Put the key there as root's alone: sudo install -D -o root -g root -m 600 <the key's file> $f"
+    printf 'MESSAGE=%s\nPRIORITY=3\nSYSLOG_IDENTIFIER=torq-agent\nOBJECT_SYSTEMD_UNIT=%s\n' "$msg" "$unit" | ${pkgs.util-linux}/bin/logger --journald || echo "$msg" >&2
+  '';
   # `torq agent run` (ADR-041, 5): a person starts a program as their own agent. This runs as root
   # (through sudo), hides every home and the people's runtime directories, gives a private /tmp,
   # binds in only the directory shared with it, and drops to the caller's agent for good.
@@ -319,6 +333,8 @@ in
       description = "${person}'s TorqOS agent (proposes; a person applies)";
       requires = [ "torq-agent@${person}.socket" ];
       after = [ "torq-agent@${person}.socket" "torq-broker.socket" ];
+      # A start that failed: if the model's key is missing, TorqOS says so in this unit's journal (keyMissing).
+      onFailure = lib.optional (modelKey != null) "torq-agent-key@${person}.service";
       serviceConfig = {
         ExecStart = "${config.torq.agent.doctor.package}/bin/torq-agent-service ${person}";
         # The listening socket as standard input (Accept=no): the program takes it from there.
@@ -377,7 +393,22 @@ in
         # Not PrivateUsers: in a user namespace of its own, SO_PEERCRED would name every caller nobody.
         # Not PrivateDevices: the doctor's rfkill and lsblk read devices.
       };
-    }) agents;
+    }) agents
+    # What says a missing key (keyMissing), started only by the agent unit's failure. Root, as the check at the
+    # start is, since the key's directory is root's alone to look into; but with one capability (to look, not to
+    # write), a read-only system and no new privilege. It is given no credential and never opens the key.
+    // lib.optionalAttrs (modelKey != null) (lib.mapAttrs' (agent: person: lib.nameValuePair "torq-agent-key@${person}" {
+      description = "${person}'s TorqOS agent: says a missing model key";
+      # Never held back for starting often: it runs once for each failed start, which systemd already limits.
+      unitConfig.StartLimitIntervalSec = 0;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${keyMissing} torq-agent@${person}.service";
+        CapabilityBoundingSet = "CAP_DAC_READ_SEARCH";
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+      };
+    }) agents);
   })
   ];
 }
