@@ -480,8 +480,12 @@ Its §5 lists claims without a test.
    under a component that sorts first (`com.system76.Aaa`) filled `MAX_KEYS` ahead of the real settings, so every
    sync failed: one component now has at most 200 settings kept (`cli/src/desktop.rs` `MAX_COMPONENT_KEYS`,
    2026-11-12, its test `one_component_cannot_fill_the_limit`), and the rest of it is left alone. Still open,
-   the name being no identity: ten such components fill `MAX_KEYS` as one did, a few large files fill the
-   1 MiB of `MAX_TOTAL` the same way, and the 200 kept are saved as COSMIC's.
+   the name being no identity: the 200 kept are saved as COSMIC's. Components also take turns now
+   (2026-11-13, `local`, test `components_take_turns_at_the_limits`): the settings are kept one from each
+   component in turn, the smaller first within a turn, so ten such components, each with 200 settings or with
+   files as large as one may be, no longer fill `MAX_KEYS` or `MAX_TOTAL` ahead of COSMIC's own. Still open:
+   as many components as the limit (one setting each, or large ones) still fill it, which only a list of
+   the components COSMIC has would stop.
 6zzb. **COSMIC's own settings can be personal, and the saved desktop is readable by every account** (6r; the
    review of work/autosave). Kept on purpose, as the person's desktop, but not harmless: the wallpaper's path
    (`CosmicBackground/v1/all`, a folder in the home), custom shortcuts (`CosmicSettings.Shortcuts/v1/custom`,
@@ -597,8 +601,12 @@ Its §5 lists claims without a test.
    RAM, a read error) is offered, since only its label says it is the installer's; a cciss disk's
    `cciss!c0d0` name is not mapped to its `/dev/cciss/c0d0`. (Two more of that review are fixed,
    2026-11-12: the hardware is detected before the write, so a detection that fails writes nothing
-   — `tests/installer.nix`, a subtest written and not run yet; leaving the file on the new disk can
-   still fail after the write, which clears the disk as before. And a disk's model is shown without
+   — `tests/installer.nix`, a subtest written and not run yet; what the first build is carried (its store
+   paths, each checked to be in the installer's store, and the registration) is read before the write
+   too, 2026-11-13, `install.rs` `what_is_carried_is_checked_before_the_write`. What can still fail
+   after the write is what needs the new disk: reading its partitions, mounting it, writing the files,
+   copying the store paths (a full disk). The disk is then cleared again, and the message says whether
+   it was or may hold part of TorqOS. And a disk's model is shown without
    control characters or direction overrides, so an escape sequence in a USB disk's INQUIRY string
    cannot redraw the list: `install.rs` `a_model_cannot_redraw_the_console`.) And the installer does not ignore SIGINT, SIGQUIT
    or SIGTERM itself (Rust has no safe way without a new crate): with the console's signal keys
@@ -784,8 +792,10 @@ Its §5 lists claims without a test.
      system running with no ledger (setup's own record of a cut-short setup does not cover adopt).
    - **`torq.dev.enable` and every other setting travel** with the configuration: adopting a dev
      machine makes a dev machine. The summary calls out `torq.dev.enable` set in the tree
-     (`nixos/torq.json`; 2026-11-12, `tests/adopt.nix`, extended but not run yet); set in an attached
-     Nix file it is not seen, and no other setting is called out.
+     (`nixos/torq.json`; 2026-11-12, `tests/adopt.nix`, extended but not run yet). A Nix file is code, so
+     what an attached one sets cannot be read reliably without evaluating it: when the configuration
+     attaches any, the summary says they were not read for development mode (2026-11-13,
+     `setup::dev_notes`, unit-tested). No other setting is called out.
 
 6zj. **Strict mode and break-glass (ADR-035).** Open:
    - **No ledger, no shell, by the owner's decision (2026-11-05: "I prefer secure over back doors").**
@@ -1074,11 +1084,16 @@ Its §5 lists claims without a test.
      brings what none of them has (an out-of-tree driver, `boot.extraModulePackages`) needs the
      network at its first build. Setup says so before a new machine's build starts, naming the driver
      (`cli/src/setup.rs` `own_drivers`, 2026-11-12; the sentence's reading of the hardware file is
-     unit-tested, its printing is not, and no such hardware has been tried). Still open of ADR-048
-     5's message: it does not offer Wi-Fi again there (offline, the build then fails and setup starts
-     over), it is not said when adopting, and only a driver is recognised, not everything not carried.
+     unit-tested, its printing is not, and no such hardware has been tried). For Broadcom's
+     `broadcom_sta` the sentence says another thing: that driver is unfree, which TorqOS refuses unless
+     told otherwise (`modules/unfree.nix`), so the first build fails with a network or without one
+     (2026-11-13, `setup::driver_notice`, unit-tested). Still open of ADR-048
+     5's message: only a driver is recognised, not everything not carried. Adopting says it too (2026-11-13,
+     the same function; its call in `adopt` is not unit-tested).
      The VM test builds change #1 for a machine none of the samples is (a VM, no firmware): 23
      derivations, from the disk alone. Real hardware (firmware, iwd) is proved on the Zenbook.
+     A build that fails with no network starts setup over and offers Wi-Fi again (2026-11-13,
+     `setup::network_again`, unit-tested; the console step itself is not).
    - **Setup's own path is not what the test runs:** the test loads the registration as setup does
      (`register_carried`) and builds as the broker would; tests/image.nix's setup still switches to a
      prebuilt specialisation.

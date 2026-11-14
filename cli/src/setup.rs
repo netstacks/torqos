@@ -118,6 +118,19 @@ fn own_drivers(hardware: &str) -> Option<String> {
     (!named.is_empty()).then(|| named.to_string())
 }
 
+/// What to say before a build when the hardware file among `files` names a driver from outside the
+/// kernel (`own_drivers`). Broadcom's `broadcom_sta` is unfree, which TorqOS refuses unless told
+/// otherwise (modules/unfree.nix): no network helps it, so that case does not say one would.
+fn driver_notice(files: &[(String, Vec<u8>)]) -> Option<String> {
+    let (_, hardware) = files.iter().find(|(rel, _)| rel == "hardware-configuration.nix")?;
+    let drivers = own_drivers(&String::from_utf8_lossy(hardware))?;
+    Some(if drivers.contains("broadcom_sta") {
+        format!("This machine's hardware needs Broadcom's Wi-Fi driver ({drivers}). It is not free software, and TorqOS allows none unless told to: the first build will fail, with a network or without one. A different network adapter (a USB one, say) avoids it.")
+    } else {
+        format!("This machine's hardware needs a driver that is not in the kernel ({drivers}). The installer does not carry it: the first build fetches it, and needs the network for that.")
+    })
+}
+
 /// The config repo's files for `a`: TorqOS's template (`template`: its templates/config) with the
 /// answers, the image's lock (`image`), this machine's hardware file (`hardware`: `hardware_file`),
 /// TorqOS from `source` (a store path), for
@@ -176,7 +189,7 @@ pub fn run() -> Result<()> {
     let repo = Path::new(REPO);
     // The network first (ADR-048, amended): what follows offers what needs it only when it is there.
     println!("\n{}\n", welcome());
-    let online = crate::network::step(&welcome)?;
+    let mut online = crate::network::step(&welcome)?;
     let mut first = true;
     loop {
         // Anything a setup cut short left: gone, to start clean. That includes Nix's caches of the
@@ -187,6 +200,7 @@ pub fn run() -> Result<()> {
         let _ = std::fs::remove_dir_all(BUILD_CACHE);
         if !std::mem::take(&mut first) {
             println!("\n{}\n", welcome());
+            online = network_again(online, || crate::network::step(&welcome))?;
         }
         const HOW: &str = "How should this machine start?\n  1  as a new machine\n  2  from a repository: become the machine it holds";
         if online {
@@ -242,6 +256,26 @@ pub fn run() -> Result<()> {
             }
         }
     }
+}
+
+/// Starting over after a build that failed: a machine that had no network is offered one again (`step`),
+/// since the build may have failed for want of it; one that had one is left as it is.
+fn network_again(online: bool, step: impl FnOnce() -> Result<bool>) -> Result<bool> {
+    if online { Ok(true) } else { step() }
+}
+
+/// What the summary says of development mode (`torq.dev.enable`, which makes sudo ask no password): that the
+/// tree's settings turn it on; and, when the configuration attaches Nix files, that those were not read for it.
+/// A Nix file is code: only evaluating it could say, so it is not guessed at.
+fn dev_notes(found: &serde_json::Value) -> Vec<&'static str> {
+    let mut notes = vec![];
+    if found["dev"].as_bool().unwrap_or(false) {
+        notes.push("It turns development mode on (torq dev enable): sudo asks no password here either. For developing TorqOS only.");
+    }
+    if found["files"].as_array().is_some_and(|f| !f.is_empty()) {
+        notes.push("Its attached Nix files were not read for development mode: if one turns it on, this machine becomes a development machine.");
+    }
+    notes
 }
 
 /// What adopting a repository asked (ADR-036).
@@ -326,8 +360,8 @@ fn adopt_questions() -> Result<Option<Adopting>> {
         Some(r) => println!("  ! It names another remote: {}", crate::history::one_line(r, 100)),
         None => println!("  ! It names no remote: this machine will not push there until `torq remote url` is set."),
     }
-    if found["dev"].as_bool().unwrap_or(false) {
-        println!("  ! It turns development mode on (torq dev enable): sudo asks no password here either. For developing TorqOS only.");
+    for note in dev_notes(&found) {
+        println!("  ! {note}");
     }
     println!("  This machine's own hardware file and software take the place of the repository's.");
     let hash = loop {
@@ -373,6 +407,10 @@ fn adopt(a: &Adopting) -> Result<()> {
     let _ = std::fs::remove_file(&file);
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?;
     writeln!(f, "{}", a.hash)?;
+    // The hardware file is this machine's own, so a driver it names is needed whatever the repository holds.
+    if let Some(notice) = driver_notice(&mine) {
+        println!("\n{notice}");
+    }
     println!();
     let ok = {
         let _p = crate::run::Progress::start("Building this machine's system and switching to it");
@@ -459,8 +497,8 @@ fn apply(a: &Answers) -> Result<()> {
     }
     register_carried(&Path::new("/").join(crate::install::REGISTRATION))?;
     // Said before the build, which would otherwise fetch it, or fail offline, without a word (ADR-048 5).
-    if let Some(drivers) = files.iter().find(|(rel, _)| rel == "hardware-configuration.nix").and_then(|(_, b)| own_drivers(&String::from_utf8_lossy(b))) {
-        println!("\nThis machine's hardware needs a driver that is not in the kernel ({drivers}). The installer does not carry it: the first build fetches it, and needs the network for that.");
+    if let Some(notice) = driver_notice(&files) {
+        println!("\n{notice}");
     }
     // The broker as a service of its own, not a child of this console program: the switch starts the
     // console's login prompt, which takes the console from setup (and stops this unit) — the broker
@@ -722,6 +760,47 @@ mod tests {
         assert_eq!(own_drivers(&file(" config.boot.kernelPackages.broadcom_sta ")).as_deref(), Some("config.boot.kernelPackages.broadcom_sta"));
         assert_eq!(own_drivers(&file(" ")), None);
         assert_eq!(own_drivers("{ ... }: { }\n"), None);
+    }
+
+    /// What setup and adopt say before a build, from the hardware file among the files they write: a
+    /// driver the installer does not carry needs the network; Broadcom's unfree one fails with or without
+    /// one, and does not say a network would help. No driver, no hardware file: nothing said.
+    #[test]
+    fn the_driver_sentence() {
+        let hw = |named: &str| vec![("hardware-configuration.nix".to_string(), format!("{{ ... }}:\n{{\n  boot.extraModulePackages = [{named}];\n}}\n").into_bytes())];
+        let other = driver_notice(&hw(" config.boot.kernelPackages.v4l2loopback ")).unwrap();
+        assert!(other.contains("v4l2loopback") && other.contains("needs the network"), "{other}");
+        let broadcom = driver_notice(&hw(" config.boot.kernelPackages.broadcom_sta ")).unwrap();
+        assert!(broadcom.contains("broadcom_sta") && broadcom.contains("not free software") && broadcom.contains("with a network or without one"), "{broadcom}");
+        assert!(!broadcom.contains("needs the network"), "{broadcom}");
+        assert_eq!(driver_notice(&hw(" ")), None);
+        assert_eq!(driver_notice(&[("flake.nix".to_string(), b"boot.extraModulePackages = [ x ];".to_vec())]), None, "only the hardware file is read");
+    }
+
+    /// The summary of an adopted configuration on development mode: set in the tree, said; attached Nix files,
+    /// said to be unread; neither, nothing.
+    #[test]
+    fn development_mode_in_the_summary() {
+        use serde_json::json;
+        assert!(dev_notes(&json!({"dev": false, "files": []})).is_empty());
+        let tree = dev_notes(&json!({"dev": true, "files": []}));
+        assert_eq!(tree.len(), 1);
+        assert!(tree[0].contains("turns development mode on"));
+        let attached = dev_notes(&json!({"dev": false, "files": ["extra.nix"]}));
+        assert_eq!(attached.len(), 1);
+        assert!(attached[0].contains("not read for development mode"));
+        assert_eq!(dev_notes(&json!({"dev": true, "files": ["extra.nix"]})).len(), 2);
+    }
+
+    /// A setup started over offers the network again to a machine that had none, and leaves one that had.
+    #[test]
+    fn a_new_start_offers_wifi_again_only_when_offline() {
+        let mut asked = 0;
+        assert!(!network_again(false, || { asked += 1; Ok(false) }).unwrap());
+        assert!(network_again(false, || { asked += 1; Ok(true) }).unwrap(), "joined this time");
+        assert_eq!(asked, 2);
+        assert!(network_again(true, || panic!("already online")).unwrap());
+        assert!(network_again(false, || bail!("no console")).is_err());
     }
 }
 

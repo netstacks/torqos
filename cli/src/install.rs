@@ -452,8 +452,11 @@ fn install(image: &Path, bytes: u64, sha: &str) -> Result<String> {
     let hardware = tool("nixos-generate-config", &["--show-hardware-config", "--no-filesystems"])
         .and_then(|detected| hardware_file(&detected, &found(Path::new("/sys")), &read_meta("file-systems.nix")?))
         .with_context(|| format!("detecting this machine's hardware (nothing was written to {})", d.name))?;
+    // Likewise what the first build is carried: unreadable or missing here, it costs the disk nothing.
+    let carried = carried_for_first_build(Path::new(FIRST_BUILD), Path::new("/"))
+        .with_context(|| format!("reading what the installer carries for the first build (nothing was written to {})", d.name))?;
     write(image, bytes, sha, d)?;
-    if let Err(e) = leave(d, &hardware) {
+    if let Err(e) = leave(d, &hardware, carried.as_ref()) {
         // Without the detected hardware, setup would take the image's (a VM's): no half-installed
         // system left to start from.
         // The disk the name still means, checked as it was before writing (`by_name`).
@@ -687,8 +690,8 @@ fn kept(src: &mut impl Read, bytes: u64, sha: &str, mut progress: impl FnMut(u64
 }
 
 /// Leave this machine's hardware file (`file`, detected before the write) on the new disk, for setup,
-/// with what its first build needs.
-fn leave(d: &Disk, file: &str) -> Result<()> {
+/// with what its first build needs (`carried`, read before the write: `carried_for_first_build`).
+fn leave(d: &Disk, file: &str, carried: Option<&(String, Vec<u8>)>) -> Result<()> {
     // The kernel reads the new partition table: once udev, which reads it too when a written disk
     // is closed, is done with it (until then the disk is busy).
     // A device elsewhere that never settles only delays this (as it does the installer's start,
@@ -719,10 +722,6 @@ fn leave(d: &Disk, file: &str) -> Result<()> {
             .with_context(|| format!("TorqOS's {what} is not on {} after writing it", d.name))
     };
     let record = own(TORQ_LABEL, "record file system")?;
-    // What a first boot builds from (ADR-048 5), where this installer carries it; none on a platform
-    // it is not computed for.
-    let first = Path::new(FIRST_BUILD);
-    let carried = first.join("store-paths").is_file().then(|| std::fs::read_to_string(first.join("store-paths"))).transpose().context("reading what the installer carries")?;
     on(&record, "ext4", None, d, "record file system", |at| {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let put = |rel: &str, bytes: &[u8]| -> Result<()> {
@@ -734,22 +733,43 @@ fn leave(d: &Disk, file: &str) -> Result<()> {
             Ok(())
         };
         put(DETECTED, file.as_bytes()).context("writing the detected hardware to the new disk")?;
-        if carried.is_some() {
-            let reg = std::fs::read(first.join("registration")).context("reading the carried paths' registration")?;
-            put(REGISTRATION, &reg).context("writing the carried paths' registration to the new disk")?;
+        if let Some((_, reg)) = carried {
+            put(REGISTRATION, reg).context("writing the carried paths' registration to the new disk")?;
         }
         Ok(())
     })?;
-    if let Some(paths) = carried {
+    if let Some((paths, _)) = carried {
         let root = own(ROOT_LABEL, "root file system")?;
         on(&root, "btrfs", Some(c"subvol=@"), d, "root file system", |at| {
             println!("  Copying what this machine's first build needs ...");
-            let n = carry(&paths, Path::new("/"), &at.join("nix/store"))?;
+            let n = carry(paths, Path::new("/"), &at.join("nix/store"))?;
             println!("  {n} added to the new disk's store.");
             Ok(())
         })?;
     }
     Ok(())
+}
+
+/// What a first boot builds from (ADR-048 5), where this installer carries it (`first`: `FIRST_BUILD`):
+/// the store paths and the registration, read now with every path checked to be there under `from` (`/`),
+/// so that a copy that would fail on the new disk fails before anything is written. None on a platform
+/// it is not computed for.
+fn carried_for_first_build(first: &Path, from: &Path) -> Result<Option<(String, Vec<u8>)>> {
+    if !first.join("store-paths").is_file() {
+        return Ok(None);
+    }
+    let paths = std::fs::read_to_string(first.join("store-paths")).context("reading the store paths")?;
+    let registration = std::fs::read(first.join("registration")).context("reading the carried paths' registration")?;
+    for p in paths.lines().map(str::trim).filter(|p| !p.is_empty()) {
+        let name = store_name(p)?;
+        from.join("nix/store").join(name).symlink_metadata().with_context(|| format!("{p} is not in this installer's store"))?;
+    }
+    Ok(Some((paths, registration)))
+}
+
+/// The name of a store path (`/nix/store/<name>`), if it is one that `carry` will copy.
+fn store_name(p: &str) -> Result<&str> {
+    p.strip_prefix("/nix/store/").filter(|n| !n.is_empty() && !n.contains('/') && !n.starts_with('.')).with_context(|| format!("{p:?} is not a store path"))
 }
 
 /// `run` with `fs` (a partition of `d`, opened) mounted at a folder of its own, as `fstype` with `data`;
@@ -779,7 +799,7 @@ fn on(fs: &std::fs::File, fstype: &str, data: Option<&std::ffi::CStr>, d: &Disk,
 pub fn carry(paths: &str, from: &Path, store: &Path) -> Result<usize> {
     let mut added = 0;
     for p in paths.lines().map(str::trim).filter(|p| !p.is_empty()) {
-        let name = p.strip_prefix("/nix/store/").filter(|n| !n.is_empty() && !n.contains('/') && !n.starts_with('.')).with_context(|| format!("{p:?} is not a store path"))?;
+        let name = store_name(p)?;
         let to = store.join(name);
         if to.symlink_metadata().is_ok() {
             continue;
@@ -1138,6 +1158,25 @@ mod tests {
         assert_eq!(carry(paths, from.path(), to.path()).unwrap(), 0, "again: nothing to add");
         for bad in ["/etc/shadow", "/nix/store/", "/nix/store/../x", "/nix/store/a/b", "/nix/store/.hidden"] {
             assert!(carry(bad, from.path(), to.path()).is_err(), "{bad}");
+        }
+    }
+
+    /// What the first build is carried is read before the write: a missing registration, a path that is not a
+    /// store path and one that is not in the installer's store are each refused then, not found on the new
+    /// disk after the image is on it. No store-paths file (a platform it is not computed for): nothing carried.
+    #[test]
+    fn what_is_carried_is_checked_before_the_write() {
+        let first = tempfile::tempdir().unwrap();
+        let from = tempfile::tempdir().unwrap();
+        assert_eq!(carried_for_first_build(first.path(), from.path()).unwrap(), None);
+        std::fs::create_dir_all(from.path().join("nix/store/aaaa-iwd")).unwrap();
+        std::fs::write(first.path().join("store-paths"), "/nix/store/aaaa-iwd\n\n").unwrap();
+        assert!(carried_for_first_build(first.path(), from.path()).is_err(), "no registration");
+        std::fs::write(first.path().join("registration"), b"reg").unwrap();
+        assert_eq!(carried_for_first_build(first.path(), from.path()).unwrap(), Some(("/nix/store/aaaa-iwd\n\n".to_string(), b"reg".to_vec())));
+        for (bad, why) in [("/nix/store/bbbb-missing\n", "not in the store"), ("/etc/shadow\n", "not a store path")] {
+            std::fs::write(first.path().join("store-paths"), bad).unwrap();
+            assert!(carried_for_first_build(first.path(), from.path()).is_err(), "{why}");
         }
     }
 

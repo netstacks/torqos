@@ -153,11 +153,23 @@ pub fn local(cosmic: &Path) -> Local {
             }
         }
     }
-    // In order of name, so that the same settings are kept each time, whatever order the folder lists them in.
+    // One setting from each component in turn (each component's in order of name), the smaller first within a
+    // turn, so that components with few or small settings are kept whole before one with many or large ones
+    // takes what is left; and the same settings are kept each time, whatever order the folder lists them in.
+    found.sort();
+    let mut turn: BTreeMap<String, usize> = BTreeMap::new();
+    let mut found: Vec<(usize, u64, String, PathBuf)> = found
+        .into_iter()
+        .map(|(key, path)| {
+            let n = turn.entry(key.split('/').next().unwrap_or_default().to_string()).or_default();
+            *n += 1;
+            (*n, std::fs::metadata(&path).map_or(0, |m| m.len()), key, path)
+        })
+        .collect();
     found.sort();
     let mut total = 0;
     let mut kept: BTreeMap<String, usize> = BTreeMap::new();
-    for (key, path) in found {
+    for (_, _, key, path) in found {
         let of_component = kept.entry(key.split('/').next().unwrap_or_default().to_string()).or_default();
         match std::fs::read_to_string(&path) {
             Ok(text) if value_ok(&text) && *of_component < MAX_COMPONENT_KEYS && out.values.len() < MAX_KEYS && total + text.len() <= MAX_TOTAL => {
@@ -694,6 +706,33 @@ mod tests {
         let mut now = Saved { cosmic: saved, ..Saved::default() };
         now.cosmic.extend(p.save.into_iter().filter_map(|(k, v)| Some((k, v?))));
         check(&now).unwrap();
+    }
+
+    /// Components take turns (KNOWN-GAPS 6zza): ten planted ones, sorted ahead of COSMIC's own, each with as many
+    /// settings as one may keep, or each with files as large as one may be, leave COSMIC's kept whole.
+    #[test]
+    fn components_take_turns_at_the_limits() {
+        let own = ["com.system76.Zzz/v1/a", "com.system76.Zzz/v1/b", "com.system76.Zzz/v1/c"];
+        // 10 x 200 one-byte files make `MAX_KEYS`; 10 x 17 files of `MAX_VALUE` are more than `MAX_TOTAL`.
+        for (files, size) in [(MAX_COMPONENT_KEYS, 1), (17, MAX_VALUE)] {
+            let d = tempfile::tempdir().unwrap();
+            let c = d.path().join("cosmic");
+            for k in own {
+                write_atomically(&c.join(k), b"M").unwrap();
+            }
+            for n in 0..10 {
+                let planted = c.join(format!("com.system76.A{n}/v1"));
+                std::fs::create_dir_all(&planted).unwrap();
+                for i in 0..files {
+                    std::fs::write(planted.join(format!("k{i}")), vec![b'x'; size]).unwrap();
+                }
+            }
+            let here = local(&c);
+            for k in own {
+                assert!(here.values.contains_key(k), "{k} kept, {files} files of {size} bytes planted in each of ten");
+            }
+            assert!(here.values.len() <= MAX_KEYS && here.values.values().map(String::len).sum::<usize>() <= MAX_TOTAL);
+        }
     }
 
     #[test]
