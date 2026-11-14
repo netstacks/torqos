@@ -90,7 +90,7 @@ enum Cmd {
     SecretShow { name: String, user: Option<String>, approved_by: String },
     Secrets,
     SecretUse { name: String, user: Option<String>, host: String, client_port: Option<u16>, server_port: Option<u16>, session: Option<String>, grant: Option<String>, ssh: bool, reason: Option<String>, waiting: Option<u64> },
-    SecretGrant { name: Option<String>, user: Option<String>, minutes: Option<u32>, tainted_too: bool, approved_by: String },
+    SecretGrant { name: Option<String>, user: Option<String>, minutes: Option<u32>, tainted_too: bool, replace: bool, approved_by: String },
     SecretRevoke { name: Option<String>, user: Option<String>, all: bool, approved_by: String },
     SecretGrants,
     SecretWaiting { approved_by: String },
@@ -262,6 +262,7 @@ fn command_line() -> clap::Command {
                 .arg(Arg::new("minutes").long("minutes").value_parser(value_parser!(u32)).required_unless_present("session"))
                 .arg(Arg::new("session").long("session").action(ArgAction::SetTrue).conflicts_with_all(["minutes", "tainted-too"]))
                 .arg(Arg::new("tainted-too").long("tainted-too").action(ArgAction::SetTrue).help("It holds in a session that read untrusted text too: one named secret, for minutes"))
+                .arg(Arg::new("replace").long("replace").action(ArgAction::SetTrue).help("End the approver's grant of the same thing that holds already, in the same step that makes this one (a grant refused leaves it as it was)"))
                 .arg(by()),
         )
         .subcommand(
@@ -346,7 +347,7 @@ fn parse_cli() -> Cli {
         "backups" => Cmd::Backups,
         "secrets" => Cmd::Secrets,
         "secret-use" => Cmd::SecretUse { name: s(sub, "name").unwrap_or_default(), user: s(sub, "user"), host: s(sub, "host").unwrap_or_default(), client_port: sub.get_one::<u16>("client-port").copied(), server_port: sub.get_one::<u16>("server-port").copied(), session: s(sub, "session"), grant: s(sub, "grant"), ssh: sub.get_flag("ssh"), reason: s(sub, "reason"), waiting: sub.get_one::<u64>("waiting").copied() },
-        "secret-grant" => Cmd::SecretGrant { name: s(sub, "name"), user: s(sub, "user"), minutes: sub.get_one::<u32>("minutes").copied(), tainted_too: sub.get_flag("tainted-too"), approved_by: by(sub) },
+        "secret-grant" => Cmd::SecretGrant { name: s(sub, "name"), user: s(sub, "user"), minutes: sub.get_one::<u32>("minutes").copied(), tainted_too: sub.get_flag("tainted-too"), replace: sub.get_flag("replace"), approved_by: by(sub) },
         "secret-revoke" => Cmd::SecretRevoke { name: s(sub, "name"), user: s(sub, "user"), all: sub.get_flag("all"), approved_by: by(sub) },
         "secret-grants" => Cmd::SecretGrants,
         "secret-waiting" => Cmd::SecretWaiting { approved_by: by(sub) },
@@ -734,14 +735,14 @@ fn run(mut cli: Cli, via: Option<String>, caller: Option<String>) -> Result<()> 
             (None, false) => println!("{} has no trust in the agent to revoke", printable(&approved_by)),
         },
         Cmd::Trust => println!("{}", json!({ "trust": proposals_trust(&b.ledger.read_all()?) })),
-        Cmd::SecretGrant { name, user, minutes, tainted_too, approved_by } => {
+        Cmd::SecretGrant { name, user, minutes, tainted_too, replace, approved_by } => {
             use torq_broker::session::{grant_secret, Covers, Scope};
             // A person's own secret is the approver's own, and no one else's: whose, the socket says from the kernel.
             if user.as_deref().is_some_and(|u| u != approved_by) {
                 anyhow::bail!("refused: a grant is of one's own secrets, or the system's: not another person's");
             }
             let covers = name.map_or(Covers::AllSecrets, |name| Covers::Secret { name, system: user.is_none() });
-            let e = grant_secret(&b, &approved_by, covers, minutes.map_or(Scope::Session, Scope::Minutes), tainted_too)?;
+            let e = grant_secret(&b, &approved_by, covers, minutes.map_or(Scope::Session, Scope::Minutes), tainted_too, replace)?;
             if json {
                 return print_entry(&e);
             }

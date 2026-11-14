@@ -638,7 +638,7 @@ fn a_slow_resolver_holds_up_no_other_session() {
 #[test]
 fn a_grant_of_secret_uses_applies_no_proposal() {
     let (dir, b) = setup(&[]);
-    let secrets = session::grant_secret(&b, "casey", session::Covers::AllSecrets, session::Scope::Minutes(480), false).unwrap();
+    let secrets = session::grant_secret(&b, "casey", session::Covers::AllSecrets, session::Scope::Minutes(480), false, false).unwrap();
     let s = session::start(&b).unwrap();
     let p = propose(&b, &htop(dir.path()), Actor::Agent, false, Some(&s.id)).unwrap();
     assert!(session::apply_trusted(&b, &p).unwrap().is_none(), "it waits for a person");

@@ -992,13 +992,14 @@ impl WaitingUse {
     }
 
     /// What the broker is asked for `reply`, in order: each only if the one before it was done. `replace`: the
-    /// person's grant of this secret that holds already is ended first, since the broker gives no second one
-    /// while it does.
+    /// person's grant of this secret that holds already is replaced by the new one in the broker's one step, since
+    /// it gives no second one while it holds: a refused grant, or a password cancelled, leaves the old one as it was.
     fn requests(&self, reply: Reply, replace: bool) -> Vec<Approval> {
         let answer = |approved, rest| Approval::Answer { n: self.n, approved, rest };
         let grant = |minutes, tainted_too| {
-            let end = replace.then(|| Approval::Revoke { name: Some(self.secret.clone()), user: self.user.clone() });
-            end.into_iter().chain([Approval::Grant { name: Some(self.secret.clone()), user: self.user.clone(), minutes, tainted_too }, answer(true, false)]).collect::<Vec<_>>()
+            let (name, user) = (Some(self.secret.clone()), self.user.clone());
+            let given = if replace { Approval::Replace { name, user, minutes, tainted_too } } else { Approval::Grant { name, user, minutes, tainted_too } };
+            vec![given, answer(true, false)]
         };
         match reply {
             Reply::Once => vec![answer(true, false)],
@@ -1043,7 +1044,7 @@ impl WaitingUse {
             replaces: held.map(|g| {
                 let scope = if g.session { " at most, in its sessions that were running then" } else { "" };
                 let short = if self.tainted && !g.even_tainted { ", but not from a session that read untrusted text" } else { "" };
-                format!("You already let your agent use this secret without asking until {}{scope}{short}. Choosing one of these ends that first, then asks your password. If the new one is refused, or you cancel the password, the old one stays ended.", g.until)
+                format!("You already let your agent use this secret without asking until {}{scope}{short}. Choosing one of these asks your password, then replaces that. If the new one is refused, or you cancel the password, the old one stays.", g.until)
             }),
             deny_session: self.session,
         }
@@ -1089,23 +1090,15 @@ fn answer_with(cli: &Cli, me: &str, log: &std::path::Path, u: &WaitingUse, reply
         anyhow::bail!("not done: that answer is not offered for use {}", u.n);
     }
     let real = crate::shell::Real::new(cli);
-    let (mut said, mut ended) = (String::new(), false);
+    let mut said = String::new();
     for request in u.requests(reply, replace) {
         match (&request, real.approval(&request, Place::Dialog, me, log)) {
-            (Approval::Revoke { .. } | Approval::RevokeAllOwn, Ok(v)) => {
-                // Only what was ended is said: that there was nothing left to end is no news here.
-                ended = v["revoked"].as_array().is_some_and(|r| !r.is_empty());
-                if ended {
-                    said.push_str(&request.said(&v));
-                }
-            }
             (_, Ok(v)) => said.push_str(&request.said(&v)),
-            // The older allowance could not be ended: nothing was changed, and the use is not answered.
-            (Approval::Revoke { .. } | Approval::RevokeAllOwn, Err(e)) => anyhow::bail!("{e:#}. Nothing was changed, and use {} still waits for your answer.", u.n),
-            // The allowance was not given (refused, or its password not), after the older one was ended for it.
-            (Approval::Grant { .. }, Err(e)) if ended => anyhow::bail!("{e:#}. What you allowed for this secret before is ended, nothing new was allowed, and use {} still waits for your answer.", u.n),
-            // The allowance was not given: nothing was, and the use is not answered.
-            (Approval::Grant { .. }, Err(e)) => anyhow::bail!("{e:#}. Nothing was allowed, and use {} still waits for your answer.", u.n),
+            // The allowance was not given (refused, or its password not): nothing was, an older one is as it was,
+            // and the use is not answered.
+            (Approval::Grant { .. } | Approval::Replace { .. }, Err(e)) => anyhow::bail!("{e:#}. Nothing was allowed{}, and use {} still waits for your answer.", if replace { " and what you allowed for this secret before stands" } else { "" }, u.n),
+            // Never asked by the dialog; if it were, as the broker said it.
+            (Approval::Revoke { .. } | Approval::RevokeAllOwn, Err(e)) => return Err(e),
             // Nothing was done before this: the answer itself was refused.
             (Approval::Answer { .. }, Err(e)) if said.is_empty() => return Err(e),
             // The allowance stands, though the yes did not reach this use (over or answered meanwhile, or the
@@ -1618,9 +1611,9 @@ mod approval_tests {
     }
 
     /// The broker gives no second grant of a secret while one holds, and a use waits two minutes: where the person
-    /// already allows the secret asked about, the dialog says so, and "Allow for…" ends that grant first (of that
-    /// one secret, theirs or the system's as the use says), then asks for the new one. If the new one is then
-    /// refused, the old one is gone, and that is what the person is told.
+    /// already allows the secret asked about, the dialog says so, and "Allow for…" replaces that grant (of that
+    /// one secret, theirs or the system's as the use says) in the one step that makes the new one. If the new one is
+    /// refused, the old one stands, and that is what the person is told.
     #[test]
     fn allow_for_replaces_a_grant_that_holds() {
         let t0 = Instant::now();
@@ -1652,41 +1645,38 @@ mod approval_tests {
         assert_eq!(tool.dialog("dev", 0, NOON, None).replaces, None);
         assert_eq!(
             tool.dialog("dev", 0, NOON, Some(&allowed[4])).replaces.as_deref(),
-            Some("You already let your agent use this secret without asking until 2026-11-13 08:00:00, but not from a session that read untrusted text. Choosing one of these ends that first, then asks your password. If the new one is refused, or you cancel the password, the old one stays ended.")
+            Some("You already let your agent use this secret without asking until 2026-11-13 08:00:00, but not from a session that read untrusted text. Choosing one of these asks your password, then replaces that. If the new one is refused, or you cancel the password, the old one stays.")
         );
         let session = Allowed { session: true, ..allowed[1].clone() };
         let said = uses(&[resident_use(8)])[0].dialog("dev", 0, NOON, Some(&session)).replaces.unwrap();
         assert!(said.starts_with("You already let your agent use this secret without asking until 2026-11-13 08:00:00 at most, in its sessions that were running then. Choosing"), "{said}");
 
-        // What is sent: the end of the old one, the new one, the yes; each only if the one before it was done.
-        const ENDED: &str = "echo '{\"revoked\":[{\"seq\":10,\"reason\":\"dev revoked their leave\"}],\"all_until\":null}'";
-        let run = |u: &WaitingUse, reply: Reply, replace: bool, revoke: &str, grant: &str| {
+        // What is sent: the new one (replacing the old), then the yes; each only if the one before it was done.
+        const REPLACED: &str = "echo '{\"seq\":11,\"reason\":\"dev lets the agent use their secret gh without asking, for 60 minutes\",\"data\":{\"until\":\"2026-11-13T13:00:00Z\"}}'";
+        let run = |u: &WaitingUse, reply: Reply, replace: bool, grant: &str| {
             let d = tempfile::tempdir().unwrap();
-            let cli = broker_of(d.path(), &format!("secret-revoke) {revoke};;\nsecret-grant) {grant};;\n*) {APPROVED};;"));
+            let cli = broker_of(d.path(), &format!("secret-grant) {grant};;\n*) {APPROVED};;"));
             let said = answer_with(&cli, "dev", &d.path().join("log"), u, reply, replace).map_err(|e| format!("{e:#}"));
             (said, std::fs::read_to_string(d.path().join("calls")).unwrap_or_default().lines().map(String::from).collect::<Vec<_>>())
         };
         let red = Reply::For(Allowance::MinutesEvenTainted(60));
-        let (said, calls) = run(&tool, red, true, ENDED, GRANTED);
-        assert_eq!(calls, ["secret-revoke --name gh --user dev --approved-by dev --json", "secret-grant --name gh --user dev --minutes 60 --tainted-too --approved-by dev --json", "secret-approve 7 --where dialog --approved-by dev --json"]);
-        assert!(said.unwrap().starts_with("dev revoked their leave (ledger #10)\ndev lets the agent use their secret gh"));
+        // One request asks for the new grant and ends the old: the broker does both or neither, so that a password
+        // cancelled or wrong, or a refusal, leaves the old one as it was. No revoke is ever sent.
+        let (said, calls) = run(&tool, red, true, REPLACED);
+        assert_eq!(calls, ["secret-grant --name gh --user dev --minutes 60 --tainted-too --replace --approved-by dev --json", "secret-approve 7 --where dialog --approved-by dev --json"]);
+        assert!(said.unwrap().starts_with("dev lets the agent use their secret gh"));
         let clean = uses(&[resident_use(8)])[0].clone();
-        assert_eq!(run(&clean, Reply::For(Allowance::Minutes(60)), true, ENDED, GRANTED).1[0], "secret-revoke --name ci --approved-by dev --json", "the system's: no user");
-        // The new one refused, the old one ended: said as that.
-        let (said, calls) = run(&tool, red, true, ENDED, REFUSED);
-        assert_eq!(calls.len(), 2);
-        assert_eq!(said.unwrap_err(), "request system secret allow gh for 60 tainted-too user dev refused: the broker would not. What you allowed for this secret before is ended, nothing new was allowed, and use 7 still waits for your answer.");
-        // The old one had ended by itself meanwhile: nothing of it is said, in success or in refusal.
-        const NONE: &str = "echo '{\"revoked\":[],\"all_until\":null}'";
-        assert!(run(&tool, red, true, NONE, GRANTED).0.unwrap().starts_with("dev lets the agent use their secret gh"));
-        assert!(run(&tool, red, true, NONE, REFUSED).0.unwrap_err().ends_with("refused: the broker would not. Nothing was allowed, and use 7 still waits for your answer."));
-        // The old one could not be ended: nothing more is sent.
-        let (said, calls) = run(&tool, red, true, REFUSED, GRANTED);
-        assert_eq!((said.unwrap_err().as_str(), calls.len()), ("request system secret allow revoke gh user dev refused: the broker would not. Nothing was changed, and use 7 still waits for your answer.", 1));
-        // No grant holds, or the answer gives none: nothing is ended.
-        assert_eq!(run(&tool, red, false, ENDED, GRANTED).1.len(), 2);
-        assert_eq!(run(&tool, Reply::Once, true, ENDED, GRANTED).1, ["secret-approve 7 --where dialog --approved-by dev --json"]);
-        assert_eq!(run(&tool, Reply::Deny, true, ENDED, GRANTED).1.len(), 1);
+        assert_eq!(run(&clean, Reply::For(Allowance::Minutes(60)), true, REPLACED).1[0], "secret-grant --name ci --minutes 60 --replace --approved-by dev --json", "the system's: no user");
+        // The new one refused (a wrong password, a cancelled one): the old one stands, and the person is told so.
+        let (said, calls) = run(&tool, red, true, REFUSED);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(said.unwrap_err(), "request system secret allow gh for 60 tainted-too user dev refused: the broker would not. Nothing was allowed and what you allowed for this secret before stands, and use 7 still waits for your answer.");
+        // No grant holds: a plain grant, nothing is replaced.
+        assert_eq!(run(&tool, red, false, REPLACED).1[0], "secret-grant --name gh --user dev --minutes 60 --tainted-too --approved-by dev --json");
+        assert!(run(&tool, red, false, REFUSED).0.unwrap_err().ends_with("refused: the broker would not. Nothing was allowed, and use 7 still waits for your answer."));
+        // A plain answer or a no replaces nothing.
+        assert_eq!(run(&tool, Reply::Once, true, REPLACED).1, ["secret-approve 7 --where dialog --approved-by dev --json"]);
+        assert_eq!(run(&tool, Reply::Deny, true, REPLACED).1.len(), 1);
     }
 
     /// The grants are asked for only where a use waits: a look that finds none is one request to the broker.

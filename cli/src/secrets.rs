@@ -69,6 +69,10 @@ pub enum Approval {
     /// `allow <name> session`, `allow <name> for <minutes> [tainted-too]` (`user <you>`: your own secret, else the
     /// system's), `allow all for <minutes>` (no name: all your own). No minutes: your agent's sessions running now.
     Grant { name: Option<String>, user: Option<String>, minutes: Option<u32>, tainted_too: bool },
+    /// A `Grant` that ends the same person's grant of the same secret, if one holds, in the one step of the broker that
+    /// makes the new one (`--replace`): the panel's dialog uses it, so that a password cancelled or wrong leaves the old
+    /// grant as it was. Not a command word: no line reads as it.
+    Replace { name: Option<String>, user: Option<String>, minutes: Option<u32>, tainted_too: bool },
     /// `allow revoke [<name> [user <you>]|all]`: end the grant of that secret (`user`: your own, else the system's),
     /// or with no name, every grant you gave.
     Revoke { name: Option<String>, user: Option<String> },
@@ -99,7 +103,7 @@ impl Approval {
     /// The command, after `request system secret `.
     pub fn line(&self) -> String {
         match self {
-            Approval::Grant { name, user, minutes, tainted_too } => {
+            Approval::Grant { name, user, minutes, tainted_too } | Approval::Replace { name, user, minutes, tainted_too } => {
                 let how_long = minutes.map_or(" session".to_string(), |m| format!(" for {m}"));
                 let owner = user.as_ref().map(|u| format!(" user {}", crate::syntax::quote(u))).unwrap_or_default();
                 format!("allow {}{how_long}{}{owner}", name.as_deref().unwrap_or("all"), if *tainted_too { " tainted-too" } else { "" })
@@ -116,7 +120,7 @@ impl Approval {
     /// gives an answer to a waiting use, which its entry records.
     pub fn args(&self, place: Place) -> Vec<String> {
         match self {
-            Approval::Grant { name, user, minutes, tainted_too } => {
+            Approval::Grant { name, user, minutes, tainted_too } | Approval::Replace { name, user, minutes, tainted_too } => {
                 let mut a = vec!["secret-grant".to_string()];
                 match name {
                     Some(n) => a.extend(["--name".into(), n.clone()]),
@@ -131,6 +135,9 @@ impl Approval {
                 }
                 if *tainted_too {
                     a.push("--tainted-too".into());
+                }
+                if matches!(self, Approval::Replace { .. }) {
+                    a.push("--replace".into());
                 }
                 a
             }
@@ -160,7 +167,7 @@ impl Approval {
     pub fn said(&self, v: &serde_json::Value) -> String {
         let entry = |e: &serde_json::Value| format!("{} (ledger #{})\n", crate::history::clean(e["reason"].as_str().unwrap_or("done")), e["seq"].as_u64().unwrap_or(0));
         match self {
-            Approval::Grant { .. } => format!("{}Until {}. `request system secret allow revoke` ends it.\n", entry(v), crate::history::clean(v["data"]["until"].as_str().unwrap_or("?"))),
+            Approval::Grant { .. } | Approval::Replace { .. } => format!("{}Until {}. `request system secret allow revoke` ends it.\n", entry(v), crate::history::clean(v["data"]["until"].as_str().unwrap_or("?"))),
             Approval::Answer { .. } => entry(v),
             Approval::Revoke { .. } | Approval::RevokeAllOwn => {
                 let ended: String = match v["revoked"].as_array().map(Vec::as_slice) {
@@ -641,6 +648,7 @@ mod tests {
         assert_eq!(Approval::Grant { name: None, user: None, minutes: Some(30), tainted_too: false }.args(Place::Terminal), ["secret-grant", "--all", "--minutes", "30"]);
         assert_eq!(Approval::Grant { name: Some("gh".into()), user: Some("dev".into()), minutes: Some(5), tainted_too: true }.args(Place::Terminal), ["secret-grant", "--name", "gh", "--user", "dev", "--minutes", "5", "--tainted-too"]);
         assert_eq!(Approval::Grant { name: Some("ci".into()), user: None, minutes: None, tainted_too: false }.args(Place::Terminal), ["secret-grant", "--name", "ci", "--session"]);
+        assert_eq!(Approval::Replace { name: Some("gh".into()), user: Some("dev".into()), minutes: Some(5), tainted_too: true }.args(Place::Dialog), ["secret-grant", "--name", "gh", "--user", "dev", "--minutes", "5", "--tainted-too", "--replace"]);
         assert_eq!(Approval::Revoke { name: None, user: None }.args(Place::Terminal), ["secret-revoke"]);
         assert_eq!(Approval::Answer { n: 7, approved: false, rest: false }.args(Place::Terminal), ["secret-deny", "7", "--where", "terminal"]);
         assert_eq!(Approval::Answer { n: 7, approved: false, rest: true }.args(Place::Terminal), ["secret-deny", "7", "--where", "terminal", "--rest-of-session"]);

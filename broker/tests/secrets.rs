@@ -656,15 +656,15 @@ fn a_grant_lets_its_secrets_uses_through_until_it_ends() {
     let a = Asked::new();
     let each = || Covers::Secret { name: "each".into(), system: false };
     for bad in [0, 481, 100_000] {
-        assert!(session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(bad), false).is_err(), "{bad} minutes");
+        assert!(session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(bad), false, false).is_err(), "{bad} minutes");
     }
-    assert!(session::grant_secret(&a.m.b, "carol", each(), Scope::Minutes(5), false).is_err(), "a person with no agent");
-    assert!(session::grant_secret(&a.m.b, "alice", Covers::Secret { name: "none".into(), system: false }, Scope::Minutes(5), false).is_err(), "a secret with no rule");
-    assert!(session::grant_secret(&a.m.b, "alice", Covers::Proposals, Scope::Minutes(5), false).is_err(), "trust in proposals is not given here");
-    let g = session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(480), false).unwrap();
+    assert!(session::grant_secret(&a.m.b, "carol", each(), Scope::Minutes(5), false, false).is_err(), "a person with no agent");
+    assert!(session::grant_secret(&a.m.b, "alice", Covers::Secret { name: "none".into(), system: false }, Scope::Minutes(5), false, false).is_err(), "a secret with no rule");
+    assert!(session::grant_secret(&a.m.b, "alice", Covers::Proposals, Scope::Minutes(5), false, false).is_err(), "trust in proposals is not given here");
+    let g = session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(480), false, false).unwrap();
     assert!(g.body.reason.contains("alice lets the agent use their secret each without asking, for 480 minutes"), "{}", g.body.reason);
     assert_eq!((g.body.kind.as_str(), g.body.approved_by.as_deref(), g.body.data["covers"].as_str(), g.body.data["owner"].as_str(), g.body.data["minutes"].as_u64()), ("trust_granted", Some("alice"), Some("secret each"), Some("user"), Some(480)));
-    assert!(session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(5), false).is_err(), "one at a time");
+    assert!(session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(5), false, false).is_err(), "one at a time");
     assert_eq!(used(&a.m.b, &a.clean("each")).unwrap().value, VALUE);
     assert_eq!(used(&a.m.b, &a.clean("each")).unwrap().value, VALUE);
     let first = a.entries("secret_first_use");
@@ -676,11 +676,33 @@ fn a_grant_lets_its_secrets_uses_through_until_it_ends() {
     assert!(a.unanswered(&a.clean("each")).contains("no one answered"), "taken back: it asks again");
     assert!(session::revoke_secrets(&a.m.b, "alice", &Ending::Everything).unwrap().is_empty(), "nothing left to end");
     // All of a person's own, for a time; ended with every other of theirs, and no one else's.
-    session::grant_secret(&a.m.b, "alice", Covers::AllSecrets, Scope::Minutes(30), false).unwrap();
-    session::grant_secret(&a.m.b, "bob", Covers::AllSecrets, Scope::Minutes(30), false).unwrap();
+    session::grant_secret(&a.m.b, "alice", Covers::AllSecrets, Scope::Minutes(30), false, false).unwrap();
+    session::grant_secret(&a.m.b, "bob", Covers::AllSecrets, Scope::Minutes(30), false, false).unwrap();
     assert_eq!(used(&a.m.b, &a.clean("first")).unwrap().value, VALUE);
     assert_eq!(session::revoke_secrets(&a.m.b, "alice", &Ending::Everything).unwrap().len(), 1);
     assert_eq!(session::active(&a.m.b.ledger.read_all().unwrap()).iter().map(|g| g.person.as_str()).collect::<Vec<_>>(), ["bob"]);
+}
+
+/// A grant made `replace`ing ends the one that holds of the same secret in the same step, and is the only one left;
+/// one refused before it is made (a bad time, a secret with no rule) leaves the old one as it was. Without `replace`
+/// a second is still refused.
+#[test]
+fn a_grant_that_replaces_ends_the_old_one_only_when_it_is_made() {
+    let a = Asked::new();
+    let each = || Covers::Secret { name: "each".into(), system: false };
+    let live = |a: &Asked| session::active(&a.m.b.ledger.read_all().unwrap()).iter().map(|g| (g.seq, g.minutes)).collect::<Vec<_>>();
+    let old = session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(5), false, false).unwrap();
+    assert!(session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(60), false, false).is_err(), "still one at a time");
+    assert!(session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(0), false, true).is_err());
+    assert!(session::grant_secret(&a.m.b, "alice", each(), Scope::Session, true, true).is_err());
+    assert_eq!(live(&a), [(old.body.seq, 5)], "refused before it was made: the old one stands");
+    let new = session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(60), false, true).unwrap();
+    assert_eq!(live(&a), [(new.body.seq, 60)]);
+    assert_eq!(a.entries("trust_revoked")[0]["data"]["grant"].as_u64(), Some(old.body.seq), "the old one is on the record as ended");
+    // With nothing to replace it is a plain grant.
+    session::revoke_secrets(&a.m.b, "alice", &Ending::Everything).unwrap();
+    session::grant_secret(&a.m.b, "alice", each(), Scope::Minutes(5), false, true).unwrap();
+    assert_eq!(live(&a).len(), 1);
 }
 
 /// Ending a grant ends that one: a person's own secret and a system secret of the same name are told apart, as
@@ -693,11 +715,11 @@ fn ending_a_grant_ends_that_one_and_no_other() {
     let give = |a: &Asked| {
         for c in [named(false), named(true), Covers::AllSecrets] {
             if !covers(a).contains(&c) {
-                session::grant_secret(&a.m.b, "alice", c, Scope::Minutes(30), false).unwrap();
+                session::grant_secret(&a.m.b, "alice", c, Scope::Minutes(30), false, false).unwrap();
             }
         }
     };
-    session::grant_secret(&a.m.b, "bob", Covers::AllSecrets, Scope::Minutes(30), false).unwrap();
+    session::grant_secret(&a.m.b, "bob", Covers::AllSecrets, Scope::Minutes(30), false, false).unwrap();
     give(&a);
     assert_eq!(covers(&a), [named(false), named(true), Covers::AllSecrets]);
     // Her own secret of that name: the system's grant and the grant of all stay.
@@ -724,19 +746,19 @@ fn ending_a_grant_ends_that_one_and_no_other() {
 fn what_a_grant_never_covers() {
     let a = Asked::new();
     let named = |name: &str, system: bool| Covers::Secret { name: name.into(), system };
-    session::grant_secret(&a.m.b, "alice", Covers::AllSecrets, Scope::Minutes(480), false).unwrap();
+    session::grant_secret(&a.m.b, "alice", Covers::AllSecrets, Scope::Minutes(480), false, false).unwrap();
     // Whose secret a grant is of is said in its entry, which the terminal prints and the dialog words alike.
-    let g = session::grant_secret(&a.m.b, "alice", named("sys", true), Scope::Minutes(480), false).unwrap();
+    let g = session::grant_secret(&a.m.b, "alice", named("sys", true), Scope::Minutes(480), false, false).unwrap();
     assert!(g.body.reason.contains("the system's secret sys") && g.body.data["owner"] == "system", "{}", g.body.reason);
     let system = |name: &str, u: Use| Use { owner: Owner::System, name: name.into(), ..u };
     // A system secret whose rule does not name this agent: no grant is given of it, and none widens its rule.
-    let e = format!("{:#}", session::grant_secret(&a.m.b, "alice", named("bobs", true), Scope::Minutes(5), false).unwrap_err());
+    let e = format!("{:#}", session::grant_secret(&a.m.b, "alice", named("bobs", true), Scope::Minutes(5), false, false).unwrap_err());
     assert!(e.contains("widens no rule"), "{e}");
     assert!(a.unanswered(&system("bobs", a.clean("x"))).contains("may not use"));
     assert_eq!(used(&a.m.b, &system("sys", a.clean("x"))).unwrap().value, VALUE, "one whose rule names it, and its grant");
     // A secret its rule gives to no agent: all her own are granted, and it is still not the agent's.
     assert!(a.unanswered(&a.clean("own")).contains("may not use"));
-    assert!(session::grant_secret(&a.m.b, "alice", named("own", false), Scope::Minutes(5), false).is_err());
+    assert!(session::grant_secret(&a.m.b, "alice", named("own", false), Scope::Minutes(5), false, false).is_err());
     // Another person's secret, or another person's agent: alice's grants are of her agent's uses alone.
     let bobs = session::start(&a.m.as_agent("torq-agent-bob", false)).unwrap().id;
     let bob = |u: Use| Use { actor: "torq-agent-bob".into(), session: Some(bobs.clone()), ..u };
@@ -753,9 +775,9 @@ fn what_a_grant_never_covers() {
     assert!(a.unanswered(&a.tool("each")).contains("untrusted text"), "all her own, and tainted: asked");
     assert!(a.unanswered(&system("sys", a.tool("x"))).contains("untrusted text"), "a grant that does not say tainted-too");
     assert!(a.unanswered(&Use { session: None, ..a.clean("each") }).contains("names no session"), "no session is a tainted one");
-    let e = format!("{:#}", session::grant_secret(&a.m.b, "bob", Covers::AllSecrets, Scope::Minutes(5), true).unwrap_err());
+    let e = format!("{:#}", session::grant_secret(&a.m.b, "bob", Covers::AllSecrets, Scope::Minutes(5), true, false).unwrap_err());
     assert!(e.contains("tainted-too is of one named secret"), "{e}");
-    let g = session::grant_secret(&a.m.b, "alice", named("each", false), Scope::Minutes(5), true).unwrap();
+    let g = session::grant_secret(&a.m.b, "alice", named("each", false), Scope::Minutes(5), true, false).unwrap();
     assert_eq!(g.body.data["tainted_too"], serde_json::json!(true), "on the record");
     assert_eq!(used(&a.m.b, &a.tool("each")).unwrap().value, VALUE, "the one named secret, tainted too");
     assert!(a.unanswered(&a.tool("first")).contains("untrusted text"), "and no other");
@@ -768,9 +790,9 @@ fn what_a_grant_never_covers() {
 fn a_session_grant_and_the_standing_word() {
     let a = Asked::new();
     let each = Covers::Secret { name: "each".into(), system: false };
-    assert!(session::grant_secret(&a.m.b, "alice", each.clone(), Scope::Session, true).is_err(), "tainted-too is for minutes");
-    assert!(session::grant_secret(&a.m.b, "alice", Covers::AllSecrets, Scope::Session, false).is_err(), "all is for minutes");
-    let g = session::grant_secret(&a.m.b, "alice", each, Scope::Session, false).unwrap();
+    assert!(session::grant_secret(&a.m.b, "alice", each.clone(), Scope::Session, true, false).is_err(), "tainted-too is for minutes");
+    assert!(session::grant_secret(&a.m.b, "alice", Covers::AllSecrets, Scope::Session, false, false).is_err(), "all is for minutes");
+    let g = session::grant_secret(&a.m.b, "alice", each, Scope::Session, false, false).unwrap();
     assert_eq!(g.body.data["scope"].as_str(), Some("session"));
     assert_eq!(used(&a.m.b, &a.clean("each")).unwrap().value, VALUE, "a session that was running");
     std::thread::sleep(std::time::Duration::from_millis(1100));
