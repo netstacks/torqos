@@ -159,6 +159,16 @@
           assert evaluates { customCompile = true; touchpadGestures = true; };
           assert !(evaluates { touchpadGestures = true; });
           pkgs.runCommand "torq-cosmic-prebuilt" { } "touch $out";
+        # The boot menu is where an earlier configuration is chosen when the machine does not start: a timeout of 0
+        # hides it, from any route (a .nix file included), and 1 or none does not (modules/base.nix, KNOWN-GAPS 6n).
+        boot-menu = let
+          system = pkgs.stdenv.hostPlatform.system;
+          evaluates = timeout: (builtins.tryEval (self.lib.mkSystem { inherit system; modules = [ ./hosts/dev-vm { boot.loader.timeout = timeout; } ]; }).config.system.build.toplevel.drvPath).success;
+        in
+          assert evaluates 1;
+          assert evaluates null;
+          assert !(evaluates 0);
+          pkgs.runCommand "torq-boot-menu" { } "touch $out";
         # torq-wire's own tests (ADR-044): the bytes on the socket, pinned. The ledger's fixtures are the broker's tests.
         wire = pkgs.rustPlatform.buildRustPackage {
           pname = "torq-wire";

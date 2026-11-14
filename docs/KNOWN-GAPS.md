@@ -155,8 +155,10 @@ Open issues found while bringing up M1 (2026-10-30). Fix with a failing test fir
    `commit confirmed` cannot help (its timer runs on the new system, which never comes up). torqcli
    says so in the commit question; the way back is an earlier configuration in the boot menu (20
    kept), which needs the machine's console, and `boot loader timeout 0` hides the menu: `set` refuses
-   it, `load` with it (`cli/src/settings.rs`, 2026-11-12); a config file or a hand-made proposal can
-   still set it, and a configuration that already holds it keeps it. To do: make the new boot entry
+   it, `load` with it (`cli/src/settings.rs`, 2026-11-12), and so does the evaluation, for every route
+   (an assertion in `modules/base.nix`, checked by `boot-menu` in flake.nix): a config file or a hand-made
+   proposal that sets it does not build. A configuration that already holds it stops building until
+   it is removed. To do: make the new boot entry
    one-shot until a confirmed commit is confirmed.
 
 6o. **A flake.lock that does not match flake.nix is fetched before it is refused** (review of S4b).
