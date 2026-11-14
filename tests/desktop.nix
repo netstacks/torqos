@@ -1,6 +1,7 @@
 # NixOS VM test: TorqOS Desktop (ADR-045) boots to COSMIC's greeter, and the owner's password logs in to
 # a COSMIC session. On it: NetworkManager with iwd as its Wi-Fi backend (one Wi-Fi stack, ADR-046 2), no
 # wpa_supplicant; Flatpak with Flathub for the person only, never the system's (ADR-037, amended).
+# An agent's use of a secret that waits is seen by the panel's applet (ADR-051, ADR-052 4): its dialog is not driven.
 # Smoothness is judged on real hardware, not here.
 { pkgs, self }:
 
@@ -230,6 +231,66 @@ pkgs.testers.runNixOSTest {
         store = "/var/lib/torq/secrets/store/system/dlg"
         assert machine.succeed(f"systemd-creds decrypt --name=torq-secret.system.dlg {store} -") == "dialog-token-1"
         assert "dialog-token-1" not in machine.succeed("torq-broker log") + machine.succeed("cat /tmp/secret.out")
+
+    with subtest("an agent's use of a secret that waits is seen by the panel's applet, which tells alice; her yes, as its dialog sends it, is on the record as the dialog's"):
+        # Driven here: the applet, in alice's session, asks the broker what waits for her, finds the use and raises
+        # its notification. Not driven: the dialog's drawing, and the press of its button. Nothing in these tests
+        # clicks in the panel, so the yes is the request the dialog's Allow once sends (secret-approve <n> --where
+        # dialog), sent from her session by the test. That an approved use reaches its host is tests/secrets.nix's:
+        # this machine has no such host to send to.
+        import time
+        machine.wait_for_unit("torq-secrets.service")
+        machine.wait_for_open_port(7800)
+        def as_account(user, request):
+            line = json.dumps(request)
+            shell = f"printf '%s\\n' {shlex.quote(line)} | {sock}"
+            return frames(machine.succeed(f"su -s /bin/sh {user} -c {shlex.quote(shell)}"))
+        def in_her_session(request):
+            return frames(machine.succeed(on_the_desktop(request)))
+        # A token of alice's own, which her agent may use for one host, a person asked each time.
+        code, v = in_her_session({"args": ["--json", "secret-set", "--name", "gh", "--user", "alice"], "key": "desk-token-1"})
+        assert code == 0, (code, v)
+        rules = '{"gh": {"kind": "token", "https": {"hosts": ["api.example.test"]}, "actors": ["torq-agent"], "approve": "each-use"}}'
+        diff = f"--- /dev/null\n+++ b/users/alice/secrets.json\n@@ -0,0 +1 @@\n+{rules}\n"
+        head = machine.succeed(f"git -C {repo} rev-parse HEAD").strip()
+        code, p = in_her_session({"args": ["--json", "propose", f"--base={head}", "--reason=gh for the agent"], "diff": diff})
+        assert code == 0, (code, p)
+        code, v = in_her_session({"args": ["--json", "apply", str(p["seq"])]})
+        assert code == 0, (code, v)
+        # Her agent's account (a coding tool's, so its session is one the broker cannot see into) uses it: it waits.
+        code, s = as_account("torq-agent-alice", {"args": ["--json", "session-start"]})
+        assert code == 0, (code, s)
+        use = f"curl -s -o /tmp/use.body -w '%{{http_code}}' -H 'X-Torq-Session: {s['session']}' -H 'X-Torq-Reason: listing the repositories' http://127.0.0.1:7800/user/alice/gh/api.example.test/echo > /tmp/use.status"
+        machine.succeed(f"rm -f /tmp/use.status; su -s /bin/sh torq-agent-alice -c {shlex.quote(use)} >&2 &")
+        waiting = []
+        for _ in range(30):
+            code, w = in_her_session({"args": ["--json", "secret-waiting"]})
+            assert code == 0, (code, w)
+            waiting = w["waiting"]
+            if waiting:
+                break
+            time.sleep(1)
+        assert len(waiting) == 1 and waiting[0]["facts"]["secret"] == "gh" and waiting[0]["facts"]["person"] == "alice" and waiting[0]["facts"]["tainted"], waiting
+        n = waiting[0]["n"]
+        # The applet has seen that very use (it asks every 10 seconds), and its notification went out without an
+        # error. (grep -c reads the whole journal: a grep that left early would break the pipe.)
+        machine.wait_until_succeeds(f"journalctl -b --no-pager | grep -c 'torq-applet: use {n} of a secret waits for an answer' > /dev/null", timeout=60)
+        machine.sleep(5)
+        machine.screenshot("use-waiting")
+        machine.fail("journalctl -b --no-pager | grep -c 'the notification that a use of a secret waits:' > /dev/null")
+        # Her agent's own account cannot say yes to it. Alice's yes, as the dialog sends it, is recorded as the dialog's.
+        code, v = as_account("torq-agent-alice", {"args": ["--json", "secret-approve", str(n), "--where", "dialog"]})
+        assert code == 1, (code, v)
+        code, v = in_her_session({"args": ["--json", "secret-approve", str(n), "--where", "dialog"]})
+        assert code == 0 and v["kind"] == "secret_use_approved" and v["approved_by"] == "alice" and v["data"]["where"] == "dialog" and v["data"]["ask"] == n, (code, v)
+        # The use is let go: whatever the daemon then answers, it is not the broker's refusal (403).
+        machine.wait_until_succeeds("test -s /tmp/use.status", timeout=60)
+        status, body = machine.succeed("cat /tmp/use.status").strip(), machine.succeed("cat /tmp/use.body")
+        assert status != "403" and "desk-token-1" not in body, (status, body)
+        code, w = in_her_session({"args": ["--json", "secret-waiting"]})
+        assert code == 0 and w["waiting"] == [], (code, w)
+        ledger = machine.succeed("torq-broker log")
+        assert "desk-token-1" not in ledger and "listing the repositories" not in ledger, "neither the value nor the agent's words are on the record"
 
     with subtest("Flathub is the person's, not the system's"):
         machine.wait_until_succeeds("su - alice -c 'flatpak remotes --user' | grep -q flathub", timeout=60)

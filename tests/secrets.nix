@@ -1,7 +1,8 @@
 # NixOS VM test: a secret used and never read (ADR-052, step 2). The daemon, the broker and curl as a machine
 # runs them; a second machine is the HTTPS host (`api.example.test`, with a certificate from a test authority
 # the first machine trusts), and writes down every request it is sent, so the test can see both ends: what
-# reached the host, and what came back to the program that asked.
+# reached the host, and what came back to the program that asked. An agent's use that asks waits for its person
+# (ADR-052 4): answered at a terminal, timed out, and let through unasked by a grant until the grant is ended.
 # Last, the way TorqOS Settings keeps a value (step 5): usable, and in no file of the machine.
 { pkgs, self }:
 
@@ -96,7 +97,8 @@ pkgs.testers.runNixOSTest {
     security.pki.certificateFiles = [ "${certs}/ca.crt" ];
     networking.hosts.${nodes.far.networking.primaryIPAddress} = [ "api.example.test" "other.example.test" "git.example.test" ];
     networking.hosts.${nodes.elsewhere.networking.primaryIPAddress} = [ "elsewhere.example.test" ];
-    environment.systemPackages = [ pkgs.socat pkgs.curl pkgs.jq windowSet ];
+    # tmux: a terminal for torqcli to ask a password at (a grant of secret uses).
+    environment.systemPackages = [ pkgs.socat pkgs.curl pkgs.jq pkgs.tmux windowSet ];
   };
 
   testScript = ''
@@ -291,6 +293,108 @@ pkgs.testers.runNixOSTest {
             assert status == 403 and "denied" in body, (i, status, body)
         status, body = ended("torq-agent-sam", tag="-w3")
         assert status == 200 and "sam-token-1" not in body and requests()[-1]["headers"]["Authorization"] == "Bearer sam-token-1", (status, body)
+
+    with subtest("a grant lets the agent's uses of one secret through unasked: with dev's password, for minutes, from a session that read untrusted text only where it says so, and until dev ends it"):
+        # Every session here is the agent account's own, so tainted from its start: there is no resident agent on
+        # this machine to start a clean one. So what a grant that does not say tainted-too lets through (a clean
+        # session's use) is not shown here; that is broker/tests/secrets.rs's. Nor is "this session"
+        # (`allow <name> session`).
+        PASSWORD = "Torq-sock-2210"
+        def entries(kind):
+            return [e for e in (json.loads(l) for l in machine.succeed("torq-broker --json log --brief").splitlines()) if e["kind"] == kind]
+        def grants():
+            code, v = ask("sam", {"args": ["--json", "secret-grants"]})
+            assert code == 0, (code, v)
+            return v["grants"]
+        code, s = ask("torq-agent-dev", {"args": ["--json", "session-start"]})
+        assert code == 0, (code, s)
+        s3 = s["session"]
+        gh = "/user/dev/gh/api.example.test/echo"
+        def asks_and_is_denied(tag):
+            """A use of gh from s3 waits for dev, who says no at a terminal: it is refused, and nothing is sent."""
+            n = len(requests())
+            begin("torq-agent-dev", gh, "-H", f"X-Torq-Session: {s3}", tag=tag)
+            for _ in range(30):
+                if waiting("dev"):
+                    break
+                time.sleep(1)
+            w = waiting("dev")
+            assert len(w) == 1 and w[0]["facts"]["secret"] == "gh", w
+            out = machine.succeed(f"su - dev -c 'torqcli request system secret deny {w[0]['n']}'")
+            assert "denied" in out, out
+            status, body = ended("torq-agent-dev", tag=tag)
+            assert status == 403 and "denied" in body and len(requests()) == n, (status, body)
+
+        # No password, no grant: with no terminal to ask at, torqcli gives none.
+        machine.fail("su - dev -c 'torqcli request system secret allow gh for 5 user dev' < /dev/null")
+        assert grants() == [] and entries("trust_granted") == []
+        # At a terminal, torqcli asks dev's password there, and the grant is on the record with what it covers.
+        machine.succeed("su - dev -c \"tmux new-session -d -s g -x 200 -y 50 'torqcli request system secret allow gh for 5 user dev; sleep 600'\"")
+        machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t g' | grep -c 'Password for dev:' > /dev/null", timeout=60)
+        machine.succeed(f"su - dev -c 'tmux send-keys -t g {PASSWORD} Enter'")
+        machine.wait_until_succeeds("su - dev -c 'tmux capture-pane -p -t g' | grep -c 'without asking, for 5 minutes' > /dev/null", timeout=60)
+        machine.succeed("su - dev -c 'tmux kill-session -t g'")
+        plain = entries("trust_granted")[-1]
+        assert plain["approved_by"] == "dev" and plain["data"]["person"] == "dev" and plain["data"]["covers"] == "secret gh" and plain["data"]["minutes"] == 5 and plain["data"]["owner"] == "user" and "tainted_too" not in plain["data"], plain
+        assert [(g["seq"], g["person"], g["tainted_too"]) for g in grants()] == [(plain["seq"], "dev", False)], grants()
+        shown = machine.succeed("su - sam -c 'torqcli show system secrets allowed'")
+        assert "dev's agent: their secret gh, until" in shown and "UNTRUSTED" not in shown, shown
+        # It does not say tainted-too, and this session read untrusted text as far as the broker can tell: dev is asked.
+        asks_and_is_denied("-g1")
+        # One grant of a thing at a time: a second is refused while the first holds, whatever it would add.
+        tainted_too = {"args": ["--json", "secret-grant", "--name", "gh", "--user", "dev", "--minutes", "5", "--tainted-too"], "password": PASSWORD}
+        code, v = ask("dev", tainted_too)
+        assert code == 1 and "revoke it first" in v["error"], (code, v)
+        # Ended, by name and with no password; a secret dev never granted has nothing to end.
+        out = machine.succeed("su - dev -c 'torqcli request system secret allow revoke gh'")
+        assert "revoked" in out, out
+        ended_grants = entries("trust_revoked")
+        assert ended_grants[-1]["data"]["grant"] == plain["seq"] and ended_grants[-1]["approved_by"] == "dev", ended_grants[-1]
+        assert grants() == []
+        assert "no such grant" in machine.succeed("su - dev -c 'torqcli request system secret allow revoke deploy'")
+
+        # Tainted-too: only with dev's own password, only dev's own, only one named secret, only for minutes.
+        code, v = ask("dev", dict(tainted_too, password="wrong"))
+        assert code == 77, (code, v)
+        for who, request in [
+            ("torq-agent-dev", {"args": tainted_too["args"]}),
+            ("sam", {"args": tainted_too["args"], "password": "Sam-sock-7742"}),
+            ("dev", {"args": ["--json", "secret-grant", "--all", "--minutes", "5", "--tainted-too"], "password": PASSWORD}),
+            ("dev", {"args": ["--json", "secret-grant", "--name", "gh", "--user", "dev", "--session", "--tainted-too"], "password": PASSWORD}),
+            ("dev", {"args": ["--json", "secret-grant", "--name", "gh", "--user", "dev", "--minutes", "481", "--tainted-too"], "password": PASSWORD}),
+        ]:
+            code, v = ask(who, request)
+            assert code not in (0, 77), (who, request["args"], code, v)
+        assert grants() == [], grants()
+        code, v = ask("dev", tainted_too)
+        assert code == 0 and v["kind"] == "trust_granted" and v["data"]["tainted_too"] is True and v["data"]["covers"] == "secret gh", (code, v)
+        shown = machine.succeed("su - sam -c 'torqcli show system secrets allowed'")
+        assert "EVEN FROM A SESSION THAT READ UNTRUSTED TEXT" in shown, shown
+        # Now the same use goes through at once, with no one asked, and is on the record as under that grant.
+        n = len(requests())
+        status, body, _ = use("torq-agent-dev", gh, "-H", f"X-Torq-Session: {s3}")
+        assert status == 200 and "dev-token-1" not in body and requests()[-1]["headers"]["Authorization"] == "Bearer dev-token-1", (status, body)
+        assert waiting("dev") == [] and len(requests()) == n + 1
+        first = [e for e in entries("secret_first_use") if e["data"].get("grant") == v["seq"]]
+        assert len(first) == 1 and first[0]["data"]["session"] == s3 and first[0]["tainted"], first
+        # A grant widens no rule: another host is still refused, and a secret it does not name still asks (sam's
+        # agent, for sam's own gh, is no part of dev's grant: it waits for sam, who says no).
+        status, body, _ = use("torq-agent-dev", "/user/dev/gh/other.example.test/echo", "-H", f"X-Torq-Session: {s3}")
+        assert status == 403 and len(requests()) == n + 1, (status, body)
+        begin("torq-agent-sam", "/user/sam/gh/api.example.test/echo", "-H", f"X-Torq-Session: {sams['session']}", tag="-g3")
+        for _ in range(30):
+            if waiting("sam"):
+                break
+            time.sleep(1)
+        code, d = ask("sam", {"args": ["--json", "secret-deny", str(waiting("sam")[0]["n"])]})
+        assert code == 0, (code, d)
+        status, body = ended("torq-agent-sam", tag="-g3")
+        assert status == 403 and len(requests()) == n + 1, (status, body)
+        # Ended with everything dev allowed: the next use asks again.
+        out = machine.succeed("su - dev -c 'torqcli request system secret allow revoke all'")
+        assert "revoked" in out, out
+        assert grants() == []
+        asks_and_is_denied("-g2")
 
     with subtest("a session tainted by what it read too is asked; with no answer in two minutes the use is refused, and recorded as timed out"):
         code, _ = ask("torq-agent-dev", {"args": ["--json", "session-taint", session, "--source", "web"]})
